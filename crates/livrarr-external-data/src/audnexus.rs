@@ -95,7 +95,11 @@ pub async fn query_audnexus<F: HttpFetcher>(
         urlencoding(title),
         urlencoding(author),
     );
-    if let Some(result) = cached_fetch(fetcher, &url, cache, priority).await? {
+    // A search route has no "this book is absent" status — an empty result set
+    // is a 200 with an empty array — so a 404/410 here means the ROUTE is gone.
+    if let Some(result) =
+        cached_fetch(fetcher, &url, cache, priority, Absence::NeverMeaningful).await?
+    {
         let book = if result.is_array() {
             result.as_array().and_then(|a| a.first()).cloned()
         } else {
@@ -122,25 +126,41 @@ pub async fn query_audnexus_by_asin<F: HttpFetcher>(
 ) -> Result<Option<AudnexusResult>, ProviderFetchError> {
     let base = base_url.trim_end_matches('/');
     let url = format!("{base}/books/{asin}");
-    match cached_fetch(fetcher, &url, cache, priority).await? {
+    match cached_fetch(fetcher, &url, cache, priority, Absence::MeansMissingItem).await? {
         Some(result) => Ok(Some(parse_audnexus(&result, Some(asin)))),
         None => Ok(None),
     }
 }
 
+/// Whether a 404/410 on this route can mean the requested thing is absent.
+///
+/// `cached_fetch` serves both an ITEM route (`/books/{asin}`) and a SEARCH
+/// route (`/books?title=&author=`), and the two read the same status
+/// differently: an item that is gone really is a miss, while a search route
+/// signals emptiness with a 200 and an empty array, so a 404 there means the
+/// route moved or is blocked — a provider-health event.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Absence {
+    MeansMissingItem,
+    NeverMeaningful,
+}
+
 /// Fetch `url` with `If-Modified-Since` conditional-request caching (R-13):
 /// a prior response's `Last-Modified` header is replayed on the next request
 /// for the same URL; a `304` response is served from the cache without
-/// re-parsing the (empty) body. A genuine "not found" (HTTP 404/410) is a
-/// soft `Ok(None)` miss. A live 429 or 5xx is retryable, not a permanent miss
-/// (Unit A): both surface as a typed `Err` — `RateLimited` / `Transient` —
-/// including a fetcher-intercepted HTTP 429 (`FetchError::RateLimited`),
-/// which the pre-Unit-A code folded into the same "no result" `Ok(None)`.
+/// re-parsing the (empty) body. On an item route a genuine "not found" (HTTP
+/// 404/410) is a soft `Ok(None)` miss; on a search route it is a failure like
+/// any other non-2xx (see [`Absence`]). A live 429 or 5xx is retryable, not a
+/// permanent miss (Unit A): both surface as a typed `Err` — `RateLimited` /
+/// `Transient` — including a fetcher-intercepted HTTP 429
+/// (`FetchError::RateLimited`), which the pre-Unit-A code folded into the same
+/// "no result" `Ok(None)`.
 async fn cached_fetch<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     cache: &AudnexusCache,
     priority: RequestPriority,
+    absence: Absence,
 ) -> Result<Option<serde_json::Value>, ProviderFetchError> {
     let cached_last_modified = {
         let mut guard = cache.0.lock().await;
@@ -194,12 +214,12 @@ async fn cached_fetch<F: HttpFetcher>(
     }
 
     if !(200..300).contains(&resp.status) {
-        if resp.status == 404 || resp.status == 410 {
+        if absence == Absence::MeansMissingItem && (resp.status == 404 || resp.status == 410) {
             return Ok(None);
         }
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Failure);
-        }
+        // Past the genuine-absence check every non-2xx is a health signal, not
+        // just a 5xx.
+        outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Failure);
         return Err(classify_audnexus_error(resp.status));
     }
 
@@ -290,6 +310,104 @@ fn urlencoding(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// C4, test-plan item 6: a refusal must reach this client's own bucket.
+    /// Audnexus serves two routes through one helper with opposite absence
+    /// semantics: `/books/{asin}` is an ITEM lookup where 404 genuinely means
+    /// the book is absent, and `/books?title=&author=` is a SEARCH route where
+    /// an empty result is a 200 with an empty array, so a 404 there means the
+    /// route is gone. All three cases are asserted together because the
+    /// contrast IS the rule.
+    #[tokio::test]
+    async fn an_audnexus_refusal_and_a_dead_search_route_report_a_breaker_failure_but_a_dead_asin_does_not(
+    ) {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        // Scoped per use so the permit an admission may hand back is released
+        // immediately.
+        macro_rules! tripped {
+            () => {{
+                let admission = queue
+                    .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                    .await;
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+            }};
+        }
+
+        // 1. A refusal on the item route is a provider-health event.
+        queue.set_breaker_config_for_tests(RateBucket::Audnexus, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
+        let cache = AudnexusCache::new();
+        let out = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0REFUSED",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(out.is_err(), "a 403 must not read as a book miss");
+        assert!(
+            tripped!(),
+            "an Audnexus refusal must report a breaker failure"
+        );
+
+        // 2. The contrast: 404 on the ITEM route is a genuine absence.
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        queue.set_breaker_config_for_tests(RateBucket::Audnexus, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let cache = AudnexusCache::new();
+        let out = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0MISSING",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("a 404 on the item route is a soft miss");
+        assert!(out.is_none());
+        assert!(
+            !tripped!(),
+            "a 404 from the by-ASIN item lookup is a missing book, not a \
+             provider failure — it must not trip the breaker"
+        );
+
+        // 3. A 404 on the SEARCH route is a dead route, not a missing book.
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        queue.set_breaker_config_for_tests(RateBucket::Audnexus, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let cache = AudnexusCache::new();
+        let out = query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Dune",
+            "Frank Herbert",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            out.is_err(),
+            "a 404 from the title/author SEARCH route means the route is gone, \
+             not that the book is absent — reporting it as a miss writes the \
+             book off while the provider looks healthy"
+        );
+        assert!(
+            tripped!(),
+            "a dead Audnexus search route must report a breaker failure"
+        );
+    }
+
     #[test]
     fn parse_audnexus_extracts_narrators_and_runtime() {
         let json = serde_json::json!({
@@ -324,6 +442,7 @@ mod tests {
     #[tokio::test]
     async fn query_audnexus_by_asin_sends_audnexus_bucket_get_no_conditional_header_on_first_call()
     {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let canned = serde_json::json!({"asin": "B07ABCDEFG", "narrators": []});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_headers(
             200,
@@ -357,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_replays_last_modified_and_serves_304_from_cache() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let canned = serde_json::json!({"asin": "B07ABCDEFG", "narrators": [{"name": "N"}]});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_headers(
             200,
@@ -406,6 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_http_404_to_ok_none() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
         let cache = AudnexusCache::new();
 
@@ -424,6 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_http_410_to_ok_none() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
         let cache = AudnexusCache::new();
 
@@ -449,6 +571,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_fetcher_rate_limited_to_err_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         // The fetcher intercepts HTTP 429 as a transport-level
         // `FetchError::RateLimited` before a status is ever seen. This must
         // now surface as `Err(RateLimited)` so the caller can schedule a
@@ -473,6 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         // D3/#6: the outbound queue's local admission cap (no HTTP attempted)
         // must surface as a typed QueueFull, not fall into the generic
         // Transient catch-all (which would silently consume retry budget).
@@ -497,6 +621,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_http_429_status_to_err_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
         let cache = AudnexusCache::new();
 
@@ -515,6 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_http_5xx_to_err_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(503, vec![]);
         let cache = AudnexusCache::new();
 
@@ -533,6 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_http_403_to_err_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         // Audnexus is keyless: a 403 has no credential to fix. The caller
         // (`provider_client::audnexus_error_outcome`) turns this into an
         // explicit `PermanentFailure`, never `NotConfigured`.
@@ -554,6 +681,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_other_4xx_to_err_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
         let cache = AudnexusCache::new();
 
@@ -604,6 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_audnexus_by_asin_maps_network_error_to_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
         // Unit A: a connection failure is retryable (Transient), not an
         // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(

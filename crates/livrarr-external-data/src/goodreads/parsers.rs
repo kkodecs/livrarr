@@ -832,6 +832,34 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // `find_book_jsonld` accepts any block declaring `"@type":"Book"`, so a
+        // stub shell that declares the type and carries nothing else reached
+        // here and became an all-`None` payload — which the caller counts as a
+        // successful parse and reports to the breaker as Success, clearing
+        // every accumulated failure. Declaring the type is not the same as
+        // carrying a book.
+        //
+        // The bar is "carried at least one field we actually extracted", not a
+        // named subset: a sparse page offering only a rating, a page count and
+        // a language is thin but real, and rejecting it would send a readable
+        // page down the unreadable path and lose the fields with it.
+        let carried_nothing = title.is_none()
+            && author.is_none()
+            && isbn.is_none()
+            && rating.is_none()
+            && rating_count.is_none()
+            && page_count.is_none()
+            && language.is_none()
+            && cover_url.is_none()
+            && book_format.is_none()
+            && description.is_none()
+            && genres.is_empty()
+            && series_name.is_none()
+            && series_position.is_none()
+            && publish_date.is_none();
+        if carried_nothing {
+            return None;
+        }
         Some(GoodreadsDetailResult {
             title,
             author,

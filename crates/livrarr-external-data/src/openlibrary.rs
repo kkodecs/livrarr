@@ -83,16 +83,20 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         if resp.status == 404 || resp.status == 410 {
             return Err(ProviderFetchError::NotFound);
         }
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared()
-                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
-        }
+        // Past the genuine-absence check, every non-2xx is a provider-health
+        // signal — a 403/401 storm must trip the breaker, not just a 5xx.
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         return Err(classify_ol_error(resp.status));
     }
 
     let data: serde_json::Value = serde_json::from_slice(&resp.body)
         .map_err(|e| ProviderFetchError::Other(format!("parse: {e}")))?;
-    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
+    // No success report here. This call has a second leg (editions, below) and
+    // `record_success` clears every accumulated failure (breaker.rs), so
+    // reporting the work leg's success up front meant a permanently refused
+    // editions endpoint produced Success, Failure, Success, Failure… and never
+    // reached the threshold. One outcome per operation, reported at the end.
+    let mut leg_failed = false;
 
     let title = data
         .get("title")
@@ -145,8 +149,33 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         user_agent: UserAgentProfile::Server,
         priority,
     };
-    if let Ok(ed_resp) = fetcher.fetch(editions_req).await {
-        if let Ok(ed_data) = serde_json::from_slice::<serde_json::Value>(&ed_resp.body) {
+    let editions_resp = fetcher.fetch(editions_req).await;
+    if let Err(ref e) = editions_resp {
+        // The transport has already reported this to the breaker
+        // (`HttpFetcherImpl::do_fetch`), so this leg must not report a second
+        // failure — but it MUST mark the leg failed, or the operation's own
+        // success report below clears the one the transport just filed and a
+        // permanently timing-out editions endpoint never reaches the threshold.
+        tracing::warn!(key = %key, error = %e, "OL editions: transport failure");
+        leg_failed = true;
+    }
+    if let Ok(ed_resp) = editions_resp {
+        // This response's status was never inspected: a 401/403/5xx body simply
+        // failed to yield `entries` and was skipped in silence, so a refused
+        // editions endpoint could be re-requested forever without the breaker
+        // ever learning. The call stays best-effort — a missing ISBN is not
+        // fatal to the work fetch — so a refusal is reported and skipped rather
+        // than failing the whole call.
+        if !(200..300).contains(&ed_resp.status) {
+            // No genuine-absence exemption on this route. The work itself just
+            // answered 200, so its own editions sub-route returning 404/410
+            // means the ROUTE is gone — a work with no editions is a 200 with
+            // an empty `entries` array, never a 404.
+            tracing::warn!(status = ed_resp.status, key = %key, "OL editions: HTTP error");
+            leg_failed = true;
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        } else if let Ok(ed_data) = serde_json::from_slice::<serde_json::Value>(&ed_resp.body) {
             if let Some(entries) = ed_data.get("entries").and_then(|e| e.as_array()) {
                 for entry in entries {
                     let Some(isbn) = entry
@@ -197,11 +226,27 @@ pub async fn query_ol_detail<F: HttpFetcher>(
                     }
                 }
             }
+        } else {
+            // A 200 whose body will not parse is the provider serving garbage,
+            // not a work without editions — the same "unreadable is not absent"
+            // rule the detail path applies. Silently skipping it let a broken
+            // edge report the operation healthy on every call.
+            tracing::warn!(key = %key, "OL editions: 200 with an unreadable body");
+            leg_failed = true;
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         }
     }
     let isbn_13 = title_and_language_isbn
         .or(title_only_isbn)
         .or(fallback_isbn_13);
+
+    // The operation's single success report: only when every leg that ran
+    // actually succeeded, so a refused editions endpoint accumulates toward the
+    // threshold instead of being cleared by this call's own work-leg success.
+    if !leg_failed {
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
+    }
 
     Ok(OlDetailResult {
         title,
@@ -258,10 +303,9 @@ pub async fn isbn_lookup<F: HttpFetcher>(
         if resp.status == 404 || resp.status == 410 {
             return Ok(None);
         }
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared()
-                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
-        }
+        // Same rule as the work-detail path above: any non-2xx that is not a
+        // genuine absence is a health signal.
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         return Err(classify_ol_error(resp.status));
     }
 
@@ -324,11 +368,24 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
         .map_err(|e| format!("OpenLibrary request failed: {e}"))?;
 
     if resp.status >= 400 {
+        // This search path reported nothing to the breaker at all. No 404/410
+        // exemption: `search.json` has no "this book is absent" status — an
+        // empty result set is a 200 with an empty `docs` array. A 404 here means
+        // the ROUTE moved or is blocked, which is a provider failure; exempting
+        // it reported every queried book as missing while the status dot stayed
+        // green.
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
         return Err(format!("OpenLibrary returned {}", resp.status));
     }
 
     let data: serde_json::Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("OpenLibrary parse error: {e}"))?;
+
+    // A parsed response — including a legitimately empty `docs` array — is a
+    // healthy answer. Without this the C4 Failure report above could open the
+    // breaker and nothing on this door could ever close it again:
+    // `record_success` is the only transition out of HalfOpen.
+    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
 
     let docs = data
         .get("docs")
@@ -399,6 +456,218 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
 mod tests {
     use super::*;
 
+    /// A provider operation may report at most ONE breaker outcome, and a
+    /// success reported by one leg must not erase a sibling leg's failures:
+    /// `record_success` clears every accumulated failure, so `work=200,
+    /// editions=403` repeating forever produced Success, Failure, Success,
+    /// Failure… and the count never reached the production threshold. The
+    /// refused editions endpoint was re-requested indefinitely with the
+    /// breaker permanently closed.
+    ///
+    /// Runs at the PRODUCTION threshold deliberately — a test that forces the
+    /// threshold to 1 cannot observe this shape at all.
+    #[tokio::test]
+    async fn a_refused_editions_endpoint_eventually_opens_the_openlibrary_breaker() {
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+
+        let work_body = serde_json::json!({"title": "Test Work"}).to_string();
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, work_body.clone().into_bytes());
+        // Alternating legs: the work endpoint always answers, the editions
+        // endpoint always refuses. Well past any sane threshold.
+        for _ in 0..12 {
+            fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: work_body.clone().into_bytes(),
+            }));
+        }
+
+        for _ in 0..12 {
+            let _ = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+        }
+
+        // Scoped so the permit this may hand back is released immediately.
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+
+        assert!(
+            tripped,
+            "a permanently refused editions endpoint must eventually open the \
+             OpenLibrary breaker — a sibling leg's success must not erase it"
+        );
+    }
+
+    /// The same multi-leg accounting rule as above, for the editions-leg
+    /// failures that are NOT an HTTP refusal — the shapes the 403 test cannot
+    /// see. In production the transport itself already reported a `Failure`
+    /// for a timeout (`HttpFetcherImpl::do_fetch`), so this operation must not
+    /// report a `Success` that erases it; a 404 on a work's own editions
+    /// sub-route means the ROUTE is gone (the work itself just answered 200);
+    /// and a 200 whose body will not parse is the provider serving garbage.
+    ///
+    /// Asserted as the ABSENCE of a Success report, which is what the defect
+    /// actually is: pre-load the bucket to one below the production threshold,
+    /// run the operation, then add one more failure. A stray Success would have
+    /// cleared the accumulated four and the last failure would not trip.
+    #[tokio::test]
+    async fn a_non_refusal_editions_failure_must_not_report_operation_success() {
+        use livrarr_domain::services::FetchError;
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        let work_body = serde_json::json!({"title": "Test Work"}).to_string();
+
+        let editions_legs: Vec<(
+            &str,
+            Result<livrarr_domain::services::FetchResponse, FetchError>,
+        )> = vec![
+            (
+                "a timed-out editions leg",
+                Err(FetchError::Timeout(std::time::Duration::from_secs(30))),
+            ),
+            (
+                "a 404 on the editions sub-route",
+                Ok(livrarr_domain::services::FetchResponse {
+                    status: 404,
+                    headers: vec![],
+                    body: vec![],
+                }),
+            ),
+            (
+                "an editions 200 whose body will not parse",
+                Ok(livrarr_domain::services::FetchResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: b"<html>not json</html>".to_vec(),
+                }),
+            ),
+        ];
+
+        for (label, editions_leg) in editions_legs {
+            queue.reset_breaker_for_tests(RateBucket::OpenLibrary);
+
+            // One below the production threshold of 5.
+            for _ in 0..4 {
+                queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+            }
+
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                work_body.clone().into_bytes(),
+            );
+            fetcher.push_response(editions_leg);
+            let _ = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+
+            let tripped = {
+                let admission = queue
+                    .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                    .await;
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+            };
+            assert!(
+                tripped,
+                "{label}: the work leg's success must not report an operation \
+                 Success — that clears the accumulated failures and the refused \
+                 editions endpoint is re-requested forever with the breaker closed"
+            );
+        }
+    }
+
+    /// C4 added Failure reporting to this door but no Success, and
+    /// `record_success` is the ONLY transition out of HalfOpen
+    /// (`breaker.rs`). A door that can open a breaker but never close it
+    /// leaves recovery to whichever unrelated code path happens to run next.
+    /// A legitimate empty result set IS a healthy answer and must say so.
+    #[tokio::test]
+    async fn a_healthy_search_result_reports_operation_success() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+
+        // One below the production threshold of 5.
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+
+        let canned = serde_json::json!({"docs": []}).to_string();
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, canned.into_bytes());
+        let results = search_openlibrary(&fetcher, "anything", "en")
+            .await
+            .expect("a 200 with an empty docs array is a healthy answer");
+        assert!(results.is_empty());
+
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            !tripped,
+            "a healthy search must report Success and clear the accumulated \
+             failures — otherwise this door can open the breaker but never close it"
+        );
+    }
+
+    /// `search.json` has no "this book is absent" status: an empty result set
+    /// is a 200 with an empty `docs` array. A 404 there means the ROUTE moved
+    /// or is blocked, which is a provider-health event — exempting it reported
+    /// every queried book as missing while the provider status stayed green.
+    #[tokio::test]
+    async fn a_search_route_404_is_a_provider_failure_not_a_book_miss() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::OpenLibrary,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let err = search_openlibrary(&fetcher, "anything", "en").await;
+        assert!(err.is_err(), "a 404 search route must not yield results");
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+
+        assert!(
+            tripped,
+            "a 404 from the search route is a provider failure, not a book miss"
+        );
+    }
+
     // -------------------------------------------------------------------
     // Door-routing: query_ol_detail goes through the HttpFetcher trait with
     // the OpenLibrary rate bucket, GET, no auth, for both the work-detail
@@ -407,6 +676,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_sends_openlibrary_bucket_get_for_both_calls() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // A single canned body serves both requests (RecordingHttpFetcher
         // repeats its one queued response) — it carries work-detail fields
         // but no `entries` key, so the editions parse naturally finds
@@ -453,6 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_strips_works_prefix_from_key() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let canned = serde_json::json!({"title": "T"});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -482,6 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_http_404_to_not_found() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
@@ -493,6 +765,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_timeout_to_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // Unit A: a transport-level timeout is retryable (Transient), not an
         // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
@@ -508,6 +781,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_wrapped_http_status_to_same_classification_as_raw_status() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // Some transport layers represent an HTTP status as a distinct
         // `FetchError::HttpError` rather than a normal response. A 429/5xx
         // wrapped this way must classify identically to the un-wrapped case.
@@ -533,6 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_fetcher_rate_limited_to_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
 
@@ -545,6 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // D3/#6: the outbound queue's local admission cap (no HTTP attempted)
         // must surface as a typed QueueFull, not fall into the generic
         // Transient catch-all (which would silently consume retry budget).
@@ -562,6 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_http_429_status_to_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
@@ -573,6 +850,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_http_5xx_to_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(503, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
@@ -584,6 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_http_403_to_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // OL is keyless: a 403 has no credential to fix. It is NOT
         // `NotFound` (unchanged-behavior tests cover that) and the crate
         // does not construct `NotConfigured` for OL at all — the caller
@@ -600,6 +879,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_other_4xx_to_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
@@ -611,6 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_maps_http_410_to_not_found() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
 
         let err = query_ol_detail(&fetcher, "OL999W", RequestPriority::Normal, None, None)
@@ -694,6 +975,7 @@ mod tests {
     #[tokio::test]
     async fn query_ol_detail_prefers_title_and_language_match_over_wrong_title_same_language_edition(
     ) {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
             code_breaker_editions_canned().to_string().into_bytes(),
@@ -718,6 +1000,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_prefers_title_match_even_when_edition_has_no_language_tag() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let canned = serde_json::json!({
             "entries": [
                 {
@@ -756,6 +1039,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_falls_back_to_first_isbn_when_no_title_given() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
             code_breaker_editions_canned().to_string().into_bytes(),
@@ -770,6 +1054,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_ol_detail_falls_back_to_first_isbn_when_no_edition_title_matches() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
             code_breaker_editions_canned().to_string().into_bytes(),
@@ -794,6 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_sends_openlibrary_bucket_get_isbn_url() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let canned = serde_json::json!({"works": [{"key": "/works/OL42W"}]});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -817,6 +1103,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_http_404_to_ok_none() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
 
         let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -828,6 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_http_410_to_ok_none() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(410, vec![]);
 
         let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -846,6 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_fetcher_rate_limited_to_err_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // The fetcher intercepts HTTP 429 as a transport-level
         // `FetchError::RateLimited` before a status is ever seen. This must
         // now surface as `Err(RateLimited)` so the caller can schedule a
@@ -863,6 +1152,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // D3/#6: same local-admission-cap rule as query_ol_detail above —
         // must not fold into the generic Transient (budget-consuming) path.
         let fetcher =
@@ -879,6 +1169,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_http_429_status_to_err_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(429, vec![]);
 
         let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -890,6 +1181,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_http_5xx_to_err_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
 
         let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -901,6 +1193,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_http_403_to_err_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
 
         let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -912,6 +1205,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_other_4xx_to_err_other() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(400, vec![]);
 
         let err = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
@@ -923,6 +1217,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_lookup_maps_network_error_to_transient() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         // Unit A: a connection failure is retryable (Transient), not an
         // opaque permanent failure.
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(

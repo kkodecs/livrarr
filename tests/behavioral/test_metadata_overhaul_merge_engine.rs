@@ -1409,13 +1409,15 @@ async fn test_merge_language_fills_when_blank() {
     );
 }
 
-/// REQ-ID: M-012 | Contract: MergeEngine::merge | Behavior: the Goodreads cover
-/// gate (REQ-017) runs at the merge chokepoint for every caller — a Goodreads
-/// cover whose title fails the deterministic Jaccard check must not win the
-/// cover field even though Goodreads outranks OpenLibrary in the English cover
-/// priority list; a Goodreads cover whose title clears the threshold may win.
+/// REQ-ID: M-012 | Contract: MergeEngine::merge | Behavior: Goodreads outranks
+/// OpenLibrary in the English cover priority list, so a Goodreads cover wins the
+/// cover field when both providers offer one.
+///
+/// The title-similarity half of this test is gone with the Goodreads cover gate
+/// (`docs/design-subtitle-matching.md` r3, C2). Nothing compares titles for cover
+/// purposes any more; the ranking below is the whole policy.
 #[tokio::test]
-async fn test_merge_engine_gr_cover_gate_at_chokepoint() {
+async fn test_merge_engine_goodreads_outranks_openlibrary_for_cover() {
     let engine = make_engine();
 
     let base_work = Work {
@@ -1429,45 +1431,6 @@ async fn test_merge_engine_gr_cover_gate_at_chokepoint() {
         ..Default::default()
     };
 
-    // Mismatched GR title: the gate strips the GR cover, so OpenLibrary's cover wins.
-    let mismatched_output = merge(
-        &engine,
-        MergeInput {
-            current_work: base_work.clone(),
-            current_provenance: vec![],
-            provider_results: HashMap::from([
-                (
-                    MetadataSource::Goodreads,
-                    success(NormalizedWorkDetail {
-                        title: Some("A Darkness at Sethanon".to_string()),
-                        cover_url: Some("https://example.test/gr-cover.jpg".to_string()),
-                        ..empty_detail()
-                    }),
-                ),
-                (
-                    MetadataSource::OpenLibrary,
-                    success(NormalizedWorkDetail {
-                        cover_url: Some("https://example.test/ol-cover.jpg".to_string()),
-                        ..empty_detail()
-                    }),
-                ),
-            ]),
-            mode: EnrichmentMode::Background,
-            priority_model: PriorityModel::english(),
-        },
-    )
-    .await;
-
-    let mismatched_cover = mismatched_output
-        .cover_resolution
-        .as_ref()
-        .expect("should resolve a cover");
-    assert_eq!(
-        mismatched_cover.url, "https://example.test/ol-cover.jpg",
-        "mismatched GR title must not win the cover gate"
-    );
-
-    // Matching GR title (Jaccard >= 0.6): the gate applies, GR outranks OL for cover.
     let matching_output = merge(
         &engine,
         MergeInput {
@@ -1502,6 +1465,6 @@ async fn test_merge_engine_gr_cover_gate_at_chokepoint() {
         .expect("should resolve a cover");
     assert_eq!(
         matching_cover.url, "https://example.test/gr-cover.jpg",
-        "matching GR title should be allowed to win the cover gate"
+        "Goodreads outranks OpenLibrary for the English ebook cover"
     );
 }

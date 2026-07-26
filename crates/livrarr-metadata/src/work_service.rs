@@ -2107,10 +2107,27 @@ where
         let (slot, canonical) = classify_identifier_input(input, slot_hint)
             .map_err(|e| IdentityEditError::InvalidValue(e.to_string()))?;
 
+        // This path used to be silent end to end: a run of failed previews wrote
+        // call records and not one log line, so the only way to learn what a
+        // provider had actually answered was to reproduce the failure by hand.
+        tracing::info!(
+            work_id,
+            slot = %slot.as_str(),
+            value = %canonical,
+            "identity preview: fetching"
+        );
+
         // Fetch the certified record for the submitted value (§Preview seam).
         let (resolved, leg_outcomes) = self
             .fetch_slot_record(&slot, &canonical, work.language.clone())
             .await;
+        tracing::info!(
+            work_id,
+            slot = %slot.as_str(),
+            resolved = resolved.is_some(),
+            legs = ?leg_outcomes,
+            "identity preview: fetched"
+        );
         let Some(resolved) = resolved else {
             let failure_reason = if leg_outcomes
                 .iter()
@@ -2502,10 +2519,12 @@ fn record_evidence<'a>(
     evidence
 }
 
-/// The proven-agreement bar (§Preview 3): keep iff title Same — or
-/// Grey{OneSidedSubtitle} corroborated by an agreeing hard identifier
-/// (`title_id_trust`, the AC-004 hatch) — AND author Agree. Everything else
-/// is not proven.
+/// The proven-agreement bar (§Preview 3): keep iff `title_id_trust` holds —
+/// title Same, or Grey{OneSidedSubtitle}, in either case with no same-provider
+/// work-key contradiction — AND author Agree. Everything else is not proven.
+/// A one-sided subtitle no longer needs an agreeing hard identifier: a subtitle
+/// is edition-level, so demanding an edition bridge between two different
+/// printings asked a question that by construction has no answer.
 fn proven_agreement(
     certified: &livrarr_domain::services::IdentityPreviewRecord,
     certified_evidence: &livrarr_domain::identity_matching::IdEvidence<'_>,

@@ -114,14 +114,28 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
 
     if resp.status == 403 {
         tracing::warn!("GoogleBooks returned 403 (likely quota exhaustion or invalid API key)");
+        // The empty-result return below is unchanged, but the breaker must still
+        // learn: a quota-exhausted key answers 403 to everything, and silently
+        // reporting "no results" forever taught it nothing.
+        outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
         return Ok(vec![]);
     }
     if resp.status >= 400 {
+        // No 404/410 exemption: `/books/v1/volumes` is a search endpoint with no
+        // "this book is absent" status — an empty result set is a 200 with
+        // `totalItems: 0` — so a 404 means the ROUTE moved or is blocked.
+        outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
         return Err(format!("GoogleBooks returned {}", resp.status));
     }
 
     let search: GbSearchResponse =
         serde_json::from_slice(&resp.body).map_err(|e| format!("GoogleBooks parse error: {e}"))?;
+
+    // A parsed response — including a legitimately empty one — is a healthy
+    // answer. Without this the C4 Failure reports above could open the breaker
+    // and nothing on this door could ever close it again: `record_success` is
+    // the only transition out of HalfOpen.
+    outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Success);
 
     Ok(search.items.unwrap_or_default())
 }
@@ -211,10 +225,12 @@ async fn fetch_gb_search<F: HttpFetcher>(
 
     if resp.status != 200 {
         tracing::warn!(status = resp.status, "GoogleBooks: HTTP error");
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared()
-                .report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
-        }
+        // 403 is handled above with its own quota-vs-bad-key discrimination.
+        // Everything else is a health signal — reporting only 5xx left a 401
+        // storm invisible to the breaker. No 404/410 exemption: this is the
+        // search endpoint, where an empty result set is a 200 with
+        // `totalItems: 0`, so a 404 means the ROUTE moved or is blocked.
+        outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
         return Err(map_http_error(resp.status));
     }
 
@@ -670,6 +686,94 @@ fn map_http_error(status: u16) -> ProviderOutcome<NormalizedWorkDetail> {
 mod tests {
     use super::*;
 
+    /// C4, test-plan item 6: a refusal must reach this client's own bucket.
+    /// `/books/v1/volumes` is a SEARCH endpoint — an empty result set is a 200
+    /// with `totalItems: 0` — so a 404 there means the route moved or is
+    /// blocked, and gets no absence exemption.
+    #[tokio::test]
+    async fn a_search_refusal_and_a_dead_search_route_both_report_a_breaker_failure() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
+        let queue = outbound_queue::shared();
+
+        for status in [403u16, 404u16, 401u16] {
+            queue.set_breaker_config_for_tests(
+                RateBucket::GoogleBooks,
+                CircuitBreakerConfig {
+                    failure_threshold: 1,
+                    evaluation_window_secs: 60,
+                    open_duration_secs: 60,
+                    half_open_probe_count: 1,
+                },
+            );
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(status, vec![]);
+            let _ = fetch_gb_volumes(
+                &fetcher,
+                "k",
+                "https://www.googleapis.com/books/v1/volumes?q=x".to_string(),
+                RequestPriority::Normal,
+            )
+            .await;
+            let tripped = {
+                let admission = queue
+                    .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
+                    .await;
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+            };
+            assert!(
+                tripped,
+                "Google Books search returning {status} must report a breaker failure"
+            );
+        }
+    }
+
+    /// C4 added Failure reporting to this door but no Success, and
+    /// `record_success` is the ONLY transition out of HalfOpen
+    /// (`breaker.rs`). A door that can open a breaker but never close it
+    /// leaves recovery to whichever unrelated code path happens to run next.
+    /// A legitimate empty result set IS a healthy answer and must say so.
+    #[tokio::test]
+    async fn a_healthy_volumes_result_reports_operation_success() {
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
+        let queue = outbound_queue::shared();
+
+        // One below the production threshold of 5.
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+        }
+
+        let canned = serde_json::json!({"totalItems": 0}).to_string();
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, canned.into_bytes());
+        let volumes = fetch_gb_volumes(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("a 200 with totalItems 0 is a healthy answer");
+        assert!(volumes.is_empty());
+
+        queue.report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            !tripped,
+            "a healthy volumes fetch must report Success and clear the \
+             accumulated failures — otherwise this door can open the breaker \
+             but never close it"
+        );
+    }
+
     fn gb_identifier(identifier_type: Option<&str>, identifier: Option<&str>) -> GbIdentifier {
         GbIdentifier {
             identifier_type: identifier_type.map(str::to_string),
@@ -1121,6 +1225,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_gb_search_sends_googlebooks_bucket_get_and_api_key_header() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
         let canned = serde_json::json!({"totalItems": 0});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -1160,6 +1265,7 @@ mod tests {
     /// plain transport failure gets.
     #[tokio::test]
     async fn fetch_gb_search_maps_fetcher_rate_limited_to_map_http_error_429() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::RateLimited,
         );
@@ -1184,6 +1290,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_gb_search_maps_fetcher_queue_full_to_queue_full_retry() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
         // D3/#6: the outbound queue's local admission cap is a transport-
         // level pause — must classify as WillRetry{QueueFull} (budget-
         // exempt), not the generic WillRetry{ServerError} (budget-consuming)
@@ -1214,6 +1321,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_gb_search_maps_http_403_to_not_configured() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]);
 
         let outcome = fetch_gb_search(
@@ -1230,6 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_gb_search_maps_network_error_to_server_error_retry() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::Timeout(Duration::from_secs(10)),
         );

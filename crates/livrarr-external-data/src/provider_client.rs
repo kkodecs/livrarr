@@ -630,7 +630,16 @@ impl HardcoverClient {
                 .await
                 {
                     Ok(Some(hc)) => self.build_success(hc, &token, priority).await,
-                    Ok(None) => ProviderOutcome::NotFound,
+                    Ok(None) => {
+                        // A parsed 200 carrying no matching book is a healthy
+                        // answer, not a health failure. `hc_post` deliberately
+                        // reports no Success (an operation may have a second
+                        // leg), so the operation boundary must report it —
+                        // otherwise a half-open Hardcover breaker can never be
+                        // closed by a probe that legitimately misses.
+                        crate::hardcover::report_hardcover_success();
+                        ProviderOutcome::NotFound
+                    }
                     Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
                         circuit_open_outcome(retry_after)
                     }
@@ -656,7 +665,16 @@ impl HardcoverClient {
                 .await
                 {
                     Ok(Some(hc)) => self.build_success(hc, &token, priority).await,
-                    Ok(None) => ProviderOutcome::NotFound,
+                    Ok(None) => {
+                        // A parsed 200 carrying no matching book is a healthy
+                        // answer, not a health failure. `hc_post` deliberately
+                        // reports no Success (an operation may have a second
+                        // leg), so the operation boundary must report it —
+                        // otherwise a half-open Hardcover breaker can never be
+                        // closed by a probe that legitimately misses.
+                        crate::hardcover::report_hardcover_success();
+                        ProviderOutcome::NotFound
+                    }
                     Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
                         circuit_open_outcome(retry_after)
                     }
@@ -717,6 +735,9 @@ impl HardcoverClient {
                     return ProviderOutcome::NotFound;
                 }
                 Ok(None) => {
+                    // A healthy call that simply matched nothing — one leg, and
+                    // it succeeded, so the operation boundary is here.
+                    crate::hardcover::report_hardcover_success();
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
                 }
                 Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
@@ -751,7 +772,12 @@ impl HardcoverClient {
             Err(
                 crate::hardcover::HardcoverError::NoResults
                 | crate::hardcover::HardcoverError::NoMatch(_),
-            ) => ProviderOutcome::NotFound,
+            ) => {
+                // The provider answered fine; it just has no match. One leg,
+                // succeeded — report the operation healthy.
+                crate::hardcover::report_hardcover_success();
+                ProviderOutcome::NotFound
+            }
             Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
                 circuit_open_outcome(retry_after)
             }
@@ -775,8 +801,14 @@ impl HardcoverClient {
             .and_then(|y| y.parse::<i32>().ok());
 
         let mut isbn_13 = hc.isbn_13.clone();
+        // The Hardcover operation reports ONE breaker outcome, here, and only
+        // when every leg it ran succeeded. `hc_post` deliberately reports no
+        // success of its own: a success clears every accumulated failure, so a
+        // query-leg success landing before an editions-leg refusal meant a
+        // permanently refused editions endpoint never reached the threshold.
+        let mut editions_leg_ok = true;
         if let Some(ref hc_id) = hc.hc_key {
-            if let Ok(Some(better_isbn)) = crate::hardcover::fetch_hardcover_editions(
+            match crate::hardcover::fetch_hardcover_editions(
                 &self.fetcher,
                 hc_id,
                 token,
@@ -785,8 +817,15 @@ impl HardcoverClient {
             )
             .await
             {
-                isbn_13 = Some(better_isbn);
+                Ok(Some(better_isbn)) => isbn_13 = Some(better_isbn),
+                Ok(None) => {}
+                // Still best-effort for the PAYLOAD — a missing ISBN never
+                // fails the work fetch — but it is not a healthy operation.
+                Err(_) => editions_leg_ok = false,
             }
+        }
+        if editions_leg_ok {
+            crate::hardcover::report_hardcover_success();
         }
 
         let payload = NormalizedWorkDetail {
@@ -1080,10 +1119,14 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         };
 
         if !(200..300).contains(&resp.status) {
-            if (500..600).contains(&resp.status) {
-                outbound_queue::shared()
-                    .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
-            }
+            // Search has no genuine-absence status — an empty result set is a
+            // 200 with an empty array — so EVERY non-2xx here is a provider
+            // health signal, 404 and 410 included. A 404 on a search route means
+            // the route moved or is blocked, not that a book is missing;
+            // exempting it would report every queried book as absent while the
+            // provider status stayed green.
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
             return Err(crate::openlibrary::classify_ol_error(resp.status));
         }
 
@@ -1235,6 +1278,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn qw2_openlibrary_isbn_circuit_open_never_falls_to_fuzzy_search() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Err(
             FetchError::CircuitOpen {
                 retry_after: Duration::from_secs(17),
@@ -1264,6 +1308,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn qw2_openlibrary_isbn_server_error_never_falls_to_fuzzy_search() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_response(server_error(503));
         fetcher.push_response(fuzzy_success_search());
         fetcher.push_response(fuzzy_success_detail());
@@ -1289,6 +1334,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn qw2_openlibrary_ol_key_server_error_never_falls_to_fuzzy_search() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_response(server_error(502));
         fetcher.push_response(fuzzy_success_search());
         fetcher.push_response(fuzzy_success_detail());
@@ -1311,6 +1357,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn qw2_openlibrary_genuine_isbn_no_match_can_fall_through_to_fuzzy_success() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_response(ok_json(
             serde_json::json!({ "works": [] }),
         ));
@@ -1332,6 +1379,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn qw2_openlibrary_dead_ol_key_404_can_fall_through_to_fuzzy_success() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
         fetcher.push_response(fuzzy_success_search());
         fetcher.push_response(fuzzy_success_detail());
@@ -1348,6 +1396,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn provider_picker_conformance_openlibrary_abstains_on_grey_author_hit() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_response(ok_json(serde_json::json!({
                 "docs": [{
@@ -1385,6 +1434,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn tier3_candidate_detail_5xx_is_retryable_not_notfound() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
         fetcher.push_response(server_error(503));
@@ -1408,6 +1458,7 @@ mod openlibrary_qw2_pins {
 
     #[tokio::test]
     async fn tier3_candidate_detail_429_is_ratelimit_not_notfound() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
         fetcher.push_response(server_error(429));
@@ -1436,6 +1487,7 @@ mod openlibrary_qw2_pins {
     /// HTTP, so it must stay budget-exempt (mirrors `CircuitOpen`).
     #[tokio::test]
     async fn tier3_search_queue_full_is_budget_exempt_not_servererror() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::QueueFull {
                 retry_after: Duration::from_secs(1),
@@ -1463,6 +1515,7 @@ mod openlibrary_qw2_pins {
     /// into a retry.
     #[tokio::test]
     async fn tier3_candidate_detail_404_stays_notfound() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_response(fuzzy_success_search());
         fetcher.push_response(Ok(FetchResponse {
@@ -1571,6 +1624,7 @@ mod unit_a_retry_classification {
 
     #[tokio::test]
     async fn openlibrary_429_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
         let client = OpenLibraryClient::new(fetcher);
         let outcome = client
@@ -1611,6 +1665,7 @@ mod unit_a_retry_classification {
 
     #[tokio::test]
     async fn openlibrary_5xx_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = RecordingHttpFetcher::with_ok(503, vec![]);
         let client = OpenLibraryClient::new(fetcher);
         let outcome = client
@@ -1651,6 +1706,7 @@ mod unit_a_retry_classification {
 
     #[tokio::test]
     async fn openlibrary_403_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = RecordingHttpFetcher::with_ok(403, vec![]);
         let client = OpenLibraryClient::new(fetcher);
         let outcome = client
@@ -1691,6 +1747,7 @@ mod unit_a_retry_classification {
 
     #[tokio::test]
     async fn openlibrary_other_4xx_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = RecordingHttpFetcher::with_ok(400, vec![]);
         let client = OpenLibraryClient::new(fetcher);
         let outcome = client
@@ -1744,6 +1801,7 @@ mod unit_a_retry_classification {
     /// actually PRODUCES the exempt outcome in the first place.
     #[tokio::test]
     async fn openlibrary_queue_full_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
             retry_after: Duration::from_secs(1),
         });
@@ -2056,6 +2114,7 @@ impl GoodreadsClient {
             Err(err) => return self.map_fetch_err(err),
         };
         if let Some(detail) = goodreads::parse_detail_html(&html) {
+            self.report_gr_payload_usable();
             return ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail)));
         }
         if let Some(res) = self.llm_extract_payload(&html, language, &detail_url).await {
@@ -2064,12 +2123,49 @@ impl GoodreadsClient {
                     if payload.gr_key.is_none() {
                         payload.gr_key = Some(gr_key.to_string());
                     }
+                    self.report_gr_payload_usable();
                     ProviderOutcome::Success(Box::new(payload))
                 }
                 Err(err) => self.map_fetch_err(err),
             };
         }
-        ProviderOutcome::NotFound
+        self.unreadable_page_outcome(&detail_url)
+    }
+
+    /// A readable book payload is the only real evidence Goodreads is working —
+    /// a bare 200 is not (the page can be an unparseable shell). Reported here
+    /// rather than in the fetch helper so an endpoint that answers but serves
+    /// nothing usable cannot look healthy, and cannot clear accumulated
+    /// failures on its way past.
+    fn report_gr_payload_usable(&self) {
+        outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Success);
+    }
+
+    /// The health half of an unreadable page, separated from the outcome half
+    /// because the search tier keeps a degraded key-only `Success` (Unit B4)
+    /// where the established-key tier returns `WillRetry`. Both fetched a page
+    /// and both failed to read it, so both owe the breaker the same signal —
+    /// reporting it only on the `WillRetry` path let a Goodreads layout break
+    /// stay invisible for every work that reached GR by title search.
+    fn report_gr_page_unreadable(&self, detail_url: &str) {
+        tracing::warn!(
+            detail_url = %detail_url,
+            "Goodreads: 200 with no readable book payload"
+        );
+        outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
+    }
+
+    /// A 200 carrying no readable book is Goodreads' problem, not evidence the
+    /// book is absent (PO ruling, 2026-07-26). Filing it as `NotFound` wrote the
+    /// book off, left the provider status line dark, and taught the breaker
+    /// nothing — so a layout change on their side would quietly empty a library
+    /// one refresh at a time.
+    fn unreadable_page_outcome(&self, detail_url: &str) -> ProviderOutcome<NormalizedWorkDetail> {
+        self.report_gr_page_unreadable(detail_url);
+        ProviderOutcome::WillRetry {
+            reason: livrarr_domain::WillRetryReason::ServerError,
+            next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+        }
     }
 
     /// LLM extraction fallback for a fetched detail page (foreign-language
@@ -2210,6 +2306,7 @@ impl GoodreadsClient {
                 payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
             apply_candidate_text(&mut payload, &resolved.candidate);
+            self.report_gr_payload_usable();
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -2225,6 +2322,7 @@ impl GoodreadsClient {
                         payload.gr_key = resolved_gr_key;
                     }
                     apply_candidate_text(&mut payload, &resolved.candidate);
+                    self.report_gr_payload_usable();
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -2238,6 +2336,12 @@ impl GoodreadsClient {
                 .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
                 .await
             {
+                // The page WAS fetched and WAS unreadable. The key-only degrade
+                // stays (Unit B4, PO-accepted), but the breaker must still hear
+                // about it: returning a bare `Success` here meant a Goodreads
+                // layout break was silent for every work resolved by title
+                // search, which is exactly the class C3 exists to close.
+                self.report_gr_page_unreadable(&detail_url);
                 tracing::info!(
                     gr_key = payload.gr_key.as_deref().unwrap_or(""),
                     verified = payload.title.is_some(),
@@ -2247,7 +2351,7 @@ impl GoodreadsClient {
             }
         }
 
-        ProviderOutcome::NotFound
+        self.unreadable_page_outcome(&detail_url)
     }
 
     /// Build the parse-failure fallback payload for a freshly resolved key.
@@ -2363,9 +2467,35 @@ impl GoodreadsClient {
                     next_attempt_at: Utc::now() + backoff,
                 }
             }
-            // 4xx other than 429: stale URL, deleted page, etc. — treat as
-            // NotFound rather than burning retries against a permanent miss.
-            GoodreadsFetchError::HttpStatus(_) => ProviderOutcome::NotFound,
+            // 404/410 is the only shape that means "this book is not here" —
+            // the house rule every other provider already follows
+            // (`ProviderFetchError::NotFound`, types.rs).
+            GoodreadsFetchError::HttpStatus(404) | GoodreadsFetchError::HttpStatus(410) => {
+                ProviderOutcome::NotFound
+            }
+            // Any other 4xx is Goodreads REFUSING us, not answering us. Filing
+            // a refusal as NotFound told the user "no book was found for that
+            // identifier — double-check the value", left the provider status
+            // dot dark while every request was being turned away, and taught
+            // the breaker nothing. It is a failure: it records as an error and
+            // retries under the shared budget.
+            GoodreadsFetchError::HttpStatus(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + backoff,
+            },
+            // The autocomplete route has no "absent" status, so NO status from
+            // it may become `NotFound` — a moved or blocked route would
+            // otherwise report every queried book as missing while the identity
+            // path terminalized on it. 429 keeps its own classification so the
+            // rate-limit backoff is unchanged.
+            GoodreadsFetchError::SearchRouteFailure(429) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::RateLimit,
+                next_attempt_at: Utc::now() + backoff,
+            },
+            GoodreadsFetchError::SearchRouteFailure(_) => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + backoff,
+            },
             GoodreadsFetchError::Network(_) => ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + backoff,
@@ -2377,7 +2507,13 @@ impl GoodreadsClient {
                 reason: livrarr_domain::WillRetryReason::ServerError,
                 next_attempt_at: Utc::now() + backoff,
             },
-            GoodreadsFetchError::Parse => ProviderOutcome::NotFound,
+            // A 200 whose body yielded no usable fields is a page we could not
+            // read, not a book that does not exist — the same misfiling as the
+            // refusal above, arrived at through a different door.
+            GoodreadsFetchError::Parse => ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                next_attempt_at: Utc::now() + backoff,
+            },
         }
     }
 
@@ -2676,6 +2812,299 @@ mod tests {
         }
     }
 
+    fn goodreads_test_client() -> GoodreadsClient {
+        goodreads_client_at("https://www.goodreads.com")
+    }
+
+    fn goodreads_client_at(base_url: &str) -> GoodreadsClient {
+        GoodreadsClient::new(
+            livrarr_http::fetcher::HttpFetcherImpl::new().expect("fetcher"),
+            HttpClient::builder().build().expect("http client"),
+            base_url,
+        )
+    }
+
+    /// The production door for an established Goodreads key, driven end to end
+    /// against a real socket — `GoodreadsClient` owns a concrete fetcher, so no
+    /// double can be injected and only a real server exercises this path.
+    ///
+    /// A 200 carrying a page we cannot read is Goodreads' problem, not evidence
+    /// the book is absent. Before this, the door returned `NotFound`: the book
+    /// was written off, the provider status line stayed dark, and the breaker
+    /// was told the provider had SUCCEEDED — so a layout change on their side
+    /// would empty a library one refresh at a time with nothing going red.
+    ///
+    /// This is the case the earlier unit test could not reach: it called the
+    /// error mapper directly with an error value no production path constructs.
+    #[tokio::test]
+    async fn an_unreadable_goodreads_page_is_a_provider_failure_not_a_missing_book() {
+        use livrarr_domain::services::RateBucket;
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Goodreads,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        // A 200 whose body carries no book fields at all.
+        let base =
+            crate::test_support::spawn_canned_http_server(200, "<html><body>nope</body></html>")
+                .await;
+        let client = goodreads_client_at(&base);
+
+        let outcome = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+
+        // Scoped so the permit this may hand back is released immediately —
+        // holding one for the rest of the test occupies the bucket's in-flight
+        // slot and stalls anything else reaching for the same bucket.
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+
+        assert!(
+            !matches!(outcome, ProviderOutcome::NotFound),
+            "an unreadable page must not be reported as a missing book, got {outcome:?}"
+        );
+        assert!(
+            matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    ..
+                }
+            ),
+            "expected a retryable provider failure, got {outcome:?}"
+        );
+        assert!(
+            tripped,
+            "an unreadable page must report a breaker failure, not a success"
+        );
+    }
+
+    /// The other way an unreadable page could look healthy: the legacy JSON-LD
+    /// parser accepted ANY block declaring `"@type":"Book"`, even one carrying
+    /// no other field, and built an all-`None` payload from it. That counted as
+    /// a successful parse, so a stub shell reported `Success` to the breaker
+    /// and cleared every accumulated failure on its way past — the same defect
+    /// C3 removed from the bare-2xx report, one layer down.
+    #[tokio::test]
+    async fn a_jsonld_stub_carrying_no_book_fields_is_not_a_readable_page() {
+        use livrarr_domain::services::RateBucket;
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Goodreads,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let base = crate::test_support::spawn_canned_http_server(
+            200,
+            r#"<html><head><script type="application/ld+json">{"@type":"Book"}</script></head><body></body></html>"#,
+        )
+        .await;
+        let client = goodreads_client_at(&base);
+
+        let outcome = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+
+        assert!(
+            !matches!(outcome, ProviderOutcome::Success(_)),
+            "a JSON-LD stub with no book fields is not a readable payload, got {outcome:?}"
+        );
+        assert!(
+            tripped,
+            "an empty JSON-LD stub must report a breaker failure, not a success"
+        );
+    }
+
+    /// The breaker clears every accumulated failure on a success, so any
+    /// endpoint that reports success on a bare 2xx can mask a sibling endpoint
+    /// refusing every request: success, failure, success, failure — the count
+    /// never reaches the threshold and the breaker never opens.
+    ///
+    /// Runs at the PRODUCTION threshold deliberately. A test that forces the
+    /// threshold to 1 cannot observe this shape at all, which is exactly why
+    /// the earlier one missed it.
+    #[tokio::test]
+    async fn repeated_unreadable_pages_still_reach_the_production_breaker_threshold() {
+        use livrarr_domain::services::RateBucket;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        // Production config for this bucket — no threshold override.
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+
+        let base =
+            crate::test_support::spawn_canned_http_server(200, "<html><body>nope</body></html>")
+                .await;
+        let client = goodreads_client_at(&base);
+
+        // Well past any sane threshold; if a stray success were clearing the
+        // count, this would never open.
+        for _ in 0..10 {
+            let _ = client
+                .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+                .await;
+        }
+
+        // Scoped so the permit this may hand back is released immediately —
+        // holding one for the rest of the test occupies the bucket's in-flight
+        // slot and stalls anything else reaching for the same bucket.
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+
+        assert!(
+            tripped,
+            "a provider serving nothing readable must eventually trip its breaker"
+        );
+    }
+
+    /// A 404 from the AUTOCOMPLETE route is a dead route, not a missing book.
+    /// Autocomplete has no "this book is absent" status — an empty result set is
+    /// a 200 carrying `[]` — so if Goodreads moves or blocks that route, every
+    /// work without a stored `gr_key` was being written off as absent, one
+    /// terminal `NotFound` at a time, until the breaker happened to open.
+    ///
+    /// Drives the real door: `GoodreadsClient::fetch` on a work with no
+    /// `gr_key`, against a real socket answering 404.
+    #[tokio::test]
+    async fn a_dead_autocomplete_route_is_not_a_missing_book() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let base = crate::test_support::spawn_canned_http_server(404, "").await;
+        let client = goodreads_client_at(&base);
+
+        let work = Work {
+            title: "Sapiens".to_string(),
+            author_name: "Yuval Noah Harari".to_string(),
+            ..Default::default()
+        };
+
+        let outcome = client.fetch(&work, RequestPriority::Normal).await;
+
+        assert!(
+            !matches!(outcome, ProviderOutcome::NotFound),
+            "a dead autocomplete route must not report the book as absent, got {outcome:?}"
+        );
+    }
+
+    /// The classification defect behind the identity modal telling the user
+    /// "No book was found for that identifier — double-check the value" while
+    /// Goodreads was in fact refusing every request. Only a genuine 404/410
+    /// means the book is not there; every other refusal is a failure, and a
+    /// page that loads but cannot be parsed is not an absent book either.
+    #[test]
+    fn a_goodreads_refusal_is_classified_as_failure_not_as_a_missing_book() {
+        let client = goodreads_test_client();
+
+        for status in [404u16, 410] {
+            assert!(
+                matches!(
+                    client.map_fetch_err(GoodreadsFetchError::HttpStatus(status)),
+                    ProviderOutcome::NotFound
+                ),
+                "HTTP {status} is a genuine absence"
+            );
+        }
+
+        for status in [400u16, 401, 403, 451] {
+            let outcome = client.map_fetch_err(GoodreadsFetchError::HttpStatus(status));
+            assert!(
+                matches!(
+                    outcome,
+                    ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        ..
+                    }
+                ),
+                "HTTP {status} is a refusal, not a missing book: got {outcome:?}"
+            );
+        }
+
+        // A 200 whose body yielded nothing is a page we could not read.
+        assert!(matches!(
+            client.map_fetch_err(GoodreadsFetchError::Parse),
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                ..
+            }
+        ));
+    }
+
+    /// Guards the two classifications the change deliberately left alone.
+    #[test]
+    fn goodreads_rate_limit_and_server_error_classifications_are_unchanged() {
+        let client = goodreads_test_client();
+
+        assert!(matches!(
+            client.map_fetch_err(GoodreadsFetchError::HttpStatus(429)),
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::RateLimit,
+                ..
+            }
+        ));
+        assert!(matches!(
+            client.map_fetch_err(GoodreadsFetchError::HttpStatus(503)),
+            ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                ..
+            }
+        ));
+    }
+
+    /// The consumer that made the misfiling user-visible: a refusal must record
+    /// as an error, which is what turns the provider dot in the left nav red.
+    /// `not_found` is deliberately excluded from that count, so filing a
+    /// refusal as NotFound left the dot dark while every request was refused.
+    #[test]
+    fn a_refusal_records_as_an_error_and_a_genuine_miss_does_not() {
+        let client = goodreads_test_client();
+
+        let (refusal_class, _) =
+            outcome_record_class(&client.map_fetch_err(GoodreadsFetchError::HttpStatus(403)));
+        assert_eq!(refusal_class, CallOutcomeClass::Error);
+
+        let (miss_class, _) =
+            outcome_record_class(&client.map_fetch_err(GoodreadsFetchError::HttpStatus(404)));
+        assert_eq!(miss_class, CallOutcomeClass::NotFound);
+    }
+
     #[test]
     fn picker_matches_subtitled_record_from_bare_seed() {
         // The 2026-07-03 bulk-refresh residue shape: the seed title is bare
@@ -2769,6 +3198,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_tier_selects_the_seed_edition_before_title_search() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let body = r#"[{"title":"Sapiens","bookTitleBare":"Sapiens","bookUrl":"/book/show/135802293","author":{"name":"Yuval Noah Harari"}}]"#;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
@@ -2797,6 +3227,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_tier_decorated_edition_title_falls_through_to_title_search() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // The seed's edition exists on GR but its display title is decorated
         // beyond the picker's bar — the tier abstains and the title tier
         // still runs, preserving today's behavior for everything else.
@@ -2831,6 +3262,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_tier_fetch_error_falls_through_to_title_search() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let title_body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::RateLimited,
@@ -2859,6 +3291,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_isbn_seed_goes_straight_to_title_search() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"/book/show/23692271","author":{"name":"Yuval Noah Harari"}}]"#;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
@@ -2888,6 +3321,7 @@ mod tests {
 
     #[tokio::test]
     async fn title_tier_accepts_relative_and_absolute_https_book_urls() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // Positive control alongside the rejection tests below — a
         // same-host relative or absolute bookUrl still resolves normally
         // through the new validation guard.
@@ -2919,6 +3353,7 @@ mod tests {
 
     #[tokio::test]
     async fn title_tier_rejects_external_host_book_url() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // Goodreads' own scraped JSON is untrusted input — a bookUrl
         // pointing off Goodreads must never become a fetch target, even
         // when the title/author otherwise match. GR abstains exactly like a
@@ -2943,6 +3378,7 @@ mod tests {
 
     #[tokio::test]
     async fn title_tier_rejects_http_scheme_book_url() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // validate_detail_url requires https — a plain-http bookUrl (even on
         // the right host) must never resolve.
         let body = r#"[{"title":"Sapiens: A Brief History of Humankind","bookUrl":"http://www.goodreads.com/book/show/1","author":{"name":"Yuval Noah Harari"}}]"#;
@@ -2968,6 +3404,7 @@ mod tests {
 
     #[tokio::test]
     async fn title_tier_rejects_private_ip_book_url() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // A bookUrl pointing at a loopback/private address must never
         // resolve — the raw-value gate rejects it outright, before any
         // connection is ever attempted (fetch_ssrf_safe's redirect-hop check
@@ -2996,6 +3433,7 @@ mod tests {
 
     #[tokio::test]
     async fn isbn_tier_rejects_invalid_book_url_and_still_falls_through_to_title_tier() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // The ISBN tier's hit clears the title/author bar but its bookUrl is
         // unsafe — it must be rejected WITHOUT ever being trusted, and the
         // title tier still gets its normal chance (mirrors the existing
@@ -3076,6 +3514,12 @@ mod tests {
         // variant-mapping guarantee itself lives in the narrower
         // `map_transport_err_distinguishes_ssrf_rejection_from_generic_network_failure`
         // test in `goodreads/client.rs`.
+        //
+        // Driving a REAL fetcher means this test needs the shared Goodreads
+        // breaker CLOSED: an Open breaker refuses admission before a socket is
+        // opened, so the autocomplete request is never made and the join below
+        // waits forever on a connection that is not coming.
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let base_url = format!("http://{addr}");
@@ -3106,7 +3550,12 @@ mod tests {
         };
 
         let outcome = client.fetch(&work, RequestPriority::Normal).await;
-        server.await.unwrap();
+        // Bounded so a request that never arrives fails with this message
+        // instead of wedging the whole test binary.
+        tokio::time::timeout(Duration::from_secs(10), server)
+            .await
+            .expect("the autocomplete request never reached the test server")
+            .unwrap();
 
         match outcome {
             ProviderOutcome::Success(payload) => {

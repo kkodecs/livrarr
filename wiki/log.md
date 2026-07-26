@@ -1,5 +1,44 @@
 # Wiki Change Log
 
+## 2026-07-25 — import-pipeline.md: only EPUB gets tagged, and the failure path repairs nothing
+
+**Updated page:** `wiki/architecture/import-pipeline.md`. Seventeenth documentarian pass.
+**Split:** `metadata-pathway.md` and `roads.md` were **not** started — see the tree-state note
+at the end, which is the reason and is more important than the size.
+
+**Audiobook tags are not written at all.** The page said tag writing supports `.epub`, `.m4b`
+and `.mp3`. Only EPUB is written: `m4b` and `mp3` return `Unsupported` from the same dispatch
+arm that catches unknown extensions, because the upstream writers buffer the shifted media
+region in RAM when metadata atoms grow and OOM on multi-GB audiobooks. The m4b and mp3 writers
+survive as dead code, kept in case a streaming writer arrives. Someone debugging "why are my
+audiobook tags missing" would have gone looking in the wrong layer entirely.
+
+**The failure path describes a repair that does not exist.** Both the per-file and the
+multi-file flows claimed that on failure the pipeline deletes the corrupt `.tmp` and
+**re-copies the source to final, untagged**. It does not, and does not need to: tagging works
+on a copy of the file *already in place*, and the original is only ever replaced by a
+successful rename. On failure the `.tmp` is deleted and the library file is untouched. The old
+text implied a destructive window that never opens.
+
+**The page also attributed tag writing to the wrong crates** — "spans `livrarr-library` and
+`livrarr-tagwrite`". `livrarr-library` has no tagwrite dependency (the same missing edge found
+on `overview.md` two passes ago) and calls no tag writer; the tag step lives in
+`livrarr-server`, and the cover+tag projection runs through `livrarr-materialize`.
+
+**Verified correct and left alone:** the file-classification table matches `classify_file`
+exactly in both directions, all ten extensions; the atomic `importing` transition; the
+`(user_id, work_id)` import lock; and file size being measured after tag writing.
+
+**Tree state — why two pages were deferred.** The working tree carries in-flight
+implementation work on `identity_matching.rs` and `merge_engine.rs`, with `cover_gate.rs`
+deleted. `metadata-pathway.md` documents the add → enrich → merge flow built on exactly those
+files. Verifying 746 lines of flow claims against a half-applied refactor would produce
+citations wrong by construction, and would make a real documentation error indistinguishable
+from a mid-edit intermediate state. Both it and `roads.md` should wait for a clean tree.
+
+**Context:** pass #17. Citations: `build/reviews/docs-edit-architecture-3-changelog.md`.
+**Progress:** 31 of 40 pages verified.
+
 ## 2026-07-25 — architecture cluster: a diagnosed defect already fixed, and the `t=book` search tier that never existed
 
 **Updated pages:** `wiki/architecture/work-creation-pipeline.md`, `enrichment-pipeline.md`,
@@ -983,3 +1022,5 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - 2026-07-24: insights.md +78 (anchor uniqueness truth: 042 dropped 041's global, 044's per-user ALL-type index is live; GT6 falsification RCA pointers; 076 delta = bridge freedom). Source: identity-edit dual-suite red-run divergence.
 
 - 2026-07-25 — added insight 79 (outbound-queue dispatcher wedge). Evidence is unusually strong: three of four independent implementations of an unrelated feature converged on the same fix to `outbound_queue.rs`, plus a single-variable A/B that turned a 7-minute hang into 36.82s. Also corrected a claim carried earlier in that session that the fix was one entry's idiosyncratic scope creep — it was not; three entries made it.
+
+- 2026-07-26 — rewrote insight 58. It described a mystery ("a parallel test leaks into this one", fix pending a PO decision); the mechanism is now proven and the fix pattern is written down. Substance added: reset-at-end is insufficient (the window, not just the leak); the symptom is a HANG not a red test, which is why it read as an infrastructure mystery for weeks; two same-named mutexes in different modules serialize nothing; the premature `BreakerSignal::Success` on a bare 2xx was masking it, so removing that production defect is what made the latent test defect reliable — do not restore it. `livrarr-external-data` is fixed (private mutex + entry/drop reset guard, bounded server waits); `livrarr-enrichment` is confirmed to have the identical shape and is NOT fixed, with the reason it cannot reuse the same helper.

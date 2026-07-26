@@ -509,15 +509,17 @@ pub fn title_id_trust(title: &TitleVerdict, a: &IdEvidence, b: &IdEvidence) -> b
     }
     match title {
         TitleVerdict::Same => true,
-        // AC-004: a grey pair whose sole demotion trigger is the one-sided
-        // subtitle may be confirmed by an agreeing ID — and only by one.
+        // A subtitle is edition-level, not work-level: a work record carries the
+        // bare title while an edition record carries title + subtitle, so one
+        // side having a subtitle is not evidence of a different work. Demanding
+        // an agreeing hard identifier here asked an unanswerable question —
+        // `EditionBridge` needs ISBN/ASIN equality between two different
+        // printings, which by construction it will not find. Equal main titles
+        // stand on their own; every caller applies its own author bar on top.
         TitleVerdict::Grey {
             cause: GreyCause::OneSidedSubtitle,
             ..
-        } => matches!(
-            id_verdict(a, b),
-            IdVerdict::WorkKeyEqual | IdVerdict::EditionBridge
-        ),
+        } => true,
         _ => false,
     }
 }
@@ -1941,18 +1943,109 @@ mod tests {
     }
 
     #[test]
-    fn title_id_trust_guards_for_unsupported_title_and_evidence_shapes() {
-        // Guards: exact title needs no ID evidence; grey needs corroborating IDs.
+    fn title_id_trust_allows_one_sided_subtitle_grey_without_id_evidence() {
+        // A one-sided-subtitle grey no longer waits for a hard identifier to
+        // agree. `EditionBridge` demanded ISBN/ASIN equality, and a provider
+        // lists a different printing's ISBN than the one in the user's file, so
+        // the corroboration this arm required could not arrive. Equal main
+        // titles plus the agreeing author every caller already requires is the
+        // operative bar.
+        let title = TitleVerdict::Grey {
+            score: 1.0,
+            cause: GreyCause::OneSidedSubtitle,
+        };
+
         assert!(title_id_trust(
-            &TitleVerdict::Same,
+            &title,
             &IdEvidence::default(),
             &IdEvidence::default()
         ));
-        assert!(!title_id_trust(
-            &TitleVerdict::Grey {
-                score: 1.0,
-                cause: GreyCause::OneSidedSubtitle,
-            },
+    }
+
+    #[test]
+    fn title_id_trust_vetoes_one_sided_subtitle_grey_on_work_key_contradiction() {
+        // The contradiction veto runs before any title arm and still applies.
+        let a = IdEvidence {
+            gr_key: Some("10884"),
+            ..Default::default()
+        };
+        let b = IdEvidence {
+            gr_key: Some("2059858"),
+            ..Default::default()
+        };
+        let title = TitleVerdict::Grey {
+            score: 1.0,
+            cause: GreyCause::OneSidedSubtitle,
+        };
+
+        assert!(!title_id_trust(&title, &a, &b));
+    }
+
+    #[test]
+    fn title_id_trust_accepts_named_omnibus_and_bounds_it_at_numbered_volumes() {
+        // ACCEPTED REGRESSION, on the record by design
+        // (`docs/design-subtitle-matching.md` r3, C1 "Accepted risk"): a named
+        // omnibus volume is now accepted as the same work. Equal mains, prose
+        // subtitle, no volume evidence either side. Asserted deliberately so the
+        // trade is visible in the suite rather than implicit.
+        let omnibus = parse_title("The Lord of the Rings");
+        let volume = parse_title("The Lord of the Rings: The Fellowship of the Ring");
+        let verdict = title_verdict(&omnibus, &volume);
+        assert!(
+            matches!(
+                verdict,
+                TitleVerdict::Grey {
+                    cause: GreyCause::OneSidedSubtitle,
+                    ..
+                }
+            ),
+            "expected OneSidedSubtitle, got {verdict:?}"
+        );
+        assert!(title_id_trust(
+            &verdict,
+            &IdEvidence::default(),
+            &IdEvidence::default()
+        ));
+
+        // What bounds that acceptance: a numbered marker parses into
+        // `series_markers`, so the pair lands in VolumeAsymmetry or VetoVolume —
+        // neither of which any arm of `title_id_trust` accepts. If this stops
+        // holding, the acceptance above is unbounded and the rule change must be
+        // revisited.
+        for numbered in [
+            "The Lord of the Rings: Book One",
+            "The Lord of the Rings #2",
+            "The Lord of the Rings, Vol. 2",
+            "The Lord of the Rings, Volume II",
+        ] {
+            let numbered_verdict = title_verdict(&omnibus, &parse_title(numbered));
+            assert!(
+                !matches!(
+                    numbered_verdict,
+                    TitleVerdict::Grey {
+                        cause: GreyCause::OneSidedSubtitle,
+                        ..
+                    }
+                ),
+                "{numbered} must not land in OneSidedSubtitle: got {numbered_verdict:?}"
+            );
+            assert!(
+                !title_id_trust(
+                    &numbered_verdict,
+                    &IdEvidence::default(),
+                    &IdEvidence::default()
+                ),
+                "{numbered} must not be trusted: got {numbered_verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_id_trust_guards_for_unsupported_title_and_evidence_shapes() {
+        // Guards: exact title needs no ID evidence; every grey cause other than
+        // the one-sided subtitle stays untrusted even with a bridging ID.
+        assert!(title_id_trust(
+            &TitleVerdict::Same,
             &IdEvidence::default(),
             &IdEvidence::default()
         ));

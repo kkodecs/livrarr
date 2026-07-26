@@ -287,9 +287,13 @@ pub async fn search_audible<F: HttpFetcher>(
     };
 
     if !(200..300).contains(&resp.status) {
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
-        }
+        // Any non-2xx is a provider-health signal here; reporting only 5xx left
+        // a refusal invisible to the breaker. No 404/410 exemption on THIS
+        // endpoint: a search has no "this book is absent" status — an empty
+        // result set is a 200 with an empty product list — so a 404 means the
+        // ROUTE moved or is blocked. The by-ASIN lookup below keeps the
+        // exemption, where a 404 really does mean that ASIN is absent.
+        outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
         return Err(ProviderFetchError::Other(format!(
             "Audible returned {}",
             resp.status
@@ -328,9 +332,18 @@ pub async fn lookup_audible_by_asin<F: HttpFetcher>(
     };
 
     if !(200..300).contains(&resp.status) {
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
+        // A 404/410 on this ITEM route is the catalog saying it does not carry
+        // that ASIN. It is neither a provider-health event nor something to
+        // keep retrying, so it leaves the breaker alone AND returns as an
+        // absence — an `Err` here reads as a provider failure one layer up
+        // (`fetch_by_asin` maps it to `WillRetry`) and burns retry budget
+        // forever on a book that will never appear.
+        if resp.status == 404 || resp.status == 410 {
+            return Ok(None);
         }
+        // Any other non-2xx is a provider-health signal; reporting only 5xx
+        // left a refusal invisible to the breaker.
+        outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
         return Err(ProviderFetchError::Other(format!(
             "Audible returned {}",
             resp.status
@@ -451,6 +464,73 @@ pub fn map_audible_to_detail(product: &AudibleProduct) -> NormalizedWorkDetail {
 mod tests {
     use super::*;
 
+    /// C4, test-plan item 6: a refusal must reach this client's own bucket.
+    /// And no 404/410 exemption on the SEARCH route — an empty result set there
+    /// is a 200 with an empty product list, so a 404 means the route is gone.
+    /// The by-ASIN lookup keeps the exemption and is asserted alongside, since
+    /// that contrast is the whole rule.
+    #[tokio::test]
+    async fn a_search_refusal_and_a_dead_search_route_both_report_a_breaker_failure() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let is_open =
+            |r: &Result<_, AdmissionError>| matches!(r, Err(AdmissionError::CircuitOpen { .. }));
+
+        for status in [403u16, 404u16] {
+            queue.set_breaker_config_for_tests(RateBucket::Audible, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(status, vec![]);
+            let _ = search_audible(&fetcher, "t", "a", 5, RequestPriority::Normal).await;
+            let tripped = {
+                let admission = queue
+                    .acquire(RateBucket::Audible, RequestPriority::Normal)
+                    .await;
+                is_open(&admission)
+            };
+            assert!(
+                tripped,
+                "Audible search returning {status} must report a breaker failure"
+            );
+        }
+
+        // The contrast: a 404 from the by-ASIN ITEM lookup is a genuine
+        // absence, not a provider-health event, so it must leave the breaker
+        // closed. This asserts the ABSENCE of a signal, which only holds
+        // because every emitter in this binary takes the same lock — a single
+        // unguarded emitter landing concurrently would fail it.
+        queue.reset_breaker_for_tests(RateBucket::Audible);
+        queue.set_breaker_config_for_tests(RateBucket::Audible, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let absent = lookup_audible_by_asin(&fetcher, "B0MISSING", RequestPriority::Normal).await;
+        // The health signal is only half the contract: an absence must also
+        // reach the caller AS an absence. Returning `Err` here is read as a
+        // provider failure one layer up and burns retry budget forever on a
+        // book Audible simply does not carry (design §C3 scope line).
+        assert!(
+            matches!(absent, Ok(None)),
+            "a 404 from the by-ASIN item lookup must be a soft miss, got {absent:?}"
+        );
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Audible, RequestPriority::Normal)
+                .await;
+            is_open(&admission)
+        };
+        assert!(
+            !tripped,
+            "a 404 from the by-ASIN item lookup is a missing book, not a \
+             provider failure — it must not trip the breaker"
+        );
+    }
+
     // -------------------------------------------------------------------
     // Door-routing: search_audible / lookup_audible_by_asin go through the
     // HttpFetcher trait with the Audible rate bucket, GET, no auth.
@@ -458,6 +538,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_audible_sends_audible_bucket_get_with_query_params() {
+        // Drives a request through the shared Audible bucket, so it emits or
+        // depends on breaker state (C4) — hold the lock.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let canned = serde_json::json!({"products": []});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -491,6 +574,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_audible_by_asin_sends_audible_bucket_get_asin_path() {
+        // Drives a request through the shared Audible bucket, so it emits or
+        // depends on breaker state (C4) — hold the lock.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let canned = serde_json::json!({"products": [{"asin": "B000FC0PBC", "title": "Dune"}]});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -511,6 +597,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_audible_by_asin_returns_none_for_empty_products() {
+        // Drives a request through the shared Audible bucket, so it emits or
+        // depends on breaker state (C4) — hold the lock.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let canned = serde_json::json!({"products": []});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -532,6 +621,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_audible_maps_http_500_to_err() {
+        // Emits a Failure to the shared Audible breaker (C4), so it must hold
+        // the lock or it lands mid-assertion in a sibling breaker test.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
 
         let err = search_audible(
@@ -549,6 +641,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_audible_maps_fetcher_rate_limited_to_err() {
+        // Drives a request through the shared Audible bucket, so it emits or
+        // depends on breaker state (C4) — hold the lock.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::RateLimited,
         );
@@ -568,6 +663,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_audible_by_asin_maps_network_error_to_err() {
+        // Drives a request through the shared Audible bucket, so it emits or
+        // depends on breaker state (C4) — hold the lock.
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::Connection("refused".to_string()),
         );

@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use livrarr_domain::services::{FetchError, FetchRequest, FetchResponse, HttpFetcher};
+use livrarr_domain::services::{FetchError, FetchRequest, FetchResponse, HttpFetcher, RateBucket};
 
 /// Fake `HttpFetcher` that records every request it receives (for
 /// door-routing assertions) and replays a queue of canned responses. Queue
@@ -160,4 +160,131 @@ impl HttpFetcher for RecordingHttpFetcher {
         }
         self.next_response()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared provider-breaker serialization
+// ---------------------------------------------------------------------------
+
+/// `outbound_queue::shared()` is a process-global singleton, so every
+/// per-provider circuit breaker is one piece of mutable state shared by every
+/// test in this binary. Any test that EMITS a breaker signal (a non-2xx, an
+/// anti-bot body, a parsed payload), READS breaker state, or DEPENDS on a
+/// breaker being closed (anything reaching a bucket through a real fetcher)
+/// must hold this lock.
+///
+/// ONE lock for all buckets, not one per bucket: the queue's pacing and
+/// in-flight caps are shared too, and breaker tests are few and fast, so
+/// serializing them all is simpler than reasoning about which buckets can
+/// safely overlap.
+///
+/// Private on purpose. [`lock_breaker`] is the only way in, so a test cannot
+/// take the lock without the reset that makes holding it meaningful, and a
+/// second same-named lock in another module — which serializes nothing — cannot
+/// quietly reappear.
+///
+/// `tokio::sync::Mutex` rather than `std`: the guard is held across awaits.
+static BREAKER_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Exclusive access to one provider's shared breaker, reset to production
+/// defaults on entry AND on drop.
+///
+/// Resetting on drop rather than at the end of the test body is what makes this
+/// panic-safe: an assertion firing while the breaker is deliberately Open, or
+/// while a one-strike config is installed, would otherwise leak that state into
+/// every later test in the binary. Goodreads' production `open_duration_secs`
+/// is 3600, so a leaked Open breaker does not recover within a test run.
+///
+/// The symptom of a leak is not a red test but a **hang**: admission is refused
+/// before any socket is opened, so a test awaiting its own one-shot server waits
+/// for a connection that is never attempted.
+pub struct BreakerGuard {
+    bucket: RateBucket,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for BreakerGuard {
+    fn drop(&mut self) {
+        reset_breaker(self.bucket.clone());
+    }
+}
+
+/// Take the shared breaker lock and start from a clean `bucket`. See
+/// [`BreakerGuard`].
+pub async fn lock_breaker(bucket: RateBucket) -> BreakerGuard {
+    let lock = BREAKER_LOCK.lock().await;
+    reset_breaker(bucket.clone());
+    BreakerGuard {
+        bucket,
+        _lock: lock,
+    }
+}
+
+/// Take the shared breaker lock for Goodreads — the common case.
+pub async fn lock_gr_breaker() -> BreakerGuard {
+    lock_breaker(RateBucket::Goodreads).await
+}
+
+fn reset_breaker(bucket: RateBucket) {
+    livrarr_http::outbound_queue::shared().reset_breaker_for_tests(bucket);
+}
+
+/// Serve one canned HTTP response per connection from a throwaway local
+/// listener, and return its base URL. Lets a test drive a client that owns a
+/// concrete `HttpFetcherImpl` (so no fetcher double can be injected) all the
+/// way through the real transport.
+pub async fn spawn_canned_http_server(status: u16, body: &'static str) -> String {
+    spawn_canned_http_server_seq(vec![(status, body)]).await
+}
+
+/// Like [`spawn_canned_http_server`] but answers successive connections with
+/// successive entries, repeating the last one once the list is exhausted.
+///
+/// Needed whenever one operation makes more than one request and the legs must
+/// differ — e.g. an autocomplete hit followed by a detail page that genuinely
+/// fails to parse. Serving one body to both cannot express that: the detail
+/// parser may well find fields in the autocomplete JSON, so the test silently
+/// exercises the parse-SUCCESS path instead.
+///
+/// Each canned response sets `Connection: close`, so one request is one
+/// connection and the sequence lines up with the request order.
+pub async fn spawn_canned_http_server_seq(responses: Vec<(u16, &'static str)>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    assert!(!responses.is_empty(), "need at least one canned response");
+    let responses = Arc::new(Mutex::new(responses));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind canned server");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let (status, body) = {
+                let mut queued = responses.lock().unwrap();
+                if queued.len() > 1 {
+                    queued.remove(0)
+                } else {
+                    queued[0]
+                }
+            };
+            tokio::spawn(async move {
+                // Drain what the client sent; without this the write can race
+                // the request and the client sees a reset instead of a reply.
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 {status} STATUS\r\nContent-Type: text/html\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    format!("http://{addr}")
 }

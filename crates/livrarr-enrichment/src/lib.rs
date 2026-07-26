@@ -1,7 +1,7 @@
 //! livrarr-enrichment — the metadata merge/enrich engine.
 //!
 //! Extracted from livrarr-metadata (4a): the provider queue, cross-provider
-//! validation, the field-merge engine, cover selection/gating, and the
+//! validation, the field-merge engine, cover selection, and the
 //! `EnrichmentServiceImpl` spine. Depends only on domain/db/external-data/http;
 //! it must not depend on livrarr-metadata or livrarr-identity.
 
@@ -14,7 +14,6 @@ use livrarr_domain::{
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
-pub mod cover_gate;
 pub mod cover_rank;
 pub mod cover_resolution;
 mod merge_engine;

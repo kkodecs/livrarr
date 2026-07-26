@@ -1,6 +1,12 @@
 # Import Pipeline
 
-How files get from download directory to organized library. Spans `livrarr-library` and `livrarr-tagwrite`.
+How files get from download directory to organized library. File operations live in
+`livrarr-library`; **tag writing does not**. `livrarr-library` depends only on
+`livrarr-domain` and `livrarr-db` (`crates/livrarr-library/Cargo.toml`) — it has no
+`livrarr-tagwrite` edge. The tag step runs in `livrarr-server`
+(`crates/livrarr-server/src/tag_service.rs`), which calls `livrarr-tagwrite`; the cover +
+tag projection path goes through `livrarr-materialize`
+(`crates/livrarr-materialize/src/lib.rs:15`, `:341`).
 
 ## Auto-Import Flow
 
@@ -26,19 +32,30 @@ How files get from download directory to organized library. Spans `livrarr-libra
 
 ## Tag Writing Detail
 
-Supported formats only (`.epub`, `.m4b`, `.mp3`). Unsupported formats import without tags — not an error.
+**Only `.epub` is written.** `write_tags_sync` dispatches `epub` to `write_epub` and returns
+`TagWriteStatus::Unsupported` for **`m4b` and `mp3`**, exactly as it does for any other
+extension (`crates/livrarr-tagwrite/src/lib.rs:168-179`). The reason is in the code: the
+upstream writers (`mp4ameta`, `id3`) buffer the shifted media region in RAM when metadata
+atoms grow, which OOMs on multi-GB audiobooks; audiobook players read their own metadata DBs,
+so embedded tags there are not load-bearing (`:173-176`). `write_m4b` and `write_mp3` survive
+as dead code, kept for a possible revival (`:1026-1029`, `:1095-1097`). Unsupported formats
+import without tags — not an error.
 
-**Per-file flow:**
-1. Copy source → `{target}.tmp`
-2. Write tags on `.tmp` in place
-3. Success: rename `.tmp` → final
-4. Failure: delete corrupted `.tmp`, re-copy source → final (untagged), log warning
+**Per-file flow** (`crates/livrarr-server/src/tag_service.rs:34-83`):
+1. Copy the in-place library file → `{file}.tmp` (`:41-49`)
+2. Write tags on `.tmp` (`:51`)
+3. `Written` → fsync, then rename `.tmp` → final (`:54-71`)
+4. `Unsupported` / `NoData` → delete `.tmp`, return Ok (`:73-77`)
+5. Failure → delete `.tmp`, return the error (`:78-81`)
 
-**Multi-file MP3 audiobooks (TAG-006):**
-1. Copy all source MP3s → `.tmp` files
-2. Pass 1: write tags into all `.tmp` files
-3. If any fails: abort, delete ALL `.tmp` files, re-copy ALL sources → final (untagged)
-4. Pass 2: rename all `.tmp` → final (all-or-nothing)
+**There is no "re-copy source → final (untagged)" step, and no window where the library file
+is missing.** Tagging works on a *copy* of the file already in place; the original is only
+ever replaced by a successful rename, so a failure needs no repair.
+
+**Multi-file MP3 audiobooks (TAG-006)** (`tag_service.rs:145-214`): copy every item →
+`.tmp`, one `write_tags_batch` call over the `.tmp` set, then rename each into place with
+per-file failure handling. A copy failure deletes all `.tmp` files and marks those items
+failed (`:180-187`) — again, no re-copy, because the originals were never removed.
 
 ## Manual Import
 

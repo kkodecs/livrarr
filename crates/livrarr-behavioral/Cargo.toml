@@ -181,10 +181,6 @@ name = "test_ewl_resolver"
 path = "../../tests/behavioral/test_ewl_resolver.rs"
 
 [[test]]
-name = "test_ewl_cover_gate"
-path = "../../tests/behavioral/test_ewl_cover_gate.rs"
-
-[[test]]
 name = "test_ewl_llm"
 path = "../../tests/behavioral/test_ewl_llm.rs"
 
@@ -617,3 +613,9 @@ required-features = ["identity_edit_red"]
 [[test]]
 name = "test_identity_edit_fixes"
 path = "../../tests/behavioral/test_identity_edit_fixes.rs"
+
+# identity/cover bug fix (docs/design-subtitle-matching.md r3). Ungated — the surfaces
+# exist; the RED points at behavior.
+[[test]]
+name = "test_subtitle_matching"
+path = "../../tests/behavioral/test_subtitle_matching.rs"

@@ -4,10 +4,9 @@
 //! `MergeEngine::merge` is the payload-policy chokepoint both the network
 //! enrichment path (`enrich_work`) and the cached-payload reuse path
 //! (`merge_from_cached`) funnel through: the language-routing drop
-//! (`drop_language_incompatible_providers`) and the Goodreads cover gate
-//! (`apply_gr_cover_gate`) run here before `merge_impl` walks each field's
-//! provider priority order (`PriorityModel`/`MERGE_FIELDS`) to resolve the
-//! final value.
+//! (`drop_language_incompatible_providers`) runs here before `merge_impl`
+//! walks each field's provider priority order (`PriorityModel`/`MERGE_FIELDS`)
+//! to resolve the final value.
 
 use std::collections::HashMap;
 
@@ -210,14 +209,11 @@ impl MergeEngine for DefaultMergeEngine {
         // caller is configured. Language routing (REQ-014/#133) is enforced here at
         // the single chokepoint both the cached and network entry paths funnel through,
         // so a foreign work can never take English OpenLibrary/Hardcover metadata.
-        // The Goodreads cover gate (REQ-017) is the second chokepoint policy enforced
-        // here, so a mismatched-title GR cover can never win on either entry path.
         // `had_providers` is captured BEFORE the policy drops: providers that were
         // attempted but all excluded yield a status-only output (REQ-014), while an
         // empty dispatch re-materializes current state as before.
         let had_providers = !inputs.provider_results.is_empty();
         let inputs = drop_language_incompatible_providers(inputs);
-        let inputs = apply_gr_cover_gate(inputs);
         merge_impl(inputs, had_providers)
     }
 
@@ -277,59 +273,6 @@ fn drop_language_incompatible_providers(mut inputs: MergeInput) -> MergeInput {
         inputs
             .provider_results
             .retain(|provider, _| !matches!(provider, P::OpenLibrary | P::Hardcover));
-    }
-    inputs
-}
-
-/// Enforce the Goodreads cover gate (REQ-017): for an English work with an OL
-/// key, a Goodreads payload's cover_url only survives if its title clears the
-/// deterministic Jaccard threshold against the work title. Called once at the
-/// `MergeEngine::merge` chokepoint so the cached-reuse path and the network
-/// path share one cover-gating policy — the same centralization
-/// `drop_language_incompatible_providers` applies to the language-routing
-/// policy (#133).
-fn apply_gr_cover_gate(mut inputs: MergeInput) -> MergeInput {
-    if inputs.current_work.language.as_deref() == Some("en") && inputs.current_work.ol_key.is_some()
-    {
-        if let Some(gr_outcome) = inputs
-            .provider_results
-            .get_mut(&livrarr_domain::MetadataProvider::Goodreads)
-        {
-            if let Some(ref mut payload) = gr_outcome.payload {
-                if payload.cover_url.is_some() {
-                    let anchor = crate::cover_gate::OlAnchor {
-                        title: &inputs.current_work.title,
-                        author_name: &inputs.current_work.author_name,
-                        year: inputs.current_work.year,
-                        isbn: inputs.current_work.isbn_13.as_deref(),
-                        ol_key: inputs.current_work.ol_key.as_deref().unwrap_or(""),
-                    };
-                    let candidate = crate::cover_gate::GrCandidate {
-                        title: payload.title.as_deref().unwrap_or(""),
-                        author_name: payload.author_name.as_deref().unwrap_or(""),
-                        year: payload.year,
-                        isbn: None,
-                        gr_key: payload.gr_key.as_deref().unwrap_or(""),
-                    };
-                    // REQ-005/REQ-016 (zero LLM): the merge is deterministic and
-                    // LLM-free, so a borderline title is a strip either way — the
-                    // gate itself has no LLM tier to select (D10).
-                    let outcome = crate::cover_gate::evaluate_gr_cover_gate(&anchor, &candidate);
-                    match outcome {
-                        crate::cover_gate::CoverGateOutcome::Apply { .. } => {}
-                        other => {
-                            tracing::info!(
-                                work_id = inputs.current_work.id,
-                                ?other,
-                                "cover gate: stripping GR cover_url"
-                            );
-                            payload.cover_url = None;
-                            payload.gr_key = None;
-                        }
-                    }
-                }
-            }
-        }
     }
     inputs
 }

@@ -33,8 +33,17 @@ pub const GOODREADS_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWeb
 pub enum GoodreadsFetchError {
     /// Response body matched the anti-bot indicator heuristic.
     AntiBot,
-    /// HTTP status was non-success. Caller can discriminate 429/5xx vs 4xx.
+    /// HTTP status was non-success on an ITEM endpoint (a detail page), where
+    /// 404/410 genuinely means the book is absent. Caller can discriminate
+    /// 429/5xx vs 4xx.
     HttpStatus(u16),
+    /// HTTP status was non-success on the AUTOCOMPLETE (search) route, which
+    /// has no "this book is absent" status at all — an empty result set is a
+    /// 200 carrying `[]`. Kept distinct from [`Self::HttpStatus`] because the
+    /// context-free mapper turns a bare 404/410 into `ProviderOutcome::NotFound`,
+    /// so a moved or blocked search route was writing every queried book off as
+    /// missing. Never maps to `NotFound`.
+    SearchRouteFailure(u16),
     /// Transport / DNS / body-read error from `reqwest`.
     Network(String),
     /// Detail page returned 200 OK but no JSON-LD or regex fields parsed out.
@@ -185,7 +194,15 @@ async fn fetch_goodreads_html_via<F: HttpFetcher>(
     }
     .map_err(|e| map_transport_err("GR request", e))?;
     if !(200..300).contains(&resp.status) {
-        if (500..600).contains(&resp.status) {
+        // This branch was silent: four failed fetches over 42 seconds produced
+        // four call records and zero log lines, so the only way to find out what
+        // Goodreads had actually answered was to reproduce it by hand.
+        tracing::warn!(status = resp.status, url = %url, "Goodreads: HTTP error");
+        // A refusal has to teach the breaker something. Reporting only 5xx left
+        // a provider that answers every request with 403 looking healthy, so the
+        // outbound queue kept dispatching into it. A genuine 404/410 is the one
+        // non-2xx that says nothing about provider health.
+        if resp.status != 404 && resp.status != 410 {
             outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
         }
         return Err(GoodreadsFetchError::HttpStatus(resp.status));
@@ -200,7 +217,11 @@ async fn fetch_goodreads_html_via<F: HttpFetcher>(
         );
         return Err(GoodreadsFetchError::AntiBot);
     }
-    outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Success);
+    // No success signal here. A 200 only proves the host answered — it says
+    // nothing about whether the page carries a readable book. Reporting success
+    // at this point told the breaker a provider was healthy while every page it
+    // served was unreadable, AND cleared any accumulated failures on the way
+    // past. The callers that actually parse a payload report success instead.
     Ok(html)
 }
 
@@ -240,8 +261,29 @@ pub async fn search_goodreads<F: HttpFetcher>(
         .await
         .map_err(|e| map_transport_err("GR autocomplete", e))?;
     if !(200..300).contains(&resp.status) {
-        return Err(GoodreadsFetchError::HttpStatus(resp.status));
+        tracing::warn!(status = resp.status, "Goodreads autocomplete: HTTP error");
+        // This path reported nothing to the breaker at all — neither failure nor
+        // success — even though it is the endpoint every Goodreads search runs
+        // through. A refusal here now counts like any other.
+        //
+        // No 404/410 exemption: an autocomplete endpoint has no "this book is
+        // absent" status — an empty result set is a 200 with an empty array. A
+        // 404 here means the ROUTE is gone or blocked, which is a provider
+        // failure, not a missing book.
+        outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
+        // Distinct from `HttpStatus`: the context-free mapper turns a bare
+        // 404/410 into `NotFound`, so returning it here reported "this book
+        // does not exist" for every work whenever the ROUTE was the thing that
+        // was gone. The breaker learning about the refusal was only half the
+        // fix; the outcome has to stop lying too.
+        return Err(GoodreadsFetchError::SearchRouteFailure(resp.status));
     }
+    // Deliberately NO success signal. Success clears the breaker's accumulated
+    // failures, so reporting it here let a working autocomplete endpoint mask a
+    // detail endpoint refusing every request: success, failure, success,
+    // failure — the count never reaches the threshold and the breaker never
+    // opens. Both endpoints share one bucket, so only the path that yields a
+    // usable book payload may report success.
     let body = String::from_utf8_lossy(&resp.body).into_owned();
     Ok(parse_autocomplete_json(&body))
 }
@@ -323,6 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_sends_goodreads_bucket_get_custom_ua_and_accept_language() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
             b"<html><body>ok</body></html>".to_vec(),
@@ -358,6 +401,8 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_maps_anti_bot_body_to_antibot_error() {
+        // Emits TripImmediately to the shared Goodreads breaker.
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
             br#"<html><div class="cf-browser-verification">Checking...</div></html>"#.to_vec(),
@@ -376,6 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_maps_fetcher_rate_limited_to_http_status_429() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // The fetcher intercepts HTTP 429 as `FetchError::RateLimited` rather
         // than a normal response — this must still surface as
         // `HttpStatus(429)` so `map_fetch_err` (provider_client.rs) keeps
@@ -396,6 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // D3/#6: the outbound queue's local admission cap is a transport-
         // level pause — must surface as GoodreadsFetchError::QueueFull, not
         // collapse into the generic Network(_) catch-all (budget-consuming).
@@ -415,8 +462,77 @@ mod tests {
         assert!(matches!(err, GoodreadsFetchError::QueueFull(_)));
     }
 
+    /// A provider answering every request with 403 is refusing us, and the
+    /// breaker has to learn that — reporting only 5xx left the outbound queue
+    /// dispatching into a provider that was turning us away. A genuine 404 is
+    /// the one non-2xx that says nothing about provider health: a library of
+    /// obscure titles would otherwise black the provider out on its own.
+    ///
+    /// Both halves live in ONE test on purpose. `outbound_queue::shared()` is a
+    /// process-global singleton, so two tests manipulating the same bucket in
+    /// parallel would race; sequencing them here makes the contrast between the
+    /// two statuses deterministic instead of flaky.
+    #[tokio::test]
+    async fn a_goodreads_refusal_trips_the_breaker_and_a_genuine_miss_does_not() {
+        use livrarr_domain::services::RateBucket;
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        // One failure is enough to trip, so each assertion is about whether the
+        // signal arrived at all rather than about threshold arithmetic.
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let is_open =
+            |r: &Result<_, AdmissionError>| matches!(r, Err(AdmissionError::CircuitOpen { .. }));
+
+        // A genuine absence must leave the breaker closed.
+        queue.set_breaker_config_for_tests(RateBucket::Goodreads, one_strike());
+        let miss = fetch_goodreads_html(
+            &crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]),
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+        let after_miss = queue
+            .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+            .await;
+        let miss_tripped = is_open(&after_miss);
+
+        // A refusal must open it.
+        queue.set_breaker_config_for_tests(RateBucket::Goodreads, one_strike());
+        let refusal = fetch_goodreads_html(
+            &crate::test_support::RecordingHttpFetcher::with_ok(403, vec![]),
+            "https://www.goodreads.com/book/show/1",
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+        let after_refusal = queue
+            .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+            .await;
+        let refusal_tripped = is_open(&after_refusal);
+
+        // Reset BEFORE asserting: leaving the shared breaker Open on a failure
+        // path would leak into every sibling test in this binary.
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+
+        assert!(matches!(miss, GoodreadsFetchError::HttpStatus(404)));
+        assert!(matches!(refusal, GoodreadsFetchError::HttpStatus(403)));
+        assert!(!miss_tripped, "a genuine 404 must not trip the breaker");
+        assert!(refusal_tripped, "a 403 refusal must trip the breaker");
+    }
+
     #[tokio::test]
     async fn fetch_goodreads_html_maps_http_500_to_http_status() {
+        // Emits a Failure to the shared Goodreads breaker.
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
 
         let err = fetch_goodreads_html(
@@ -432,6 +548,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_goodreads_sends_goodreads_bucket_get_autocomplete_url() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"[]".to_vec());
 
         let hits = search_goodreads(
@@ -465,6 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_goodreads_parses_canned_autocomplete_response() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let body = r#"[{"title":"The Hobbit","bookUrl":"/book/show/5907","author":{"name":"J.R.R. Tolkien"}}]"#;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
@@ -484,6 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_goodreads_maps_fetcher_rate_limited_to_http_status_429() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         let fetcher =
             crate::test_support::RecordingHttpFetcher::with_error(FetchError::RateLimited);
 
@@ -600,6 +719,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_ssrf_safe_routes_through_fetch_ssrf_safe() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // The search-tier resolution path's HTML fetch (a URL built from
         // Goodreads' own scraped bookUrl) must go through the per-hop
         // redirect-validated method, not the unrestricted one — this is what
@@ -654,6 +774,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_goodreads_html_established_key_path_stays_unrestricted() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
         // The established-gr_key detail fetch (`fetch_goodreads_html`, used
         // by `fetch_detail_by_key`) builds its URL from a fixed base + an
         // already-normalized, persisted anchor — trusted infrastructure, not

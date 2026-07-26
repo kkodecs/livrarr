@@ -26,3 +26,6 @@ futures = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
+# The breaker reset/config seams used by the provider-refusal tests are gated
+# behind livrarr-http's `test-helpers`; same pattern as livrarr-enrichment.
+livrarr-http = { workspace = true, features = ["test-helpers"] }

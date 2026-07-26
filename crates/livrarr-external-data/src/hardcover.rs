@@ -93,16 +93,35 @@ pub async fn hc_post<F: HttpFetcher>(
     };
 
     if !(200..300).contains(&resp.status) {
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
-        }
+        // An expired or revoked token answers 401/403 forever; reporting only
+        // 5xx meant the breaker never learned and the queue kept dispatching.
+        //
+        // No 404/410 exemption: this is one fixed GraphQL POST route. GraphQL
+        // signals "no such record" with a 200 carrying null data, never with a
+        // 404 — so a 404 here means the ROUTE is gone or blocked, which is a
+        // provider failure, not an absent book.
+        outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
         return Err(HardcoverError::Http(format!("HTTP {}", resp.status)));
     }
 
+    // No success report here. A Hardcover operation can carry a second leg
+    // (`fetch_hardcover_editions`) and `record_success` clears every
+    // accumulated failure, so reporting this leg's success up front meant a
+    // permanently refused editions endpoint produced Success, Failure, Success,
+    // Failure… and never reached the threshold. The operation boundary reports
+    // once, via `report_hardcover_success`.
     let parsed = serde_json::from_slice(&resp.body)
         .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
-    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
     Ok(parsed)
+}
+
+/// Report a completed Hardcover operation as healthy.
+///
+/// Called by the operation boundary — the caller that knows every leg it was
+/// going to run has run and succeeded — never by an individual request helper.
+/// See the note in [`hc_post`].
+pub fn report_hardcover_success() {
+    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
 }
 
 /// Extract the `hits` array from a Hardcover search response value.
@@ -405,9 +424,9 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
         .map_err(|e| format!("edition request failed: {e}"))?;
 
     if !(200..300).contains(&resp.status) {
-        if (500..600).contains(&resp.status) {
-            outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
-        }
+        // Same rule as the query path above, 404/410 included — same fixed
+        // GraphQL route.
+        outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
         return Err(format!("edition HTTP {}", resp.status));
     }
 
@@ -665,6 +684,122 @@ pub async fn query_hardcover_by_key<F: HttpFetcher>(
 mod tests {
     use super::*;
 
+    /// Hardcover speaks one fixed GraphQL POST route. "No such record" arrives
+    /// as a 200 carrying null data, never as a 404 — so a 404/410 here means the
+    /// route is gone or blocked, and exempting it left a dead route invisible to
+    /// the breaker while every request errored.
+    #[tokio::test]
+    async fn a_hardcover_route_404_reports_a_breaker_failure() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Hardcover,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let err = hc_post(
+            &fetcher,
+            serde_json::json!({"query": "{ books { id } }"}),
+            "tok",
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(err.is_err(), "a 404 route must not yield data");
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "a 404 on the fixed GraphQL route is a provider failure, not an absent book"
+        );
+    }
+
+    /// A success clears every accumulated failure, so a query leg reporting
+    /// success before the editions leg ran meant `query=200, editions=403`
+    /// repeating forever produced Success, Failure, Success, Failure… and the
+    /// count never reached the production threshold. The refused editions
+    /// endpoint was re-requested indefinitely with the breaker closed.
+    ///
+    /// Runs at the PRODUCTION threshold deliberately — forcing the threshold to
+    /// 1 cannot observe this shape at all.
+    ///
+    /// **Entry-point justification** (CLAUDE.md "tests drive the real door"):
+    /// the production door is `HardcoverClient::build_success`, which owns a
+    /// concrete `HttpFetcherImpl` AND posts to the hardcoded `HARDCOVER_API_URL`
+    /// — no double can be injected and no local server can be addressed, so no
+    /// test can reach it. This composes the same two legs, in the same order,
+    /// against the same real process-global breaker. It pins the accounting
+    /// rule; it does not prove `build_success` still calls the legs in this
+    /// order. Making `HardcoverClient` base-URL-configurable (as
+    /// `GoodreadsClient` already is) would close that gap.
+    #[tokio::test]
+    async fn a_refused_editions_endpoint_eventually_opens_the_hardcover_breaker() {
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+
+        let ok_body = serde_json::json!({"data": {}}).to_string();
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, ok_body.clone().into_bytes());
+        for _ in 0..12 {
+            fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: ok_body.clone().into_bytes(),
+            }));
+        }
+
+        for _ in 0..12 {
+            // Leg 1: the query, exactly as `query_hardcover*` issues it.
+            let _ = hc_post(
+                &fetcher,
+                serde_json::json!({"query": "{ books { id } }"}),
+                "tok",
+                RequestPriority::Normal,
+            )
+            .await;
+            // Leg 2: the editions follow-up `build_success` issues on a hc_key.
+            let editions =
+                fetch_hardcover_editions(&fetcher, "123", "tok", "en", RequestPriority::Normal)
+                    .await;
+            // The operation boundary reports success only when every leg was ok.
+            if editions.is_ok() {
+                report_hardcover_success();
+            }
+        }
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "a permanently refused editions endpoint must eventually open the \
+             Hardcover breaker — a sibling leg's success must not erase it"
+        );
+    }
+
     #[test]
     fn doc_author_name_takes_first_credited_author() {
         let doc = serde_json::json!({"author_names": ["Jim Butcher", "Co Writer"]});
@@ -692,6 +827,7 @@ mod tests {
 
     #[tokio::test]
     async fn hc_post_sends_hardcover_bucket_post_bearer_auth_and_json_body() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({"data": {"search": {"results": {"hits": []}}}});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -737,6 +873,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_hardcover_editions_sends_hardcover_bucket_post_bearer_auth_and_json_body() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({"data": {"editions": []}});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -767,6 +904,7 @@ mod tests {
 
     #[tokio::test]
     async fn hc_post_parses_canned_success_response_into_value() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({
             "data": {"search": {"results": {"hits": [{"document": {"id": 42}}]}}}
         });
@@ -785,6 +923,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_hardcover_editions_returns_isbn_for_preferred_language() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({
             "data": {
                 "editions": [
@@ -812,6 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn hc_post_maps_http_500_to_hardcover_error_http() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(500, vec![]);
         let body = hc_search_body(25, "\"x\"");
 
@@ -827,6 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn hc_post_maps_fetch_timeout_to_hardcover_error_http() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::Timeout(std::time::Duration::from_secs(10)),
         );
@@ -849,6 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_hardcover_by_key_sends_hardcover_bucket_post_bearer_auth_and_id_variable() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({"data": {"books_by_pk": null}});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -876,6 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_hardcover_by_key_maps_full_response_into_hardcover_result() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         // Shape matches the live-prototyped GetBookByKey response
         // (2026-07-05, book id 1): rating is a float, release_date is
         // "YYYY-MM-DD", pages/ratings_count are ints.
@@ -928,6 +1071,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_hardcover_by_key_returns_none_for_null_books_by_pk() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({"data": {"books_by_pk": null}});
         let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
             200,
@@ -943,6 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_picker_conformance_hardcover_abstains_on_grey_author_hit() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
         let canned = serde_json::json!({
             "data": {
                 "search": {

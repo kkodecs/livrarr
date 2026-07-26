@@ -424,6 +424,9 @@ async fn fast_hc_cover_search<F: HttpFetcher>(
         .unwrap_or(title);
     let body = hc_search_body(10, &format!("\"{clean_title}\""));
     let data = hc_post(fetcher, body, token, priority).await?;
+    // Single-leg operation, so its boundary is right here. `hc_post` reports no
+    // success of its own — see the note on `report_hardcover_success`.
+    livrarr_external_data::hardcover::report_hardcover_success();
     let hits = hc_extract_hits(&data);
 
     let title_lower = clean_title.trim().to_lowercase();
