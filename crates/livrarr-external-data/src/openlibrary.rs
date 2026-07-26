@@ -25,6 +25,13 @@ pub(crate) fn classify_ol_error(status: u16) -> ProviderFetchError {
     }
 }
 
+/// Report the single successful outcome for a complete OpenLibrary operation.
+/// Request helpers never call this: only the outer caller that knows no later
+/// provider leg will run may clear the breaker history.
+pub(crate) fn report_openlibrary_success() {
+    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
+}
+
 /// Parsed subset of an OpenLibrary work detail + first edition with ISBN.
 #[derive(Debug, Clone)]
 pub struct OlDetailResult {
@@ -35,6 +42,10 @@ pub struct OlDetailResult {
     pub description: Option<String>,
     pub isbn_13: Option<String>,
     pub cover_id: Option<i64>,
+    /// True only when every request leg that ran completed successfully.
+    /// The outer provider operation uses this to decide whether it may report
+    /// the single breaker Success for the complete operation.
+    pub(crate) all_legs_succeeded: bool,
 }
 
 pub async fn query_ol_detail<F: HttpFetcher>(
@@ -241,18 +252,16 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         .or(title_only_isbn)
         .or(fallback_isbn_13);
 
-    // The operation's single success report: only when every leg that ran
-    // actually succeeded, so a refused editions endpoint accumulates toward the
-    // threshold instead of being cleared by this call's own work-leg success.
-    if !leg_failed {
-        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
-    }
+    // Do not report Success here. Every production caller may compose this
+    // helper with an ISBN or search leg; the outermost caller owns the single
+    // operation outcome and consults `all_legs_succeeded` below.
 
     Ok(OlDetailResult {
         title,
         description,
         isbn_13,
         cover_id,
+        all_legs_succeeded: !leg_failed,
     })
 }
 
@@ -311,7 +320,8 @@ pub async fn isbn_lookup<F: HttpFetcher>(
 
     let data: serde_json::Value = serde_json::from_slice(&resp.body)
         .map_err(|e| ProviderFetchError::Other(format!("OL ISBN parse error: {e}")))?;
-    outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
+    // This is only an ISBN leg. Its caller may continue with work detail,
+    // editions, or fuzzy search, so Success belongs at that outer boundary.
 
     let ol_work_key = data
         .get("works")
@@ -510,70 +520,61 @@ mod tests {
         );
     }
 
-    /// The same multi-leg accounting rule as above, for the editions-leg
-    /// failures that are NOT an HTTP refusal — the shapes the 403 test cannot
-    /// see. In production the transport itself already reported a `Failure`
-    /// for a timeout (`HttpFetcherImpl::do_fetch`), so this operation must not
-    /// report a `Success` that erases it; a 404 on a work's own editions
-    /// sub-route means the ROUTE is gone (the work itself just answered 200);
-    /// and a 200 whose body will not parse is the provider serving garbage.
-    ///
-    /// Asserted as the ABSENCE of a Success report, which is what the defect
-    /// actually is: pre-load the bucket to one below the production threshold,
-    /// run the operation, then add one more failure. A stray Success would have
-    /// cleared the accumulated four and the last failure would not trip.
+    /// Response-derived editions failures must file their own breaker signal.
+    /// A threshold-one breaker makes the assertion load-bearing: deleting the
+    /// production `Failure` report for either branch leaves the breaker closed.
+    // Bug reproduction: subtitle-matching finding 4 — response failures were
+    // previously masked by a manually injected fifth failure in the test.
     #[tokio::test]
-    async fn a_non_refusal_editions_failure_must_not_report_operation_success() {
-        use livrarr_domain::services::FetchError;
-        use livrarr_http::breaker::BreakerSignal;
+    async fn response_derived_editions_failures_open_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
         use livrarr_http::outbound_queue::{self, AdmissionError};
 
         let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
         let queue = outbound_queue::shared();
         let work_body = serde_json::json!({"title": "Test Work"}).to_string();
-
-        let editions_legs: Vec<(
-            &str,
-            Result<livrarr_domain::services::FetchResponse, FetchError>,
-        )> = vec![
-            (
-                "a timed-out editions leg",
-                Err(FetchError::Timeout(std::time::Duration::from_secs(30))),
-            ),
+        let editions_legs = [
             (
                 "a 404 on the editions sub-route",
-                Ok(livrarr_domain::services::FetchResponse {
+                livrarr_domain::services::FetchResponse {
                     status: 404,
                     headers: vec![],
                     body: vec![],
-                }),
+                },
             ),
             (
                 "an editions 200 whose body will not parse",
-                Ok(livrarr_domain::services::FetchResponse {
+                livrarr_domain::services::FetchResponse {
                     status: 200,
                     headers: vec![],
                     body: b"<html>not json</html>".to_vec(),
-                }),
+                },
             ),
         ];
 
         for (label, editions_leg) in editions_legs {
             queue.reset_breaker_for_tests(RateBucket::OpenLibrary);
-
-            // One below the production threshold of 5.
-            for _ in 0..4 {
-                queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
-            }
+            queue.set_breaker_config_for_tests(
+                RateBucket::OpenLibrary,
+                CircuitBreakerConfig {
+                    failure_threshold: 1,
+                    evaluation_window_secs: 60,
+                    open_duration_secs: 60,
+                    half_open_probe_count: 1,
+                },
+            );
 
             let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
                 200,
                 work_body.clone().into_bytes(),
             );
-            fetcher.push_response(editions_leg);
-            let _ = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
-
-            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+            fetcher.push_response(Ok(editions_leg));
+            let result =
+                query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+            assert!(
+                result.is_ok(),
+                "{label}: editions stay best-effort for the payload"
+            );
 
             let tripped = {
                 let admission = queue
@@ -583,11 +584,123 @@ mod tests {
             };
             assert!(
                 tripped,
-                "{label}: the work leg's success must not report an operation \
-                 Success — that clears the accumulated failures and the refused \
-                 editions endpoint is re-requested forever with the breaker closed"
+                "{label}: the operation itself must report Failure and open a threshold-one breaker"
             );
         }
+    }
+
+    /// The recording fetcher returns a synthetic timeout without reproducing
+    /// `HttpFetcherImpl::do_fetch`'s transport-level Failure report. This case
+    /// can therefore pin only that the outer operation emits no Success that
+    /// would erase the real transport signal in production.
+    #[tokio::test]
+    async fn a_timed_out_editions_leg_must_not_report_operation_success() {
+        use livrarr_domain::services::FetchError;
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+
+        let work_body = serde_json::json!({"title": "Test Work"}).to_string();
+        let fetcher =
+            crate::test_support::RecordingHttpFetcher::with_ok(200, work_body.into_bytes());
+        fetcher.push_response(Err(FetchError::Timeout(std::time::Duration::from_secs(30))));
+        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+        assert!(result.is_ok(), "editions stay best-effort for the payload");
+
+        // Stand in only for the transport signal omitted by this test double.
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the outer operation must not report Success after a timed-out editions leg"
+        );
+    }
+
+    /// The ISBN request is only the first leg of seeded and anchor operations.
+    /// It must not clear accumulated failures before the resolved work/detail
+    /// legs run; the caller owns the operation-level Success.
+    // Bug reproduction: subtitle-matching finding 1 — ISBN helper Success
+    // erased a later editions Failure on every composite invocation.
+    #[tokio::test]
+    async fn isbn_lookup_defers_success_to_the_operation_boundary() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+
+        let body = serde_json::json!({"works": [{"key": "/works/OL123W"}]}).to_string();
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, body.into_bytes());
+        let key = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal)
+            .await
+            .expect("a parseable ISBN response is healthy");
+        assert_eq!(key.as_deref(), Some("OL123W"));
+
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the ISBN helper must not report Success before later provider legs finish"
+        );
+    }
+
+    /// `query_ol_detail` is also a request helper for every production Open
+    /// Library client door. Even with healthy work and editions responses, its
+    /// caller must own the single operation-level Success.
+    #[tokio::test]
+    async fn query_ol_detail_defers_success_to_the_operation_boundary() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            serde_json::json!({"title": "Test Work"})
+                .to_string()
+                .into_bytes(),
+        );
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({"entries": []}).to_string().into_bytes(),
+        }));
+        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+        assert!(result.is_ok());
+
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the detail helper must not report Success before its caller boundary"
+        );
     }
 
     /// C4 added Failure reporting to this door but no Success, and

@@ -735,9 +735,8 @@ impl HardcoverClient {
                     return ProviderOutcome::NotFound;
                 }
                 Ok(None) => {
-                    // A healthy call that simply matched nothing — one leg, and
-                    // it succeeded, so the operation boundary is here.
-                    crate::hardcover::report_hardcover_success();
+                    // A healthy ISBN miss is not the boundary on this seeded
+                    // surface: title/author fallback still runs below.
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
                 }
                 Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
@@ -935,8 +934,29 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             AnchorQuery::Isbn13(isbn) => {
                 let normalized = livrarr_domain::strip_isbn_punctuation(isbn);
                 match self.isbn_lookup(&normalized, priority).await {
-                    Ok(Some(ol_work_key)) => self.detail_by_key(&ol_work_key, priority).await,
-                    Ok(None) => ProviderOutcome::NotFound,
+                    Ok(Some(ol_work_key)) => {
+                        match query_ol_detail(&self.fetcher, &ol_work_key, priority, None, None)
+                            .await
+                        {
+                            Ok(detail) => {
+                                if detail.all_legs_succeeded {
+                                    crate::openlibrary::report_openlibrary_success();
+                                }
+                                ProviderOutcome::Success(Box::new(
+                                    self.build_payload(&ol_work_key, detail),
+                                ))
+                            }
+                            Err(crate::types::ProviderFetchError::NotFound) => {
+                                crate::openlibrary::report_openlibrary_success();
+                                ProviderOutcome::NotFound
+                            }
+                            Err(e) => ol_error_outcome(&e, self.retry_backoff_secs),
+                        }
+                    }
+                    Ok(None) => {
+                        crate::openlibrary::report_openlibrary_success();
+                        ProviderOutcome::NotFound
+                    }
                     Err(e) => ol_error_outcome(&e, self.retry_backoff_secs),
                 }
             }
@@ -956,7 +976,16 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         match query_ol_detail(&self.fetcher, ol_key, priority, None, None).await {
-            Ok(detail) => ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail))),
+            Ok(detail) => {
+                if detail.all_legs_succeeded {
+                    crate::openlibrary::report_openlibrary_success();
+                }
+                ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)))
+            }
+            Err(crate::types::ProviderFetchError::NotFound) => {
+                crate::openlibrary::report_openlibrary_success();
+                ProviderOutcome::NotFound
+            }
             Err(e) => {
                 tracing::debug!(ol_key = %ol_key, error = %e, "OL key detail miss");
                 ol_error_outcome(&e, self.retry_backoff_secs)
@@ -987,6 +1016,9 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                     .await
                     {
                         Ok(detail) => {
+                            if detail.all_legs_succeeded {
+                                crate::openlibrary::report_openlibrary_success();
+                            }
                             let mut payload = self.build_payload(&ol_work_key, detail);
                             payload.isbn_13 = Some(normalized.clone());
                             return ProviderOutcome::Success(Box::new(payload));
@@ -1023,6 +1055,9 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             .await
             {
                 Ok(detail) => {
+                    if detail.all_legs_succeeded {
+                        crate::openlibrary::report_openlibrary_success();
+                    }
                     return ProviderOutcome::Success(Box::new(self.build_payload(ol_key, detail)));
                 }
                 Err(crate::types::ProviderFetchError::NotFound) => {
@@ -1133,7 +1168,8 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
             crate::types::ProviderFetchError::Other(format!("OL search parse error: {e}"))
         })?;
-        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Success);
+        // Search is only the first leg when it selects a work. Report no
+        // Success until this helper knows no detail/editions leg will follow.
 
         let docs = data
             .get("docs")
@@ -1182,6 +1218,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                     top_candidate = candidates.first().map(|(t, _)| t.as_str()).unwrap_or(""),
                     "OpenLibrary title+author search: no candidate cleared the identity bar — OL result dropped from the fan-out"
                 );
+                crate::openlibrary::report_openlibrary_success();
                 return Ok(None);
             }
         };
@@ -1193,7 +1230,10 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
 
         let ol_key = match ol_key {
             Some(k) => k,
-            None => return Ok(None),
+            None => {
+                crate::openlibrary::report_openlibrary_success();
+                return Ok(None);
+            }
         };
 
         match query_ol_detail(
@@ -1205,12 +1245,20 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         )
         .await
         {
-            Ok(detail) => Ok(Some(self.build_payload(&ol_key, detail))),
+            Ok(detail) => {
+                if detail.all_legs_succeeded {
+                    crate::openlibrary::report_openlibrary_success();
+                }
+                Ok(Some(self.build_payload(&ol_key, detail)))
+            }
             // A genuine miss stays NotFound; every other error (429/5xx/
             // QueueFull/CircuitOpen/Other) must propagate so the caller
             // routes it through `ol_error_outcome` — mirroring Tier 1/2,
             // which never collapse a live failure into a permanent miss.
-            Err(crate::types::ProviderFetchError::NotFound) => Ok(None),
+            Err(crate::types::ProviderFetchError::NotFound) => {
+                crate::openlibrary::report_openlibrary_success();
+                Ok(None)
+            }
             Err(e) => Err(e),
         }
     }
@@ -1375,6 +1423,164 @@ mod openlibrary_qw2_pins {
 
         assert!(matches!(outcome, ProviderOutcome::Success(_)));
         assert!(has_fuzzy_search(&client.fetcher));
+    }
+
+    /// ISBN lookup is a child leg. Repeating `isbn=200, detail=200,
+    /// editions=403` must accumulate the editions failures instead of clearing
+    /// them at the start of every invocation.
+    // Bug reproduction: subtitle-matching finding 1 — OpenLibrary ISBN
+    // Success was reported before the composite operation finished.
+    #[tokio::test]
+    async fn openlibrary_isbn_composite_accumulates_later_editions_failures() {
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for _ in 0..12 {
+            fetcher.push_response(ok_json(serde_json::json!({
+                "works": [{"key": "/works/OL123W"}]
+            })));
+            fetcher.push_response(ok_json(serde_json::json!({"title": "Fuzzy Success"})));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+        }
+        let client = OpenLibraryClient::new(fetcher);
+
+        for _ in 0..12 {
+            let outcome = client
+                .fetch(&work(Some("9781234567890"), None), RequestPriority::Normal)
+                .await;
+            assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        }
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the ISBN leg must not clear every later editions Failure"
+        );
+    }
+
+    /// Title/author search is also a child leg when it selects a work and then
+    /// fetches detail plus editions. Its parsed search response is not the
+    /// operation boundary.
+    #[tokio::test]
+    async fn openlibrary_title_composite_accumulates_later_editions_failures() {
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for _ in 0..12 {
+            fetcher.push_response(fuzzy_success_search());
+            fetcher.push_response(fuzzy_success_detail());
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+        }
+        let client = OpenLibraryClient::new(fetcher);
+
+        for _ in 0..12 {
+            let outcome = client
+                .fetch(&work(None, None), RequestPriority::Normal)
+                .await;
+            assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        }
+
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the search leg must not clear every later editions Failure"
+        );
+    }
+
+    /// A genuine item absence is a healthy final answer on the direct work-key
+    /// surface and must clear a half-open/pending failure history at that outer
+    /// boundary.
+    #[tokio::test]
+    async fn openlibrary_direct_key_absence_reports_outer_success() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::OlKey("OLMISSINGW".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert!(matches!(outcome, ProviderOutcome::NotFound));
+
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            !tripped,
+            "a healthy final work-key absence must report Success at the caller boundary"
+        );
+    }
+
+    /// The ISBN anchor surface also ends at a genuine 404/410 miss, so that
+    /// final absence must report Success even though the ISBN request helper
+    /// itself is forbidden from doing so.
+    #[tokio::test]
+    async fn openlibrary_isbn_absence_reports_outer_success() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        }
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(404, vec![]);
+        let client = OpenLibraryClient::new(fetcher);
+
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9781234567890".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert!(matches!(outcome, ProviderOutcome::NotFound));
+
+        queue.report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            !tripped,
+            "a healthy final ISBN absence must report Success at the caller boundary"
+        );
     }
 
     #[tokio::test]

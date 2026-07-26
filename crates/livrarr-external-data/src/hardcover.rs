@@ -432,7 +432,8 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
 
     let data: Value =
         serde_json::from_slice(&resp.body).map_err(|e| format!("edition parse: {e}"))?;
-    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
+    // Editions are a child leg. `HardcoverClient::build_success` reports the
+    // operation's one Success only after this parse and every earlier leg pass.
 
     let editions = data
         .pointer("/data/editions")
@@ -942,6 +943,44 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, Some("9780000000001".to_string()));
+    }
+
+    /// Editions are a child leg of a Hardcover operation. A healthy child
+    /// response must not clear failures before the caller reaches the final
+    /// boundary and decides whether every provider leg succeeded.
+    // Bug reproduction: subtitle-matching finding 1 — the editions helper and
+    // `build_success` both reported Success for one operation.
+    #[tokio::test]
+    async fn hardcover_editions_defers_success_to_the_operation_boundary() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        for _ in 0..4 {
+            queue.report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
+        }
+
+        let canned = serde_json::json!({"data": {"editions": []}}).to_string();
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, canned.into_bytes());
+        let result =
+            fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal).await;
+        assert_eq!(
+            result.expect("a parseable editions response is healthy"),
+            None
+        );
+
+        queue.report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
+        let tripped = {
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. }))
+        };
+        assert!(
+            tripped,
+            "the editions helper must not report Success before its caller boundary"
+        );
     }
 
     // -------------------------------------------------------------------
