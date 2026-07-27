@@ -751,15 +751,9 @@ where
 
     let body = String::from_utf8_lossy(&resp.body);
     // Discovery deliberately treats Goodreads as one optional union
-    // contribution. Preserve that user-facing behavior while using the checked
-    // parser so provider-client callers can retain the same top-level error.
-    let parsed = match livrarr_external_data::goodreads::parse_autocomplete_json_checked(&body) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            tracing::warn!(error = %e, "Goodreads autocomplete response was unreadable");
-            Vec::new()
-        }
-    };
+    // contribution. The shared lenient wrapper owns the one error-to-empty
+    // mapping; provider-client callers use the checked parser instead.
+    let parsed = livrarr_external_data::goodreads::parse_autocomplete_json(&body);
 
     let results = parsed
         .into_iter()
@@ -922,6 +916,20 @@ where
     Ok(results)
 }
 
+async fn fetch_hardcover_discovery_hits<H: HttpFetcher>(
+    http: &H,
+    term: &str,
+    token: &str,
+    priority: RequestPriority,
+) -> Result<Vec<serde_json::Value>, WorkServiceError> {
+    let body = livrarr_external_data::hardcover::hc_search_body(15, term);
+    let data = livrarr_external_data::hardcover::hc_post(http, body, token, priority)
+        .await
+        .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;
+    livrarr_external_data::hardcover::hc_extract_hits(&data)
+        .map_err(|e| WorkServiceError::Enrichment(format!("HC search response: {e}")))
+}
+
 async fn lookup_hardcover<C, H, L>(
     ctx: DiscoveryCtx<'_, C, H, L>,
     term: &str,
@@ -955,42 +963,13 @@ where
         None => return Ok(vec![]),
     };
 
-    let body = livrarr_external_data::hardcover::hc_search_body(15, term);
-    let body_bytes = serde_json::to_vec(&body)
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC serialize: {e}")))?;
-
-    let resp = ctx
-        .http
-        .fetch(livrarr_domain::services::FetchRequest {
-            url: livrarr_external_data::hardcover::HARDCOVER_API_URL.to_string(),
-            method: livrarr_domain::services::HttpMethod::Post,
-            headers: vec![
-                ("Authorization".into(), format!("Bearer {token}")),
-                ("Content-Type".into(), "application/json".into()),
-            ],
-            body: Some(body_bytes),
-            timeout: std::time::Duration::from_secs(10),
-            rate_bucket: livrarr_domain::services::RateBucket::Hardcover,
-            max_body_bytes: 2 * 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: livrarr_domain::services::UserAgentProfile::Server,
-            priority: livrarr_domain::RequestPriority::Normal,
-        })
-        .await
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;
-
-    if resp.status >= 400 {
-        return Err(WorkServiceError::Enrichment(format!(
-            "HC search HTTP {}",
-            resp.status
-        )));
-    }
-
-    let data: serde_json::Value = serde_json::from_slice(&resp.body)
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC parse: {e}")))?;
-
-    let hits = livrarr_external_data::hardcover::hc_extract_hits(&data)
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC search response: {e}")))?;
+    let hits = fetch_hardcover_discovery_hits(
+        ctx.http,
+        term,
+        &token,
+        livrarr_domain::RequestPriority::Normal,
+    )
+    .await?;
 
     let results: Vec<LookupResult> = hits
         .iter()
@@ -1212,6 +1191,140 @@ fn best_same_work_cover(
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    static DISCOVERY_BREAKER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct DiscoveryBreakerGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for DiscoveryBreakerGuard {
+        fn drop(&mut self) {
+            livrarr_http::outbound_queue::shared().report_outcome(
+                RateBucket::Hardcover,
+                livrarr_http::breaker::BreakerSignal::Success,
+            );
+        }
+    }
+
+    async fn lock_discovery_hardcover_breaker() -> DiscoveryBreakerGuard {
+        let lock = DISCOVERY_BREAKER_LOCK.lock().await;
+        livrarr_http::outbound_queue::shared().report_outcome(
+            RateBucket::Hardcover,
+            livrarr_http::breaker::BreakerSignal::Success,
+        );
+        DiscoveryBreakerGuard { _lock: lock }
+    }
+
+    struct CannedDiscoveryFetcher {
+        response: FetchResponse,
+        requests: std::sync::Mutex<Vec<FetchRequest>>,
+    }
+
+    impl CannedDiscoveryFetcher {
+        fn new(body: Vec<u8>) -> Self {
+            Self {
+                response: FetchResponse {
+                    status: 200,
+                    headers: vec![],
+                    body,
+                },
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl HttpFetcher for CannedDiscoveryFetcher {
+        async fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            self.requests.lock().unwrap().push(req);
+            Ok(FetchResponse {
+                status: self.response.status,
+                headers: self.response.headers.clone(),
+                body: self.response.body.clone(),
+            })
+        }
+
+        async fn fetch_ssrf_safe(&self, req: FetchRequest) -> Result<FetchResponse, FetchError> {
+            self.fetch(req).await
+        }
+    }
+
+    #[test]
+    fn discovery_goodreads_reuses_the_lenient_autocomplete_wrapper() {
+        let compact_source: String = include_str!("discovery_service.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let expected_call = [
+            "letparsed=livrarr_external_data::goodreads::parse_",
+            "autocomplete_json(&body);",
+        ]
+        .concat();
+
+        assert!(
+            compact_source.contains(&expected_call),
+            "discovery must delegate its lenient invalid-response mapping to the shared wrapper"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_hardcover_uses_common_decode_and_graphql_envelope_authority() {
+        use livrarr_http::breaker::BreakerSignal;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = lock_discovery_hardcover_breaker().await;
+        let queue = outbound_queue::shared();
+
+        for body in [
+            b"not-json".to_vec(),
+            serde_json::json!({
+                "errors": [{"message": "partial"}],
+                "data": {"search": {"results": {"hits": []}}}
+            })
+            .to_string()
+            .into_bytes(),
+        ] {
+            queue.report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
+            let fetcher = CannedDiscoveryFetcher::new(body);
+
+            for _ in 0..5 {
+                assert!(fetch_hardcover_discovery_hits(
+                    &fetcher,
+                    "Dune",
+                    "test-token",
+                    RequestPriority::Normal,
+                )
+                .await
+                .is_err());
+            }
+            assert_eq!(fetcher.requests.lock().unwrap().len(), 5);
+            assert!(matches!(
+                queue
+                    .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                    .await,
+                Err(AdmissionError::CircuitOpen { .. })
+            ));
+        }
+
+        queue.report_outcome(RateBucket::Hardcover, BreakerSignal::Success);
+        let fetcher = CannedDiscoveryFetcher::new(
+            serde_json::json!({"data": {"search": {"results": {"hits": []}}}})
+                .to_string()
+                .into_bytes(),
+        );
+        let hits =
+            fetch_hardcover_discovery_hits(&fetcher, "Dune", "test-token", RequestPriority::Normal)
+                .await
+                .expect("explicit empty hits is a healthy discovery miss");
+        assert!(hits.is_empty());
+        assert_eq!(fetcher.requests.lock().unwrap().len(), 1);
+        assert!(!matches!(
+            queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
 
     fn lr(title: &str, author: &str, isbn: Option<&str>) -> LookupResult {
         LookupResult {

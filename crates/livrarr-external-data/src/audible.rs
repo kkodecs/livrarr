@@ -71,14 +71,14 @@ struct AudibleSearchResponse {
 // ─── Client ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct AudibleCatalogClient {
-    pub fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+pub struct AudibleCatalogClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    pub fetcher: F,
     pub retry_backoff_secs: i64,
     call_sink: Option<std::sync::Arc<dyn livrarr_domain::services::ProviderCallSink>>,
 }
 
-impl AudibleCatalogClient {
-    pub fn new(fetcher: livrarr_http::fetcher::HttpFetcherImpl, retry_backoff_secs: i64) -> Self {
+impl<F: HttpFetcher> AudibleCatalogClient<F> {
+    pub fn new(fetcher: F, retry_backoff_secs: i64) -> Self {
         Self {
             fetcher,
             retry_backoff_secs,
@@ -112,9 +112,13 @@ impl AudibleCatalogClient {
     ) -> crate::ProviderOutcome<NormalizedWorkDetail> {
         match lookup_audible_by_asin(&self.fetcher, asin, priority).await {
             Ok(Some(product)) => {
+                report_audible_success();
                 crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(&product)))
             }
-            Ok(None) => crate::ProviderOutcome::NotFound,
+            Ok(None) => {
+                report_audible_success();
+                crate::ProviderOutcome::NotFound
+            }
             Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
             Err(_) => crate::ProviderOutcome::WillRetry {
                 reason: livrarr_domain::WillRetryReason::ServerError,
@@ -153,6 +157,7 @@ impl AudibleCatalogClient {
                     )
                     .is_some()
                     {
+                        report_audible_success();
                         return crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(
                             &product,
                         )));
@@ -177,7 +182,10 @@ impl AudibleCatalogClient {
 
         // Title+author search
         match search_audible(&self.fetcher, &work.title, &work.author_name, 10, priority).await {
-            Ok(products) if products.is_empty() => crate::ProviderOutcome::NotFound,
+            Ok(products) if products.is_empty() => {
+                report_audible_success();
+                crate::ProviderOutcome::NotFound
+            }
             Ok(products) => {
                 // Feed multiple title variants per product (raw, series-stripped,
                 // subtitle) into the strict matcher so a series-prefixed catalog
@@ -205,11 +213,13 @@ impl AudibleCatalogClient {
                     false,
                 ) {
                     let pi = variant_to_product[vidx];
+                    report_audible_success();
                     return crate::ProviderOutcome::Success(Box::new(map_audible_to_detail(
                         &products[pi],
                     )));
                 }
 
+                report_audible_success();
                 crate::ProviderOutcome::NotFound
             }
             Err(ProviderFetchError::CircuitOpen(retry_after)) => circuit_open_outcome(retry_after),
@@ -233,6 +243,10 @@ fn circuit_open_outcome(retry_after: Duration) -> crate::ProviderOutcome<Normali
             + chrono::Duration::from_std(retry_after)
                 .unwrap_or_else(|_| chrono::Duration::seconds(60)),
     }
+}
+
+fn report_audible_success() {
+    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 }
 
 // ─── API functions ───────────────────────────────────────────────────────
@@ -304,7 +318,6 @@ pub async fn search_audible<F: HttpFetcher>(
         outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
         ProviderFetchError::Other(format!("Audible parse error: {e}"))
     })?;
-    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products)
 }
@@ -356,7 +369,6 @@ pub async fn lookup_audible_by_asin<F: HttpFetcher>(
         outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Failure);
         ProviderFetchError::Other(format!("Audible parse error: {e}"))
     })?;
-    outbound_queue::shared().report_outcome(RateBucket::Audible, BreakerSignal::Success);
 
     Ok(data.products.into_iter().next())
 }
@@ -467,6 +479,372 @@ pub fn map_audible_to_detail(product: &AudibleProduct) -> NormalizedWorkDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn half_open_audible_probe() -> livrarr_http::outbound_queue::QueuePermit {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+
+        let queue = outbound_queue::shared();
+        queue.reset_breaker_for_tests(RateBucket::Audible);
+        queue.set_breaker_config_for_tests(
+            RateBucket::Audible,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Audible,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        queue
+            .acquire(RateBucket::Audible, RequestPriority::Normal)
+            .await
+            .expect("half-open Audible breaker must admit one probe")
+    }
+
+    #[test]
+    fn audible_client_accepts_the_recording_fetcher_seam() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<AudibleCatalogClient<crate::test_support::RecordingHttpFetcher>>();
+    }
+
+    #[tokio::test]
+    async fn seeded_asin_mismatch_cannot_erase_later_search_failures_at_production_threshold() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            asin: Some("B0MISMATCH".to_string()),
+            ..Default::default()
+        };
+
+        for unreadable_search in [false, true] {
+            queue.reset_breaker_for_tests(RateBucket::Audible);
+            queue.set_breaker_config_for_tests(
+                RateBucket::Audible,
+                CircuitBreakerConfig {
+                    failure_threshold: 5,
+                    evaluation_window_secs: 60,
+                    open_duration_secs: 60,
+                    half_open_probe_count: 1,
+                },
+            );
+
+            let fetcher = crate::test_support::RecordingHttpFetcher::new();
+            for _ in 0..5 {
+                fetcher.push_response(Ok(FetchResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: br#"{"products":[{"asin":"B0MISMATCH","title":"Foundation","authors":[{"name":"Isaac Asimov"}]}]}"#.to_vec(),
+                }));
+                fetcher.push_response(Ok(FetchResponse {
+                    status: if unreadable_search { 200 } else { 403 },
+                    headers: vec![],
+                    body: if unreadable_search {
+                        b"not-json".to_vec()
+                    } else {
+                        vec![]
+                    },
+                }));
+            }
+            let client = AudibleCatalogClient::new(fetcher, 1);
+
+            for _ in 0..5 {
+                let outcome = client.fetch(&work, RequestPriority::Normal).await;
+                assert!(matches!(
+                    outcome,
+                    crate::ProviderOutcome::WillRetry {
+                        reason: livrarr_domain::WillRetryReason::ServerError,
+                        ..
+                    }
+                ));
+            }
+
+            let open = matches!(
+                queue
+                    .acquire(RateBucket::Audible, RequestPriority::Normal)
+                    .await,
+                Err(AdmissionError::CircuitOpen { .. })
+            );
+            assert!(
+                open,
+                "five seeded operations must retain their later {} search Failures",
+                if unreadable_search { "decode" } else { "HTTP" }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_helper_leaves_half_open_success_ownership_to_the_client() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Audible,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Audible,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let probe = queue
+            .acquire(RateBucket::Audible, RequestPriority::Normal)
+            .await
+            .expect("half-open Audible breaker must admit one probe");
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"products":[]}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let products = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("decoded empty search");
+        assert!(products.is_empty());
+        assert!(search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Audible, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_asin_absences_close_half_open_only_at_the_client_boundary() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+
+        for (status, body) in [
+            (404, Vec::new()),
+            (410, Vec::new()),
+            (200, br#"{"products":[]}"#.to_vec()),
+        ] {
+            let probe = half_open_audible_probe().await;
+            let fetcher = crate::test_support::RecordingHttpFetcher::new();
+            fetcher.push_response(Ok(FetchResponse {
+                status,
+                headers: vec![],
+                body,
+            }));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            let client = AudibleCatalogClient::new(fetcher.clone(), 1);
+
+            let outcome = client
+                .fetch_by_asin("B0MISSING", RequestPriority::Normal)
+                .await;
+            assert!(matches!(outcome, crate::ProviderOutcome::NotFound));
+            assert!(search_audible(
+                &fetcher,
+                "Dune",
+                "Frank Herbert",
+                10,
+                RequestPriority::Normal,
+            )
+            .await
+            .is_err());
+            drop(probe);
+
+            queue
+                .acquire(RateBucket::Audible, RequestPriority::Normal)
+                .await
+                .expect(
+                    "terminal healthy ASIN absence must close half-open before a later failure",
+                );
+        }
+    }
+
+    #[tokio::test]
+    async fn matching_seeded_asin_is_terminal_reports_success_and_skips_search() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_audible_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"products":[{"asin":"B0DUNE","title":"Dune","authors":[{"name":"Frank Herbert"}]}]}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let client = AudibleCatalogClient::new(fetcher.clone(), 1);
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            asin: Some("B0DUNE".to_string()),
+            ..Default::default()
+        };
+
+        let outcome = client.fetch(&work, RequestPriority::Normal).await;
+        assert!(matches!(outcome, crate::ProviderOutcome::Success(_)));
+        assert_eq!(fetcher.call_count(), 1, "a Same ASIN hit is terminal");
+        assert!(search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+
+        queue
+            .acquire(RateBucket::Audible, RequestPriority::Normal)
+            .await
+            .expect("matching seeded ASIN must report one outer Success");
+    }
+
+    #[tokio::test]
+    async fn terminal_search_hit_and_miss_report_outer_success() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Default::default()
+        };
+
+        for body in [
+            br#"{"products":[]}"#.to_vec(),
+            br#"{"products":[{"asin":"B0DUNE","title":"Dune","authors":[{"name":"Frank Herbert"}]}]}"#
+                .to_vec(),
+        ] {
+            let probe = half_open_audible_probe().await;
+            let fetcher = crate::test_support::RecordingHttpFetcher::new();
+            fetcher.push_response(Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body,
+            }));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            let client = AudibleCatalogClient::new(fetcher.clone(), 1);
+
+            let outcome = client.fetch(&work, RequestPriority::Normal).await;
+            assert!(matches!(
+                outcome,
+                crate::ProviderOutcome::Success(_) | crate::ProviderOutcome::NotFound
+            ));
+            assert!(search_audible(
+                &fetcher,
+                "Dune",
+                "Frank Herbert",
+                10,
+                RequestPriority::Normal,
+            )
+            .await
+            .is_err());
+            drop(probe);
+
+            queue
+                .acquire(RateBucket::Audible, RequestPriority::Normal)
+                .await
+                .expect("terminal healthy search must report one outer Success");
+        }
+    }
+
+    #[tokio::test]
+    async fn seeded_asin_miss_then_broken_search_reopens_half_open_without_early_success() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_audible_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"products":[]}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let client = AudibleCatalogClient::new(fetcher, 1);
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            asin: Some("B0MISSING".to_string()),
+            ..Default::default()
+        };
+
+        let outcome = client.fetch(&work, RequestPriority::Normal).await;
+        assert!(matches!(
+            outcome,
+            crate::ProviderOutcome::WillRetry {
+                reason: livrarr_domain::WillRetryReason::ServerError,
+                ..
+            }
+        ));
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Audible, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn search_audible_invalid_json_opens_threshold_one_breaker() {

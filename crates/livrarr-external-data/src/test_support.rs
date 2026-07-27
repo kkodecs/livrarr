@@ -10,6 +10,7 @@ use livrarr_domain::services::{FetchError, FetchRequest, FetchResponse, HttpFetc
 /// door-routing assertions) and replays a queue of canned responses. Queue
 /// semantics: empty queue returns a bare 200, a single entry repeats forever,
 /// multiple entries are consumed in order.
+#[derive(Clone)]
 pub struct RecordingHttpFetcher {
     requests: Arc<Mutex<Vec<FetchRequest>>>,
     responses: Arc<Mutex<Vec<Result<FetchResponse, FetchError>>>>,

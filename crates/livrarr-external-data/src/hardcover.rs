@@ -1229,15 +1229,10 @@ mod tests {
     /// Runs at the PRODUCTION threshold deliberately — forcing the threshold to
     /// 1 cannot observe this shape at all.
     ///
-    /// **Entry-point justification** (CLAUDE.md "tests drive the real door"):
-    /// the production door is `HardcoverClient::build_success`, which owns a
-    /// concrete `HttpFetcherImpl` AND posts to the hardcoded `HARDCOVER_API_URL`
-    /// — no double can be injected and no local server can be addressed, so no
-    /// test can reach it. This composes the same two legs, in the same order,
-    /// against the same real process-global breaker. It pins the accounting
-    /// rule; it does not prove `build_success` still calls the legs in this
-    /// order. Making `HardcoverClient` base-URL-configurable (as
-    /// `GoodreadsClient` already is) would close that gap.
+    /// This lower-level two-leg regression remains useful alongside B2's
+    /// `HardcoverClient<RecordingHttpFetcher>` composition tests: both exercise
+    /// the same process-global breaker, while the client test additionally
+    /// proves `build_success` still owns the final signal.
     #[tokio::test]
     async fn a_refused_editions_endpoint_eventually_opens_the_hardcover_breaker() {
         use livrarr_http::outbound_queue::{self, AdmissionError};

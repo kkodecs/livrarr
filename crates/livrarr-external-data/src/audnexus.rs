@@ -208,7 +208,6 @@ async fn cached_fetch<F: HttpFetcher>(
         let mut guard = cache.0.lock().await;
         if let Some(cached) = guard.get(url) {
             tracing::debug!(%url, "audnexus 304 — reusing cached response");
-            outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Success);
             return Ok(Some(cached.body.clone()));
         }
     }
@@ -248,7 +247,6 @@ async fn cached_fetch<F: HttpFetcher>(
         );
     }
 
-    outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Success);
     Ok(Some(data))
 }
 
@@ -311,6 +309,144 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn half_open_audnexus_probe() -> livrarr_http::outbound_queue::QueuePermit {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+
+        let queue = outbound_queue::shared();
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        queue.set_breaker_config_for_tests(
+            RateBucket::Audnexus,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Audnexus,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        queue
+            .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+            .await
+            .expect("half-open Audnexus breaker must admit one probe")
+    }
+
+    #[tokio::test]
+    async fn cached_fetch_leaves_parsed_and_304_success_ownership_to_the_client() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+
+        // Parsed 2xx.
+        let probe = half_open_audnexus_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"asin":"B0HIT"}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let cache = AudnexusCache::new();
+        assert!(query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0HIT",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("parsed item")
+        .is_some());
+        assert!(query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Dune",
+            "Frank Herbert",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+
+        // Cache-backed 304.
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![("Last-Modified".to_string(), "seed-v1".to_string())],
+            body: br#"{"asin":"B0CACHE"}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 304,
+            headers: vec![],
+            body: vec![],
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let cache = AudnexusCache::new();
+        assert!(query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0CACHE",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("cache seed")
+        .is_some());
+        let probe = half_open_audnexus_probe().await;
+        assert!(query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0CACHE",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("cache-backed 304")
+        .is_some());
+        assert!(query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Dune",
+            "Frank Herbert",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn cached_fetch_invalid_json_opens_breaker_for_item_and_search_and_is_not_cached() {

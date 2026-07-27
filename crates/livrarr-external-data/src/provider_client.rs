@@ -396,19 +396,16 @@ impl StubProviderClient {
 ///     a coarser classification can land alongside the rest of the cutover when
 ///     each provider's failure taxonomy gets pulled into typed errors.
 #[derive(Clone)]
-pub struct AudnexusClient {
-    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+pub struct AudnexusClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    fetcher: F,
     base_url: String,
     retry_backoff_secs: i64,
     cache: AudnexusCache,
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
-impl AudnexusClient {
-    pub fn new(
-        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
-        base_url: impl Into<String>,
-    ) -> Self {
+impl<F: HttpFetcher> AudnexusClient<F> {
+    pub fn new(fetcher: F, base_url: impl Into<String>) -> Self {
         Self {
             fetcher,
             base_url: base_url.into(),
@@ -446,8 +443,14 @@ impl AudnexusClient {
         .await;
 
         match result {
-            Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
-            Ok(None) => ProviderOutcome::NotFound,
+            Ok(Some(audnexus)) => {
+                report_audnexus_success();
+                ProviderOutcome::Success(Box::new(audnexus_payload(audnexus)))
+            }
+            Ok(None) => {
+                report_audnexus_success();
+                ProviderOutcome::NotFound
+            }
             Err(e) => audnexus_error_outcome(&e, self.retry_backoff_secs),
         }
     }
@@ -461,11 +464,21 @@ impl AudnexusClient {
         match query_audnexus_by_asin(&self.fetcher, &self.base_url, asin, &self.cache, priority)
             .await
         {
-            Ok(Some(audnexus)) => ProviderOutcome::Success(Box::new(audnexus_payload(audnexus))),
-            Ok(None) => ProviderOutcome::NotFound,
+            Ok(Some(audnexus)) => {
+                report_audnexus_success();
+                ProviderOutcome::Success(Box::new(audnexus_payload(audnexus)))
+            }
+            Ok(None) => {
+                report_audnexus_success();
+                ProviderOutcome::NotFound
+            }
             Err(e) => audnexus_error_outcome(&e, self.retry_backoff_secs),
         }
     }
+}
+
+fn report_audnexus_success() {
+    outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Success);
 }
 
 /// One classification of a `ProviderFetchError` into the outcome any
@@ -558,8 +571,8 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
 /// picker; nothing clearing the bar means HC abstains (`NoMatch`) rather
 /// than adopting a fuzzy hit.
 #[derive(Clone)]
-pub struct HardcoverClient {
-    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+pub struct HardcoverClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    fetcher: F,
     /// Reads `hardcover_enabled` + `hardcover_api_token` per fetch — config
     /// changes via UI take effect on the next enrichment without restart.
     live_config: crate::live_config::LiveMetadataConfig,
@@ -567,11 +580,8 @@ pub struct HardcoverClient {
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
-impl HardcoverClient {
-    pub fn new(
-        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
-        live_config: crate::live_config::LiveMetadataConfig,
-    ) -> Self {
+impl<F: HttpFetcher> HardcoverClient<F> {
+    pub fn new(fetcher: F, live_config: crate::live_config::LiveMetadataConfig) -> Self {
         Self {
             fetcher,
             live_config,
@@ -2266,6 +2276,15 @@ struct ResolvedGrDetail {
     candidate: Option<GrCandidateText>,
 }
 
+/// Search-tier resolution result plus the health of every autocomplete leg
+/// attempted on the way there. A failed ISBN tier may deliberately fall
+/// through to title search, so useful application data and healthy breaker
+/// state are independent facts.
+struct GrResolution {
+    detail: Option<ResolvedGrDetail>,
+    all_legs_succeeded: bool,
+}
+
 /// Real-network Goodreads adapter. Wraps the lifted
 /// `crate::goodreads::{search_goodreads, fetch_goodreads_detail}`
 /// helpers and maps their errors onto `ProviderOutcome<NormalizedWorkDetail>`.
@@ -2294,8 +2313,8 @@ struct ResolvedGrDetail {
 ///   - HTTP 4xx (other than 429) → `NotFound` (typically 404 on a stale URL).
 ///   - Detail page returned 200 OK but unparseable → `NotFound`.
 #[derive(Clone)]
-pub struct GoodreadsClient {
-    fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+pub struct GoodreadsClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    fetcher: F,
     /// Kept solely for the `llm_extract_payload` pass-through — the LLM
     /// caller is out of scope for the outbound queue.
     http: HttpClient,
@@ -2309,12 +2328,8 @@ pub struct GoodreadsClient {
     call_sink: Option<Arc<dyn ProviderCallSink>>,
 }
 
-impl GoodreadsClient {
-    pub fn new(
-        fetcher: livrarr_http::fetcher::HttpFetcherImpl,
-        http: HttpClient,
-        base_url: impl Into<String>,
-    ) -> Self {
+impl<F: HttpFetcher> GoodreadsClient<F> {
+    pub fn new(fetcher: F, http: HttpClient, base_url: impl Into<String>) -> Self {
         Self {
             fetcher,
             http,
@@ -2481,10 +2496,18 @@ impl GoodreadsClient {
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
-        let resolved = match self.resolve_detail_url(work, priority).await {
-            Ok(Some(resolved)) => resolved,
-            Ok(None) => return ProviderOutcome::NotFound,
+        let resolution = match self.resolve_detail_url(work, priority).await {
+            Ok(resolution) => resolution,
             Err(err) => return self.map_fetch_err(err),
+        };
+        let resolved = match resolution.detail {
+            Some(resolved) => resolved,
+            None => {
+                if resolution.all_legs_succeeded {
+                    self.report_gr_payload_usable();
+                }
+                return ProviderOutcome::NotFound;
+            }
         };
         let detail_url = resolved.url;
 
@@ -2554,7 +2577,9 @@ impl GoodreadsClient {
                 payload.cover_url = resolved.candidate.as_ref().and_then(|c| c.cover());
             }
             apply_candidate_text(&mut payload, &resolved.candidate);
-            self.report_gr_payload_usable();
+            if resolution.all_legs_succeeded {
+                self.report_gr_payload_usable();
+            }
             return ProviderOutcome::Success(Box::new(payload));
         }
 
@@ -2570,7 +2595,9 @@ impl GoodreadsClient {
                         payload.gr_key = resolved_gr_key;
                     }
                     apply_candidate_text(&mut payload, &resolved.candidate);
-                    self.report_gr_payload_usable();
+                    if resolution.all_legs_succeeded {
+                        self.report_gr_payload_usable();
+                    }
                     return ProviderOutcome::Success(Box::new(payload));
                 }
                 Err(err) => return self.map_fetch_err(err),
@@ -2676,16 +2703,19 @@ impl GoodreadsClient {
         &self,
         work: &Work,
         priority: RequestPriority,
-    ) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
+    ) -> Result<GrResolution, GoodreadsFetchError> {
         // 1. work.gr_key — canonical GR identity. No candidate text: the key
         // is already established, nothing needs vouching.
         if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
-            return Ok(Some(ResolvedGrDetail {
-                url: goodreads::detail_url_for_gr_key(&self.base_url, key),
-                candidate: None,
-            }));
+            return Ok(GrResolution {
+                detail: Some(ResolvedGrDetail {
+                    url: goodreads::detail_url_for_gr_key(&self.base_url, key),
+                    candidate: None,
+                }),
+                all_legs_succeeded: true,
+            });
         }
-        search_resolve_detail(
+        search_resolve_detail_with_health(
             &self.fetcher,
             &self.base_url,
             &work.title,
@@ -2866,6 +2896,7 @@ fn is_gr_junk_edition(title: &str) -> bool {
 /// (decorated printings) abstains here and falls through to the title tier.
 /// A fetch error on this tier also falls through — the title tier keeps
 /// today's error semantics, so a GR outage behaves exactly as before.
+#[cfg(test)]
 async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
     fetcher: &F,
     base_url: &str,
@@ -2874,6 +2905,23 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
     isbn_13: Option<&str>,
     priority: RequestPriority,
 ) -> Result<Option<ResolvedGrDetail>, GoodreadsFetchError> {
+    Ok(
+        search_resolve_detail_with_health(fetcher, base_url, title, author, isbn_13, priority)
+            .await?
+            .detail,
+    )
+}
+
+async fn search_resolve_detail_with_health<F: livrarr_domain::services::HttpFetcher>(
+    fetcher: &F,
+    base_url: &str,
+    title: &str,
+    author: &str,
+    isbn_13: Option<&str>,
+    priority: RequestPriority,
+) -> Result<GrResolution, GoodreadsFetchError> {
+    let mut all_legs_succeeded = true;
+
     if let Some(isbn) = isbn_13 {
         match goodreads::search_goodreads(fetcher, base_url, isbn, priority).await {
             Ok(isbn_hits) => {
@@ -2890,20 +2938,23 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
                             chosen_idx = idx,
                             "GR ISBN-tier hit selected (deterministic)"
                         );
-                        return Ok(Some(ResolvedGrDetail {
-                            url: goodreads::resolve_detail_url(
-                                base_url,
-                                &isbn_hits[idx].detail_url,
-                            ),
-                            candidate: Some(GrCandidateText {
-                                title: isbn_hits[idx].title.clone(),
-                                title_bare: isbn_hits[idx].title_bare.clone(),
-                                author: isbn_hits[idx].author.clone(),
-                                cover_url: isbn_hits[idx].cover_url.clone(),
-                                series_name: isbn_hits[idx].series_name.clone(),
-                                series_position: isbn_hits[idx].series_position,
+                        return Ok(GrResolution {
+                            detail: Some(ResolvedGrDetail {
+                                url: goodreads::resolve_detail_url(
+                                    base_url,
+                                    &isbn_hits[idx].detail_url,
+                                ),
+                                candidate: Some(GrCandidateText {
+                                    title: isbn_hits[idx].title.clone(),
+                                    title_bare: isbn_hits[idx].title_bare.clone(),
+                                    author: isbn_hits[idx].author.clone(),
+                                    cover_url: isbn_hits[idx].cover_url.clone(),
+                                    series_name: isbn_hits[idx].series_name.clone(),
+                                    series_position: isbn_hits[idx].series_position,
+                                }),
                             }),
-                        }));
+                            all_legs_succeeded,
+                        });
                     }
                     tracing::warn!(
                         title = %title,
@@ -2924,6 +2975,7 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
                 );
             }
             Err(e) => {
+                all_legs_succeeded = false;
                 tracing::warn!(
                     title = %title,
                     isbn,
@@ -2966,17 +3018,20 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
         // Unit B4: same raw-bookUrl validation as the ISBN tier above.
         if goodreads::validate_detail_url(&hits[idx].detail_url) {
             tracing::debug!(title = %title, chosen_idx = idx, "GR search result selected (deterministic)");
-            return Ok(Some(ResolvedGrDetail {
-                url: goodreads::resolve_detail_url(base_url, &hits[idx].detail_url),
-                candidate: Some(GrCandidateText {
-                    title: hits[idx].title.clone(),
-                    title_bare: hits[idx].title_bare.clone(),
-                    author: hits[idx].author.clone(),
-                    cover_url: hits[idx].cover_url.clone(),
-                    series_name: hits[idx].series_name.clone(),
-                    series_position: hits[idx].series_position,
+            return Ok(GrResolution {
+                detail: Some(ResolvedGrDetail {
+                    url: goodreads::resolve_detail_url(base_url, &hits[idx].detail_url),
+                    candidate: Some(GrCandidateText {
+                        title: hits[idx].title.clone(),
+                        title_bare: hits[idx].title_bare.clone(),
+                        author: hits[idx].author.clone(),
+                        cover_url: hits[idx].cover_url.clone(),
+                        series_name: hits[idx].series_name.clone(),
+                        series_position: hits[idx].series_position,
+                    }),
                 }),
-            }));
+                all_legs_succeeded,
+            });
         }
         tracing::warn!(
             title = %title,
@@ -3001,7 +3056,10 @@ async fn search_resolve_detail<F: livrarr_domain::services::HttpFetcher>(
             "GR abstained: no confident title/author match"
         );
     }
-    Ok(None)
+    Ok(GrResolution {
+        detail: None,
+        all_legs_succeeded,
+    })
 }
 
 /// Deterministic Goodreads search-hit selection — no LLM. Drop junk editions
@@ -3046,6 +3104,613 @@ mod tests {
     use super::*;
     use crate::goodreads::GoodreadsSearchResult;
 
+    async fn half_open_audnexus_client_probe() -> livrarr_http::outbound_queue::QueuePermit {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+
+        let queue = outbound_queue::shared();
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        queue.set_breaker_config_for_tests(
+            RateBucket::Audnexus,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Audnexus,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        queue
+            .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+            .await
+            .expect("half-open Audnexus breaker must admit one probe")
+    }
+
+    #[test]
+    fn audnexus_client_accepts_the_recording_fetcher_seam() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<AudnexusClient<crate::test_support::RecordingHttpFetcher>>();
+    }
+
+    #[test]
+    fn hardcover_client_accepts_the_recording_fetcher_seam() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<HardcoverClient<crate::test_support::RecordingHttpFetcher>>();
+    }
+
+    #[test]
+    fn goodreads_client_accepts_the_recording_fetcher_seam() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<GoodreadsClient<crate::test_support::RecordingHttpFetcher>>();
+    }
+
+    #[tokio::test]
+    async fn audnexus_terminal_item_absences_close_half_open_at_client_boundary() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+
+        for status in [404, 410] {
+            let probe = half_open_audnexus_client_probe().await;
+            let fetcher = crate::test_support::RecordingHttpFetcher::new();
+            fetcher.push_response(Ok(FetchResponse {
+                status,
+                headers: vec![],
+                body: vec![],
+            }));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            let client = AudnexusClient::new(fetcher.clone(), "https://api.audnex.us");
+
+            let outcome = client
+                .fetch_by_asin("B0MISSING", RequestPriority::Normal)
+                .await;
+            assert!(matches!(outcome, ProviderOutcome::NotFound));
+            assert!(query_audnexus(
+                &fetcher,
+                "https://api.audnex.us",
+                None,
+                "Dune",
+                "Frank Herbert",
+                &AudnexusCache::new(),
+                RequestPriority::Normal,
+            )
+            .await
+            .is_err());
+            drop(probe);
+
+            queue
+                .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                .await
+                .expect("terminal Audnexus item absence must close half-open");
+        }
+    }
+
+    #[tokio::test]
+    async fn audnexus_parsed_hit_and_empty_search_close_half_open_at_client_boundary() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+
+        for (body, anchor) in [
+            (br#"{"asin":"B0HIT"}"#.to_vec(), true),
+            (br#"[]"#.to_vec(), false),
+        ] {
+            let probe = half_open_audnexus_client_probe().await;
+            let fetcher = crate::test_support::RecordingHttpFetcher::new();
+            fetcher.push_response(Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body,
+            }));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 403,
+                headers: vec![],
+                body: vec![],
+            }));
+            let client = AudnexusClient::new(fetcher.clone(), "https://api.audnex.us");
+
+            let outcome = if anchor {
+                client.fetch_by_asin("B0HIT", RequestPriority::Normal).await
+            } else {
+                client
+                    .fetch(
+                        &Work {
+                            title: "Dune".to_string(),
+                            author_name: "Frank Herbert".to_string(),
+                            ..Default::default()
+                        },
+                        RequestPriority::Normal,
+                    )
+                    .await
+            };
+            assert!(matches!(
+                outcome,
+                ProviderOutcome::Success(_) | ProviderOutcome::NotFound
+            ));
+            assert!(query_audnexus(
+                &fetcher,
+                "https://api.audnex.us",
+                None,
+                "Dune",
+                "Frank Herbert",
+                &AudnexusCache::new(),
+                RequestPriority::Normal,
+            )
+            .await
+            .is_err());
+            drop(probe);
+
+            queue
+                .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                .await
+                .expect("parsed Audnexus terminal hit/miss must close half-open");
+        }
+    }
+
+    #[tokio::test]
+    async fn audnexus_cache_backed_304_closes_half_open_at_client_boundary() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![("Last-Modified".to_string(), "seed-v1".to_string())],
+            body: br#"{"asin":"B0CACHE"}"#.to_vec(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 304,
+            headers: vec![],
+            body: vec![],
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let client = AudnexusClient::new(fetcher.clone(), "https://api.audnex.us");
+
+        assert!(matches!(
+            client
+                .fetch_by_asin("B0CACHE", RequestPriority::Normal)
+                .await,
+            ProviderOutcome::Success(_)
+        ));
+        let probe = half_open_audnexus_client_probe().await;
+        assert!(matches!(
+            client
+                .fetch_by_asin("B0CACHE", RequestPriority::Normal)
+                .await,
+            ProviderOutcome::Success(_)
+        ));
+        assert!(query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Dune",
+            "Frank Herbert",
+            &AudnexusCache::new(),
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+
+        queue
+            .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+            .await
+            .expect("cache-backed 304 must report terminal client Success");
+    }
+
+    #[tokio::test]
+    async fn audnexus_seeded_item_miss_then_broken_search_reopens_half_open() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_audnexus_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(FetchResponse {
+            status: 404,
+            headers: vec![],
+            body: vec![],
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 403,
+            headers: vec![],
+            body: vec![],
+        }));
+        let client = AudnexusClient::new(fetcher, "https://api.audnex.us");
+        let outcome = client
+            .fetch(
+                &Work {
+                    title: "Dune".to_string(),
+                    author_name: "Frank Herbert".to_string(),
+                    asin: Some("B0MISSING".to_string()),
+                    ..Default::default()
+                },
+                RequestPriority::Normal,
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::PermanentFailure {
+                reason: PermanentFailureReason::Unsupported
+            }
+        ));
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    fn hardcover_live_config() -> crate::live_config::LiveMetadataConfig {
+        crate::live_config::LiveMetadataConfig::new(livrarr_domain::settings::MetadataConfig {
+            hardcover_enabled: true,
+            hardcover_api_token: Some("test-token".to_string()),
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: String::new(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        })
+    }
+
+    async fn half_open_hardcover_client_probe() -> livrarr_http::outbound_queue::QueuePermit {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+
+        let queue = outbound_queue::shared();
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(
+            RateBucket::Hardcover,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Hardcover,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await
+            .expect("half-open Hardcover breaker must admit one probe")
+    }
+
+    fn hardcover_hit_response() -> livrarr_domain::services::FetchResponse {
+        livrarr_domain::services::FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({
+                "data": {
+                    "search": {
+                        "results": {
+                            "hits": [{
+                                "document": {
+                                    "id": 42,
+                                    "title": "Dune",
+                                    "author_names": ["Frank Herbert"],
+                                    "users_read_count": 100
+                                }
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string()
+            .into_bytes(),
+        }
+    }
+
+    #[tokio::test]
+    async fn hardcover_anchor_graphql_errors_are_retryable_error_records_and_open_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let envelope = serde_json::json!({
+            "errors": [{"message": "denied"}],
+            "data": {
+                "search": {"results": {"hits": []}},
+                "books_by_pk": null
+            }
+        });
+
+        for query in [
+            AnchorQuery::Isbn13("9780441172719".to_string()),
+            AnchorQuery::HcKey("42".to_string()),
+        ] {
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(
+                RateBucket::Hardcover,
+                CircuitBreakerConfig {
+                    failure_threshold: 1,
+                    evaluation_window_secs: 60,
+                    open_duration_secs: 60,
+                    half_open_probe_count: 1,
+                },
+            );
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                envelope.to_string().into_bytes(),
+            );
+            let client = HardcoverClient::new(fetcher, hardcover_live_config());
+
+            let outcome = client
+                .fetch_by_anchor_query(&query, RequestPriority::Normal)
+                .await;
+            assert!(matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::ServerError,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                outcome_record_class(&outcome).0,
+                CallOutcomeClass::Error
+            ));
+            assert!(matches!(
+                queue
+                    .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                    .await,
+                Err(AdmissionError::CircuitOpen { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn hardcover_seeded_graphql_errors_stop_without_fallback_or_partial_consumption() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let cases = [
+            (
+                Work {
+                    title: "Dune".to_string(),
+                    author_name: "Frank Herbert".to_string(),
+                    isbn_13: Some("9780441172719".to_string()),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "errors": [{"message": "denied"}],
+                    "data": {"search": {"results": {"hits": []}}}
+                }),
+            ),
+            (
+                Work {
+                    title: "Dune".to_string(),
+                    author_name: "Frank Herbert".to_string(),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "errors": [{"message": "denied"}],
+                    "data": {"search": {"results": {"hits": []}}}
+                }),
+            ),
+            (
+                Work {
+                    title: "Dune".to_string(),
+                    author_name: "Frank Herbert".to_string(),
+                    ..Default::default()
+                },
+                serde_json::json!({
+                    "errors": [{"message": "partial"}],
+                    "data": {
+                        "search": {
+                            "results": {
+                                "hits": [{
+                                    "document": {
+                                        "id": 42,
+                                        "title": "Dune",
+                                        "author_names": ["Frank Herbert"],
+                                        "users_read_count": 100
+                                    }
+                                }]
+                            }
+                        }
+                    }
+                }),
+            ),
+        ];
+
+        for (work, envelope) in cases {
+            outbound_queue::shared().reset_breaker_for_tests(RateBucket::Hardcover);
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                envelope.to_string().into_bytes(),
+            );
+            let client = HardcoverClient::new(fetcher.clone(), hardcover_live_config());
+            let outcome = client.fetch(&work, RequestPriority::Normal).await;
+
+            assert!(matches!(
+                outcome,
+                ProviderOutcome::WillRetry {
+                    reason: WillRetryReason::ServerError,
+                    ..
+                }
+            ));
+            assert_eq!(
+                fetcher.call_count(),
+                1,
+                "GraphQL error must stop before fallback or editions"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hardcover_editions_failure_accumulates_at_production_threshold() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Hardcover,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for _ in 0..5 {
+            fetcher.push_response(Ok(hardcover_hit_response()));
+            fetcher.push_response(Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: serde_json::json!({
+                    "errors": [{"message": "editions denied"}],
+                    "data": {"editions": []}
+                })
+                .to_string()
+                .into_bytes(),
+            }));
+        }
+        let client = HardcoverClient::new(fetcher, hardcover_live_config());
+        let work = Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Default::default()
+        };
+
+        for _ in 0..5 {
+            assert!(matches!(
+                client.fetch(&work, RequestPriority::Normal).await,
+                ProviderOutcome::Success(_)
+            ));
+        }
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hardcover_editions_error_keeps_payload_but_reopens_half_open() {
+        use livrarr_domain::services::FetchResponse;
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_hardcover_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(hardcover_hit_response()));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({
+                "errors": [{"message": "editions denied"}],
+                "data": {"editions": []}
+            })
+            .to_string()
+            .into_bytes(),
+        }));
+        let client = HardcoverClient::new(fetcher, hardcover_live_config());
+        let outcome = client
+            .fetch(
+                &Work {
+                    title: "Dune".to_string(),
+                    author_name: "Frank Herbert".to_string(),
+                    ..Default::default()
+                },
+                RequestPriority::Normal,
+            )
+            .await;
+        assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hardcover_empty_editions_reports_one_outer_success() {
+        use livrarr_domain::services::FetchResponse;
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_hardcover_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(hardcover_hit_response()));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({"data": {"editions": []}})
+                .to_string()
+                .into_bytes(),
+        }));
+        fetcher.push_response(Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({
+                "errors": [{"message": "later failure"}],
+                "data": {"search": {"results": {"hits": []}}}
+            })
+            .to_string()
+            .into_bytes(),
+        }));
+        let client = HardcoverClient::new(fetcher.clone(), hardcover_live_config());
+        assert!(matches!(
+            client
+                .fetch(
+                    &Work {
+                        title: "Dune".to_string(),
+                        author_name: "Frank Herbert".to_string(),
+                        ..Default::default()
+                    },
+                    RequestPriority::Normal,
+                )
+                .await,
+            ProviderOutcome::Success(_)
+        ));
+        assert!(crate::hardcover::hc_post(
+            &fetcher,
+            crate::hardcover::hc_search_body(1, "later"),
+            "test-token",
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+
+        queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await
+            .expect("healthy empty editions must close half-open at the outer boundary");
+    }
+
     fn hit(title: &str, title_bare: Option<&str>, author: &str) -> GoodreadsSearchResult {
         GoodreadsSearchResult {
             title: title.to_string(),
@@ -3072,9 +3737,312 @@ mod tests {
         )
     }
 
+    fn goodreads_recording_client(
+        fetcher: crate::test_support::RecordingHttpFetcher,
+    ) -> GoodreadsClient<crate::test_support::RecordingHttpFetcher> {
+        GoodreadsClient::new(
+            fetcher,
+            HttpClient::builder().build().expect("http client"),
+            "https://www.goodreads.com",
+        )
+    }
+
+    fn goodreads_response(
+        status: u16,
+        body: impl Into<Vec<u8>>,
+    ) -> livrarr_domain::services::FetchResponse {
+        livrarr_domain::services::FetchResponse {
+            status,
+            headers: vec![],
+            body: body.into(),
+        }
+    }
+
+    fn goodreads_test_work(isbn_13: Option<&str>) -> Work {
+        Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            isbn_13: isbn_13.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn goodreads_title_hit_body() -> &'static str {
+        r#"[{"title":"Dune","bookTitleBare":"Dune","bookUrl":"/book/show/44767458","author":{"name":"Frank Herbert"}}]"#
+    }
+
+    fn goodreads_usable_detail_body() -> &'static str {
+        r#"<html><script type="application/ld+json">
+        {"@context":"https://schema.org","@type":"Book","name":"Dune","author":[{"@type":"Person","name":"Frank Herbert"}]}
+        </script></html>"#
+    }
+
+    async fn half_open_goodreads_client_probe() -> livrarr_http::outbound_queue::QueuePermit {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+
+        let queue = outbound_queue::shared();
+        queue.reset_breaker_for_tests(RateBucket::Goodreads);
+        queue.set_breaker_config_for_tests(
+            RateBucket::Goodreads,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        queue.report_outcome(
+            RateBucket::Goodreads,
+            BreakerSignal::TripImmediately {
+                open_for: Some(Duration::from_millis(5)),
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        queue
+            .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+            .await
+            .expect("half-open Goodreads breaker must admit one probe")
+    }
+
+    #[tokio::test]
+    async fn goodreads_terminal_title_decode_failure_is_retryable_error_and_opens_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Goodreads,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            b"<html>not autocomplete JSON</html>".to_vec(),
+        );
+        let client = goodreads_recording_client(fetcher);
+
+        let outcome = client
+            .fetch(&goodreads_test_work(None), RequestPriority::Normal)
+            .await;
+        assert!(matches!(
+            outcome,
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::ServerError,
+                ..
+            }
+        ));
+        assert_eq!(
+            outcome_record_class(&outcome).0,
+            CallOutcomeClass::Error,
+            "the public call record must retain the retryable provider failure"
+        );
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goodreads_failed_isbn_fallback_keeps_payload_without_outer_success() {
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_goodreads_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for body in [
+            "<html>broken ISBN autocomplete</html>",
+            goodreads_title_hit_body(),
+            goodreads_usable_detail_body(),
+        ] {
+            fetcher.push_response(Ok(goodreads_response(200, body.as_bytes().to_vec())));
+        }
+        let client = goodreads_recording_client(fetcher.clone());
+
+        assert!(matches!(
+            client
+                .fetch(
+                    &goodreads_test_work(Some("9780441172719")),
+                    RequestPriority::Normal,
+                )
+                .await,
+            ProviderOutcome::Success(_)
+        ));
+        assert_eq!(fetcher.call_count(), 3);
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goodreads_failed_isbn_fallback_accumulates_at_production_threshold() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Goodreads,
+            CircuitBreakerConfig {
+                failure_threshold: 5,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for _ in 0..5 {
+            for body in [
+                "<html>broken ISBN autocomplete</html>",
+                goodreads_title_hit_body(),
+                goodreads_usable_detail_body(),
+            ] {
+                fetcher.push_response(Ok(goodreads_response(200, body.as_bytes().to_vec())));
+            }
+        }
+        let client = goodreads_recording_client(fetcher.clone());
+
+        for _ in 0..5 {
+            assert!(matches!(
+                client
+                    .fetch(
+                        &goodreads_test_work(Some("9780441172719")),
+                        RequestPriority::Normal,
+                    )
+                    .await,
+                ProviderOutcome::Success(_)
+            ));
+        }
+        assert_eq!(fetcher.call_count(), 15);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goodreads_fully_healthy_fallback_reports_one_final_success() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_goodreads_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for body in [
+            "[]",
+            goodreads_title_hit_body(),
+            goodreads_usable_detail_body(),
+            "<html>later broken autocomplete</html>",
+        ] {
+            fetcher.push_response(Ok(goodreads_response(200, body.as_bytes().to_vec())));
+        }
+        let client = goodreads_recording_client(fetcher.clone());
+
+        assert!(matches!(
+            client
+                .fetch(
+                    &goodreads_test_work(Some("9780441172719")),
+                    RequestPriority::Normal,
+                )
+                .await,
+            ProviderOutcome::Success(_)
+        ));
+        assert!(goodreads::search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "later",
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+        queue
+            .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+            .await
+            .expect("healthy fallback must close half-open before one later failure");
+    }
+
+    #[tokio::test]
+    async fn goodreads_healthy_title_miss_reports_outer_success() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_goodreads_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(goodreads_response(200, b"[]".to_vec())));
+        fetcher.push_response(Ok(goodreads_response(
+            200,
+            b"<html>later broken autocomplete</html>".to_vec(),
+        )));
+        let client = goodreads_recording_client(fetcher.clone());
+
+        assert!(matches!(
+            client
+                .fetch(&goodreads_test_work(None), RequestPriority::Normal)
+                .await,
+            ProviderOutcome::NotFound
+        ));
+        assert!(goodreads::search_goodreads(
+            &fetcher,
+            "https://www.goodreads.com",
+            "later",
+            RequestPriority::Normal,
+        )
+        .await
+        .is_err());
+        drop(probe);
+        queue
+            .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+            .await
+            .expect("healthy terminal miss must close half-open at the outer boundary");
+    }
+
+    #[tokio::test]
+    async fn goodreads_miss_after_failed_isbn_emits_no_outer_success() {
+        use livrarr_http::outbound_queue::AdmissionError;
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        let probe = half_open_goodreads_client_probe().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        fetcher.push_response(Ok(goodreads_response(
+            200,
+            b"<html>broken ISBN autocomplete</html>".to_vec(),
+        )));
+        fetcher.push_response(Ok(goodreads_response(200, b"[]".to_vec())));
+        let client = goodreads_recording_client(fetcher);
+
+        assert!(matches!(
+            client
+                .fetch(
+                    &goodreads_test_work(Some("9780441172719")),
+                    RequestPriority::Normal,
+                )
+                .await,
+            ProviderOutcome::NotFound
+        ));
+        drop(probe);
+        assert!(matches!(
+            queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await,
+            Err(AdmissionError::CircuitOpen { .. })
+        ));
+    }
+
     /// The production door for an established Goodreads key, driven end to end
-    /// against a real socket — `GoodreadsClient` owns a concrete fetcher, so no
-    /// double can be injected and only a real server exercises this path.
+    /// against a real socket through the default concrete fetcher
+    /// specialization.
     ///
     /// A 200 carrying a page we cannot read is Goodreads' problem, not evidence
     /// the book is absent. Before this, the door returned `NotFound`: the book
@@ -3745,9 +4713,9 @@ mod tests {
         // identity quorum of a GR key. Any FUTURE change to this must be
         // deliberate.
         //
-        // `GoodreadsClient` is hardwired to the concrete `HttpFetcherImpl`
-        // (not generic over `HttpFetcher`), so this drives the REAL fetcher
-        // end-to-end rather than a test double. The autocomplete hit's
+        // This regression deliberately instantiates the default concrete
+        // `HttpFetcherImpl` specialization, so it drives the REAL fetcher
+        // end-to-end rather than the injectable recording seam. The autocomplete hit's
         // `bookUrl` is a relative path, which resolves against `base_url`
         // (this loopback test server) — so the "detail" fetch targets
         // 127.0.0.1, which the real SSRF preflight in `fetch_ssrf_safe_impl`
