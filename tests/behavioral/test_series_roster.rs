@@ -82,7 +82,7 @@ const ROSTER_HTML_PAGE1_OF_2: &str = r#"<html><body>
 
 async fn seed_series(db: &SqliteDb, gr_key: &str) -> (UserId, i64, i64) {
     let user_id = create_test_user(db).await;
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Jim Butcher".to_string(),
@@ -388,7 +388,7 @@ async fn stub_collision_with_stored_empty_roster_refetches_and_heals() {
     // is served from the pre-seeded cache).
     let fetcher = StubHttpFetcher::with_ok(200, ROSTER_HTML.as_bytes().to_vec());
     let user_id = create_test_user(&db).await;
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Jim Butcher".to_string(),

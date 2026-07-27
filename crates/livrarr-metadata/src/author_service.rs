@@ -170,12 +170,18 @@ where
             import_id: None,
         };
 
-        let author = self
+        let (author, created) = self
             .db
             .create_author(db_req)
             .await
             .map_err(AuthorServiceError::Db)?;
-        Ok(AddAuthorResult::Created(author))
+        // A creation-race loser converges on the winning row: same shape as
+        // the adopted/exact-hit arms above, never a second Created (REQ-002).
+        Ok(if created {
+            AddAuthorResult::Created(author)
+        } else {
+            AddAuthorResult::Updated(author)
+        })
     }
 
     async fn get(
@@ -246,6 +252,16 @@ where
             .await
             .map_err(|e| match e {
                 DbError::NotFound { .. } => AuthorServiceError::NotFound,
+                // Rename onto another author's stored identity key: rejected,
+                // naming the colliding author; an intended merge goes through
+                // the merge endpoint instead (REQ-004).
+                DbError::IdentityCollision { id, name, .. } => AuthorServiceError::Validation {
+                    field: "name".into(),
+                    message: format!(
+                        "name collides with existing author \"{name}\" (id {id}); \
+                         use the author merge action to combine them"
+                    ),
+                },
                 other => AuthorServiceError::Db(other),
             })
     }

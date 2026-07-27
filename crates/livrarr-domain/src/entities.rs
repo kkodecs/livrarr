@@ -290,6 +290,13 @@ pub enum DbError {
     #[error("conflict: {message}")]
     Conflict { message: String },
 
+    #[error("identity collision: {entity} \"{name}\" (id {id}) already holds this identity")]
+    IdentityCollision {
+        entity: &'static str,
+        id: i64,
+        name: String,
+    },
+
     #[error("cannot remove the last remaining admin")]
     LastAdmin,
 

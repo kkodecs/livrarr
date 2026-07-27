@@ -261,7 +261,7 @@ async fn test_wcc_path_seams_ac_002_031_readarr_candidate_persists_foreign_book_
 async fn test_wcc_path_seams_ac_025_author_monitor_create_persists_native_ol_anchor() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Frank Herbert".to_string(),

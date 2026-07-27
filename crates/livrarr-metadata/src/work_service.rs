@@ -2887,7 +2887,10 @@ where
                     return Ok((false, Some(adopted.id)));
                 }
 
-                let author = self
+                // `created` is the DB's own verdict: a creation-race loser
+                // converges on the winning row and reports false, exactly
+                // like a lookup hit (REQ-002).
+                let (author, created) = self
                     .db
                     .create_author(CreateAuthorDbRequest {
                         user_id,
@@ -2900,7 +2903,7 @@ where
                     })
                     .await
                     .map_err(WorkServiceError::Db)?;
-                Ok((true, Some(author.id)))
+                Ok((created, Some(author.id)))
             }
         }
     }

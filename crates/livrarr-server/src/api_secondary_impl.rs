@@ -24,6 +24,9 @@ fn db_err(e: DbError) -> ApiError {
         DbError::LastAdmin => ApiError::Conflict {
             reason: "cannot remove the last remaining admin".to_string(),
         },
+        e @ DbError::IdentityCollision { .. } => ApiError::Conflict {
+            reason: e.to_string(),
+        },
         DbError::DataCorruption { detail, .. } => ApiError::Internal(detail),
         DbError::IncompatibleData { detail } => ApiError::Internal(detail),
         DbError::Io(e) => ApiError::Internal(e.to_string()),
@@ -80,7 +83,7 @@ impl AuthorApi for SecondaryApiImpl {
                 .map_err(db_err)?;
             return Ok(author_to_response(&updated));
         }
-        let author = self
+        let (author, _) = self
             .db
             .create_author(CreateAuthorDbRequest {
                 user_id: uid,

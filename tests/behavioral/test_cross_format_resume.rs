@@ -158,7 +158,7 @@ async fn seed_library(db: &SqliteDb) -> Seed {
         .await
         .unwrap();
 
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id: user.id,
             name: "Test Author".to_string(),
@@ -1947,7 +1947,7 @@ async fn update_progress_legacy_body_defaults_to_seek_and_succeeds() {
         })
         .await
         .unwrap();
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id: user.id,
             name: "Handler Author".to_string(),

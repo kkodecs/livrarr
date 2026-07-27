@@ -649,6 +649,16 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
         std::process::exit(1);
     }
 
+    // Step 9b (authors): Backfill authors.normalized_name, merge duplicate
+    // author rows through the shared merge contract, and create the partial
+    // UNIQUE index (issue #175). Migration 077 adds the column only; the
+    // index arms here, after repair — same shape as Step 9b for works.
+    if let Err(e) = livrarr_db::pool::backfill_author_identity(&pool).await {
+        error!("author identity backfill failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
     // Step 9c: Recompute works.normalized_title/normalized_author via the
     // identity_matching authority's identity_key recipe (REQ-014),
     // superseding the retired normalize_for_matching. Idempotent — migration

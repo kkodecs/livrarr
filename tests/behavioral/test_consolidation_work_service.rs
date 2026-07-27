@@ -348,7 +348,7 @@ async fn test_work_add_result_author_id_when_existing_author_reused() {
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
 
-    let existing = db
+    let (existing, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Octavia E. Butler".into(),

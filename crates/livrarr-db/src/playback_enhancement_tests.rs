@@ -45,7 +45,7 @@ mod tests {
             .await
             .unwrap();
 
-        let author = db
+        let (author, _) = db
             .create_author(CreateAuthorDbRequest {
                 user_id: user.id,
                 name: "Test Author".to_string(),
@@ -148,7 +148,7 @@ mod tests {
             .await
             .unwrap();
 
-        let author_b = db
+        let (author_b, _) = db
             .create_author(CreateAuthorDbRequest {
                 user_id: user_b.id,
                 name: "Author B".to_string(),

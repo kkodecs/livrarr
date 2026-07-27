@@ -810,6 +810,143 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
     Ok(())
 }
 
+/// Backfill `authors.normalized_name`, merge duplicate author rows per
+/// (user_id, stored key) through the shared merge contract, and create the
+/// partial UNIQUE index — all inside ONE transaction (issue #175, REQ-003).
+///
+/// Migration 077 added the column NULL-valued and unindexed — installs may
+/// hold duplicate author rows. This computes each row's key via
+/// `identity_matching::canonical_author_key` (a non-canonicalizable name
+/// keeps NULL — the ST-010 exemption), resolves every duplicate group
+/// through `merge_authors_tx` — the same policy as the live merge endpoint —
+/// onto the D-5 keeper (most works → most external keys → oldest id), then
+/// creates `idx_authors_identity`. The `_livrarr_meta` completion marker is
+/// the last write before commit: a mid-transaction failure rolls back every
+/// data change together with the marker, so a partial run can never be
+/// mistaken for a complete one on the next startup.
+///
+/// Idempotent via the `author_identity_backfill_complete` marker: once
+/// stamped, this is a single read and an early return.
+pub async fn backfill_author_identity(pool: &SqlitePool) -> Result<(), String> {
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key = 'author_identity_backfill_complete'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("read author_identity_backfill_complete: {e}"))?;
+
+    if marker.as_deref() == Some("1") {
+        tracing::debug!("author identity backfill: already complete (marker present)");
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin author identity backfill transaction: {e}"))?;
+
+    // Step 1: compute the stored key for every unkeyed row; an empty-recipe
+    // name keeps NULL (ST-010) — "" is never stored.
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, name FROM authors WHERE normalized_name IS NULL")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| format!("select unkeyed authors: {e}"))?;
+
+    let mut keyed = 0usize;
+    for (id, name) in &rows {
+        let key = livrarr_domain::identity_matching::canonical_author_key(name);
+        if key.is_empty() {
+            continue;
+        }
+        sqlx::query("UPDATE authors SET normalized_name = ? WHERE id = ?")
+            .bind(&key)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("backfill normalized_name for author {id}: {e}"))?;
+        keyed += 1;
+    }
+
+    // Step 2: merge duplicate groups per (user_id, key). Keeper per the
+    // shipped D-5 policy: most works → most external keys → oldest id.
+    let dupes: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT user_id, normalized_name FROM authors \
+         WHERE normalized_name IS NOT NULL \
+         GROUP BY user_id, normalized_name \
+         HAVING COUNT(*) > 1",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("scan duplicate authors: {e}"))?;
+
+    if !dupes.is_empty() {
+        tracing::warn!(
+            "author identity backfill: {} duplicate author groups detected",
+            dupes.len()
+        );
+    }
+
+    let mut merged_count = 0i64;
+    for (user_id, key) in &dupes {
+        let ranked: Vec<i64> = sqlx::query_scalar(
+            "SELECT a.id FROM authors a \
+             WHERE a.user_id = ? AND a.normalized_name = ? \
+             ORDER BY (SELECT COUNT(*) FROM works w \
+                       WHERE w.author_id = a.id AND w.user_id = a.user_id) DESC, \
+                      (a.ol_key IS NOT NULL) + (a.gr_key IS NOT NULL) + (a.hc_key IS NOT NULL) DESC, \
+                      a.id ASC",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| format!("rank duplicate author group for user {user_id}: {e}"))?;
+
+        let keeper_id = ranked[0];
+        for &loser_id in &ranked[1..] {
+            crate::sqlite_author::merge_authors_tx(&mut tx, *user_id, keeper_id, loser_id)
+                .await
+                .map_err(|e| format!("merge author {loser_id} into {keeper_id}: {e}"))?;
+            merged_count += 1;
+        }
+        tracing::info!(
+            "author identity backfill: merged {} duplicates into author {keeper_id}",
+            ranked.len() - 1
+        );
+    }
+
+    // Step 3: create the partial UNIQUE index now that groups are resolved;
+    // NULL-keyed rows stay outside it (ST-010).
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_identity \
+         ON authors(user_id, normalized_name) WHERE normalized_name IS NOT NULL",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("create idx_authors_identity: {e}"))?;
+
+    // Completion marker — the LAST write before commit; a failure above
+    // rolls back every data change together with this marker.
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('author_identity_backfill_complete', '1') \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("stamp author_identity_backfill_complete marker: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("commit author identity backfill transaction: {e}"))?;
+
+    tracing::info!(
+        "author identity backfill complete: {keyed} authors keyed, {merged_count} duplicates resolved"
+    );
+    Ok(())
+}
+
 /// The compiled-in identity-key recipe generation (REQ-014). Bump this
 /// constant whenever `identity_matching::identity_key`'s output changes in a
 /// way that changes stored `works.normalized_title`/`normalized_author`
@@ -2079,6 +2216,521 @@ mod backfill_normalized_identity_tests {
             vec![(keeper_id, user_id)],
             "the import_intent row must be repointed to the keeper, not cascade-deleted: {intents:?}"
         );
+    }
+}
+
+/// REQ-003/REQ-004 (issue #175): `backfill_author_identity` must be one
+/// atomic, marker-guarded, idempotent transaction that repairs duplicate
+/// authors through the shared merge contract BEFORE arming the unique
+/// index. Tests seed the REAL legacy precondition — `authors` rows with
+/// NULL `normalized_name`, exactly what migration 077 leaves on an upgraded
+/// install — via direct SQL, not `create_author()`, whose named ON CONFLICT
+/// target requires the very unique index this function is responsible for
+/// creating (the same justification as `backfill_normalized_identity_tests`
+/// above; spec AC-003).
+#[cfg(test)]
+mod backfill_author_identity_tests {
+    use super::*;
+    use crate::sqlite::SqliteDb;
+    use crate::test_helpers::create_test_db;
+    use crate::{CreateUserDbRequest, UserDb, UserRole};
+    use livrarr_domain::identity_matching::canonical_author_key;
+
+    async fn seed_user(db: &SqliteDb, username: &str) -> i64 {
+        db.create_user(CreateUserDbRequest {
+            username: username.into(),
+            password_hash: "hash".into(),
+            role: UserRole::User,
+            api_key_hash: format!("{username}-key"),
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// The test harness bootstraps the post-repair author index (so
+    /// `create_author`'s conflict target always resolves); this function's
+    /// whole job runs BEFORE that index exists, so repair tests drop it to
+    /// seed the legacy state.
+    async fn drop_harness_author_index(pool: &SqlitePool) {
+        sqlx::query("DROP INDEX IF EXISTS idx_authors_identity")
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Raw-insert an author in the legacy pre-backfill state: NULL
+    /// `normalized_name`, exactly what migration 077 leaves behind.
+    async fn seed_legacy_author(
+        pool: &SqlitePool,
+        user_id: i64,
+        name: &str,
+        ol_key: Option<&str>,
+        gr_key: Option<&str>,
+        monitored: bool,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO authors (user_id, name, ol_key, gr_key, monitored, added_at) \
+             VALUES (?, ?, ?, ?, ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(ol_key)
+        .bind(gr_key)
+        .bind(monitored)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+    }
+
+    async fn seed_work(
+        pool: &SqlitePool,
+        user_id: i64,
+        author_id: i64,
+        title: &str,
+        series_id: Option<i64>,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO works (user_id, title, author_name, normalized_title, \
+             normalized_author, author_id, series_id, enrichment_status, added_at) \
+             VALUES (?, ?, 'seed', ?, 'seed-author', ?, ?, 'unenriched', '2026-01-01')",
+        )
+        .bind(user_id)
+        .bind(title)
+        .bind(title.to_lowercase())
+        .bind(author_id)
+        .bind(series_id)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+    }
+
+    async fn seed_series(
+        pool: &SqlitePool,
+        user_id: i64,
+        author_id: i64,
+        name: &str,
+        gr_key: &str,
+        monitor_ebook: bool,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO series (user_id, author_id, name, gr_key, monitor_ebook) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .bind(name)
+        .bind(gr_key)
+        .bind(monitor_ebook)
+        .execute(pool)
+        .await
+        .unwrap()
+        .last_insert_rowid()
+    }
+
+    async fn seed_caches(pool: &SqlitePool, author_id: i64) {
+        sqlx::query("INSERT INTO author_series_cache (author_id, entries) VALUES (?, '[]')")
+            .bind(author_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO author_bibliography (author_id, entries) VALUES (?, '[]')")
+            .bind(author_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn marker_value(pool: &SqlitePool) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT value FROM _livrarr_meta WHERE key = 'author_identity_backfill_complete'",
+        )
+        .fetch_optional(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn author_index_exists(pool: &SqlitePool) -> bool {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'index' AND name = 'idx_authors_identity'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        n > 0
+    }
+
+    async fn authors_snapshot(
+        pool: &SqlitePool,
+    ) -> Vec<(
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+    )> {
+        sqlx::query_as(
+            "SELECT id, name, normalized_name, ol_key, gr_key, monitored \
+             FROM authors ORDER BY id",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    // ---- (a) Full repair: D-5 keeper, fold/move arms, caches, junk pair,
+    //      display rewrite, monotonic fields, index, marker, idempotency ----
+
+    #[tokio::test]
+    async fn repair_merges_groups_via_shared_contract_with_d5_keeper_and_arms_index() {
+        let db = create_test_db().await;
+        drop_harness_author_index(db.pool()).await;
+        let user_id = seed_user(&db, "author-repair-user").await;
+
+        // Group 1 — byte-identical names, the exact #175 field shape. The
+        // D-5 keeper (most works) is deliberately NOT the oldest id.
+        let a1 = seed_legacy_author(db.pool(), user_id, "Anne Rice", None, None, false).await;
+        let a2 =
+            seed_legacy_author(db.pool(), user_id, "Anne Rice", Some("OL-A2"), None, false).await;
+        let a3 =
+            seed_legacy_author(db.pool(), user_id, "Anne Rice", None, Some("GR-A3"), false).await;
+
+        // Same-gr_key series on keeper AND loser -> FOLD arm (flags OR);
+        // loser-only series -> MOVE arm.
+        let s_keeper = seed_series(db.pool(), user_id, a2, "Vampire Chronicles", "VC", false).await;
+        let s_loser = seed_series(db.pool(), user_id, a1, "Vampire Chronicles", "VC", true).await;
+        seed_series(db.pool(), user_id, a3, "Mayfair Witches", "MW", false).await;
+
+        // Works scattered across the duplicates; a1's work rides the loser
+        // series so the fold must repoint it without unlinking.
+        let w1 = seed_work(db.pool(), user_id, a1, "Interview", Some(s_loser)).await;
+        let w2 = seed_work(db.pool(), user_id, a2, "Lestat", None).await;
+        let w3 = seed_work(db.pool(), user_id, a2, "Queen of the Damned", None).await;
+
+        seed_caches(db.pool(), a1).await;
+        seed_caches(db.pool(), a3).await;
+
+        // Group 2 — display variants converging on one canonical key:
+        // keeper by most works; the loser carries the only ol_key and the
+        // only monitored=true (monotonic fill + OR).
+        let b1 = seed_legacy_author(db.pool(), user_id, "J.K. Rowling", None, None, false).await;
+        let b2 = seed_legacy_author(
+            db.pool(),
+            user_id,
+            "J. K. Rowling",
+            Some("OL-B2"),
+            None,
+            true,
+        )
+        .await;
+        seed_work(db.pool(), user_id, b1, "Casual Vacancy", None).await;
+        seed_work(db.pool(), user_id, b1, "Ickabog", None).await;
+        let bw = seed_work(db.pool(), user_id, b2, "Christmas Pig", None).await;
+
+        // Group 3 — works-tied: the key-count tiebreak decides, again NOT
+        // the oldest id.
+        let c1 = seed_legacy_author(db.pool(), user_id, "Ursula Vernon", None, None, false).await;
+        let c2 = seed_legacy_author(
+            db.pool(),
+            user_id,
+            "Ursula Vernon",
+            Some("OL-C2"),
+            Some("GR-C2"),
+            false,
+        )
+        .await;
+
+        // ST-010 pair: two distinct junk-named authors stay separate.
+        let j1 = seed_legacy_author(db.pool(), user_id, "Jr.", None, None, false).await;
+        let j2 = seed_legacy_author(db.pool(), user_id, "(Editor)", None, None, false).await;
+
+        backfill_author_identity(db.pool()).await.unwrap();
+
+        // Group 1: keeper a2 (most works, not oldest), losers gone.
+        let anne_rows: Vec<(i64, Option<String>)> =
+            sqlx::query_as("SELECT id, normalized_name FROM authors WHERE name = 'Anne Rice'")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            anne_rows.len(),
+            1,
+            "exactly one Anne Rice row must survive: {anne_rows:?}"
+        );
+        assert_eq!(anne_rows[0].0, a2, "D-5 keeper is most-works, not oldest");
+        assert_eq!(
+            anne_rows[0].1.as_deref(),
+            Some(canonical_author_key("Anne Rice").as_str()),
+            "survivor carries the recipe's stored key"
+        );
+
+        // All three works on the keeper; w1 repointed to the folded series.
+        let work_rows: Vec<(i64, i64, Option<i64>)> =
+            sqlx::query_as("SELECT id, author_id, series_id FROM works WHERE id IN (?, ?, ?)")
+                .bind(w1)
+                .bind(w2)
+                .bind(w3)
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        for (wid, author_id, _) in &work_rows {
+            assert_eq!(*author_id, a2, "work {wid} must be parented to the keeper");
+        }
+        let w1_series: Option<i64> = work_rows.iter().find(|r| r.0 == w1).unwrap().2;
+        assert_eq!(
+            w1_series,
+            Some(s_keeper),
+            "fold must repoint the loser-series work, never unlink it"
+        );
+
+        // FOLD: one VC row under the keeper with OR'd flag + the language
+        // backstop; MOVE: MW travels intact to the keeper.
+        let vc: Vec<(i64, i64, bool, Option<String>)> = sqlx::query_as(
+            "SELECT id, author_id, monitor_ebook, monitor_language FROM series WHERE gr_key = 'VC'",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(vc.len(), 1, "fold leaves exactly one VC series: {vc:?}");
+        assert_eq!(vc[0].0, s_keeper);
+        assert_eq!(vc[0].1, a2);
+        assert!(vc[0].2, "loser's monitor_ebook must OR into the fold");
+        assert_eq!(
+            vc[0].3.as_deref(),
+            Some("en"),
+            "monitored fold with no language gets the invariant backstop"
+        );
+        let mw_author: i64 = sqlx::query_scalar("SELECT author_id FROM series WHERE gr_key = 'MW'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(mw_author, a2, "loser-only series must MOVE to the keeper");
+
+        // Group 2: display rewrite + monotonic fields.
+        let jk: Vec<(i64, Option<String>, bool)> = sqlx::query_as(
+            "SELECT id, ol_key, monitored FROM authors WHERE name LIKE 'J.%Rowling'",
+        )
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(jk.len(), 1, "one Rowling row must survive: {jk:?}");
+        assert_eq!(jk[0].0, b1, "keeper by most works");
+        assert_eq!(
+            jk[0].1.as_deref(),
+            Some("OL-B2"),
+            "loser's ol_key fills the keeper's missing key"
+        );
+        assert!(jk[0].2, "loser's monitored must OR onto the keeper");
+        let bw_display: String = sqlx::query_scalar("SELECT author_name FROM works WHERE id = ?")
+            .bind(bw)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            bw_display, "J.K. Rowling",
+            "merged work's display author must be rewritten to the keeper spelling"
+        );
+
+        // Group 3: works tie -> most external keys wins (again not oldest).
+        let ursula: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM authors WHERE name = 'Ursula Vernon'")
+                .fetch_all(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(ursula, vec![c2], "key-count tiebreak keeps {c2}, not {c1}");
+
+        // ST-010: junk-named rows stay separate with NULL keys.
+        let junk: Vec<(i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, normalized_name FROM authors WHERE id IN (?, ?) ORDER BY id",
+        )
+        .bind(j1)
+        .bind(j2)
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            junk,
+            vec![(j1, None), (j2, None)],
+            "junk-named authors keep NULL keys and stay separate"
+        );
+
+        // Zero references to any deleted row in ANY referencing table.
+        for table in [
+            "works",
+            "series",
+            "author_series_cache",
+            "author_bibliography",
+        ] {
+            let n: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE author_id IN (?, ?, ?, ?)"
+            ))
+            .bind(a1)
+            .bind(a3)
+            .bind(b2)
+            .bind(c1)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            assert_eq!(n, 0, "{table} must hold no reference to a deleted row");
+        }
+
+        assert!(author_index_exists(db.pool()).await, "index must be armed");
+        assert_eq!(marker_value(db.pool()).await.as_deref(), Some("1"));
+
+        // Re-run: marker short-circuits, state byte-identical.
+        let before = authors_snapshot(db.pool()).await;
+        backfill_author_identity(db.pool()).await.unwrap();
+        assert_eq!(
+            before,
+            authors_snapshot(db.pool()).await,
+            "a re-run after completion must be a no-op"
+        );
+    }
+
+    // ---- (b) AC-004: DB-level enforcement + NULL exemption ----
+
+    #[tokio::test]
+    async fn db_rejects_duplicate_key_after_repair_and_null_keys_stay_exempt() {
+        let db = create_test_db().await;
+        drop_harness_author_index(db.pool()).await;
+        let user_id = seed_user(&db, "author-enforce-user").await;
+        seed_legacy_author(db.pool(), user_id, "Carl Sagan", None, None, false).await;
+
+        backfill_author_identity(db.pool()).await.unwrap();
+        assert!(author_index_exists(db.pool()).await);
+
+        // A direct duplicate insert — bypassing every service layer — must
+        // fail at the database itself.
+        let key = canonical_author_key("Carl Sagan");
+        let dup = sqlx::query(
+            "INSERT INTO authors (user_id, name, normalized_name, added_at) \
+             VALUES (?, 'Carl Sagan Copy', ?, '2026-01-02T00:00:00Z')",
+        )
+        .bind(user_id)
+        .bind(&key)
+        .execute(db.pool())
+        .await;
+        assert!(
+            dup.is_err(),
+            "a raw duplicate (user, key) insert must fail at the DB"
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM authors WHERE normalized_name = ?")
+                .bind(&key)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "no second row may exist for the key");
+
+        // NULL keys are exempt: two junk rows both insert (ST-010).
+        for name in ["Jr.", "(Editor)"] {
+            sqlx::query(
+                "INSERT INTO authors (user_id, name, normalized_name, added_at) \
+                 VALUES (?, ?, NULL, '2026-01-02T00:00:00Z')",
+            )
+            .bind(user_id)
+            .bind(name)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        }
+        let nulls: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM authors WHERE user_id = ? AND normalized_name IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(nulls, 2, "NULL-key rows are exempt from the unique index");
+    }
+
+    // ---- (c) AC-005: mid-transaction failpoint ----
+
+    #[tokio::test]
+    async fn mid_transaction_failure_rolls_back_keys_merges_index_and_marker_together() {
+        let db = create_test_db().await;
+        drop_harness_author_index(db.pool()).await;
+        let user_id = seed_user(&db, "author-failpoint-user").await;
+
+        // A singleton row proves Step 1's key backfill rolls back too.
+        let singleton =
+            seed_legacy_author(db.pool(), user_id, "Solo Writer", None, None, false).await;
+
+        // A duplicate pair whose merge must touch author_bibliography.
+        let keeper = seed_legacy_author(db.pool(), user_id, "Anne Rice", None, None, false).await;
+        let loser = seed_legacy_author(db.pool(), user_id, "Anne Rice", None, None, false).await;
+        seed_work(db.pool(), user_id, keeper, "Interview", None).await;
+        seed_caches(db.pool(), loser).await;
+
+        // The failpoint: drop a table the merge must touch, forcing a real,
+        // naturally triggered SQL error partway through the repair.
+        sqlx::query("DROP TABLE author_bibliography")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let result = backfill_author_identity(db.pool()).await;
+        assert!(
+            result.is_err(),
+            "a mid-transaction SQL error must surface as Err"
+        );
+
+        let singleton_key: Option<String> =
+            sqlx::query_scalar("SELECT normalized_name FROM authors WHERE id = ?")
+                .bind(singleton)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            singleton_key, None,
+            "Step 1's key backfill must roll back with the rest"
+        );
+        let pair_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authors WHERE id IN (?, ?)")
+            .bind(keeper)
+            .bind(loser)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(pair_count, 2, "no merge may survive the rollback");
+        assert_eq!(marker_value(db.pool()).await, None, "marker rolls back too");
+        assert!(
+            !author_index_exists(db.pool()).await,
+            "index rolls back too"
+        );
+
+        // A subsequent clean run completes the repair fully (the dropped
+        // table is restored to its migrated shape: 003 + 033).
+        sqlx::query(
+            "CREATE TABLE author_bibliography ( \
+                 author_id INTEGER PRIMARY KEY REFERENCES authors(id) ON DELETE CASCADE, \
+                 entries TEXT NOT NULL DEFAULT '[]', \
+                 fetched_at TEXT NOT NULL DEFAULT (datetime('now')), \
+                 raw_entries TEXT \
+             )",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        backfill_author_identity(db.pool()).await.unwrap();
+
+        let anne_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM authors WHERE name = 'Anne Rice'")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(anne_count, 1, "the clean run must complete the merge");
+        let survivor: i64 = sqlx::query_scalar("SELECT id FROM authors WHERE name = 'Anne Rice'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(survivor, keeper, "D-5: the row with works survives");
+        assert!(author_index_exists(db.pool()).await);
+        assert_eq!(marker_value(db.pool()).await.as_deref(), Some("1"));
     }
 }
 

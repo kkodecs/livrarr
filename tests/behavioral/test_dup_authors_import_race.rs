@@ -69,11 +69,12 @@ async fn make_service() -> (TestListService, UserId, SqliteDb) {
 /// one shared author. Distinct titles keep work-level dedup out of the way so
 /// every row reaches author resolution.
 fn csv_many_rows_one_author() -> Vec<u8> {
-    let mut csv = String::from(
-        "Book Id,Title,Author,ISBN13,Original Publication Year,Exclusive Shelf\n",
-    );
+    let mut csv =
+        String::from("Book Id,Title,Author,ISBN13,Original Publication Year,Exclusive Shelf\n");
     for i in 0..ROW_COUNT {
-        csv.push_str(&format!(",Vampire Chronicle Vol {i},{SHARED_AUTHOR},,1990,to-read\n"));
+        csv.push_str(&format!(
+            ",Vampire Chronicle Vol {i},{SHARED_AUTHOR},,1990,to-read\n"
+        ));
     }
     csv.into_bytes()
 }
@@ -102,10 +103,7 @@ async fn test_dup_authors_ac_001_concurrent_import_rows_converge_on_one_author_r
     assert_eq!(added, ROW_COUNT, "every distinct-title row should be added");
 
     let authors = db.list_authors(user_id).await.expect("list authors");
-    let matching: Vec<_> = authors
-        .iter()
-        .filter(|a| a.name == SHARED_AUTHOR)
-        .collect();
+    let matching: Vec<_> = authors.iter().filter(|a| a.name == SHARED_AUTHOR).collect();
     assert_eq!(
         matching.len(),
         1,

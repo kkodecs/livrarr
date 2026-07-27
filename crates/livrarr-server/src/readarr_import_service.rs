@@ -73,8 +73,12 @@ pub trait ReadarrImportService: Send + Sync {
     ) -> Result<i64, ReadarrImportError>;
 
     // -- Author operations (run_import) --
-    async fn create_author(&self, req: CreateAuthorDbRequest)
-        -> Result<Author, ReadarrImportError>;
+    /// Create author, or converge on the existing row with the same stored
+    /// identity key; `true` iff a new row was inserted (`AuthorDb` contract).
+    async fn create_author(
+        &self,
+        req: CreateAuthorDbRequest,
+    ) -> Result<(Author, bool), ReadarrImportError>;
     async fn list_authors(&self, user_id: UserId) -> Result<Vec<Author>, ReadarrImportError>;
 
     // -- Work operations (run_import) --
@@ -179,7 +183,7 @@ where
     async fn create_author(
         &self,
         req: CreateAuthorDbRequest,
-    ) -> Result<Author, ReadarrImportError> {
+    ) -> Result<(Author, bool), ReadarrImportError> {
         Ok(self.db.create_author(req).await?)
     }
 

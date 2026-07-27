@@ -13,10 +13,17 @@ pub trait AuthorDb: Send + Sync {
     /// List authors for a user.
     async fn list_authors(&self, user_id: UserId) -> Result<Vec<Author>, DbError>;
 
-    /// Create author.
-    async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<Author, DbError>;
+    /// Create author, or converge on the existing row holding the same
+    /// (user, stored identity key). The bool is `true` iff a new row was
+    /// inserted; a creation-race loser gets the winning row and `false`,
+    /// indistinguishable from a lookup hit (issue #175). Rows whose name
+    /// does not canonicalize store a NULL key and always insert (ST-010).
+    async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<(Author, bool), DbError>;
 
-    /// Update author (monitoring settings).
+    /// Update author (monitoring settings). A name change recomputes the
+    /// stored identity key in the same statement; a recomputed key already
+    /// held by a different row fails with `DbError::IdentityCollision`
+    /// naming that row, with nothing written.
     async fn update_author(
         &self,
         user_id: UserId,

@@ -87,7 +87,8 @@ mod tests {
                 import_id: None,
             })
             .await
-            .expect("author");
+            .expect("author")
+            .0;
         mk_work_with_lang(&db, user, author.id, None, "Un", "fr").await;
         mk_work_with_lang(&db, user, author.id, None, "Deux", "fr").await;
 
@@ -155,7 +156,8 @@ mod tests {
                 import_id: None,
             })
             .await
-            .expect("author");
+            .expect("author")
+            .0;
         let en = db
             .update_author(
                 user,
@@ -187,7 +189,8 @@ mod tests {
                 import_id: None,
             })
             .await
-            .expect("author");
+            .expect("author")
+            .0;
         mk_work_with_lang(&db, user, explicit.id, None, "X", "fr").await;
         let chose = db
             .update_author(
@@ -287,7 +290,8 @@ mod tests {
                 import_id: None,
             })
             .await
-            .expect("create author_a");
+            .expect("create author_a")
+            .0;
 
         let author_b = db
             .create_author(CreateAuthorDbRequest {
@@ -300,7 +304,8 @@ mod tests {
                 import_id: None,
             })
             .await
-            .expect("create author_b");
+            .expect("create author_b")
+            .0;
 
         let (work_a, _) = db
             .create_work(CreateWorkDbRequest {

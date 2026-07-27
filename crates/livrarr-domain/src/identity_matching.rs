@@ -640,7 +640,10 @@ fn rendered_volume_numbers(parsed: &ParsedTitle) -> Vec<String> {
 /// [`identity_key_flat`]: order-normalized, accent-stripped,
 /// suffix-dropped tokens (the same name canonicalization `author_verdict`
 /// uses under the hood), or empty when no usable author name is present.
-fn canonical_author_key(author: &str) -> String {
+/// Also the recipe for the stored author identity key
+/// (`authors.normalized_name`): one normalization authority for both the
+/// works-side and authors-side stored forms.
+pub fn canonical_author_key(author: &str) -> String {
     canonical_author_name(author)
         .map(|name| {
             let mut tokens = name.given;

@@ -200,7 +200,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let author = db
+        let (author, _) = db
             .create_author(CreateAuthorDbRequest {
                 user_id: user.id,
                 name: "Jim Butcher".to_string(),

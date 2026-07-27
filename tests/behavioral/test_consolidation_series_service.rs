@@ -37,7 +37,7 @@ async fn setup_second_user(db: &SqliteDb) -> i64 {
 }
 
 async fn seed_series(db: &SqliteDb, user_id: i64, name: &str) -> livrarr_domain::Series {
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: format!("Author for {name}"),

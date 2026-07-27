@@ -343,7 +343,7 @@ async fn b5_series_monitor_threads_canonical_and_persists_series_flags() {
     assert_seam(
         "B5",
         |db, user_id, service, _workflow| async move {
-            let author = db
+            let (author, _) = db
                 .create_author(CreateAuthorDbRequest {
                     user_id,
                     name: "Door Author".to_string(),
@@ -1051,7 +1051,7 @@ const OL_WORKS_JSON: &str = r#"{
 async fn a1_author_monitor_adds_auto_added_pending_work_candidate() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "A1 Author".to_string(),
@@ -1123,7 +1123,7 @@ const SERIES_ROSTER_HTML: &str = r#"<html><body>
 async fn a2_series_monitor_worker_constructible_arm_adds_auto_added_series_candidate() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "A2 Author".to_string(),

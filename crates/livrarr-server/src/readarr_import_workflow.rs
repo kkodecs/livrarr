@@ -1613,6 +1613,112 @@ fn resolve_batch_author(name: &str, batch_authors: &[Author]) -> BatchAuthorDeci
     }
 }
 
+/// `process_authors`' full batch loop over its narrow dependencies: snapshot
+/// the user's authors, adopt-or-create per Readarr row, count only rows the
+/// DB actually created (REQ-002 counter honesty — a converged create is not
+/// a created author), and map every Readarr id to its Livrarr author id.
+/// Extracted from the `ImportRunner` method (which delegates here) so the
+/// real loop is drivable with the real service over a real test DB — the
+/// production `ImportRunner` construction chain pulls in live provider
+/// wiring that cannot be assembled offline (see `resolve_batch_author` and
+/// the author-dedup suite's deferred pin).
+#[allow(clippy::too_many_arguments)]
+async fn process_authors_batch(
+    readarr_import_service: &ReadarrImportServiceImpl,
+    user_id: i64,
+    import_id: &str,
+    files_only: bool,
+    progress: &Arc<Mutex<ReadarrImportProgress>>,
+    rd_authors: &[RdAuthor],
+    rd_books: &[RdBook],
+    active_book_ids: &HashSet<i64>,
+    author_map_rd: &mut HashMap<i64, i64>,
+    authors_created: &mut i64,
+) -> Result<(), String> {
+    let mut existing_authors = readarr_import_service
+        .list_authors(user_id)
+        .await
+        .map_err(|e| format!("list authors: {e}"))?;
+
+    for rd_author in rd_authors {
+        let name = rd_author.author_name.as_deref().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        if files_only {
+            let has_files = rd_books
+                .iter()
+                .filter(|b| b.author_id == rd_author.id)
+                .any(|b| active_book_ids.contains(&b.id));
+            if !has_files {
+                let mut prog = progress.lock().await;
+                prog.authors_processed += 1;
+                continue;
+            }
+        }
+
+        let livrarr_author_id = match resolve_batch_author(name, &existing_authors) {
+            BatchAuthorDecision::Adopt(id) => id,
+            BatchAuthorDecision::Create => {
+                let sort_name = rd_author
+                    .sort_name
+                    .as_deref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| derive_sort_name(name));
+
+                match readarr_import_service
+                    .create_author(CreateAuthorDbRequest {
+                        user_id,
+                        name: name.to_string(),
+                        sort_name: Some(sort_name),
+                        ol_key: None,
+                        gr_key: None,
+                        hc_key: None,
+                        import_id: Some(import_id.to_string()),
+                    })
+                    .await
+                {
+                    Ok((a, created)) => {
+                        // Counter honesty (REQ-002): a create that converged
+                        // on an existing row — a lost creation race or a
+                        // stored-key collision the batch gate could not see —
+                        // is not a created author.
+                        if created {
+                            *authors_created += 1;
+                        }
+                        let id = a.id;
+                        // Newly-created authors join the batch-local list so
+                        // a later in-batch spelling variant adopts instead of
+                        // double-creating [REV codex R-7]. Adopted/converged
+                        // authors are never re-appended here — they are
+                        // already in the snapshot or an earlier append
+                        // [REV codex R-9].
+                        if created {
+                            existing_authors.push(a);
+                        }
+                        id
+                    }
+                    Err(e) => {
+                        warn!(name = %name, "Failed to create author: {e}");
+                        let mut prog = progress.lock().await;
+                        prog.errors.push(format!("Author '{name}': {e}"));
+                        continue;
+                    }
+                }
+            }
+        };
+
+        author_map_rd.insert(rd_author.id, livrarr_author_id);
+
+        {
+            let mut prog = progress.lock().await;
+            prog.authors_processed += 1;
+        }
+    }
+    Ok(())
+}
+
 impl ImportRunner {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1756,82 +1862,19 @@ impl ImportRunner {
         rd_books: &[RdBook],
         active_book_ids: &HashSet<i64>,
     ) -> Result<(), String> {
-        let mut existing_authors = self
-            .readarr_import_service
-            .list_authors(self.user_id)
-            .await
-            .map_err(|e| format!("list authors: {e}"))?;
-
-        for rd_author in rd_authors {
-            let name = rd_author.author_name.as_deref().unwrap_or("").trim();
-            if name.is_empty() {
-                continue;
-            }
-
-            if self.req.files_only {
-                let has_files = rd_books
-                    .iter()
-                    .filter(|b| b.author_id == rd_author.id)
-                    .any(|b| active_book_ids.contains(&b.id));
-                if !has_files {
-                    let mut prog = self.progress().lock().await;
-                    prog.authors_processed += 1;
-                    continue;
-                }
-            }
-
-            let livrarr_author_id = match resolve_batch_author(name, &existing_authors) {
-                BatchAuthorDecision::Adopt(id) => id,
-                BatchAuthorDecision::Create => {
-                    let sort_name = rd_author
-                        .sort_name
-                        .as_deref()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| derive_sort_name(name));
-
-                    match self
-                        .readarr_import_service
-                        .create_author(CreateAuthorDbRequest {
-                            user_id: self.user_id,
-                            name: name.to_string(),
-                            sort_name: Some(sort_name),
-                            ol_key: None,
-                            gr_key: None,
-                            hc_key: None,
-                            import_id: Some(self.import_id.clone()),
-                        })
-                        .await
-                    {
-                        Ok(a) => {
-                            self.authors_created += 1;
-                            let id = a.id;
-                            // Newly-created authors join the batch-local list
-                            // so a later in-batch spelling variant adopts
-                            // instead of double-creating [REV codex R-7].
-                            // Adopted authors are never re-appended here —
-                            // they are already in the snapshot or an earlier
-                            // append [REV codex R-9].
-                            existing_authors.push(a);
-                            id
-                        }
-                        Err(e) => {
-                            warn!(name = %name, "Failed to create author: {e}");
-                            let mut prog = self.progress().lock().await;
-                            prog.errors.push(format!("Author '{name}': {e}"));
-                            continue;
-                        }
-                    }
-                }
-            };
-
-            self.author_map_rd.insert(rd_author.id, livrarr_author_id);
-
-            {
-                let mut prog = self.progress().lock().await;
-                prog.authors_processed += 1;
-            }
-        }
-        Ok(())
+        process_authors_batch(
+            &self.readarr_import_service,
+            self.user_id,
+            &self.import_id,
+            self.req.files_only,
+            &self.readarr_import_progress,
+            rd_authors,
+            rd_books,
+            active_book_ids,
+            &mut self.author_map_rd,
+            &mut self.authors_created,
+        )
+        .await
     }
 
     async fn process_works(
@@ -2368,6 +2411,142 @@ impl ImportRunner {
 // `add()` so the timing is deterministic. A regression that moves the bump
 // back into a post-collect loop (the 114c bug) makes
 // `test_readarr_import_progress_advances_incrementally` fail.
+/// Issue #175 AC-002(c): the REAL `process_authors` batch loop (via
+/// `process_authors_batch`, which the runner method delegates to) driven
+/// with the real `LiveReadarrImportService` over the real migrated SQLite
+/// writer — no injected outcomes.
+#[cfg(test)]
+mod process_authors_batch_tests {
+    use super::*;
+    use crate::readarr_import_service::LiveReadarrImportService;
+    use livrarr_db::test_helpers::create_test_db;
+    use livrarr_db::{AuthorDb, CreateUserDbRequest, UserDb};
+    use livrarr_domain::UserRole;
+
+    fn rd_author(id: i64, name: &str) -> RdAuthor {
+        RdAuthor {
+            id,
+            author_name: Some(name.to_string()),
+            sort_name: None,
+            foreign_author_id: None,
+            overview: None,
+            genres: None,
+            images: None,
+            monitored: None,
+            added: None,
+            path: None,
+        }
+    }
+
+    /// AC-002(c): a `create_author` call that converges on an existing row
+    /// leaves `authors_created` unchanged and maps the Readarr id to the
+    /// winner row; a genuinely new author is still counted and mapped.
+    ///
+    /// The fixture forces the create arm for an existing stored key: with
+    /// "John Smith" AND "J. Smith" both in the snapshot, the candidate
+    /// "John Smith" is ambiguous to the batch adoption gate (two compatible
+    /// entries → create), and the insert then converges on the exact
+    /// "John Smith" row at the DB backstop.
+    #[tokio::test]
+    async fn converged_create_leaves_counter_unchanged_and_maps_the_winner_row() {
+        let db = create_test_db().await;
+        let user_id = db
+            .create_user(CreateUserDbRequest {
+                username: "readarr-175".into(),
+                password_hash: "hash".into(),
+                role: UserRole::User,
+                api_key_hash: "readarr-175-key".into(),
+            })
+            .await
+            .expect("seed user")
+            .id;
+
+        let (winner, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id,
+                name: "John Smith".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("seed winner");
+        db.create_author(CreateAuthorDbRequest {
+            user_id,
+            name: "J. Smith".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("seed ambiguity sibling");
+
+        // The FK target `run_import` always writes before processing
+        // authors (authors.import_id references imports.id).
+        sqlx::query(
+            "INSERT INTO imports (id, user_id, source, status, started_at) \
+             VALUES ('import-175', ?, 'readarr', 'running', '2026-01-01T00:00:00Z')",
+        )
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .expect("seed import row");
+
+        let service = LiveReadarrImportService::new(db.clone());
+        let progress = Arc::new(Mutex::new(ReadarrImportProgress::default()));
+        let mut author_map_rd: HashMap<i64, i64> = HashMap::new();
+        let mut authors_created = 0i64;
+
+        process_authors_batch(
+            &service,
+            user_id,
+            "import-175",
+            false,
+            &progress,
+            &[rd_author(77, "John Smith"), rd_author(78, "Fresh Author")],
+            &[],
+            &HashSet::new(),
+            &mut author_map_rd,
+            &mut authors_created,
+        )
+        .await
+        .expect("process authors batch");
+
+        assert_eq!(
+            author_map_rd.get(&77),
+            Some(&winner.id),
+            "converged Readarr author must map to the pre-existing winner row"
+        );
+        let fresh_id = author_map_rd
+            .get(&78)
+            .copied()
+            .expect("fresh author must be mapped");
+        assert_ne!(fresh_id, winner.id);
+        assert_eq!(
+            authors_created, 1,
+            "only the genuinely created author counts — the converged row must not (REQ-002)"
+        );
+
+        let authors = db.list_authors(user_id).await.expect("list authors");
+        assert_eq!(
+            authors.iter().filter(|a| a.name == "John Smith").count(),
+            1,
+            "no duplicate John Smith row may exist after the converged create"
+        );
+        let progress = progress.lock().await;
+        assert_eq!(progress.authors_processed, 2);
+        assert!(
+            progress.errors.is_empty(),
+            "no errors: {:?}",
+            progress.errors
+        );
+    }
+}
+
 #[cfg(test)]
 mod process_works_progress_tests {
     use super::*;

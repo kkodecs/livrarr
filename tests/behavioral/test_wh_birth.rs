@@ -110,7 +110,7 @@ async fn assert_creation_door(
     let author = format!("Author {door_name}");
     let ol_key = format!("/works/WH-{door_name}");
 
-    let seed_author = db
+    let (seed_author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: format!("Series Author {door_name}"),

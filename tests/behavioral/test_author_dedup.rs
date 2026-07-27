@@ -155,6 +155,7 @@ async fn create_author(db: &SqliteDb, user_id: UserId, name: &str, ol_key: Optio
     })
     .await
     .expect("seed author")
+    .0
 }
 
 async fn author_count(db: &SqliteDb, user_id: UserId) -> i64 {
@@ -435,7 +436,7 @@ async fn build_merge_fixture(
     db: &SqliteDb,
     user_id: UserId,
 ) -> (Author, Author, Work, i64, i64, i64, i64) {
-    let survivor = db
+    let (survivor, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Survivor Name".to_string(),
@@ -456,7 +457,7 @@ async fn build_merge_fixture(
     .execute(db.pool())
     .await
     .expect("seed loser import FK target");
-    let loser = db
+    let (loser, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: "Loser Name".to_string(),

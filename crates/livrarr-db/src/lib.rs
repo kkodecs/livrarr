@@ -108,6 +108,17 @@ pub mod test_helpers {
         .execute(&pool)
         .await
         .unwrap();
+        // Post-repair author schema: `create_author`'s named ON CONFLICT
+        // target requires this index (production gets it from
+        // `backfill_author_identity` at startup). Repair tests drop it by
+        // name to seed the legacy pre-index state.
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_identity \
+             ON authors(user_id, normalized_name) WHERE normalized_name IS NOT NULL",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         SqliteDb::new(pool)
     }
 }

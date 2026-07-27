@@ -301,7 +301,7 @@ async fn seed_monitored_author(
     monitor_new_items: bool,
     monitor_since: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Author {
-    let author = db
+    let (author, _) = db
         .create_author(CreateAuthorDbRequest {
             user_id,
             name: name.into(),

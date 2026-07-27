@@ -77,6 +77,284 @@ impl SqliteDb {
     }
 }
 
+/// In-transaction body of [`AuthorDb::merge_authors`] — every statement of
+/// the merge contract (works repoint, series fold/move, cache drops,
+/// monotonic author fields, loser delete) on the caller's own
+/// connection/transaction. Shared between the live merge endpoint and the
+/// startup author-identity repair so both paths apply the identical policy
+/// (the same factoring as `merge_user_identity_state` in pool.rs).
+pub(crate) async fn merge_authors_tx(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: UserId,
+    survivor_id: AuthorId,
+    loser_id: AuthorId,
+) -> Result<livrarr_domain::services::AuthorMergeReport, DbError> {
+    // 1. validate: both exist, scoped to this user.
+    let survivor_row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
+        .bind(survivor_id)
+        .bind(user_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    let survivor = row_to_author(survivor_row)?;
+
+    let loser_row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
+        .bind(loser_id)
+        .bind(user_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    let loser = row_to_author(loser_row)?;
+
+    // 2. works: repoint author_id + the display author_name, bump
+    // merge_generation so tag convergence re-syncs file tags to the
+    // survivor spelling (normalized_author is UNTOUCHED — D-3).
+    let works_moved = sqlx::query(
+        "UPDATE works SET author_id = ?, author_name = ?, merge_generation = merge_generation + 1 \
+         WHERE author_id = ? AND user_id = ?",
+    )
+    .bind(survivor_id)
+    .bind(&survivor.name)
+    .bind(loser_id)
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_db_err)?
+    .rows_affected();
+
+    // 3. series: fold each loser row onto a same-gr_key survivor row,
+    // else move it. Repoint-before-delete throughout — series has
+    // ON DELETE CASCADE on author_id and works.series_id has
+    // ON DELETE SET NULL, so an un-repointed row would silently wipe
+    // itself or unlink works when the loser author is deleted in step 6.
+    let loser_series_rows = sqlx::query("SELECT * FROM series WHERE user_id = ? AND author_id = ?")
+        .bind(user_id)
+        .bind(loser_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_db_err)?
+        .into_iter()
+        .map(row_to_series)
+        .collect::<Result<Vec<Series>, DbError>>()?;
+
+    let mut series_moved = 0u64;
+    let mut series_folded = 0u64;
+
+    for loser_series in loser_series_rows {
+        let survivor_match =
+            sqlx::query("SELECT * FROM series WHERE user_id = ? AND author_id = ? AND gr_key = ?")
+                .bind(user_id)
+                .bind(survivor_id)
+                .bind(&loser_series.gr_key)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(map_db_err)?
+                .map(row_to_series)
+                .transpose()?;
+
+        match survivor_match {
+            Some(survivor_series) => {
+                // FOLD: same gr_key already tracked under the survivor.
+                let merged_ebook = survivor_series.monitor_ebook || loser_series.monitor_ebook;
+                let merged_audiobook =
+                    survivor_series.monitor_audiobook || loser_series.monitor_audiobook;
+                let mut merged_language = survivor_series
+                    .monitor_language
+                    .clone()
+                    .or(loser_series.monitor_language.clone());
+                // monitored-series⇒language invariant, re-enforced here
+                // since this write path bypasses
+                // update_series_flags/upsert_series where it normally
+                // lives.
+                if (merged_ebook || merged_audiobook) && merged_language.is_none() {
+                    merged_language = Some("en".to_string());
+                }
+                let flags_changed = merged_ebook != survivor_series.monitor_ebook
+                    || merged_audiobook != survivor_series.monitor_audiobook;
+
+                sqlx::query(
+                    "UPDATE series SET monitor_ebook = ?, monitor_audiobook = ?, monitor_language = ? \
+                     WHERE id = ? AND user_id = ?",
+                )
+                .bind(merged_ebook)
+                .bind(merged_audiobook)
+                .bind(&merged_language)
+                .bind(survivor_series.id)
+                .bind(user_id)
+                .execute(&mut *conn)
+                .await
+                .map_err(map_db_err)?;
+
+                // Roster: keep the survivor's own; adopt the loser's
+                // only when the survivor has none (otherwise the
+                // loser's cascades away with its series row below).
+                sqlx::query(
+                    "UPDATE series_roster SET series_id = ? \
+                     WHERE series_id = ? AND NOT EXISTS ( \
+                         SELECT 1 FROM series_roster WHERE series_id = ? \
+                     )",
+                )
+                .bind(survivor_series.id)
+                .bind(loser_series.id)
+                .bind(survivor_series.id)
+                .execute(&mut *conn)
+                .await
+                .map_err(map_db_err)?;
+
+                // Work-flag propagation mirrors the two EXISTING write
+                // paths: a flag change restamps every work under the
+                // survivor series (update_series_flags semantics); no
+                // change stamps only the just-repointed loser works
+                // (link_work_to_series semantics), leaving pre-existing
+                // survivor works untouched.
+                if flags_changed {
+                    sqlx::query(
+                        "UPDATE works SET series_id = ? WHERE series_id = ? AND user_id = ?",
+                    )
+                    .bind(survivor_series.id)
+                    .bind(loser_series.id)
+                    .bind(user_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_db_err)?;
+
+                    sqlx::query(
+                        "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ? \
+                         WHERE series_id = ? AND user_id = ?",
+                    )
+                    .bind(merged_ebook)
+                    .bind(merged_audiobook)
+                    .bind(survivor_series.id)
+                    .bind(user_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_db_err)?;
+                } else {
+                    sqlx::query(
+                        "UPDATE works SET series_id = ?, monitor_ebook = ?, monitor_audiobook = ? \
+                         WHERE series_id = ? AND user_id = ?",
+                    )
+                    .bind(survivor_series.id)
+                    .bind(merged_ebook)
+                    .bind(merged_audiobook)
+                    .bind(loser_series.id)
+                    .bind(user_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_db_err)?;
+                }
+
+                sqlx::query("DELETE FROM series WHERE id = ? AND user_id = ?")
+                    .bind(loser_series.id)
+                    .bind(user_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_db_err)?;
+
+                series_folded += 1;
+            }
+            None => {
+                // MOVE: no gr_key collision — the row travels intact,
+                // its own language and roster untouched.
+                sqlx::query("UPDATE series SET author_id = ? WHERE id = ? AND user_id = ?")
+                    .bind(survivor_id)
+                    .bind(loser_series.id)
+                    .bind(user_id)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(map_db_err)?;
+
+                series_moved += 1;
+            }
+        }
+    }
+
+    // 4. caches: refetchable, drop the loser's.
+    sqlx::query("DELETE FROM author_series_cache WHERE author_id = ?")
+        .bind(loser_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
+        .bind(loser_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+
+    // 5. author fields: monotonic merge onto the survivor row.
+    let monitored = survivor.monitored || loser.monitored;
+    let monitor_new_items = survivor.monitor_new_items || loser.monitor_new_items;
+    let monitor_since = survivor
+        .monitor_since
+        .into_iter()
+        .chain(loser.monitor_since)
+        .min();
+    let mut monitor_language = survivor
+        .monitor_language
+        .clone()
+        .or(loser.monitor_language.clone());
+    if monitored && monitor_language.is_none() {
+        // seed::dominant_language over the survivor's works, computable
+        // here because step 2 already reassigned them in this
+        // transaction; else the shared "en" default (insight 53).
+        let langs: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT language FROM works WHERE user_id = ? AND author_id = ?")
+                .bind(user_id)
+                .bind(survivor_id)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(map_db_err)?;
+        monitor_language = Some(
+            livrarr_domain::seed::dominant_language(langs.iter().map(|l| l.as_deref()))
+                .unwrap_or_else(|| livrarr_domain::seed::DEFAULT_SEED_LANGUAGE.to_string()),
+        );
+    }
+
+    sqlx::query(
+        "UPDATE authors SET \
+         sort_name = COALESCE(sort_name, ?), \
+         ol_key = COALESCE(ol_key, ?), \
+         gr_key = COALESCE(gr_key, ?), \
+         hc_key = COALESCE(hc_key, ?), \
+         import_id = COALESCE(import_id, ?), \
+         monitored = ?, monitor_new_items = ?, monitor_since = ?, monitor_language = ? \
+         WHERE id = ? AND user_id = ?",
+    )
+    .bind(&loser.sort_name)
+    .bind(&loser.ol_key)
+    .bind(&loser.gr_key)
+    .bind(&loser.hc_key)
+    .bind(&loser.import_id)
+    .bind(monitored)
+    .bind(monitor_new_items)
+    .bind(monitor_since.map(|dt| dt.to_rfc3339()))
+    .bind(&monitor_language)
+    .bind(survivor_id)
+    .bind(user_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+
+    // 6. delete the loser row — step 3 handled every loser series row
+    // (fold or move), so no series row remains for this delete's
+    // CASCADE to touch, and works.author_id was repointed in step 2.
+    let deleted = sqlx::query("DELETE FROM authors WHERE id = ? AND user_id = ?")
+        .bind(loser_id)
+        .bind(user_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    if deleted.rows_affected() == 0 {
+        return Err(DbError::NotFound { entity: "author" });
+    }
+
+    Ok(livrarr_domain::services::AuthorMergeReport {
+        works_moved,
+        series_moved,
+        series_folded,
+    })
+}
+
 impl AuthorDb for SqliteDb {
     async fn merge_authors(
         &self,
@@ -91,276 +369,9 @@ impl AuthorDb for SqliteDb {
         }
 
         let mut tx = self.pool().begin().await.map_err(map_db_err)?;
-
-        // 1. validate: both exist, scoped to this user.
-        let survivor_row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
-            .bind(survivor_id)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        let survivor = row_to_author(survivor_row)?;
-
-        let loser_row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
-            .bind(loser_id)
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        let loser = row_to_author(loser_row)?;
-
-        // 2. works: repoint author_id + the display author_name, bump
-        // merge_generation so tag convergence re-syncs file tags to the
-        // survivor spelling (normalized_author is UNTOUCHED — D-3).
-        let works_moved = sqlx::query(
-            "UPDATE works SET author_id = ?, author_name = ?, merge_generation = merge_generation + 1 \
-             WHERE author_id = ? AND user_id = ?",
-        )
-        .bind(survivor_id)
-        .bind(&survivor.name)
-        .bind(loser_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_db_err)?
-        .rows_affected();
-
-        // 3. series: fold each loser row onto a same-gr_key survivor row,
-        // else move it. Repoint-before-delete throughout — series has
-        // ON DELETE CASCADE on author_id and works.series_id has
-        // ON DELETE SET NULL, so an un-repointed row would silently wipe
-        // itself or unlink works when the loser author is deleted in step 6.
-        let loser_series_rows =
-            sqlx::query("SELECT * FROM series WHERE user_id = ? AND author_id = ?")
-                .bind(user_id)
-                .bind(loser_id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(map_db_err)?
-                .into_iter()
-                .map(row_to_series)
-                .collect::<Result<Vec<Series>, DbError>>()?;
-
-        let mut series_moved = 0u64;
-        let mut series_folded = 0u64;
-
-        for loser_series in loser_series_rows {
-            let survivor_match = sqlx::query(
-                "SELECT * FROM series WHERE user_id = ? AND author_id = ? AND gr_key = ?",
-            )
-            .bind(user_id)
-            .bind(survivor_id)
-            .bind(&loser_series.gr_key)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_db_err)?
-            .map(row_to_series)
-            .transpose()?;
-
-            match survivor_match {
-                Some(survivor_series) => {
-                    // FOLD: same gr_key already tracked under the survivor.
-                    let merged_ebook = survivor_series.monitor_ebook || loser_series.monitor_ebook;
-                    let merged_audiobook =
-                        survivor_series.monitor_audiobook || loser_series.monitor_audiobook;
-                    let mut merged_language = survivor_series
-                        .monitor_language
-                        .clone()
-                        .or(loser_series.monitor_language.clone());
-                    // monitored-series⇒language invariant, re-enforced here
-                    // since this write path bypasses
-                    // update_series_flags/upsert_series where it normally
-                    // lives.
-                    if (merged_ebook || merged_audiobook) && merged_language.is_none() {
-                        merged_language = Some("en".to_string());
-                    }
-                    let flags_changed = merged_ebook != survivor_series.monitor_ebook
-                        || merged_audiobook != survivor_series.monitor_audiobook;
-
-                    sqlx::query(
-                        "UPDATE series SET monitor_ebook = ?, monitor_audiobook = ?, monitor_language = ? \
-                         WHERE id = ? AND user_id = ?",
-                    )
-                    .bind(merged_ebook)
-                    .bind(merged_audiobook)
-                    .bind(&merged_language)
-                    .bind(survivor_series.id)
-                    .bind(user_id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(map_db_err)?;
-
-                    // Roster: keep the survivor's own; adopt the loser's
-                    // only when the survivor has none (otherwise the
-                    // loser's cascades away with its series row below).
-                    sqlx::query(
-                        "UPDATE series_roster SET series_id = ? \
-                         WHERE series_id = ? AND NOT EXISTS ( \
-                             SELECT 1 FROM series_roster WHERE series_id = ? \
-                         )",
-                    )
-                    .bind(survivor_series.id)
-                    .bind(loser_series.id)
-                    .bind(survivor_series.id)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(map_db_err)?;
-
-                    // Work-flag propagation mirrors the two EXISTING write
-                    // paths: a flag change restamps every work under the
-                    // survivor series (update_series_flags semantics); no
-                    // change stamps only the just-repointed loser works
-                    // (link_work_to_series semantics), leaving pre-existing
-                    // survivor works untouched.
-                    if flags_changed {
-                        sqlx::query(
-                            "UPDATE works SET series_id = ? WHERE series_id = ? AND user_id = ?",
-                        )
-                        .bind(survivor_series.id)
-                        .bind(loser_series.id)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db_err)?;
-
-                        sqlx::query(
-                            "UPDATE works SET monitor_ebook = ?, monitor_audiobook = ? \
-                             WHERE series_id = ? AND user_id = ?",
-                        )
-                        .bind(merged_ebook)
-                        .bind(merged_audiobook)
-                        .bind(survivor_series.id)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db_err)?;
-                    } else {
-                        sqlx::query(
-                            "UPDATE works SET series_id = ?, monitor_ebook = ?, monitor_audiobook = ? \
-                             WHERE series_id = ? AND user_id = ?",
-                        )
-                        .bind(survivor_series.id)
-                        .bind(merged_ebook)
-                        .bind(merged_audiobook)
-                        .bind(loser_series.id)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db_err)?;
-                    }
-
-                    sqlx::query("DELETE FROM series WHERE id = ? AND user_id = ?")
-                        .bind(loser_series.id)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db_err)?;
-
-                    series_folded += 1;
-                }
-                None => {
-                    // MOVE: no gr_key collision — the row travels intact,
-                    // its own language and roster untouched.
-                    sqlx::query("UPDATE series SET author_id = ? WHERE id = ? AND user_id = ?")
-                        .bind(survivor_id)
-                        .bind(loser_series.id)
-                        .bind(user_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_db_err)?;
-
-                    series_moved += 1;
-                }
-            }
-        }
-
-        // 4. caches: refetchable, drop the loser's.
-        sqlx::query("DELETE FROM author_series_cache WHERE author_id = ?")
-            .bind(loser_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        sqlx::query("DELETE FROM author_bibliography WHERE author_id = ?")
-            .bind(loser_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-
-        // 5. author fields: monotonic merge onto the survivor row.
-        let monitored = survivor.monitored || loser.monitored;
-        let monitor_new_items = survivor.monitor_new_items || loser.monitor_new_items;
-        let monitor_since = survivor
-            .monitor_since
-            .into_iter()
-            .chain(loser.monitor_since)
-            .min();
-        let mut monitor_language = survivor
-            .monitor_language
-            .clone()
-            .or(loser.monitor_language.clone());
-        if monitored && monitor_language.is_none() {
-            // seed::dominant_language over the survivor's works, computable
-            // here because step 2 already reassigned them in this
-            // transaction; else the shared "en" default (insight 53).
-            let langs: Vec<Option<String>> = sqlx::query_scalar(
-                "SELECT language FROM works WHERE user_id = ? AND author_id = ?",
-            )
-            .bind(user_id)
-            .bind(survivor_id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-            monitor_language = Some(
-                livrarr_domain::seed::dominant_language(langs.iter().map(|l| l.as_deref()))
-                    .unwrap_or_else(|| livrarr_domain::seed::DEFAULT_SEED_LANGUAGE.to_string()),
-            );
-        }
-
-        sqlx::query(
-            "UPDATE authors SET \
-             sort_name = COALESCE(sort_name, ?), \
-             ol_key = COALESCE(ol_key, ?), \
-             gr_key = COALESCE(gr_key, ?), \
-             hc_key = COALESCE(hc_key, ?), \
-             import_id = COALESCE(import_id, ?), \
-             monitored = ?, monitor_new_items = ?, monitor_since = ?, monitor_language = ? \
-             WHERE id = ? AND user_id = ?",
-        )
-        .bind(&loser.sort_name)
-        .bind(&loser.ol_key)
-        .bind(&loser.gr_key)
-        .bind(&loser.hc_key)
-        .bind(&loser.import_id)
-        .bind(monitored)
-        .bind(monitor_new_items)
-        .bind(monitor_since.map(|dt| dt.to_rfc3339()))
-        .bind(&monitor_language)
-        .bind(survivor_id)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_db_err)?;
-
-        // 6. delete the loser row — step 3 handled every loser series row
-        // (fold or move), so no series row remains for this delete's
-        // CASCADE to touch, and works.author_id was repointed in step 2.
-        let deleted = sqlx::query("DELETE FROM authors WHERE id = ? AND user_id = ?")
-            .bind(loser_id)
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        if deleted.rows_affected() == 0 {
-            return Err(DbError::NotFound { entity: "author" });
-        }
-
+        let report = merge_authors_tx(&mut tx, user_id, survivor_id, loser_id).await?;
         tx.commit().await.map_err(map_db_err)?;
-
-        Ok(livrarr_domain::services::AuthorMergeReport {
-            works_moved,
-            series_moved,
-            series_folded,
-        })
+        Ok(report)
     }
 
     async fn get_author(&self, user_id: UserId, id: AuthorId) -> Result<Author, DbError> {
@@ -391,11 +402,22 @@ impl AuthorDb for SqliteDb {
         Ok(results)
     }
 
-    async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<Author, DbError> {
+    async fn create_author(&self, req: CreateAuthorDbRequest) -> Result<(Author, bool), DbError> {
         let now = Utc::now().to_rfc3339();
-        let id = sqlx::query(
-            "INSERT INTO authors (user_id, name, sort_name, ol_key, gr_key, hc_key, import_id, added_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        // Rust-computed stored key (never SQL — SQLite LOWER is ASCII-only);
+        // a non-canonicalizable name stores NULL, exempt from the unique
+        // index by SQLite NULL-distinct semantics (ST-010) — never "".
+        let key = livrarr_domain::identity_matching::canonical_author_key(&req.name);
+        let normalized_name = (!key.is_empty()).then_some(key);
+        // The conflict target names the partial idx_authors_identity index
+        // (the WHERE clause is required for a partial-index target); a
+        // same-key concurrent insert lands on DO NOTHING and the winner is
+        // re-selected below — mirrors `create_work`.
+        let result = sqlx::query(
+            "INSERT INTO authors (user_id, name, sort_name, ol_key, gr_key, hc_key, import_id, \
+             added_at, normalized_name) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(user_id, normalized_name) WHERE normalized_name IS NOT NULL DO NOTHING",
         )
         .bind(req.user_id)
         .bind(&req.name)
@@ -405,12 +427,26 @@ impl AuthorDb for SqliteDb {
         .bind(&req.hc_key)
         .bind(&req.import_id)
         .bind(&now)
+        .bind(&normalized_name)
         .execute(self.pool())
         .await
-        .map_err(map_db_err)?
-        .last_insert_rowid();
+        .map_err(map_db_err)?;
 
-        self.get_author(req.user_id, id).await
+        if result.rows_affected() == 1 {
+            let author = self
+                .get_author(req.user_id, result.last_insert_rowid())
+                .await?;
+            Ok((author, true))
+        } else {
+            let row =
+                sqlx::query("SELECT * FROM authors WHERE user_id = ? AND normalized_name = ?")
+                    .bind(req.user_id)
+                    .bind(&normalized_name)
+                    .fetch_one(self.pool())
+                    .await
+                    .map_err(map_db_err)?;
+            Ok((row_to_author(row)?, false))
+        }
     }
 
     async fn update_author(
@@ -457,12 +493,21 @@ impl AuthorDb for SqliteDb {
             chosen
         };
 
-        sqlx::query(
-            "UPDATE authors SET name = ?, sort_name = ?, ol_key = ?, gr_key = ?, \
-             monitored = ?, monitor_new_items = ?, monitor_since = ?, monitor_language = ? \
+        // The stored identity key follows every name write in the same
+        // statement (REQ-004); a non-canonicalizable resolved name stores
+        // NULL (ST-010). The write is a single UPDATE, so a unique
+        // violation leaves no partial state.
+        let key = livrarr_domain::identity_matching::canonical_author_key(&name);
+        let normalized_name = (!key.is_empty()).then_some(key);
+
+        let update = sqlx::query(
+            "UPDATE authors SET name = ?, normalized_name = ?, sort_name = ?, ol_key = ?, \
+             gr_key = ?, monitored = ?, monitor_new_items = ?, monitor_since = ?, \
+             monitor_language = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(&name)
+        .bind(&normalized_name)
         .bind(&sort_name)
         .bind(&ol_key)
         .bind(&gr_key)
@@ -473,8 +518,32 @@ impl AuthorDb for SqliteDb {
         .bind(id)
         .bind(user_id)
         .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
+        .await;
+
+        match update {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(ref db_err)) if db_err.is_unique_violation() => {
+                // The recomputed key is already held by a different row —
+                // surface WHICH row (REQ-004: the error names the collider;
+                // the recovery for an intended merge is the merge endpoint).
+                let collider_row = sqlx::query(
+                    "SELECT * FROM authors WHERE user_id = ? AND normalized_name = ? AND id != ?",
+                )
+                .bind(user_id)
+                .bind(&normalized_name)
+                .bind(id)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_db_err)?;
+                let collider = row_to_author(collider_row)?;
+                return Err(DbError::IdentityCollision {
+                    entity: "author",
+                    id: collider.id,
+                    name: collider.name,
+                });
+            }
+            Err(e) => return Err(map_db_err(e)),
+        }
 
         self.get_author(user_id, id).await
     }
