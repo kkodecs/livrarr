@@ -585,9 +585,9 @@ fn init_tracing_and_config(
 
 /// Steps 4-10: verify the data directory is writable, acquire the
 /// single-instance PID lock, connect to SQLite, take a pre-migration
-/// backup, run migrations, check the version gate, backfill the two
-/// normalized-identity columns, and prune old backups. Exits the process
-/// (releasing the PID lock first, once acquired) on any failure.
+/// backup, run migrations, check the version gate, run marker-gated database
+/// repairs, and prune old backups. Exits the process (releasing the PID lock
+/// first, once acquired) on any failure.
 async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     // Step 4: Permission check — verify data dir is writable.
     if let Err(e) = livrarr_db::pool::check_data_dir_permissions(data_dir) {
@@ -665,6 +665,15 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     // needed; the completion marker and rows commit atomically. Idempotent.
     if let Err(e) = livrarr_db::backfill_work_identity_ledger(&pool).await {
         error!("identity ledger backfill failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 9e: One-time C5 repair for Goodreads work-anchor dead ends created
+    // before the subtitle trust rule changed. Its marker, dead-end deletion,
+    // and convergence-clock clearing are one transaction.
+    if let Err(e) = livrarr_db::pool::clear_subtitle_rule_deadends(&pool).await {
+        error!("subtitle-rule dead-end clear failed: {e}");
         livrarr_db::pool::release_pid_lock(data_dir);
         std::process::exit(1);
     }

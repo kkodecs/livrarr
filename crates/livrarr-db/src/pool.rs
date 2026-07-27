@@ -914,6 +914,68 @@ pub async fn backfill_identity_key_recompute(pool: &SqlitePool) -> Result<(), St
     Ok(())
 }
 
+/// Clear Goodreads-work anchor dead ends created before the subtitle matching
+/// rule changed, and make the affected works immediately convergence-eligible.
+///
+/// The completion marker is checked before opening the transaction, so every
+/// later startup performs only that one read and a debug log. On the first
+/// startup, clock clearing, provider-scoped dead-end deletion, and marker
+/// stamping commit atomically.
+pub async fn clear_subtitle_rule_deadends(pool: &SqlitePool) -> Result<(), String> {
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key = 'subtitle_rule_deadend_clear_v1'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("read subtitle_rule_deadend_clear_v1 marker: {e}"))?;
+
+    if marker.as_deref() == Some("1") {
+        tracing::debug!("subtitle-rule dead-end clear: already complete");
+        return Ok(());
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("begin subtitle-rule dead-end clear transaction: {e}"))?;
+
+    let clock_result = sqlx::query(
+        "UPDATE works SET next_convergence_at = NULL \
+         WHERE id IN ( \
+             SELECT work_id FROM work_anchor_dead_ends WHERE anchor_type = 'gr_work' \
+         )",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("clear convergence clocks for gr_work dead ends: {e}"))?;
+
+    let delete_result =
+        sqlx::query("DELETE FROM work_anchor_dead_ends WHERE anchor_type = 'gr_work'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("delete gr_work anchor dead ends: {e}"))?;
+
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('subtitle_rule_deadend_clear_v1', '1') \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("stamp subtitle_rule_deadend_clear_v1 marker: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("commit subtitle-rule dead-end clear transaction: {e}"))?;
+
+    tracing::info!(
+        clocks_cleared = clock_result.rows_affected(),
+        dead_ends_deleted = delete_result.rows_affected(),
+        "subtitle-rule dead-end clear complete"
+    );
+    Ok(())
+}
+
 /// True when a sqlx error is a database-level UNIQUE-constraint violation —
 /// the one error class [`backfill_identity_key_recompute`] treats as a
 /// collision skip. Same detection idiom as `sqlite_common::map_db_err`
@@ -2016,6 +2078,149 @@ mod backfill_normalized_identity_tests {
             intents,
             vec![(keeper_id, user_id)],
             "the import_intent row must be repointed to the keeper, not cascade-deleted: {intents:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod subtitle_rule_deadend_clear_tests {
+    use super::*;
+    use crate::sqlite::SqliteDb;
+    use crate::test_helpers::create_test_db;
+    use crate::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, UserRole, WorkDb, WorkDbCreate};
+    use chrono::{Duration, Utc};
+
+    async fn seed_user(db: &SqliteDb) -> i64 {
+        db.create_user(CreateUserDbRequest {
+            username: "subtitle-repair-user".into(),
+            password_hash: "hash".into(),
+            role: UserRole::User,
+            api_key_hash: "subtitle-repair-key".into(),
+        })
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn seed_work(db: &SqliteDb, user_id: i64) -> i64 {
+        let (work, created) = db
+            .create_work(CreateWorkDbRequest {
+                user_id,
+                title: "Einstein".into(),
+                author_name: "Walter Isaacson".into(),
+                normalized_title: "einstein".into(),
+                normalized_author: "walter isaacson".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(created);
+        work.id
+    }
+
+    async fn seed_gr_dead_end(
+        db: &SqliteDb,
+        work_id: i64,
+        user_id: i64,
+        next_convergence_at: &str,
+    ) {
+        sqlx::query(
+            "UPDATE works \
+             SET identity_status = 'confirmed', enrichment_status = 'enriched', \
+                 ol_key = '/works/OL1W', hc_key = '1', isbn_13 = '9780743264747', \
+                 asin = 'B000000001', next_convergence_at = ? \
+             WHERE id = ?",
+        )
+        .bind(next_convergence_at)
+        .bind(work_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO work_anchor_dead_ends \
+             (work_id, anchor_type, attempt_count, last_attempt_at, user_id) \
+             VALUES (?, 'gr_work', 3, ?, ?)",
+        )
+        .bind(work_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn subtitle_rule_deadend_clear_unsticks_gr_work_once_then_marker_noops() {
+        let db = create_test_db().await;
+        let user_id = seed_user(&db).await;
+        let work_id = seed_work(&db, user_id).await;
+        let future_clock = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        seed_gr_dead_end(&db, work_id, user_id, &future_clock).await;
+
+        assert!(
+            db.list_convergence_due(user_id, Utc::now(), 3, 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the threshold dead end plus future clock must exclude the work before repair"
+        );
+
+        clear_subtitle_rule_deadends(db.pool()).await.unwrap();
+
+        let dead_end_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM work_anchor_dead_ends \
+             WHERE work_id = ? AND anchor_type = 'gr_work'",
+        )
+        .bind(work_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(dead_end_count, 0, "the gr_work dead end must be deleted");
+
+        let repaired_clock: Option<String> =
+            sqlx::query_scalar("SELECT next_convergence_at FROM works WHERE id = ?")
+                .bind(work_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            repaired_clock, None,
+            "the same work's convergence clock must be cleared"
+        );
+        assert_eq!(
+            db.list_convergence_due(user_id, Utc::now(), 3, 100)
+                .await
+                .unwrap(),
+            vec![work_id],
+            "the real convergence selector must see the repaired work"
+        );
+
+        seed_gr_dead_end(&db, work_id, user_id, &future_clock).await;
+        clear_subtitle_rule_deadends(db.pool()).await.unwrap();
+
+        let second_dead_end_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM work_anchor_dead_ends \
+             WHERE work_id = ? AND anchor_type = 'gr_work'",
+        )
+        .bind(work_id)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            second_dead_end_count, 1,
+            "the marker must make every later boot a strict no-op"
+        );
+        let second_clock: Option<String> =
+            sqlx::query_scalar("SELECT next_convergence_at FROM works WHERE id = ?")
+                .bind(work_id)
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            second_clock,
+            Some(future_clock),
+            "the marker-gated no-op must leave the re-seeded clock untouched"
         );
     }
 }
