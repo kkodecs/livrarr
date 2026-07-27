@@ -624,3 +624,7 @@ path = "../../tests/behavioral/test_subtitle_matching.rs"
 [[test]]
 name = "test_subtitle_matching_preview_door"
 path = "../../tests/behavioral/test_subtitle_matching_preview_door.rs"
+
+[[test]]
+name = "test_dup_authors_import_race"
+path = "../../tests/behavioral/test_dup_authors_import_race.rs"
