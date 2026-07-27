@@ -100,8 +100,10 @@ pub async fn query_ol_detail<F: HttpFetcher>(
         return Err(classify_ol_error(resp.status));
     }
 
-    let data: serde_json::Value = serde_json::from_slice(&resp.body)
-        .map_err(|e| ProviderFetchError::Other(format!("parse: {e}")))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        ProviderFetchError::Other(format!("parse: {e}"))
+    })?;
     // No success report here. This call has a second leg (editions, below) and
     // `record_success` clears every accumulated failure (breaker.rs), so
     // reporting the work leg's success up front meant a permanently refused
@@ -318,8 +320,10 @@ pub async fn isbn_lookup<F: HttpFetcher>(
         return Err(classify_ol_error(resp.status));
     }
 
-    let data: serde_json::Value = serde_json::from_slice(&resp.body)
-        .map_err(|e| ProviderFetchError::Other(format!("OL ISBN parse error: {e}")))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        ProviderFetchError::Other(format!("OL ISBN parse error: {e}"))
+    })?;
     // This is only an ISBN leg. Its caller may continue with work detail,
     // editions, or fuzzy search, so Success belongs at that outer boundary.
 
@@ -388,8 +392,10 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
         return Err(format!("OpenLibrary returned {}", resp.status));
     }
 
-    let data: serde_json::Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("OpenLibrary parse error: {e}"))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+        outbound_queue::shared().report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
+        format!("OpenLibrary parse error: {e}")
+    })?;
 
     // A parsed response — including a legitimately empty `docs` array — is a
     // healthy answer. Without this the C4 Failure report above could open the
@@ -589,6 +595,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn query_ol_detail_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::OpenLibrary,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let result = query_ol_detail(&fetcher, "OL123W", RequestPriority::Normal, None, None).await;
+        assert!(
+            matches!(result, Err(ProviderFetchError::Other(message)) if message.starts_with("parse:")),
+            "the existing parse error must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed response must open a threshold-one breaker"
+        );
+    }
+
     /// The recording fetcher returns a synthetic timeout without reproducing
     /// `HttpFetcherImpl::do_fetch`'s transport-level Failure report. This case
     /// can therefore pin only that the outer operation emits no Success that
@@ -623,6 +662,39 @@ mod tests {
         assert!(
             tripped,
             "the outer operation must not report Success after a timed-out editions leg"
+        );
+    }
+
+    #[tokio::test]
+    async fn isbn_lookup_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::OpenLibrary,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let result = isbn_lookup(&fetcher, "9781234567890", RequestPriority::Normal).await;
+        assert!(
+            matches!(result, Err(ProviderFetchError::Other(message)) if message.starts_with("OL ISBN parse error:")),
+            "the existing ISBN parse error must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed ISBN response must open a threshold-one breaker"
         );
     }
 
@@ -700,6 +772,39 @@ mod tests {
         assert!(
             tripped,
             "the detail helper must not report Success before its caller boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_openlibrary_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::OpenLibrary,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let result = search_openlibrary(&fetcher, "anything", "en").await;
+        assert!(
+            matches!(result, Err(message) if message.starts_with("OpenLibrary parse error:")),
+            "the existing discovery parse error must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed discovery response must open a threshold-one breaker"
         );
     }
 

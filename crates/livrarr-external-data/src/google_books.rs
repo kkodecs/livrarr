@@ -128,8 +128,10 @@ pub async fn fetch_gb_volumes<F: HttpFetcher>(
         return Err(format!("GoogleBooks returned {}", resp.status));
     }
 
-    let search: GbSearchResponse =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("GoogleBooks parse error: {e}"))?;
+    let search: GbSearchResponse = serde_json::from_slice(&resp.body).map_err(|e| {
+        outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+        format!("GoogleBooks parse error: {e}")
+    })?;
 
     // A parsed response — including a legitimately empty one — is a healthy
     // answer. Without this the C4 Failure reports above could open the breaker
@@ -234,11 +236,13 @@ async fn fetch_gb_search<F: HttpFetcher>(
         return Err(map_http_error(resp.status));
     }
 
-    let parsed: GbSearchResponse =
-        serde_json::from_slice(&resp.body).map_err(|_| ProviderOutcome::WillRetry {
+    let parsed: GbSearchResponse = serde_json::from_slice(&resp.body).map_err(|_| {
+        outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Failure);
+        ProviderOutcome::WillRetry {
             reason: livrarr_domain::WillRetryReason::ServerError,
             next_attempt_at: chrono::Utc::now() + chrono::Duration::seconds(300),
-        })?;
+        }
+    })?;
     outbound_queue::shared().report_outcome(RateBucket::GoogleBooks, BreakerSignal::Success);
     Ok(parsed)
 }
@@ -727,6 +731,90 @@ mod tests {
                 "Google Books search returning {status} must report a breaker failure"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_gb_volumes_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::GoogleBooks,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let result = fetch_gb_volumes(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(message) if message.starts_with("GoogleBooks parse error:")),
+            "the existing volumes parse error must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed volumes response must open a threshold-one breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_gb_search_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::GoogleBooks).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::GoogleBooks,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let result = fetch_gb_search(
+            &fetcher,
+            "test-key",
+            "https://example.com/volumes".into(),
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::ServerError,
+                    ..
+                })
+            ),
+            "the existing provider-search retry mapping must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::GoogleBooks, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed provider-search response must open a threshold-one breaker"
+        );
     }
 
     /// C4 added Failure reporting to this door but no Success, and

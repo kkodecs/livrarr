@@ -750,8 +750,16 @@ where
     }
 
     let body = String::from_utf8_lossy(&resp.body);
-    // A non-array body (WAF interstitial / format change) parses to empty.
-    let parsed = livrarr_external_data::goodreads::parse_autocomplete_json(&body);
+    // Discovery deliberately treats Goodreads as one optional union
+    // contribution. Preserve that user-facing behavior while using the checked
+    // parser so provider-client callers can retain the same top-level error.
+    let parsed = match livrarr_external_data::goodreads::parse_autocomplete_json_checked(&body) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            tracing::warn!(error = %e, "Goodreads autocomplete response was unreadable");
+            Vec::new()
+        }
+    };
 
     let results = parsed
         .into_iter()
@@ -981,7 +989,8 @@ where
     let data: serde_json::Value = serde_json::from_slice(&resp.body)
         .map_err(|e| WorkServiceError::Enrichment(format!("HC parse: {e}")))?;
 
-    let hits = livrarr_external_data::hardcover::hc_extract_hits(&data);
+    let hits = livrarr_external_data::hardcover::hc_extract_hits(&data)
+        .map_err(|e| WorkServiceError::Enrichment(format!("HC search response: {e}")))?;
 
     let results: Vec<LookupResult> = hits
         .iter()

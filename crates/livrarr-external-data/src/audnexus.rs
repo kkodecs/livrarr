@@ -232,8 +232,10 @@ async fn cached_fetch<F: HttpFetcher>(
         .find(|(k, _)| k.eq_ignore_ascii_case("last-modified"))
         .map(|(_, v)| v.clone());
 
-    let data: serde_json::Value = serde_json::from_slice(&resp.body)
-        .map_err(|e| ProviderFetchError::Other(format!("parse: {e}")))?;
+    let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+        outbound_queue::shared().report_outcome(RateBucket::Audnexus, BreakerSignal::Failure);
+        ProviderFetchError::Other(format!("parse: {e}"))
+    })?;
 
     if let Some(lm) = last_modified {
         let mut guard = cache.0.lock().await;
@@ -309,6 +311,123 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_fetch_invalid_json_opens_breaker_for_item_and_search_and_is_not_cached() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+
+        queue.set_breaker_config_for_tests(RateBucket::Audnexus, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok_headers(
+            200,
+            vec![("Last-Modified".to_string(), "Tue, 01 Jan 2030".to_string())],
+            b"not json".to_vec(),
+        );
+        fetcher.push_response(Ok(livrarr_domain::services::FetchResponse {
+            status: 304,
+            headers: vec![],
+            body: vec![],
+        }));
+        let cache = AudnexusCache::new();
+        let item_result = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0INVALID",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            matches!(item_result, Err(ProviderFetchError::Other(message)) if message.starts_with("parse:")),
+            "the existing item parse error must be preserved"
+        );
+        let item_admission = queue
+            .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(item_admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed item response must open a threshold-one breaker"
+        );
+
+        let revalidation = query_audnexus_by_asin(
+            &fetcher,
+            "https://api.audnex.us",
+            "B0INVALID",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            revalidation.is_err(),
+            "a 304 must not reuse an unreadable body"
+        );
+        {
+            let requests = fetcher.requests();
+            assert!(
+                requests[1]
+                    .headers
+                    .iter()
+                    .all(|(name, _)| name != "If-Modified-Since"),
+                "an unreadable response must not populate the conditional-request cache"
+            );
+        }
+
+        queue.reset_breaker_for_tests(RateBucket::Audnexus);
+        queue.set_breaker_config_for_tests(RateBucket::Audnexus, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let cache = AudnexusCache::new();
+        let search_result = query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Dune",
+            "Frank Herbert",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(
+            matches!(search_result, Err(ProviderFetchError::Other(message)) if message.starts_with("parse:")),
+            "the existing search parse error must be preserved"
+        );
+        let search_admission = queue
+            .acquire(RateBucket::Audnexus, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(search_admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed search response must open a threshold-one breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_audnexus_empty_search_array_is_a_healthy_miss() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audnexus).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"[]".to_vec());
+        let cache = AudnexusCache::new();
+
+        let result = query_audnexus(
+            &fetcher,
+            "https://api.audnex.us",
+            None,
+            "Missing",
+            "Author",
+            &cache,
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("a decoded empty search array is healthy");
+
+        assert!(result.is_none());
+    }
 
     /// C4, test-plan item 6: a refusal must reach this client's own bucket.
     /// Audnexus serves two routes through one helper with opposite absence

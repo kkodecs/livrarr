@@ -57,6 +57,11 @@ pub fn hc_search_body(per_page: u32, term: &str) -> Value {
     })
 }
 
+fn hardcover_response_error(message: impl Into<String>) -> HardcoverError {
+    outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
+    HardcoverError::Http(message.into())
+}
+
 /// POST a pre-built body to the Hardcover GraphQL endpoint and return the parsed
 /// JSON response. Handles auth header, Content-Type, and HTTP status check.
 pub async fn hc_post<F: HttpFetcher>(
@@ -110,8 +115,27 @@ pub async fn hc_post<F: HttpFetcher>(
     // permanently refused editions endpoint produced Success, Failure, Success,
     // Failure… and never reached the threshold. The operation boundary reports
     // once, via `report_hardcover_success`.
-    let parsed = serde_json::from_slice(&resp.body)
-        .map_err(|e| HardcoverError::Http(format!("parse error: {e}")))?;
+    let parsed: Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| hardcover_response_error(format!("parse error: {e}")))?;
+
+    if let Some(errors) = parsed.get("errors") {
+        let errors = errors
+            .as_array()
+            .ok_or_else(|| hardcover_response_error("malformed GraphQL errors field"))?;
+        if !errors.is_empty() {
+            return Err(hardcover_response_error(format!(
+                "GraphQL response contained {} errors",
+                errors.len()
+            )));
+        }
+    }
+
+    if !parsed.get("data").is_some_and(Value::is_object) {
+        return Err(hardcover_response_error(
+            "GraphQL response missing object data",
+        ));
+    }
+
     Ok(parsed)
 }
 
@@ -125,11 +149,11 @@ pub fn report_hardcover_success() {
 }
 
 /// Extract the `hits` array from a Hardcover search response value.
-pub fn hc_extract_hits(data: &Value) -> Vec<Value> {
+pub fn hc_extract_hits(data: &Value) -> Result<Vec<Value>, HardcoverError> {
     data.pointer("/data/search/results/hits")
         .and_then(|r| r.as_array())
         .cloned()
-        .unwrap_or_default()
+        .ok_or_else(|| hardcover_response_error("GraphQL search response missing hits array"))
 }
 
 /// Hardcover GraphQL API endpoint.
@@ -196,7 +220,7 @@ pub async fn query_hardcover<F: HttpFetcher>(
     let search_term = format!("\"{clean_title}\"");
     let body = hc_search_body(25, &search_term);
     let data = hc_post(fetcher, body, token, priority).await?;
-    let hits = hc_extract_hits(&data);
+    let hits = hc_extract_hits(&data)?;
 
     if hits.is_empty() {
         return Err(HardcoverError::NoResults);
@@ -400,38 +424,9 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
         "variables": {"bookId": book_id_int}
     });
 
-    let req = FetchRequest {
-        url: HARDCOVER_API_URL.to_string(),
-        method: HttpMethod::Post,
-        headers: vec![
-            ("Authorization".into(), format!("Bearer {token}")),
-            ("Content-Type".into(), "application/json".into()),
-        ],
-        body: Some(
-            serde_json::to_vec(&body).map_err(|e| format!("edition body encode error: {e}"))?,
-        ),
-        timeout: Duration::from_secs(10),
-        rate_bucket: RateBucket::Hardcover,
-        max_body_bytes: 2 * 1024 * 1024,
-        anti_bot_check: false,
-        user_agent: UserAgentProfile::Server,
-        priority,
-    };
-
-    let resp = fetcher
-        .fetch(req)
+    let data = hc_post(fetcher, body, token, priority)
         .await
         .map_err(|e| format!("edition request failed: {e}"))?;
-
-    if !(200..300).contains(&resp.status) {
-        // Same rule as the query path above, 404/410 included — same fixed
-        // GraphQL route.
-        outbound_queue::shared().report_outcome(RateBucket::Hardcover, BreakerSignal::Failure);
-        return Err(format!("edition HTTP {}", resp.status));
-    }
-
-    let data: Value =
-        serde_json::from_slice(&resp.body).map_err(|e| format!("edition parse: {e}"))?;
     // Editions are a child leg. `HardcoverClient::build_success` reports the
     // operation's one Success only after this parse and every earlier leg pass.
 
@@ -439,7 +434,8 @@ pub async fn fetch_hardcover_editions<F: HttpFetcher>(
         .pointer("/data/editions")
         .and_then(|e| e.as_array())
         .cloned()
-        .unwrap_or_default();
+        .ok_or_else(|| hardcover_response_error("GraphQL editions response missing editions array"))
+        .map_err(|e| format!("edition response invalid: {e}"))?;
 
     let preferred = preferred_language.to_lowercase();
 
@@ -484,7 +480,7 @@ pub async fn query_hardcover_by_isbn<F: HttpFetcher>(
 ) -> Result<Option<HardcoverResult>, HardcoverError> {
     let body = hc_search_body(10, isbn);
     let data = hc_post(fetcher, body, token, priority).await?;
-    let hits = hc_extract_hits(&data);
+    let hits = hc_extract_hits(&data)?;
 
     for hit in &hits {
         let doc = match hit.get("document") {
@@ -620,9 +616,13 @@ pub async fn query_hardcover_by_key<F: HttpFetcher>(
     let data = hc_post(fetcher, body, token, priority).await?;
 
     let doc = match data.pointer("/data/books_by_pk") {
-        None => return Ok(None),
         Some(v) if v.is_null() => return Ok(None),
-        Some(v) => v,
+        Some(v) if v.is_object() => v,
+        _ => {
+            return Err(hardcover_response_error(
+                "GraphQL key response missing object-or-null books_by_pk",
+            ))
+        }
     };
 
     let title = doc
@@ -685,6 +685,21 @@ pub async fn query_hardcover_by_key<F: HttpFetcher>(
 mod tests {
     use super::*;
 
+    fn test_metadata_config() -> livrarr_domain::settings::MetadataConfig {
+        livrarr_domain::settings::MetadataConfig {
+            hardcover_enabled: true,
+            hardcover_api_token: Some("tok".to_string()),
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: "https://api.audnex.us".to_string(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        }
+    }
+
     /// Hardcover speaks one fixed GraphQL POST route. "No such record" arrives
     /// as a 200 carrying null data, never as a 404 — so a 404/410 here means the
     /// route is gone or blocked, and exempting it left a dead route invisible to
@@ -725,6 +740,483 @@ mod tests {
         assert!(
             tripped,
             "a 404 on the fixed GraphQL route is a provider failure, not an absent book"
+        );
+    }
+
+    #[tokio::test]
+    async fn hc_post_rejects_unreadable_or_invalid_graphql_envelopes() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let cases = vec![
+            ("malformed JSON", b"not json".to_vec()),
+            (
+                "non-empty errors",
+                serde_json::json!({"errors": [{"message": "denied"}], "data": {}})
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "partial data plus errors",
+                serde_json::json!({
+                    "errors": [{"message": "partial"}],
+                    "data": {"search": {"results": {"hits": []}}}
+                })
+                .to_string()
+                .into_bytes(),
+            ),
+            (
+                "non-array errors",
+                serde_json::json!({"errors": {"message": "bad"}, "data": {}})
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "null errors",
+                serde_json::json!({"errors": null, "data": {}})
+                    .to_string()
+                    .into_bytes(),
+            ),
+            (
+                "missing data",
+                serde_json::json!({"errors": []}).to_string().into_bytes(),
+            ),
+            (
+                "non-object data",
+                serde_json::json!({"errors": [], "data": []})
+                    .to_string()
+                    .into_bytes(),
+            ),
+        ];
+
+        for (label, response_body) in cases {
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, response_body);
+            let result = hc_post(
+                &fetcher,
+                serde_json::json!({"query": "{ books { id } }"}),
+                "tok",
+                RequestPriority::Normal,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(HardcoverError::Http(_))),
+                "{label}: the invalid response must preserve the Http error variant"
+            );
+
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "{label}: the completed invalid response must open a threshold-one breaker"
+            );
+        }
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            serde_json::json!({"errors": [], "data": {}})
+                .to_string()
+                .into_bytes(),
+        );
+        let result = hc_post(
+            &fetcher,
+            serde_json::json!({"query": "{ books { id } }"}),
+            "tok",
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(result.is_ok(), "an empty errors array is a valid envelope");
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "a valid empty-errors envelope must remain healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardcover_search_paths_reject_missing_or_wrong_typed_hits() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let cases = [
+            (
+                "missing hits",
+                serde_json::json!({"data": {"search": {"results": {}}}}),
+            ),
+            (
+                "wrong-typed hits",
+                serde_json::json!({"data": {"search": {"results": {"hits": {}}}}}),
+            ),
+        ];
+
+        for (label, response) in &cases {
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                response.to_string().into_bytes(),
+            );
+            let result = query_hardcover(
+                &fetcher,
+                "Dune",
+                "Frank Herbert",
+                "tok",
+                RequestPriority::Normal,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(HardcoverError::Http(_))),
+                "title search with {label} must be a response error"
+            );
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "title search with {label} must open a threshold-one breaker"
+            );
+
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                response.to_string().into_bytes(),
+            );
+            let result = query_hardcover_by_isbn(
+                &fetcher,
+                "9780441172719",
+                "tok",
+                &test_metadata_config(),
+                RequestPriority::Normal,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(HardcoverError::Http(_))),
+                "ISBN search with {label} must be a response error"
+            );
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "ISBN search with {label} must open a threshold-one breaker"
+            );
+        }
+
+        let empty_hits = serde_json::json!({"data": {"search": {"results": {"hits": []}}}});
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            empty_hits.to_string().into_bytes(),
+        );
+        let result = query_hardcover(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            "tok",
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(matches!(result, Err(HardcoverError::NoResults)));
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "an explicitly empty title-search hits array is a healthy miss"
+        );
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            empty_hits.to_string().into_bytes(),
+        );
+        let result = query_hardcover_by_isbn(
+            &fetcher,
+            "9780441172719",
+            "tok",
+            &test_metadata_config(),
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(matches!(result, Ok(None)));
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "an explicitly empty ISBN-search hits array is a healthy miss"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardcover_key_lookup_rejects_missing_or_wrong_typed_book_field() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let cases = [
+            ("missing books_by_pk", serde_json::json!({"data": {}})),
+            (
+                "wrong-typed books_by_pk",
+                serde_json::json!({"data": {"books_by_pk": []}}),
+            ),
+        ];
+
+        for (label, response) in cases {
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                response.to_string().into_bytes(),
+            );
+            let result = query_hardcover_by_key(&fetcher, 42, "tok", RequestPriority::Normal).await;
+            assert!(
+                matches!(result, Err(HardcoverError::Http(_))),
+                "{label} must be a response error"
+            );
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "{label} must open a threshold-one breaker"
+            );
+        }
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            serde_json::json!({"data": {"books_by_pk": null}})
+                .to_string()
+                .into_bytes(),
+        );
+        let result = query_hardcover_by_key(&fetcher, 42, "tok", RequestPriority::Normal).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "an explicit null book is a healthy miss"
+        );
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "an explicit null book must not report Failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_hardcover_query_path_uses_the_common_graphql_envelope_check() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let response = serde_json::json!({
+            "errors": [{"message": "denied"}],
+            "data": {}
+        })
+        .to_string()
+        .into_bytes();
+
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, response.clone());
+        let result = query_hardcover(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            "tok",
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(matches!(result, Err(HardcoverError::Http(_))));
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(matches!(admission, Err(AdmissionError::CircuitOpen { .. })));
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, response.clone());
+        let result = query_hardcover_by_isbn(
+            &fetcher,
+            "9780441172719",
+            "tok",
+            &test_metadata_config(),
+            RequestPriority::Normal,
+        )
+        .await;
+        assert!(matches!(result, Err(HardcoverError::Http(_))));
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(matches!(admission, Err(AdmissionError::CircuitOpen { .. })));
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, response.clone());
+        let result = query_hardcover_by_key(&fetcher, 42, "tok", RequestPriority::Normal).await;
+        assert!(matches!(result, Err(HardcoverError::Http(_))));
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(matches!(admission, Err(AdmissionError::CircuitOpen { .. })));
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, response);
+        let result =
+            fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal).await;
+        assert!(
+            result.is_err(),
+            "editions must reject the common GraphQL error envelope"
+        );
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "editions must report the common envelope failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardcover_editions_uses_common_envelope_failure_signal() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::Hardcover,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            serde_json::json!({
+                "errors": [{"message": "denied"}],
+                "data": {"editions": []}
+            })
+            .to_string()
+            .into_bytes(),
+        );
+
+        let result =
+            fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal).await;
+        assert!(result.is_err());
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the editions path must retain hc_post's response-derived Failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn hardcover_editions_rejects_missing_or_wrong_typed_editions_field() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+        let cases = [
+            ("missing editions", serde_json::json!({"data": {}})),
+            (
+                "wrong-typed editions",
+                serde_json::json!({"data": {"editions": {}}}),
+            ),
+        ];
+
+        for (label, response) in cases {
+            queue.reset_breaker_for_tests(RateBucket::Hardcover);
+            queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+            let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+                200,
+                response.to_string().into_bytes(),
+            );
+            let result =
+                fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal)
+                    .await;
+            assert!(result.is_err(), "{label} must be a response error");
+            let admission = queue
+                .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "{label} must open a threshold-one breaker"
+            );
+        }
+
+        queue.reset_breaker_for_tests(RateBucket::Hardcover);
+        queue.set_breaker_config_for_tests(RateBucket::Hardcover, one_strike());
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(
+            200,
+            serde_json::json!({"data": {"editions": []}})
+                .to_string()
+                .into_bytes(),
+        );
+        let result =
+            fetch_hardcover_editions(&fetcher, "42", "tok", "en", RequestPriority::Normal).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "an explicit empty editions array is a healthy miss"
+        );
+        let admission = queue
+            .acquire(RateBucket::Hardcover, RequestPriority::Normal)
+            .await;
+        assert!(
+            !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "an explicit empty editions array must not report Failure"
         );
     }
 

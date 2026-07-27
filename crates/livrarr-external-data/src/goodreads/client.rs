@@ -11,7 +11,8 @@ use livrarr_http::outbound_queue;
 use std::time::Duration;
 
 use super::parsers::{
-    parse_autocomplete_json, parse_detail_html, GoodreadsDetailResult, GoodreadsSearchResult,
+    parse_autocomplete_json_checked, parse_detail_html, GoodreadsDetailResult,
+    GoodreadsSearchResult,
 };
 
 // =============================================================================
@@ -285,7 +286,11 @@ pub async fn search_goodreads<F: HttpFetcher>(
     // opens. Both endpoints share one bucket, so only the path that yields a
     // usable book payload may report success.
     let body = String::from_utf8_lossy(&resp.body).into_owned();
-    Ok(parse_autocomplete_json(&body))
+    parse_autocomplete_json_checked(&body).map_err(|e| {
+        tracing::warn!(error = %e, "Goodreads autocomplete: invalid top-level response");
+        outbound_queue::shared().report_outcome(RateBucket::Goodreads, BreakerSignal::Failure);
+        GoodreadsFetchError::Parse
+    })
 }
 
 /// Fetch and parse a Goodreads detail page. Returns `Err(Parse)` if the page
@@ -544,6 +549,83 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, GoodreadsFetchError::HttpStatus(500)));
+    }
+
+    #[tokio::test]
+    async fn search_goodreads_rejects_bad_top_levels_and_preserves_valid_entries() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let queue = outbound_queue::shared();
+        let one_strike = || CircuitBreakerConfig {
+            failure_threshold: 1,
+            evaluation_window_secs: 60,
+            open_duration_secs: 60,
+            half_open_probe_count: 1,
+        };
+
+        for (label, body) in [
+            ("HTML", "<html>blocked</html>"),
+            ("truncated JSON", r#"[{"title":"Broken""#),
+            ("non-array JSON", r#"{"hits":[]}"#),
+        ] {
+            queue.reset_breaker_for_tests(RateBucket::Goodreads);
+            queue.set_breaker_config_for_tests(RateBucket::Goodreads, one_strike());
+            let fetcher =
+                crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+            let result = search_goodreads(
+                &fetcher,
+                "https://www.goodreads.com",
+                "Dune",
+                RequestPriority::Normal,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(GoodreadsFetchError::Parse)),
+                "{label}: the provider path must preserve the checked parse error"
+            );
+            let admission = queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await;
+            assert!(
+                matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "{label}: the completed unreadable response must open a threshold-one breaker"
+            );
+        }
+
+        for (label, body, expected_len) in [
+            ("empty array", "[]", 0usize),
+            (
+                "mixed valid/malformed entries",
+                r#"[
+                    {"bookUrl":{"nested":"garbage"},"title":"Broken Entry"},
+                    {"bookUrl":"/book/show/5907","title":"Survivor","author":{"name":"J.R.R. Tolkien"}}
+                ]"#,
+                1usize,
+            ),
+        ] {
+            queue.reset_breaker_for_tests(RateBucket::Goodreads);
+            queue.set_breaker_config_for_tests(RateBucket::Goodreads, one_strike());
+            let fetcher =
+                crate::test_support::RecordingHttpFetcher::with_ok(200, body.as_bytes().to_vec());
+            let results = search_goodreads(
+                &fetcher,
+                "https://www.goodreads.com",
+                "Dune",
+                RequestPriority::Normal,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{label}: a valid array must remain healthy"));
+            assert_eq!(results.len(), expected_len, "{label}");
+            let admission = queue
+                .acquire(RateBucket::Goodreads, RequestPriority::Normal)
+                .await;
+            assert!(
+                !matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+                "{label}: valid top-level arrays must not report Failure"
+            );
+        }
     }
 
     #[tokio::test]

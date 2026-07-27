@@ -1166,6 +1166,8 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         }
 
         let data: serde_json::Value = serde_json::from_slice(&resp.body).map_err(|e| {
+            outbound_queue::shared()
+                .report_outcome(RateBucket::OpenLibrary, BreakerSignal::Failure);
             crate::types::ProviderFetchError::Other(format!("OL search parse error: {e}"))
         })?;
         // Search is only the first leg when it selects a work. Report no
@@ -1322,6 +1324,46 @@ mod openlibrary_qw2_pins {
             .requests()
             .iter()
             .any(|req| req.url.contains("/search.json?q="))
+    }
+
+    #[tokio::test]
+    async fn openlibrary_title_author_invalid_json_opens_threshold_one_breaker() {
+        use livrarr_http::breaker::CircuitBreakerConfig;
+        use livrarr_http::outbound_queue::{self, AdmissionError};
+
+        let _guard = crate::test_support::lock_breaker(RateBucket::OpenLibrary).await;
+        let queue = outbound_queue::shared();
+        queue.set_breaker_config_for_tests(
+            RateBucket::OpenLibrary,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                evaluation_window_secs: 60,
+                open_duration_secs: 60,
+                half_open_probe_count: 1,
+            },
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_ok(200, b"not json".to_vec());
+        let client = OpenLibraryClient::new(fetcher);
+        let result = client
+            .title_author_search(&work(None, None), RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(crate::types::ProviderFetchError::Other(message))
+                    if message.starts_with("OL search parse error:")
+            ),
+            "the existing provider-search parse error must be preserved"
+        );
+
+        let admission = queue
+            .acquire(RateBucket::OpenLibrary, RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(admission, Err(AdmissionError::CircuitOpen { .. })),
+            "the unreadable completed provider-search response must open a threshold-one breaker"
+        );
     }
 
     #[tokio::test]

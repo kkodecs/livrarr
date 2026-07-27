@@ -270,21 +270,16 @@ struct AutocompleteAuthor {
 /// discovery fan-out can treat Goodreads like any other provider.
 ///
 /// `/search` is AWS-WAF 202-challenged (effectively dead); this WAF-free JSON
-/// endpoint is the live discovery path (measured 2026-06-01). A non-array body
-/// (a WAF interstitial or a format change) yields an empty list rather than an
-/// error — the caller unions providers, so a Goodreads miss is not a failure.
-/// Entries deserialize INDIVIDUALLY: one malformed entry drops alone (logged)
-/// instead of failing the whole batch — a single rogue edition in the hit list
-/// used to silently erase every result for that query.
-pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
-    let values: Vec<serde_json::Value> = match serde_json::from_str(body) {
-        Ok(values) => values,
-        Err(e) => {
-            tracing::warn!(error = %e, "GR autocomplete body is not a JSON array (WAF interstitial or format change) — treating as no results");
-            return Vec::new();
-        }
-    };
-    values
+/// endpoint is the live discovery path (measured 2026-06-01). The checked
+/// parser preserves an invalid/non-array top-level response as an error so the
+/// provider client can classify it honestly. Entries still deserialize
+/// INDIVIDUALLY: one malformed entry drops alone (logged) instead of failing
+/// the whole batch.
+pub fn parse_autocomplete_json_checked(
+    body: &str,
+) -> Result<Vec<GoodreadsSearchResult>, serde_json::Error> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(body)?;
+    Ok(values
         .into_iter()
         .filter_map(|v| match serde_json::from_value::<AutocompleteEntry>(v) {
             Ok(e) => Some(e),
@@ -330,7 +325,19 @@ pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
                 series_position,
             })
         })
-        .collect()
+        .collect())
+}
+
+/// Lenient compatibility wrapper for callers where Goodreads is one optional
+/// contribution to a wider provider union.
+pub fn parse_autocomplete_json(body: &str) -> Vec<GoodreadsSearchResult> {
+    match parse_autocomplete_json_checked(body) {
+        Ok(results) => results,
+        Err(e) => {
+            tracing::warn!(error = %e, "GR autocomplete body is not a JSON array (WAF interstitial or format change) — treating as no results");
+            Vec::new()
+        }
+    }
 }
 // =============================================================================
 // Detail page parsing
@@ -1628,6 +1635,29 @@ mod tests {
         ]"#;
         let results = parse_autocomplete_json(body);
         assert_eq!(results.len(), 1, "the broken entry drops alone");
+        assert_eq!(results[0].title, "Survivor");
+    }
+
+    #[test]
+    fn autocomplete_checked_parser_rejects_bad_top_levels_but_isolates_entries() {
+        for body in ["<html>blocked</html>", r#"{"hits":[]}"#, "null"] {
+            assert!(
+                parse_autocomplete_json_checked(body).is_err(),
+                "{body:?} is not a valid autocomplete array"
+            );
+        }
+
+        let empty = parse_autocomplete_json_checked("[]")
+            .expect("an explicit empty array is a healthy miss");
+        assert!(empty.is_empty());
+
+        let mixed = r#"[
+            {"bookUrl":{"nested":"garbage"},"title":"Broken Entry"},
+            {"bookUrl":"/book/show/5907","title":"Survivor","author":{"name":"J.R.R. Tolkien"}}
+        ]"#;
+        let results = parse_autocomplete_json_checked(mixed)
+            .expect("bad entries must not poison a valid top-level array");
+        assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "Survivor");
     }
 
