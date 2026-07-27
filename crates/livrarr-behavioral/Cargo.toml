@@ -36,10 +36,11 @@ livrarr-matching = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-handlers = { workspace = true }
-livrarr-http = { workspace = true }
+livrarr-http = { workspace = true, features = ["test-helpers"] }
 livrarr-external-data = { workspace = true }
 livrarr-materialize = { workspace = true }
 livrarr-server = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 axum = { workspace = true }
 assert_matches = "1"
 futures = { workspace = true }
@@ -619,3 +620,7 @@ path = "../../tests/behavioral/test_identity_edit_fixes.rs"
 [[test]]
 name = "test_subtitle_matching"
 path = "../../tests/behavioral/test_subtitle_matching.rs"
+
+[[test]]
+name = "test_subtitle_matching_preview_door"
+path = "../../tests/behavioral/test_subtitle_matching_preview_door.rs"

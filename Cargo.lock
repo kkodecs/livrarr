@@ -1594,6 +1594,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tower",
+ "tracing-subscriber",
  "trait-variant",
  "unicode-normalization",
  "urlencoding",
