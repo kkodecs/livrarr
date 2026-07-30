@@ -251,7 +251,7 @@ fn enrichment_status_str(s: EnrichmentStatus) -> &'static str {
     }
 }
 
-fn parse_identity_status(s: &str) -> Result<livrarr_domain::IdentityStatus, DbError> {
+pub(crate) fn parse_identity_status(s: &str) -> Result<livrarr_domain::IdentityStatus, DbError> {
     use livrarr_domain::IdentityStatus;
     match s {
         "pending" => Ok(IdentityStatus::Pending),

@@ -5,10 +5,10 @@ use crate::DbError;
 use livrarr_domain::{
     AgreedAuthorRouteEvidence, AuthorCompatibilityProjection, AuthorEvidenceFingerprint, AuthorId,
     AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCursor,
-    AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger, AuthorProvider, AuthorRoadInput,
-    AuthorRoute, AuthorRouteKey, AuthorSweepProgress, ProviderAuthorNameObservation,
-    RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome, SettledWorkProviderKey,
-    UserId, WorkId,
+    AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger, AuthorNameSource,
+    AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteKey, AuthorSweepProgress,
+    ProviderAuthorNameObservation, RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome,
+    SettledWorkProviderKey, UserId, WorkId,
 };
 
 #[derive(Debug, Clone)]
@@ -42,6 +42,21 @@ pub struct AuthorProviderCall {
     pub provider: AuthorProvider,
     pub work_route: String,
     pub priority: RequestPriority,
+}
+
+/// Input to the shared author create/adopt gate.
+///
+/// It deliberately carries no `ol_key`/`gr_key`/`hc_key`: an author is created
+/// or adopted on identity alone, and an explicitly selected provider route is a
+/// separate user-sovereign step taken after the gate commits.
+#[derive(Debug, Clone)]
+pub struct CreateAuthorGateRequest {
+    pub user_id: UserId,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub import_id: Option<String>,
+    pub initial_name_source: AuthorNameSource,
+    pub trigger: AuthorLinkTrigger,
 }
 
 #[derive(Debug, Clone)]

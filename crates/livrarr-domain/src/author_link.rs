@@ -41,6 +41,27 @@ const OPEN_LIBRARY_URL_PREFIXES: [&str; 4] = [
     "http://www.openlibrary.org",
 ];
 
+impl OpenLibraryAuthorKey {
+    /// The canonical `OL<number>A` form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl GoodreadsAuthorId {
+    /// The canonical positive decimal id.
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+impl HardcoverAuthorId {
+    /// The canonical positive decimal id.
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
 impl AuthorRouteKey {
     /// Parse a raw provider author-route value into its canonical typed form.
     ///
@@ -62,6 +83,26 @@ impl AuthorRouteKey {
                 .map(|id| Self::Goodreads(GoodreadsAuthorId(id))),
             AuthorProvider::Hardcover => parse_numeric_author_id(provider, trimmed)
                 .map(|id| Self::Hardcover(HardcoverAuthorId(id))),
+        }
+    }
+
+    /// The provider this route addresses.
+    pub fn provider(&self) -> AuthorProvider {
+        match self {
+            Self::OpenLibrary(_) => AuthorProvider::OpenLibrary,
+            Self::Goodreads(_) => AuthorProvider::Goodreads,
+            Self::Hardcover(_) => AuthorProvider::Hardcover,
+        }
+    }
+
+    /// The canonical stored value. Every alias of the same identifier parses to
+    /// the same string, so this is what route uniqueness, tombstone lookup, and
+    /// route consumers compare.
+    pub fn value(&self) -> String {
+        match self {
+            Self::OpenLibrary(key) => key.as_str().to_string(),
+            Self::Goodreads(id) => id.get().to_string(),
+            Self::Hardcover(id) => id.get().to_string(),
         }
     }
 }
@@ -252,6 +293,13 @@ pub struct AuthorRouteEvidence {
 #[derive(Debug, Clone)]
 struct AuthorNameGuardAgree;
 
+impl AuthorNameGuardAgree {
+    /// The witness carries no data — holding one *is* the assertion that
+    /// [`guard_author_route`] returned `Agree`. Presenting it is how a route
+    /// writer discharges the one standard of proof.
+    fn presented(&self) {}
+}
+
 #[derive(Debug, Clone)]
 pub struct AgreedAuthorRouteEvidence {
     evidence: AuthorRouteEvidence,
@@ -261,6 +309,17 @@ pub struct AgreedAuthorRouteEvidence {
 impl AgreedAuthorRouteEvidence {
     pub fn evidence(&self) -> &AuthorRouteEvidence {
         &self.evidence
+    }
+
+    /// Consume the capability and hand back the evidence it proves.
+    ///
+    /// Taking `self` by value is what makes the guarded route writer's contract
+    /// mechanical: it must hold — and give up — the private witness only
+    /// [`guard_author_route`] can mint, so no caller can route unguarded
+    /// evidence by asserting `Agree` on its own authority.
+    pub fn into_agreed_evidence(self) -> AuthorRouteEvidence {
+        self.agree_proof.presented();
+        self.evidence
     }
 }
 

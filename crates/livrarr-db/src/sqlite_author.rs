@@ -5,11 +5,11 @@ use crate::sqlite::SqliteDb;
 use crate::sqlite_common::{map_db_err, parse_dt};
 use crate::sqlite_series::row_to_series;
 use crate::{
-    Author, AuthorDb, AuthorId, CreateAuthorDbRequest, DbError, Series, UpdateAuthorDbRequest,
-    UserId,
+    Author, AuthorDb, AuthorId, AuthorLinkDb, CreateAuthorDbRequest, CreateAuthorGateRequest,
+    DbError, Series, UpdateAuthorDbRequest, UserId,
 };
 
-fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
+pub(crate) fn row_to_author(row: sqlx::sqlite::SqliteRow) -> Result<Author, DbError> {
     let monitor_since_str: Option<String> = row
         .try_get("monitor_since")
         .map_err(|e| DbError::Io(Box::new(e)))?;
@@ -74,6 +74,27 @@ impl SqliteDb {
             livrarr_domain::seed::dominant_language(langs.iter().map(|l| l.as_deref()))
                 .unwrap_or_else(|| livrarr_domain::seed::DEFAULT_SEED_LANGUAGE.to_string()),
         )
+    }
+
+    /// The shared author create/adopt gate: one transaction that converges a
+    /// creation race onto a single author row and leaves that winner with its
+    /// initial name variant and a due author-link progress row.
+    ///
+    /// Every F1 add path (interactive add, standalone author add, manual
+    /// import, list import, series monitor, Readarr import) enters here, so an
+    /// author can never be committed in a state the sweep cannot see. The
+    /// pre-F1 [`AuthorDb::create_author`] writer stays as it is for legacy and
+    /// fixture use; [`AuthorLinkDb::ensure_enqueued`] is what repairs an author
+    /// that predates this gate.
+    pub async fn create_or_adopt_author(
+        &self,
+        request: CreateAuthorGateRequest,
+    ) -> Result<(Author, bool), DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let converged =
+            crate::sqlite_author_link::create_or_adopt_author_tx(&mut tx, &request).await?;
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(converged)
     }
 }
 
@@ -335,6 +356,12 @@ pub(crate) async fn merge_authors_tx(
     .await
     .map_err(map_db_err)?;
 
+    // 5b. author-link state: routes, name variants, candidates, and progress
+    // fold onto the survivor before the delete below cascades the loser's rows
+    // away. Survivor tombstones are never resurrected.
+    crate::sqlite_author_link::fold_author_link_state_tx(conn, user_id, survivor_id, loser_id)
+        .await?;
+
     // 6. delete the loser row — step 3 handled every loser series row
     // (fold or move), so no series row remains for this delete's
     // CASCADE to touch, and works.author_id was repointed in step 2.
@@ -593,17 +620,145 @@ impl AuthorDb for SqliteDb {
         rows.into_iter().map(row_to_author).collect()
     }
 
+    /// Monitored authors that have at least one *active OpenLibrary* route,
+    /// grouped one target per author. Plural OL routes widen a target's feed
+    /// coverage; they never turn one author into several monitor entries.
     async fn list_author_monitor_targets(
         &self,
         user_id: UserId,
     ) -> Result<Vec<livrarr_domain::AuthorMonitorTarget>, DbError> {
-        todo!()
+        let authors = sqlx::query(
+            "SELECT * FROM authors a \
+              WHERE a.user_id = ? AND a.monitored = 1 \
+                AND EXISTS (SELECT 1 FROM author_provider_routes r \
+                             WHERE r.user_id = a.user_id AND r.author_id = a.id \
+                               AND r.provider = 'open_library' AND r.state = 'active') \
+              ORDER BY a.id",
+        )
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_db_err)?;
+
+        let mut targets = Vec::with_capacity(authors.len());
+        for row in authors {
+            let author = row_to_author(row)?;
+            let ol_routes = self
+                .list_active_routes(
+                    user_id,
+                    author.id,
+                    Some(livrarr_domain::AuthorProvider::OpenLibrary),
+                )
+                .await?;
+            targets.push(livrarr_domain::AuthorMonitorTarget { author, ol_routes });
+        }
+        Ok(targets)
     }
 
+    /// The one display-name cascade, shared by rename and stored-variant pick.
+    ///
+    /// It changes what the library *shows* — `authors.name`, `works.author_name`
+    /// — and bumps `merge_generation` so tag convergence re-syncs file tags. It
+    /// never touches `works.normalized_author`: matching identity is not a
+    /// display concern, and rewriting it here would silently re-key the library.
     async fn rename_author_and_cascade(
         &self,
         request: crate::RenameAuthorDbRequest,
     ) -> Result<Author, DbError> {
-        todo!()
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
+        let owner: Option<i64> = sqlx::query_scalar("SELECT user_id FROM authors WHERE id = ?")
+            .bind(request.author_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        if owner != Some(request.user_id) {
+            return Err(DbError::NotFound { entity: "author" });
+        }
+
+        // A variant id selects a stored spelling; id 0 means the caller supplied
+        // the display string directly.
+        let display_name = if request.variant_id == 0 {
+            request.display_name.trim().to_string()
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT name FROM author_name_variants \
+                  WHERE id = ? AND user_id = ? AND author_id = ?",
+            )
+            .bind(request.variant_id)
+            .bind(request.user_id)
+            .bind(request.author_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_db_err)?
+            .ok_or(DbError::NotFound {
+                entity: "author name variant",
+            })?
+        };
+        if display_name.is_empty() {
+            return Err(DbError::Constraint {
+                message: "author display name must not be empty".to_string(),
+            });
+        }
+
+        // Exactly one User variant records the explicit display choice.
+        let canonical = livrarr_domain::identity_matching::canonical_author_key(&display_name);
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("DELETE FROM author_name_variants WHERE user_id = ? AND author_id = ? AND source = 'user'")
+            .bind(request.user_id)
+            .bind(request.author_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        if !canonical.is_empty() {
+            sqlx::query(
+                "INSERT INTO author_name_variants \
+                     (user_id, author_id, name, canonical_name, source, user_selected_at, \
+                      observed_at) \
+                 VALUES (?, ?, ?, ?, 'user', ?, ?)",
+            )
+            .bind(request.user_id)
+            .bind(request.author_id)
+            .bind(&display_name)
+            .bind(&canonical)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        }
+
+        let normalized_name = (!canonical.is_empty()).then_some(canonical);
+        sqlx::query(
+            "UPDATE authors SET name = ?, normalized_name = ? WHERE id = ? AND user_id = ?",
+        )
+        .bind(&display_name)
+        .bind(&normalized_name)
+        .bind(request.author_id)
+        .bind(request.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        sqlx::query(
+            "UPDATE works SET author_name = ?, merge_generation = merge_generation + 1 \
+              WHERE author_id = ? AND user_id = ?",
+        )
+        .bind(&display_name)
+        .bind(request.author_id)
+        .bind(request.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        let row = sqlx::query("SELECT * FROM authors WHERE id = ? AND user_id = ?")
+            .bind(request.author_id)
+            .bind(request.user_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+        let author = row_to_author(row)?;
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(author)
     }
 }
