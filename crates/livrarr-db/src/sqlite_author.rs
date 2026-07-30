@@ -658,15 +658,47 @@ impl AuthorDb for SqliteDb {
         Ok(targets)
     }
 
-    /// The one display-name cascade, shared by rename and stored-variant pick.
+    async fn rename_author_and_cascade(
+        &self,
+        request: crate::RenameAuthorDbRequest,
+    ) -> Result<Author, DbError> {
+        self.display_name_cascade(request, DisplayNameOrigin::UserChoice)
+            .await
+    }
+
+    async fn converge_author_display_name(
+        &self,
+        request: crate::RenameAuthorDbRequest,
+    ) -> Result<Author, DbError> {
+        self.display_name_cascade(request, DisplayNameOrigin::AutomaticConvergence)
+            .await
+    }
+}
+
+/// Who chose the display name a cascade is about to commit.
+///
+/// The name change itself is identical either way. What differs is user
+/// authority: only a user's own choice is recorded as one, because a stamp
+/// written on the machine's behalf would outrank every provider name the
+/// ranking might later prefer and freeze convergence on the first guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayNameOrigin {
+    UserChoice,
+    AutomaticConvergence,
+}
+
+impl SqliteDb {
+    /// The one display-name cascade, shared by rename, stored-variant pick, and
+    /// automatic convergence.
     ///
     /// It changes what the library *shows* — `authors.name`, `works.author_name`
     /// — and bumps `merge_generation` so tag convergence re-syncs file tags. It
     /// never touches `works.normalized_author`: matching identity is not a
     /// display concern, and rewriting it here would silently re-key the library.
-    async fn rename_author_and_cascade(
+    async fn display_name_cascade(
         &self,
         request: crate::RenameAuthorDbRequest,
+        origin: DisplayNameOrigin,
     ) -> Result<Author, DbError> {
         let mut tx = self.pool().begin().await.map_err(map_db_err)?;
 
@@ -704,31 +736,16 @@ impl AuthorDb for SqliteDb {
             });
         }
 
-        // Exactly one User variant records the explicit display choice.
         let canonical = livrarr_domain::identity_matching::canonical_author_key(&display_name);
-        let now = Utc::now().to_rfc3339();
-        sqlx::query("DELETE FROM author_name_variants WHERE user_id = ? AND author_id = ? AND source = 'user'")
-            .bind(request.user_id)
-            .bind(request.author_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        if !canonical.is_empty() {
-            sqlx::query(
-                "INSERT INTO author_name_variants \
-                     (user_id, author_id, name, canonical_name, source, user_selected_at, \
-                      observed_at) \
-                 VALUES (?, ?, ?, ?, 'user', ?, ?)",
+        if origin == DisplayNameOrigin::UserChoice {
+            record_user_display_choice_tx(
+                &mut tx,
+                &request,
+                &display_name,
+                &canonical,
+                &Utc::now().to_rfc3339(),
             )
-            .bind(request.user_id)
-            .bind(request.author_id)
-            .bind(&display_name)
-            .bind(&canonical)
-            .bind(&now)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
+            .await?;
         }
 
         let normalized_name = (!canonical.is_empty()).then_some(canonical);
@@ -763,5 +780,282 @@ impl AuthorDb for SqliteDb {
         let author = row_to_author(row)?;
         tx.commit().await.map_err(map_db_err)?;
         Ok(author)
+    }
+}
+
+/// Record that the display name about to be committed is the user's own choice.
+///
+/// Exactly one variant carries the selection, so the stamp is cleared across the
+/// author's variants first. A stored spelling the user picked is marked in place
+/// — the provider observation that produced it stays intact with its source —
+/// while a name the user typed exists only as the single `User` variant this
+/// writes.
+async fn record_user_display_choice_tx(
+    tx: &mut sqlx::SqliteConnection,
+    request: &crate::RenameAuthorDbRequest,
+    display_name: &str,
+    canonical: &str,
+    now: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE author_name_variants SET user_selected_at = NULL \
+          WHERE user_id = ? AND author_id = ?",
+    )
+    .bind(request.user_id)
+    .bind(request.author_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_db_err)?;
+
+    if request.variant_id != 0 {
+        sqlx::query(
+            "UPDATE author_name_variants SET user_selected_at = ? \
+              WHERE id = ? AND user_id = ? AND author_id = ?",
+        )
+        .bind(now)
+        .bind(request.variant_id)
+        .bind(request.user_id)
+        .bind(request.author_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+        return Ok(());
+    }
+
+    sqlx::query(
+        "DELETE FROM author_name_variants \
+          WHERE user_id = ? AND author_id = ? AND source = 'user'",
+    )
+    .bind(request.user_id)
+    .bind(request.author_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_db_err)?;
+    if canonical.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO author_name_variants \
+             (user_id, author_id, name, canonical_name, source, user_selected_at, \
+              observed_at) \
+         VALUES (?, ?, ?, ?, 'user', ?, ?)",
+    )
+    .bind(request.user_id)
+    .bind(request.author_id)
+    .bind(display_name)
+    .bind(canonical)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_db_err)?;
+    Ok(())
+}
+
+/// The two cascade origins, which differ only in what they say about authority.
+///
+/// The user-chosen path is covered end to end by the author-link door and
+/// database suites. Automatic convergence has no caller yet — the observer that
+/// drives it is wired in a later unit — so its one distinguishing property is
+/// pinned here rather than left to be discovered after it starts running.
+#[cfg(test)]
+mod display_name_origin_tests {
+    use super::*;
+    use crate::test_helpers::create_test_db;
+    use crate::{
+        AuthorNameVariantDb, CreateUserDbRequest, CreateWorkDbRequest, RenameAuthorDbRequest,
+        UserDb, UserRole, WorkDbCreate,
+    };
+    use livrarr_domain::{normalize_for_matching, AuthorNameSource, ProviderAuthorNameObservation};
+
+    /// One user, one author, one work, and one observed OpenLibrary name
+    /// variant — the state both cascade origins act on.
+    async fn seed(db: &SqliteDb) -> (i64, i64, i64, i64) {
+        let user = db
+            .create_user(CreateUserDbRequest {
+                username: "cascade-origin".into(),
+                password_hash: "hash".into(),
+                role: UserRole::User,
+                api_key_hash: "cascade-origin-key".into(),
+            })
+            .await
+            .expect("user");
+        let (author, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user.id,
+                name: "Stored Author".into(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("author");
+        let (work, _) = db
+            .create_work(CreateWorkDbRequest {
+                user_id: user.id,
+                title: "Cascade Work".into(),
+                author_name: "Stored Author".into(),
+                normalized_title: normalize_for_matching("Cascade Work"),
+                normalized_author: normalize_for_matching("Stored Author"),
+                author_id: Some(author.id),
+                language: Some("en".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("work");
+        db.record_observed_names(
+            user.id,
+            work.id,
+            &[ProviderAuthorNameObservation {
+                source: AuthorNameSource::OpenLibrary,
+                name: "Provider Author".into(),
+            }],
+        )
+        .await
+        .expect("observed name");
+        let variant_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM author_name_variants WHERE user_id = ? AND name = ?",
+        )
+        .bind(user.id)
+        .bind("Provider Author")
+        .fetch_one(db.pool())
+        .await
+        .expect("variant id");
+        (user.id, author.id, work.id, variant_id)
+    }
+
+    #[tokio::test]
+    async fn automatic_convergence_moves_the_display_name_and_claims_no_user_authority() {
+        let db = create_test_db().await;
+        let (user_id, author_id, work_id, variant_id) = seed(&db).await;
+        let generation_before: i64 =
+            sqlx::query_scalar("SELECT merge_generation FROM works WHERE id = ?")
+                .bind(work_id)
+                .fetch_one(db.pool())
+                .await
+                .expect("generation before");
+
+        let converged = db
+            .converge_author_display_name(RenameAuthorDbRequest {
+                user_id,
+                author_id,
+                display_name: "Provider Author".into(),
+                variant_id,
+            })
+            .await
+            .expect("automatic convergence");
+
+        assert_eq!(converged.name, "Provider Author");
+        let work: (String, String, i64) = sqlx::query_as(
+            "SELECT author_name, normalized_author, merge_generation FROM works WHERE id = ?",
+        )
+        .bind(work_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("work after convergence");
+        assert_eq!(work.0, "Provider Author");
+        assert_eq!(
+            work.1,
+            normalize_for_matching("Stored Author"),
+            "convergence is a display change and must not re-key the library"
+        );
+        assert_eq!(work.2, generation_before + 1, "tags must re-sync");
+
+        let user_variants: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_name_variants \
+              WHERE user_id = ? AND author_id = ? AND source = 'user'",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("user variant count");
+        assert_eq!(
+            user_variants, 0,
+            "automatic convergence must not fabricate a User variant"
+        );
+        let selected: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_name_variants \
+              WHERE user_id = ? AND author_id = ? AND user_selected_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("selected count");
+        assert_eq!(
+            selected, 0,
+            "automatic convergence must not stamp user authority on its own choice"
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_convergence_leaves_an_existing_user_selection_alone() {
+        let db = create_test_db().await;
+        let (user_id, author_id, _work_id, variant_id) = seed(&db).await;
+        db.rename_author_and_cascade(RenameAuthorDbRequest {
+            user_id,
+            author_id,
+            display_name: "Chosen By User".into(),
+            variant_id: 0,
+        })
+        .await
+        .expect("user rename");
+
+        db.converge_author_display_name(RenameAuthorDbRequest {
+            user_id,
+            author_id,
+            display_name: "Provider Author".into(),
+            variant_id,
+        })
+        .await
+        .expect("automatic convergence over a user choice");
+
+        let still_selected: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM author_name_variants \
+              WHERE user_id = ? AND author_id = ? AND user_selected_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_all(db.pool())
+        .await
+        .expect("selected variants");
+        assert_eq!(
+            still_selected,
+            vec!["Chosen By User".to_string()],
+            "the user's selection survives an automatic display-name change"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_picked_stored_variant_records_the_user_as_its_chooser() {
+        let db = create_test_db().await;
+        let (user_id, author_id, _work_id, variant_id) = seed(&db).await;
+
+        db.rename_author_and_cascade(RenameAuthorDbRequest {
+            user_id,
+            author_id,
+            display_name: String::new(),
+            variant_id,
+        })
+        .await
+        .expect("stored-variant pick");
+
+        let selected: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT id, source FROM author_name_variants \
+              WHERE user_id = ? AND author_id = ? AND user_selected_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_all(db.pool())
+        .await
+        .expect("selected variants");
+        assert_eq!(
+            selected,
+            vec![(variant_id, "open_library".to_string())],
+            "the picked observation is marked in place, keeping its source"
+        );
     }
 }

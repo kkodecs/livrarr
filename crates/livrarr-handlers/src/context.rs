@@ -1,13 +1,13 @@
 use livrarr_domain::services::{
-    AppConfigService, AuthorLinkService, AuthorMonitorWorkflow, AuthorService, BookmarkService,
-    ChapterService, CoverService, DiscoveryService, DownloadClientCredentialService,
-    DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
-    HistoryService, IdentityConflictService, IdentityResolver, ImportIoService, ImportService,
-    ImportWorkflow, IndexerCredentialService, IndexerSettingsService, ListService,
-    ManualImportService, MatchingService, NotificationService, ProviderStatsService, QueueService,
-    ReadarrImportWorkflow, ReleaseService, RemotePathMappingService, RootFolderService,
-    RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkIdentityRepository,
-    WorkService,
+    AppConfigService, AuthorLinkService, AuthorMonitorWorkflow, AuthorService, AuthorViewService,
+    BookmarkService, ChapterService, CoverService, DiscoveryService,
+    DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
+    EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
+    IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
+    IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
+    ProviderStatsService, QueueService, ReadarrImportWorkflow, ReleaseService,
+    RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
+    SeriesService, TagService, WorkIdentityRepository, WorkService,
 };
 use livrarr_http::HttpClient;
 
@@ -66,6 +66,11 @@ pub trait HasAuthorService: Clone + Send + Sync + 'static {
 pub trait HasAuthorLinkService: Clone + Send + Sync + 'static {
     type AuthorLinkSvc: AuthorLinkService + Send + Sync + 'static;
     fn author_link_service(&self) -> &Self::AuthorLinkSvc;
+}
+
+pub trait HasAuthorViewService: Clone + Send + Sync + 'static {
+    type AuthorViewSvc: AuthorViewService + Send + Sync + 'static;
+    fn author_view_service(&self) -> &Self::AuthorViewSvc;
 }
 
 pub trait HasSeriesService: Clone + Send + Sync + 'static {
@@ -304,6 +309,7 @@ pub trait AppContext:
     + HasCrossFormatService
     + HasAuthorService
     + HasAuthorLinkService
+    + HasAuthorViewService
     + HasSeriesService
     + HasSeriesQueryService
     + HasGrabService
@@ -358,6 +364,7 @@ impl<T> AppContext for T where
         + HasCrossFormatService
         + HasAuthorService
         + HasAuthorLinkService
+        + HasAuthorViewService
         + HasSeriesService
         + HasSeriesQueryService
         + HasGrabService

@@ -177,3 +177,71 @@ pub trait AuthorService: Send + Sync {
         monitor_language: Option<String>,
     ) -> Result<Author, AuthorServiceError>;
 }
+
+/// The author's route panel, read-only.
+///
+/// It exists as its own capability because every author response needs the same
+/// four derived values and none of them may be recomputed at a door: link state,
+/// monitorability, and the compatibility keys all follow from the route ledger,
+/// which lives behind the compile wall.
+#[trait_variant::make(Send)]
+pub trait AuthorViewService: Send + Sync {
+    /// The author's routes, link state, whether monitoring is available, and the
+    /// scalar key projection kept for API compatibility — all derived from the
+    /// route ledger, never from the frozen `authors.*_key` columns.
+    async fn route_view(
+        &self,
+        user_id: UserId,
+        author: &Author,
+    ) -> Result<AuthorRouteView, AuthorServiceError>;
+}
+
+/// The four derived values every author response carries.
+#[derive(Debug, Clone)]
+pub struct AuthorRouteView {
+    pub routes: Vec<crate::AuthorRoute>,
+    pub link_state: crate::AuthorLinkState,
+    /// True only for an active OpenLibrary route: a Goodreads or Hardcover route
+    /// makes an author linked, never monitorable.
+    pub monitorable: bool,
+    pub compatibility: crate::AuthorCompatibilityProjection,
+}
+
+impl AuthorRouteView {
+    /// Derive the panel from an author's active route rows.
+    ///
+    /// The one place these three answers are computed, so a caller that already
+    /// holds the route set cannot reach a different conclusion than a caller
+    /// that reads it again. Pending review evidence outranks an existing route:
+    /// a linked author with an open question is still a question. Every value
+    /// comes from the route ledger — never from the frozen `authors.*_key`
+    /// columns.
+    pub fn from_active_routes(routes: Vec<crate::AuthorRoute>, under_review: bool) -> Self {
+        use crate::{AuthorLinkState, AuthorProvider};
+
+        let key_for = |provider: AuthorProvider| {
+            routes
+                .iter()
+                .find(|route| route.key.provider() == provider)
+                .map(|route| route.key.value())
+        };
+        let compatibility = crate::AuthorCompatibilityProjection {
+            ol_key: key_for(AuthorProvider::OpenLibrary),
+            gr_key: key_for(AuthorProvider::Goodreads),
+            hc_key: key_for(AuthorProvider::Hardcover),
+        };
+        let link_state = if under_review {
+            AuthorLinkState::NeedsReview
+        } else if routes.is_empty() {
+            AuthorLinkState::Unlinked
+        } else {
+            AuthorLinkState::Linked
+        };
+        Self {
+            monitorable: compatibility.ol_key.is_some(),
+            routes,
+            link_state,
+            compatibility,
+        }
+    }
+}

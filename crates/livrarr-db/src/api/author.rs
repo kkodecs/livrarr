@@ -66,7 +66,25 @@ pub trait AuthorDb: Send + Sync {
         user_id: UserId,
     ) -> Result<Vec<AuthorMonitorTarget>, DbError>;
 
+    /// The display-name cascade for a name the user chose.
+    ///
+    /// One transaction: exactly one variant carries the user's selection,
+    /// `authors.name` and `works.author_name` change, and `merge_generation`
+    /// bumps so tag convergence re-syncs. `works.normalized_author` is never
+    /// touched.
     async fn rename_author_and_cascade(
+        &self,
+        request: RenameAuthorDbRequest,
+    ) -> Result<Author, DbError>;
+
+    /// The same cascade for a name automatic convergence ranked.
+    ///
+    /// It moves `authors.name`, `works.author_name`, and `merge_generation`
+    /// exactly as the user-chosen path does, and touches no user authority: no
+    /// `User` variant is fabricated and no `user_selected_at` is stamped or
+    /// cleared. Writing one would make the machine's own choice outrank every
+    /// later provider name and freeze convergence on it.
+    async fn converge_author_display_name(
         &self,
         request: RenameAuthorDbRequest,
     ) -> Result<Author, DbError>;

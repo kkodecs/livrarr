@@ -80,6 +80,39 @@ pub struct AuthorResponse {
     pub added_at: String,
 }
 
+impl AuthorResponse {
+    /// The author plus its assembled route panel.
+    ///
+    /// The scalar `*_key` fields are the panel's compatibility projection, never
+    /// the frozen `authors.*_key` columns: one authority answers what an author
+    /// is linked to, and it is the route ledger.
+    pub fn from_author_and_view(
+        author: &livrarr_domain::Author,
+        view: livrarr_domain::services::AuthorRouteView,
+    ) -> Self {
+        Self {
+            id: author.id,
+            name: author.name.clone(),
+            sort_name: author.sort_name.clone(),
+            ol_key: view.compatibility.ol_key,
+            gr_key: view.compatibility.gr_key,
+            hc_key: view.compatibility.hc_key,
+            routes: view
+                .routes
+                .iter()
+                .map(AuthorRouteResponse::from_route)
+                .collect(),
+            name_variants: Vec::new(),
+            link_state: view.link_state,
+            monitorable: view.monitorable,
+            monitored: author.monitored,
+            monitor_new_items: author.monitor_new_items,
+            monitor_language: author.monitor_language.clone(),
+            added_at: author.added_at.to_rfc3339(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorRouteResponse {
@@ -89,6 +122,19 @@ pub struct AuthorRouteResponse {
     pub state: AuthorRouteState,
     pub provenance: AuthorRouteProvenance,
     pub removed_at: Option<DateTime<Utc>>,
+}
+
+impl AuthorRouteResponse {
+    pub fn from_route(route: &livrarr_domain::AuthorRoute) -> Self {
+        Self {
+            id: route.id,
+            provider: route.key.provider(),
+            value: route.key.value(),
+            state: route.state,
+            provenance: route.provenance,
+            removed_at: route.removed_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

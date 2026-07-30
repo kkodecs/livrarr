@@ -171,6 +171,27 @@ impl From<livrarr_domain::services::AuthorServiceError> for ApiError {
     }
 }
 
+impl From<livrarr_domain::AuthorLinkError> for ApiError {
+    fn from(e: livrarr_domain::AuthorLinkError) -> Self {
+        use livrarr_domain::AuthorLinkError;
+        match e {
+            AuthorLinkError::NotFound => ApiError::NotFound,
+            // The route is real and someone else's: the caller's request is
+            // answerable, just not as asked.
+            AuthorLinkError::RouteOwnedByOtherAuthor(author_id) => ApiError::Conflict {
+                reason: format!("author route is already held by author {author_id}"),
+            },
+            // A lost claim means the evidence this action was about has moved on.
+            AuthorLinkError::ClaimLost => ApiError::Conflict {
+                reason: "author link state changed while this request was in flight".to_string(),
+            },
+            AuthorLinkError::InvalidRoute(message) => ApiError::BadRequest(message),
+            AuthorLinkError::Database(message) => ApiError::Internal(message),
+            AuthorLinkError::Provider(error) => ApiError::BadGateway(format!("{error:?}")),
+        }
+    }
+}
+
 impl From<livrarr_domain::services::SeriesServiceError> for ApiError {
     fn from(e: livrarr_domain::services::SeriesServiceError) -> Self {
         use livrarr_domain::services::SeriesServiceError;

@@ -476,22 +476,58 @@ where
         self.lookup(query, limit).await
     }
 
+    /// Rename an author to a name the user typed.
+    ///
+    /// The typed text becomes the author's single `User` name variant and the
+    /// display cascade commits it — there is no second rename mechanism, and
+    /// `works.normalized_author` is not a display concern and is left alone.
     async fn rename(
         &self,
         user_id: UserId,
         author_id: AuthorId,
         name: String,
     ) -> Result<Author, AuthorServiceError> {
-        todo!()
+        let display_name = name.trim().to_string();
+        if display_name.is_empty() {
+            return Err(AuthorServiceError::Validation {
+                field: "name".to_string(),
+                message: "cannot be empty".to_string(),
+            });
+        }
+        // variant_id 0 means "the caller supplied the display string": the
+        // cascade owns creating the one User variant that records the choice.
+        Ok(self
+            .db
+            .rename_author_and_cascade(livrarr_db::RenameAuthorDbRequest {
+                user_id,
+                author_id,
+                display_name,
+                variant_id: 0,
+            })
+            .await?)
     }
 
+    /// Promote one already-observed spelling to the author's display name.
+    ///
+    /// The same cascade as [`AuthorService::rename`], entered by variant id: the
+    /// chosen row is marked as the user's selection in place, so the provider
+    /// observation that produced it keeps its source and nothing about the name
+    /// is re-derived here.
     async fn select_name_variant(
         &self,
         user_id: UserId,
         author_id: AuthorId,
         variant_id: i64,
     ) -> Result<Author, AuthorServiceError> {
-        todo!()
+        Ok(self
+            .db
+            .rename_author_and_cascade(livrarr_db::RenameAuthorDbRequest {
+                user_id,
+                author_id,
+                display_name: String::new(),
+                variant_id,
+            })
+            .await?)
     }
 
     async fn set_monitoring(
@@ -503,6 +539,23 @@ where
         monitor_language: Option<String>,
     ) -> Result<Author, AuthorServiceError> {
         todo!()
+    }
+}
+
+impl<D, F, L> AuthorViewService for AuthorServiceImpl<D, F, L>
+where
+    D: livrarr_db::AuthorLinkDb + Send + Sync,
+    F: Send + Sync,
+    L: Send + Sync,
+{
+    async fn route_view(
+        &self,
+        user_id: UserId,
+        author: &Author,
+    ) -> Result<AuthorRouteView, AuthorServiceError> {
+        crate::author_linking::AuthorResponseAssembler { db: &self.db }
+            .route_view(user_id, author)
+            .await
     }
 }
 

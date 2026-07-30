@@ -402,9 +402,19 @@ impl HasAuthorService for AppState {
 }
 
 impl HasAuthorLinkService for AppState {
-    type AuthorLinkSvc = LiveAuthorLinkingService;
+    // The author-link doors are served by the composition root itself: the road
+    // is the repository plus the shared provider transports, and this is where
+    // both live. See `services::author_linking_service`.
+    type AuthorLinkSvc = AppState;
     fn author_link_service(&self) -> &Self::AuthorLinkSvc {
-        &self.author_link_service
+        self
+    }
+}
+
+impl livrarr_handlers::context::HasAuthorViewService for AppState {
+    type AuthorViewSvc = LiveAuthorService;
+    fn author_view_service(&self) -> &Self::AuthorViewSvc {
+        &self.author_service
     }
 }
 

@@ -10,20 +10,20 @@ use livrarr_domain::identity_matching::{
 };
 use livrarr_domain::seed::dominant_language;
 use livrarr_domain::services::{
-    AuthorLinkService, AuthorLinkWorkflow, AuthorProviderGateway, AuthorServiceError,
+    AuthorLinkService, AuthorLinkWorkflow, AuthorProviderGateway, AuthorRouteView,
+    AuthorServiceError,
 };
 use livrarr_domain::{
     guard_author_route, AgreedAuthorRouteEvidence, Author, AuthorCandidateAlternateNameEvidence,
-    AuthorCandidateCatalogState, AuthorCompatibilityProjection, AuthorEvidenceFingerprint,
-    AuthorId, AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate,
-    AuthorLinkCandidateReason, AuthorLinkCandidateStatus, AuthorLinkCursor, AuthorLinkError,
-    AuthorLinkProgress, AuthorLinkProgressState, AuthorLinkProgressUpdate, AuthorLinkReview,
-    AuthorLinkState, AuthorLinkTrigger, AuthorNameSource, AuthorNameVariant, AuthorProvider,
-    AuthorProviderError, AuthorRoadInput, AuthorRoute, AuthorRouteEvidenceSource,
-    AuthorRouteGuardResult, AuthorRouteKey, AuthorSweepProgress, AuthorSweepTickSummary,
-    OpenLibraryAuthorCandidate, OpenLibraryAuthorKey, OpenLibraryNameRole,
-    RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome, SettledAuthorWork,
-    SettledWorkProviderKey, UserId, WorkId,
+    AuthorCandidateCatalogState, AuthorEvidenceFingerprint, AuthorId, AuthorKeyAttempt,
+    AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCandidateReason,
+    AuthorLinkCandidateStatus, AuthorLinkCursor, AuthorLinkError, AuthorLinkProgress,
+    AuthorLinkProgressState, AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger,
+    AuthorNameSource, AuthorNameVariant, AuthorProvider, AuthorProviderError, AuthorRoadInput,
+    AuthorRoute, AuthorRouteEvidenceSource, AuthorRouteGuardResult, AuthorRouteKey,
+    AuthorSweepProgress, AuthorSweepTickSummary, OpenLibraryAuthorCandidate, OpenLibraryAuthorKey,
+    OpenLibraryNameRole, RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome,
+    SettledAuthorWork, SettledWorkProviderKey, UserId, WorkId,
 };
 use livrarr_external_data::language::{provider_priority, ProviderPriority};
 use tokio_util::sync::CancellationToken;
@@ -757,7 +757,9 @@ where
     /// through the one shared rename cascade.
     ///
     /// Provider-free and idempotent: when the ranked choice is already the
-    /// stored name, nothing is written.
+    /// stored name, nothing is written. The cascade is entered as automatic
+    /// convergence, so the machine's own ranking never writes itself in as a
+    /// user selection that later provider names could not outrank.
     async fn converge_display_name(
         &self,
         claim: &AuthorLinkClaim,
@@ -778,7 +780,7 @@ where
             return Ok(());
         }
         self.db
-            .rename_author_and_cascade(RenameAuthorDbRequest {
+            .converge_author_display_name(RenameAuthorDbRequest {
                 user_id: claim.user_id,
                 author_id: claim.author_id,
                 display_name: chosen.name.clone(),
@@ -1264,23 +1266,38 @@ where
     }
 }
 
-pub struct AuthorResponseAssembler;
+/// Assembles the author-detail route panel from the route ledger.
+///
+/// It borrows the repository rather than owning one: every caller already holds
+/// the handle, and the panel is a read the caller performs, not a service with a
+/// lifetime of its own.
+pub struct AuthorResponseAssembler<'a, D> {
+    pub db: &'a D,
+}
 
-impl AuthorResponseAssembler {
+impl<'a, D> AuthorResponseAssembler<'a, D>
+where
+    D: AuthorLinkDb + Send + Sync,
+{
+    /// The route panel's four derived values.
+    ///
+    /// Two reads — the author's active routes and whether the review surface
+    /// still holds a current-generation question about them — and then the one
+    /// shared derivation, so this panel and a caller that already had the route
+    /// set in hand cannot disagree.
     pub async fn route_view(
         &self,
         user_id: UserId,
         author: &Author,
-    ) -> Result<
-        (
-            Vec<AuthorRoute>,
-            AuthorLinkState,
-            bool,
-            AuthorCompatibilityProjection,
-        ),
-        AuthorServiceError,
-    > {
-        todo!()
+    ) -> Result<AuthorRouteView, AuthorServiceError> {
+        let routes = self.db.list_active_routes(user_id, author.id, None).await?;
+        let under_review = self
+            .db
+            .list_review(user_id)
+            .await?
+            .iter()
+            .any(|review| review.author.id == author.id);
+        Ok(AuthorRouteView::from_active_routes(routes, under_review))
     }
 }
 
