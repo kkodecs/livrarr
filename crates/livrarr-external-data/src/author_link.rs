@@ -23,6 +23,7 @@ use livrarr_domain::services::{
 use livrarr_domain::{
     AuthorProvider, AuthorProviderError, AuthorRouteKey, OpenLibraryAuthorCandidate,
     OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, RequestPriority,
+    CERTIFIED_AUTHOR_ROLE,
 };
 use lru::LruCache;
 use tokio::sync::{broadcast, Semaphore};
@@ -70,13 +71,74 @@ const OL_AUTHOR_NAME_CACHE_CAPACITY: usize = 1024;
 /// slow requests one sweep can be waiting on.
 const OL_HYDRATION_MAX_IN_FLIGHT: usize = 2;
 
-/// Keep only the first ref per canonical route key, preserving the order the
-/// provider credited them in.
-fn canonical_distinct(refs: Vec<ProviderAuthorRef>) -> Vec<ProviderAuthorRef> {
-    let mut seen = HashSet::new();
-    refs.into_iter()
-        .filter(|candidate| seen.insert(candidate.key.value()))
+/// One route per person, keeping every credit the provider made for them.
+///
+/// A provider can credit the same person twice on one book — Hardcover per
+/// edition, Goodreads on both a primary and a secondary edge — and the credits
+/// need not agree. A route is authorial if **any** occurrence certified it,
+/// because a person who wrote one edition wrote the book; a route nobody
+/// credited as an author keeps whatever label it was first seen with. The order
+/// the provider credited people in is preserved.
+fn aggregate_credits(refs: Vec<ProviderAuthorRef>) -> Vec<ProviderAuthorRef> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_route: HashMap<String, ProviderAuthorRef> = HashMap::new();
+    for candidate in refs {
+        let route = candidate.key.value();
+        match by_route.entry(route.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(route);
+                slot.insert(candidate);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let held_is_authorial = slot.get().role.as_deref() == Some(CERTIFIED_AUTHOR_ROLE);
+                let offer_is_authorial = candidate.role.as_deref() == Some(CERTIFIED_AUTHOR_ROLE);
+                if offer_is_authorial && !held_is_authorial {
+                    // The authorial occurrence is the one worth keeping, and it
+                    // brings the name the provider used when crediting the
+                    // person as an author.
+                    slot.insert(candidate);
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|route| by_route.remove(&route))
         .collect()
+}
+
+/// What one adapter's per-entry reads add up to.
+///
+/// Dropping a single unreadable entry is parse-drift discipline; dropping every
+/// entry is the shape having moved. Answering `Ok([])` in that second case
+/// would certify a non-empty response as "nobody was credited" and make the
+/// keyed read terminally successful on fabricated emptiness (insight 62).
+struct ContributorRead {
+    refs: Vec<ProviderAuthorRef>,
+    raw_entries: usize,
+    role_dropped: usize,
+}
+
+impl ContributorRead {
+    fn new() -> Self {
+        Self {
+            refs: Vec::new(),
+            raw_entries: 0,
+            role_dropped: 0,
+        }
+    }
+
+    /// The aggregated credits, or drift when a moved role shape is the only
+    /// reason this response looks empty.
+    fn finish(self, provider: &str) -> Result<Vec<ProviderAuthorRef>, ProviderFetchError> {
+        if self.raw_entries > 0 && self.refs.is_empty() && self.role_dropped > 0 {
+            return Err(ProviderFetchError::LayoutDrift(format!(
+                "{provider} credited {} contributor(s) but none carried a readable role",
+                self.raw_entries
+            )));
+        }
+        Ok(aggregate_credits(self.refs))
+    }
 }
 
 impl<F: HttpFetcher> OpenLibraryClient<F> {
@@ -113,8 +175,9 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             .cloned()
             .unwrap_or_default();
 
-        let mut refs = Vec::with_capacity(entries.len());
+        let mut read = ContributorRead::new();
         for entry in &entries {
+            read.raw_entries += 1;
             let Some(raw_key) = entry
                 .pointer("/author/key")
                 .and_then(|value| value.as_str())
@@ -145,17 +208,14 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 None => self.hydrate_author_name(author_key, priority).await?,
             };
 
-            refs.push(ProviderAuthorRef {
+            read.refs.push(ProviderAuthorRef {
                 key: route,
                 name,
-                role: entry
-                    .pointer("/type/key")
-                    .and_then(|value| value.as_str())
-                    .map(|raw| raw.trim_start_matches("/type/").to_string()),
+                role: Some(open_library_certified_role(entry)),
             });
         }
 
-        Ok(canonical_distinct(refs))
+        read.finish("OpenLibrary")
     }
 
     /// The credited name on one OpenLibrary author record, served by the
@@ -189,6 +249,25 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             priority,
         )
         .await
+    }
+}
+
+/// What one entry of an OpenLibrary work's `authors[]` credits this person as.
+///
+/// OpenLibrary spells an ordinary author credit as the structural type
+/// `/type/author_role`; other role types name a different credit and travel
+/// under their own stripped label. An entry with no type at all is still a
+/// member of the work's **author list**, which is the credit the container
+/// itself makes.
+fn open_library_certified_role(entry: &serde_json::Value) -> String {
+    match entry
+        .pointer("/type/key")
+        .and_then(|value| value.as_str())
+        .map(|raw| raw.trim().trim_start_matches("/type/"))
+        .filter(|label| !label.is_empty())
+    {
+        None | Some("author_role") => CERTIFIED_AUTHOR_ROLE.to_string(),
+        Some(label) => label.to_string(),
     }
 }
 
@@ -520,19 +599,41 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             .await
             .map_err(map_goodreads_error)?;
 
-        let contributors = goodreads::parse_book_contributors(&html).ok_or_else(|| {
+        let read = goodreads::parse_book_contributors(&html).ok_or_else(|| {
             ProviderFetchError::LayoutDrift(format!(
                 "Goodreads book {key} has no readable contributor association"
             ))
         })?;
+        let from_author_field = read.source == goodreads::GoodreadsContributorSource::JsonLdAuthors;
 
-        let mut refs = Vec::with_capacity(contributors.len());
-        for contributor in contributors {
+        let mut contributors = ContributorRead::new();
+        for contributor in read.contributors {
+            contributors.raw_entries += 1;
+            // The JSON-LD fallback reads the book's `author` field, so every
+            // entry in it is an author credit by the field's own meaning. An
+            // Apollo edge instead names its credit, and an edge that names none
+            // has told us nothing we may act on.
+            let role = if from_author_field {
+                Some(CERTIFIED_AUTHOR_ROLE.to_string())
+            } else {
+                match contributor.role.as_deref() {
+                    Some(label) => Some(goodreads_certified_role(label)),
+                    None => {
+                        tracing::warn!(
+                            book_key = %key,
+                            author_id = %contributor.raw_id,
+                            "Goodreads contributor edge names no role — entry dropped"
+                        );
+                        contributors.role_dropped += 1;
+                        continue;
+                    }
+                }
+            };
             match AuthorRouteKey::parse(AuthorProvider::Goodreads, &contributor.raw_id) {
-                Ok(route) => refs.push(ProviderAuthorRef {
+                Ok(route) => contributors.refs.push(ProviderAuthorRef {
                     key: route,
                     name: contributor.name,
-                    role: contributor.role,
+                    role,
                 }),
                 Err(_) => tracing::warn!(
                     book_key = %key,
@@ -542,7 +643,7 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             }
         }
 
-        Ok(canonical_distinct(refs))
+        contributors.finish("Goodreads")
     }
 }
 
@@ -626,6 +727,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
             r#"query GetBookContributors($bookId: Int!) {{
             editions(where: {{book_id: {{_eq: $bookId}}}}, order_by: [{{users_read_count: desc}}], limit: {HARDCOVER_EDITION_SCAN_LIMIT}) {{
                 contributions {{
+                    contribution
                     author {{
                         id
                         name
@@ -651,7 +753,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                 )
             })?;
 
-        let mut refs = Vec::new();
+        let mut read = ContributorRead::new();
         for edition in editions {
             let contributions = edition
                 .get("contributions")
@@ -662,6 +764,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                     )
                 })?;
             for contribution in contributions {
+                read.raw_entries += 1;
                 let author = contribution
                     .get("author")
                     .filter(|value| value.is_object())
@@ -694,16 +797,53 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                             "Hardcover author id {id} is not a canonical author id"
                         ))
                     })?;
-                refs.push(ProviderAuthorRef {
+                let Some(role) = hardcover_certified_role(contribution) else {
+                    tracing::warn!(
+                        book_id,
+                        author_id = id,
+                        "Hardcover contribution field is absent or an unreadable shape — entry dropped"
+                    );
+                    read.role_dropped += 1;
+                    continue;
+                };
+                read.refs.push(ProviderAuthorRef {
                     key: route,
                     name: name.to_string(),
-                    role: None,
+                    role: Some(role),
                 });
             }
         }
 
-        Ok(canonical_distinct(refs))
+        read.finish("Hardcover")
     }
+}
+
+/// What one Hardcover contribution credits this person as, or `None` when the
+/// field cannot be read at all.
+///
+/// Hardcover leaves `contribution` empty for the people who wrote the book and
+/// names every other credit in free text. A field that is *absent*, or present
+/// in a shape this reader does not know, is not the same as an empty one: it is
+/// a shape that moved, and guessing it into an author credit is exactly the
+/// silent failure the role gate exists to prevent.
+fn hardcover_certified_role(contribution: &serde_json::Value) -> Option<String> {
+    match contribution.get("contribution") {
+        Some(serde_json::Value::Null) => Some(CERTIFIED_AUTHOR_ROLE.to_string()),
+        Some(serde_json::Value::String(label)) => Some(label.clone()),
+        _ => None,
+    }
+}
+
+/// What one Goodreads contributor edge credits this person as.
+///
+/// The site spells an author credit two ways — plain "Author" on a primary
+/// edge, "Goodreads Author" when the person has a claimed profile — and both
+/// mean the same thing. Every other credit travels verbatim.
+fn goodreads_certified_role(label: &str) -> String {
+    if label.eq_ignore_ascii_case("author") || label.eq_ignore_ascii_case("goodreads author") {
+        return CERTIFIED_AUTHOR_ROLE.to_string();
+    }
+    label.to_string()
 }
 
 /// Hardcover failures: a pause stays a pause, and a readable-but-refused
@@ -1577,5 +1717,286 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Role certification — what each provider actually said about a credit
+    // -----------------------------------------------------------------------
+
+    fn hardcover(fetcher: RecordingHttpFetcher) -> HardcoverClient<RecordingHttpFetcher> {
+        HardcoverClient::new(
+            fetcher,
+            LiveMetadataConfig::new(metadata_config(true, Some("token"))),
+        )
+    }
+
+    fn goodreads(fetcher: RecordingHttpFetcher) -> GoodreadsClient<RecordingHttpFetcher> {
+        let http = livrarr_http::HttpClient::builder()
+            .user_agent("livrarr-author-gateway-test")
+            .build()
+            .expect("test HTTP client");
+        GoodreadsClient::new(fetcher, http, "https://www.goodreads.com")
+    }
+
+    /// One Goodreads book page in the current layout, with the contributor
+    /// edges spelled the way the live Apollo cache spells them.
+    fn goodreads_page(edges: &str) -> String {
+        format!(
+            r#"<html><script id="__NEXT_DATA__" type="application/json">
+            {{"props":{{"pageProps":{{"apolloState":{{
+                "Book:kca://book/1":{{{edges}}},
+                "Contributor:kca://author/1":{{"name":"First Person","legacyId":31}},
+                "Contributor:kca://author/2":{{"name":"Second Person","legacyId":32}}
+            }}}}}}}}</script></html>"#
+        )
+    }
+
+    /// Hardcover says "author" by sending the contribution field with no value.
+    /// A named contribution is a different credit and keeps its own label.
+    #[tokio::test]
+    async fn hardcover_certifies_a_null_contribution_as_author_and_a_label_verbatim() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[
+                {"contribution":null,"author":{"id":41,"name":"The Author"}},
+                {"contribution":"Narrated by","author":{"id":42,"name":"The Narrator"}}
+            ]}]}}"#)]);
+
+        let refs = hardcover(fetcher)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("Hardcover contributor read");
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].name, "The Author");
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[1].name, "The Narrator");
+        assert_eq!(refs[1].role.as_deref(), Some("Narrated by"));
+    }
+
+    /// A contribution field that is absent, or present in a shape this reader
+    /// does not know, is not a credit it can certify — the entry is dropped
+    /// with a warning rather than guessed into an author.
+    #[tokio::test]
+    async fn hardcover_drops_an_entry_whose_contribution_shape_is_unreadable() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[
+                {"author":{"id":41,"name":"No Contribution Field"}},
+                {"contribution":{"role":"author"},"author":{"id":42,"name":"Unknown Shape"}},
+                {"contribution":null,"author":{"id":43,"name":"The Author"}}
+            ]}]}}"#)]);
+
+        let refs = hardcover(fetcher)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("a mixed response still answers");
+
+        assert_eq!(refs.len(), 1, "only the readable credit survives");
+        assert_eq!(refs[0].name, "The Author");
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+    }
+
+    /// Every entry unreadable is the shape moving, not a book nobody wrote.
+    /// Answering `Ok([])` here would make the keyed read terminally successful
+    /// on fabricated emptiness (insight 62).
+    #[tokio::test]
+    async fn hardcover_reports_drift_when_every_contribution_shape_is_unreadable() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[
+                {"author":{"id":41,"name":"First Person"}},
+                {"author":{"id":42,"name":"Second Person"}}
+            ]}]}}"#)]);
+
+        let outcome = hardcover(fetcher)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await;
+
+        assert!(
+            matches!(outcome, Err(ProviderFetchError::LayoutDrift(_))),
+            "got {outcome:?}"
+        );
+    }
+
+    /// A book that genuinely credits nobody is still a readable answer.
+    #[tokio::test]
+    async fn hardcover_keeps_a_genuinely_empty_contribution_list_a_success() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[]}]}}"#)]);
+
+        let refs = hardcover(fetcher)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("an empty credit list is readable");
+
+        assert!(refs.is_empty());
+    }
+
+    /// One person credited on two editions is one route. Any edition that
+    /// credited them as the author makes the route authorial, whichever
+    /// edition came back first.
+    #[tokio::test]
+    async fn hardcover_aggregates_one_person_across_editions_in_either_order() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let narrator_first = queued(vec![ok(r#"{"data":{"editions":[
+                {"contributions":[{"contribution":"Narrated by","author":{"id":41,"name":"Both Credits"}}]},
+                {"contributions":[{"contribution":null,"author":{"id":41,"name":"Both Credits"}}]}
+            ]}}"#)]);
+        let refs = hardcover(narrator_first)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("narrator credit first");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+
+        let author_first = queued(vec![ok(r#"{"data":{"editions":[
+                {"contributions":[{"contribution":null,"author":{"id":41,"name":"Both Credits"}}]},
+                {"contributions":[{"contribution":"Narrated by","author":{"id":41,"name":"Both Credits"}}]}
+            ]}}"#)]);
+        let refs = hardcover(author_first)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("author credit first");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+    }
+
+    /// The order the provider credited people in is the order they come back
+    /// in, and a person credited only as a narrator keeps that label.
+    #[tokio::test]
+    async fn hardcover_aggregation_preserves_first_seen_order_and_other_labels() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[
+                {"contribution":"Narrated by","author":{"id":41,"name":"Only Narrator"}},
+                {"contribution":null,"author":{"id":42,"name":"The Author"}},
+                {"contribution":"Illustrated by","author":{"id":41,"name":"Only Narrator"}}
+            ]}]}}"#)]);
+
+        let refs = hardcover(fetcher)
+            .fetch_work_authors("42".to_string(), RequestPriority::Low)
+            .await
+            .expect("ordered contributor read");
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].name, "Only Narrator");
+        assert_eq!(
+            refs[0].role.as_deref(),
+            Some("Narrated by"),
+            "a non-authorial route keeps the label it was first credited with"
+        );
+        assert_eq!(refs[1].name, "The Author");
+        assert_eq!(refs[1].role.as_deref(), Some("author"));
+    }
+
+    /// Goodreads names the credit on the edge. "Author" — in either of the two
+    /// spellings the site uses — is an author credit; anything else is that
+    /// other credit, verbatim.
+    #[tokio::test]
+    async fn goodreads_certifies_author_edges_and_keeps_other_roles_verbatim() {
+        let _guard = lock_breaker(RateBucket::Goodreads).await;
+        let page = goodreads_page(
+            r#""primaryContributorEdge":{"node":{"__ref":"Contributor:kca://author/1"},"role":"Goodreads Author"},
+               "secondaryContributorEdges":[{"node":{"__ref":"Contributor:kca://author/2"},"role":"Translator"}]"#,
+        );
+        let fetcher = queued(vec![ok(&page)]);
+
+        let refs = goodreads(fetcher)
+            .fetch_work_authors("9300".to_string(), RequestPriority::Low)
+            .await
+            .expect("Goodreads contributor read");
+
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].name, "First Person");
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[1].name, "Second Person");
+        assert_eq!(refs[1].role.as_deref(), Some("Translator"));
+    }
+
+    /// An edge with no role said nothing about the credit. Dropping it is the
+    /// only reading that cannot invent an author.
+    #[tokio::test]
+    async fn goodreads_drops_an_edge_that_names_no_role() {
+        let _guard = lock_breaker(RateBucket::Goodreads).await;
+        let page = goodreads_page(
+            r#""primaryContributorEdge":{"node":{"__ref":"Contributor:kca://author/1"},"role":"Author"},
+               "secondaryContributorEdges":[{"node":{"__ref":"Contributor:kca://author/2"},"role":"   "}]"#,
+        );
+        let fetcher = queued(vec![ok(&page)]);
+
+        let refs = goodreads(fetcher)
+            .fetch_work_authors("9300".to_string(), RequestPriority::Low)
+            .await
+            .expect("a mixed response still answers");
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "First Person");
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+    }
+
+    /// Every edge roleless is the layout having moved.
+    #[tokio::test]
+    async fn goodreads_reports_drift_when_no_edge_names_a_role() {
+        let _guard = lock_breaker(RateBucket::Goodreads).await;
+        let page = goodreads_page(
+            r#""primaryContributorEdge":{"node":{"__ref":"Contributor:kca://author/1"}},
+               "secondaryContributorEdges":[{"node":{"__ref":"Contributor:kca://author/2"}}]"#,
+        );
+        let fetcher = queued(vec![ok(&page)]);
+
+        let outcome = goodreads(fetcher)
+            .fetch_work_authors("9300".to_string(), RequestPriority::Low)
+            .await;
+
+        assert!(
+            matches!(outcome, Err(ProviderFetchError::LayoutDrift(_))),
+            "got {outcome:?}"
+        );
+    }
+
+    /// The JSON-LD fallback has no roles because the field it reads *is* the
+    /// author list — every entry in it is an author credit.
+    #[tokio::test]
+    async fn goodreads_json_ld_entries_are_author_credits() {
+        let _guard = lock_breaker(RateBucket::Goodreads).await;
+        let fetcher = queued(vec![ok(r#"<html><script type="application/ld+json">
+               {"author":[{"@type":"Person","name":"First Person","url":"/author/show/31"},
+                          {"@type":"Person","name":"Second Person","url":"/author/show/32"}]}
+               </script></html>"#)]);
+
+        let refs = goodreads(fetcher)
+            .fetch_work_authors("9300".to_string(), RequestPriority::Low)
+            .await
+            .expect("JSON-LD contributor read");
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs
+            .iter()
+            .all(|entry| entry.role.as_deref() == Some("author")));
+    }
+
+    /// Open Library spells an ordinary author credit `/type/author_role`, and
+    /// an entry with no type at all is still in the work's author list.
+    #[tokio::test]
+    async fn open_library_certifies_author_role_and_a_missing_type_as_author() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(r#"{"authors":[
+                {"type":{"key":"/type/author_role"},
+                 "author":{"key":"/authors/OL7001A"},"name":"Typed Author"},
+                {"author":{"key":"/authors/OL7002A"},"name":"Untyped Author"},
+                {"type":{"key":"/type/translator_role"},
+                 "author":{"key":"/authors/OL7003A"},"name":"Translator Person"}
+            ]}"#)]);
+
+        let refs = OpenLibraryClient::new(fetcher)
+            .fetch_work_authors("OL7000W".to_string(), RequestPriority::Low)
+            .await
+            .expect("OpenLibrary contributor read");
+
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(
+            refs[1].role.as_deref(),
+            Some("author"),
+            "the authors[] container is the work's author list"
+        );
+        assert_eq!(refs[2].role.as_deref(), Some("translator_role"));
     }
 }

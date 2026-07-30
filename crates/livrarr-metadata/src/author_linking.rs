@@ -174,9 +174,17 @@ where
 /// What one `run_author` pass observed, accumulated as it commits each effect.
 #[derive(Default)]
 struct RoadTally {
-    /// Contributor refs any provider returned for this author's settled works.
-    /// Zero is what makes Tier 2 eligible: the keys we hold said nothing.
+    /// Every contributor ref any provider returned for this author's settled
+    /// works, whatever it was credited as. A diagnostic count, never a gate.
     contributors_seen: u32,
+    /// Contributors a provider actually credited as authors — the ones that
+    /// reached a verdict. Zero is what makes Tier 2 eligible: the keys we hold
+    /// said nothing about who wrote these books.
+    authorial_contributors_seen: u32,
+    /// Credits filtered because the provider made them as something other than
+    /// an author. Never a route, a candidate or a name — only a number an
+    /// operator can read.
+    non_authorial_filtered: u32,
     /// Routes this pass left active (attached, already active, or upgraded).
     active_routes: u32,
     /// An OpenLibrary route is now active, so Tier 2 has nothing to add.
@@ -349,12 +357,14 @@ where
                 .iter()
                 .any(|route| route.key.provider() == AuthorProvider::OpenLibrary);
 
-        // Tier 2 exists for authors whose keys said nothing. A key that answered
-        // — with a contributor to attach, to review, or to leave tombstoned — has
-        // already produced the better evidence, and an outstanding OpenLibrary
-        // retry is about to. Only a genuinely silent key set falls through here.
+        // Tier 2 exists for authors whose keys said nothing about their author.
+        // A key that credited someone as an author — to attach, to review, or to
+        // leave tombstoned — has already produced the better evidence, and an
+        // outstanding OpenLibrary retry is about to. A key that credited only a
+        // translator answered a different question, so it does not close this
+        // one.
         let run_tier2 = !attempts.is_empty()
-            && tally.contributors_seen == 0
+            && tally.authorial_contributors_seen == 0
             && !has_open_library_route
             && !tally.open_library_retry;
         if run_tier2 {
@@ -444,6 +454,8 @@ where
         };
 
         let mut rejected = Vec::new();
+        let mut filtered_here = 0u32;
+        let mut authorial_here = 0u32;
         for provider_ref in refs {
             tally.contributors_seen += 1;
             let provider = provider_ref.key.provider();
@@ -453,7 +465,24 @@ where
                 Some(attempt.work_id),
                 AuthorRouteEvidenceSource::Tier1SettledWork,
             ) {
+                // The provider credited this person as something other than an
+                // author of this book. That is not a question for the user and
+                // not a name this author is known by — it is simply not an
+                // author claim, so nothing is written and nothing is asked.
+                AuthorRouteGuardResult::NonAuthorial(filtered) => {
+                    filtered_here += 1;
+                    tally.non_authorial_filtered += 1;
+                    tracing::debug!(
+                        provider = ?provider,
+                        route = %filtered.key().value(),
+                        name = %filtered.observed_name(),
+                        role = filtered.role().unwrap_or("<uncertified>"),
+                        "author link: credit filtered as non-authorial"
+                    );
+                }
                 AuthorRouteGuardResult::Agreed(evidence) => {
+                    tally.authorial_contributors_seen += 1;
+                    authorial_here += 1;
                     let written = self
                         .db
                         .apply_guarded_route(GuardedRouteWrite {
@@ -466,6 +495,8 @@ where
                     tally.record_route_write(&written, provider);
                 }
                 AuthorRouteGuardResult::Rejected(rejection) => {
+                    tally.authorial_contributors_seen += 1;
+                    authorial_here += 1;
                     let evidence = rejection.evidence();
                     tally.parked_names.push(evidence.observed_name.clone());
                     rejected.push(AuthorLinkCandidate {
@@ -488,9 +519,25 @@ where
                         status: AuthorLinkCandidateStatus::Pending,
                         evidence_generation: generation,
                         observed_at: now,
+                        // The book this credit was read on, so the review card
+                        // can say where the question came from.
+                        evidence_work_id: evidence.evidence_work_id,
+                        // Read-side only: `list_review` joins the title.
+                        evidence_work_title: None,
                     });
                 }
             }
+        }
+
+        if filtered_here > 0 {
+            tracing::debug!(
+                provider = ?attempt.provider,
+                work_route = %attempt.work_route,
+                contributors_seen = authorial_here + filtered_here,
+                authorial_contributors_seen = authorial_here,
+                non_authorial_filtered = filtered_here,
+                "author link: key attempt filtered non-authorial credits"
+            );
         }
 
         if !rejected.is_empty() {
@@ -893,6 +940,10 @@ impl Tier2Candidate {
             status: AuthorLinkCandidateStatus::Pending,
             evidence_generation: generation,
             observed_at: now,
+            // A name search is evidence about a person, not about one book, so
+            // there is no book to name on the card.
+            evidence_work_id: None,
+            evidence_work_title: None,
         }
     }
 }

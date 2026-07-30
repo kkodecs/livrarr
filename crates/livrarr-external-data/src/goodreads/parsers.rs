@@ -947,6 +947,24 @@ struct ApolloContributorIdentity {
     legacy_id: Option<StringOrInt>,
 }
 
+/// Which of the two book→contributor shapes a page was read through.
+///
+/// The caller certifies roles, and it cannot do that without knowing which
+/// shape it is looking at: an Apollo edge names its own credit, while the
+/// JSON-LD field this falls back to *is* the author list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoodreadsContributorSource {
+    ApolloEdges,
+    JsonLdAuthors,
+}
+
+/// Every contributor credited on one book, and the shape they were read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoodreadsBookContributors {
+    pub source: GoodreadsContributorSource,
+    pub contributors: Vec<GoodreadsBookContributor>,
+}
+
 /// Every contributor credited on the selected book, or `None` when the
 /// book→contributor association shape is unreadable.
 ///
@@ -955,8 +973,18 @@ struct ApolloContributorIdentity {
 /// the shape moved. Only edges hanging off the selected Book are followed —
 /// reviewer and user entities in the same Apollo cache also carry `legacyId`
 /// and are not contributors of this book.
-pub fn parse_book_contributors(html: &str) -> Option<Vec<GoodreadsBookContributor>> {
-    apollo_book_contributors(html).or_else(|| jsonld_book_contributors(html))
+pub fn parse_book_contributors(html: &str) -> Option<GoodreadsBookContributors> {
+    apollo_book_contributors(html)
+        .map(|contributors| GoodreadsBookContributors {
+            source: GoodreadsContributorSource::ApolloEdges,
+            contributors,
+        })
+        .or_else(|| {
+            jsonld_book_contributors(html).map(|contributors| GoodreadsBookContributors {
+                source: GoodreadsContributorSource::JsonLdAuthors,
+                contributors,
+            })
+        })
 }
 
 /// The current layout: `__NEXT_DATA__` → `apolloState` → this page's Book →

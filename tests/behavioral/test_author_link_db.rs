@@ -119,6 +119,8 @@ fn candidate(author_id: i64, raw: &str, generation: i64) -> AuthorLinkCandidate 
         status: AuthorLinkCandidateStatus::Pending,
         evidence_generation: generation,
         observed_at: Utc::now(),
+        evidence_work_id: None,
+        evidence_work_title: None,
     }
 }
 
@@ -231,6 +233,29 @@ async fn apply_migration_079(db: &SqliteDb) {
         .expect("upgrade real migration-078 fixture through 079");
 }
 
+/// Every migration after the cutover pair. A fixture that stops short of head
+/// is not a state production ever serves from — startup migrates all the way —
+/// so a production writer running against it would fail on a schema this
+/// install would really have.
+async fn apply_migrations_after_079(db: &SqliteDb) {
+    let remainder = Migrator {
+        migrations: Cow::Owned(
+            ALL_MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version > 79)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: true,
+        locking: true,
+        no_tx: false,
+    };
+    remainder
+        .run(db.pool())
+        .await
+        .expect("upgrade real migration-079 fixture to head");
+}
+
 async fn legacy_route_db(raw_ol_key: &str) -> (SqliteDb, i64, i64) {
     let db = migration_077_db().await;
     let user_id = create_test_user(&db).await;
@@ -245,6 +270,7 @@ async fn legacy_route_db(raw_ol_key: &str) -> (SqliteDb, i64, i64) {
     db.ingest_legacy_routes()
         .await
         .expect("production legacy-route ingestion");
+    apply_migrations_after_079(&db).await;
     (db, user_id, author.id)
 }
 

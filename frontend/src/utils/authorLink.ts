@@ -93,6 +93,29 @@ export function authorGateMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Why this candidate is a question, in the most concrete words available.
+ *
+ * A credit read off one of the user's own books can say so by name — which
+ * provider, which spelling, which book — and that is far more use than a
+ * category. Everything else, including a question whose book has since been
+ * deleted, falls back to the category label rather than inventing a book.
+ */
+export function candidateEvidenceText(
+  candidate: AuthorLinkCandidate,
+  authorName: string,
+): string {
+  if (candidate.reason === "name_guard_failed" && candidate.evidence_work_title) {
+    const provider = PROVIDER_LABELS[candidateProvider(candidate)];
+    return (
+      `${provider} credits "${candidate.candidate_name}" as an author of ` +
+      `"${candidate.evidence_work_title}". It doesn't match any name you have ` +
+      `for ${authorName}.`
+    );
+  }
+  return CANDIDATE_REASON_LABELS[candidate.reason];
+}
+
 /** Only Tier-2 name-search candidates ever get a catalogue read. */
 function expectsCatalogRead(candidate: AuthorLinkCandidate): boolean {
   return candidate.reason === "tier2_name_search";

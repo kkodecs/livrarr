@@ -501,6 +501,10 @@ export interface AuthorLinkCandidate {
   status: AuthorLinkCandidateStatus;
   evidence_generation: number;
   observed_at: string;
+  /** The book whose provider page raised this question, where there was one. */
+  evidence_work_id: number | null;
+  /** That book's current title. Null once the book is gone. */
+  evidence_work_title: string | null;
 }
 
 export interface AuthorLinkReview {

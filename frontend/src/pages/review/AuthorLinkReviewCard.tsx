@@ -5,10 +5,10 @@ import { ExternalLink, UserSearch } from "lucide-react";
 import { dismissAuthorLinkCandidate, pickAuthorLinkCandidate } from "@/api";
 import { HelpTip } from "@/components/HelpTip";
 import {
-  CANDIDATE_REASON_LABELS,
   MONITORABLE_HELP,
   PROVIDER_LABELS,
   VERDICT_LABELS,
+  candidateEvidenceText,
   candidateProvider,
   candidateRouteValue,
   catalogEvidenceText,
@@ -80,7 +80,7 @@ function CandidateRow({
             )}
           </p>
           <p className="mt-1 text-xs text-muted">
-            {CANDIDATE_REASON_LABELS[candidate.reason]}
+            {candidateEvidenceText(candidate, authorName)}
           </p>
           <ul className="mt-1 space-y-0.5 text-xs text-muted">
             <li>

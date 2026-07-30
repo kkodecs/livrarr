@@ -187,6 +187,12 @@ path = "../../tests/behavioral/test_author_link_doors.rs"
 name = "test_author_link_consumers"
 path = "../../tests/behavioral/test_author_link_consumers.rs"
 
+# U8 role-gating fix (build/design-176/DESIGN-U8-role-gating.md r4). Ungated —
+# every surface it names exists; the RED points at behavior.
+[[test]]
+name = "test_author_link_role_gate"
+path = "../../tests/behavioral/test_author_link_role_gate.rs"
+
 # --- End author-provider linking Stage 4b red behavioral suite ---
 
 # --- English work lifecycle behavioral test skeletons ---

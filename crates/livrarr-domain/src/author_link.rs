@@ -339,17 +339,58 @@ impl RejectedAuthorRouteEvidence {
     }
 }
 
+/// A credit the provider did not make as an author, kept only so an operator
+/// can see which label was filtered and on whose behalf.
+#[derive(Debug, Clone)]
+pub struct NonAuthorialProviderRef {
+    key: AuthorRouteKey,
+    observed_name: String,
+    role: Option<String>,
+}
+
+impl NonAuthorialProviderRef {
+    pub fn key(&self) -> &AuthorRouteKey {
+        &self.key
+    }
+
+    pub fn observed_name(&self) -> &str {
+        &self.observed_name
+    }
+
+    /// The label exactly as the certifying gateway read it. `None` means the
+    /// gateway certified nothing at all — the fail-closed case.
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AuthorRouteGuardResult {
     Agreed(AgreedAuthorRouteEvidence),
     Rejected(RejectedAuthorRouteEvidence),
+    NonAuthorial(NonAuthorialProviderRef),
 }
+
+/// The one label that means "this provider credited this person as an author".
+///
+/// Gateways normalize their own shape knowledge into this exact value; nothing
+/// else is an author claim. Keeping it in one place is what lets a gateway
+/// certify and the guard decide without the two agreeing by coincidence.
+pub const CERTIFIED_AUTHOR_ROLE: &str = "author";
 
 /// The one standard of proof for an automatic author-route write.
 ///
-/// The canonical [`crate::identity_matching::author_verdict`] authority compares
-/// the provider's name for one author identifier against the author's full
-/// current associated-name snapshot. `Agree` is the only verdict that mints
+/// Two questions, in order. First: did this provider credit this person as an
+/// **author** of the book? Only [`CERTIFIED_AUTHOR_ROLE`] says yes — every
+/// other label, and the absence of a label, is [`AuthorRouteGuardResult::NonAuthorial`]
+/// and never reaches a verdict. That ordering is what makes the boundary
+/// fail-closed: a gateway that forgets to certify produces a visible
+/// non-authorial credit, never a silent author.
+///
+/// Then, for an author credit only: the canonical
+/// [`crate::identity_matching::author_verdict`] authority compares the
+/// provider's name for one author identifier against the author's full current
+/// associated-name snapshot. `Agree` is the only verdict that mints
 /// [`AgreedAuthorRouteEvidence`]; `Grey`, `Abstain`, and `Disagree` are retained
 /// as review evidence with the verdict that produced them.
 pub fn guard_author_route(
@@ -358,6 +399,13 @@ pub fn guard_author_route(
     evidence_work_id: Option<WorkId>,
     source: AuthorRouteEvidenceSource,
 ) -> AuthorRouteGuardResult {
+    if provider_ref.role.as_deref() != Some(CERTIFIED_AUTHOR_ROLE) {
+        return AuthorRouteGuardResult::NonAuthorial(NonAuthorialProviderRef {
+            key: provider_ref.key,
+            observed_name: provider_ref.name.trim().to_string(),
+            role: provider_ref.role,
+        });
+    }
     let evidence = AuthorRouteEvidence {
         key: provider_ref.key,
         observed_name: provider_ref.name.trim().to_string(),
@@ -376,6 +424,12 @@ pub fn guard_author_route(
     }
 }
 
+/// One person a provider credited on one book.
+///
+/// `role` is a **certified** value, not a raw provider string: the gateway that
+/// read the response is the only place that knows which of its shapes means
+/// "author", and it writes [`CERTIFIED_AUTHOR_ROLE`] when it saw one. Any other
+/// label travels verbatim so an operator can read what was actually said.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderAuthorRef {
     pub key: AuthorRouteKey,
@@ -588,6 +642,13 @@ pub struct AuthorLinkCandidate {
     pub status: AuthorLinkCandidateStatus,
     pub evidence_generation: i64,
     pub observed_at: DateTime<Utc>,
+    /// The settled work whose provider record raised this question. `None` for
+    /// a name-search candidate, which came from no single book, and for a
+    /// question whose evidence work has since been deleted.
+    pub evidence_work_id: Option<WorkId>,
+    /// That work's title, hydrated only by the review read that joins it. A
+    /// scalar read leaves it absent rather than showing a stale title.
+    pub evidence_work_title: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

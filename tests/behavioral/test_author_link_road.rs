@@ -553,7 +553,7 @@ async fn ac003_ac013_tier1_run_author_attaches_each_agree_and_never_attaches_gre
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9502A")),
                     name: "Unrelated Contributor".to_string(),
-                    role: Some("editor".to_string()),
+                    role: Some("author".to_string()),
                 },
             ],
         )]),
@@ -617,7 +617,7 @@ async fn ac003_ac013_tier1_run_author_attaches_each_agree_and_never_attaches_gre
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9512A")),
                     name: "Both Agree Author".to_string(),
-                    role: Some("co-author".to_string()),
+                    role: Some("author".to_string()),
                 },
             ],
         )]),
@@ -786,8 +786,8 @@ async fn ac003_ac013_goodreads_keyed_adapter_returns_all_contributors_unselected
 #[tokio::test]
 async fn ac003_ac013_hardcover_keyed_adapter_returns_all_contributors_unselected() {
     let fixture = br#"{"data":{"editions":[{"contributions":[
-      {"author":{"id":41,"name":"Author One"}},
-      {"author":{"id":42,"name":"Author Two"}}
+      {"contribution":null,"author":{"id":41,"name":"Author One"}},
+      {"contribution":null,"author":{"id":42,"name":"Author Two"}}
     ]}]}}"#;
     let client = HardcoverClient::new(
         StubHttpFetcher::with_ok(200, fixture.to_vec()),

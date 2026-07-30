@@ -74,6 +74,8 @@ export function makeCandidate(
     status: "pending",
     evidence_generation: 4,
     observed_at: "2026-07-29T10:00:00.000Z",
+    evidence_work_id: null,
+    evidence_work_title: null,
     ...over,
   };
 }

@@ -76,10 +76,23 @@ fn row_to_route(row: &sqlx::sqlite::SqliteRow) -> Result<AuthorRoute, DbError> {
 const CANDIDATE_COLUMNS: &str =
     "id, author_id, provider, route_value, candidate_name, reason, name_verdict, \
      primary_name_verdict, top_work_preview, catalog_evidence_state, corroborated_title_count, \
-     settled_work_count, previously_removed, status, evidence_generation, observed_at";
+     settled_work_count, previously_removed, status, evidence_generation, observed_at, \
+     evidence_work_id";
+
+/// [`CANDIDATE_COLUMNS`] qualified by a table alias, for the one read that
+/// joins another table and would otherwise be ambiguous on `id`.
+fn candidate_columns_from(alias: &str) -> String {
+    CANDIDATE_COLUMNS
+        .split(", ")
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Scalar half of a candidate; `alternate_name_evidence` is hydrated from the
-/// child table by the caller that needs it.
+/// child table by the caller that needs it, and `evidence_work_title` only by
+/// the review read that joins it — a scalar read leaves it absent rather than
+/// naming a book it did not look up.
 fn row_to_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<AuthorLinkCandidate, DbError> {
     let provider: String = row.try_get("provider").map_err(map_db_err)?;
     let value: String = row.try_get("route_value").map_err(map_db_err)?;
@@ -114,6 +127,8 @@ fn row_to_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<AuthorLinkCandidate
         status: parse_candidate_status(&status)?,
         evidence_generation: row.try_get("evidence_generation").map_err(map_db_err)?,
         observed_at: parse_dt(&observed_at)?,
+        evidence_work_id: row.try_get("evidence_work_id").map_err(map_db_err)?,
+        evidence_work_title: row.try_get("evidence_work_title").unwrap_or(None),
     })
 }
 
@@ -417,6 +432,9 @@ struct NonTier2Candidate<'a> {
     reason: AuthorLinkCandidateReason,
     verdict: AuthorVerdict,
     previously_removed: bool,
+    /// The settled work whose provider record produced this evidence, where
+    /// there was one. A Readarr import record names no work.
+    evidence_work_id: Option<WorkId>,
 }
 
 async fn upsert_non_tier2_candidate_tx(
@@ -434,15 +452,17 @@ async fn upsert_non_tier2_candidate_tx(
              (user_id, author_id, provider, route_value, candidate_name, reason, name_verdict, \
               primary_name_verdict, top_work_preview, catalog_evidence_state, \
               corroborated_title_count, settled_work_count, previously_removed, status, \
-              evidence_generation, observed_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', 0, 0, ?, 'pending', ?, ?) \
+              evidence_generation, observed_at, evidence_work_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', 0, 0, ?, 'pending', ?, ?, ?) \
          ON CONFLICT(user_id, author_id, provider, route_value, reason, evidence_generation) \
          DO UPDATE SET \
              candidate_name = excluded.candidate_name, \
              name_verdict = excluded.name_verdict, \
              primary_name_verdict = excluded.primary_name_verdict, \
              previously_removed = excluded.previously_removed, \
-             observed_at = excluded.observed_at",
+             observed_at = excluded.observed_at, \
+             evidence_work_id = COALESCE(author_link_candidates.evidence_work_id, \
+                                         excluded.evidence_work_id)",
     )
     .bind(user_id)
     .bind(candidate.author_id)
@@ -455,6 +475,7 @@ async fn upsert_non_tier2_candidate_tx(
     .bind(candidate.previously_removed)
     .bind(generation)
     .bind(now_ts())
+    .bind(candidate.evidence_work_id)
     .execute(&mut *conn)
     .await
     .map_err(map_db_err)?;
@@ -1389,6 +1410,12 @@ impl AuthorLinkDb for SqliteDb {
                         reason: AuthorLinkCandidateReason::OwnershipCollision,
                         verdict: AuthorVerdict::Agree,
                         previously_removed: false,
+                        // A route-collision park is a question about two
+                        // *authors* holding one provider page, not about the
+                        // book the credit was read on. Same FK-safety rule the
+                        // route upgrade path already follows: this seam does
+                        // not re-validate the work, so it does not claim one.
+                        evidence_work_id: None,
                     },
                 )
                 .await?;
@@ -1408,6 +1435,7 @@ impl AuthorLinkDb for SqliteDb {
                         reason: AuthorLinkCandidateReason::Tombstoned,
                         verdict: AuthorVerdict::Agree,
                         previously_removed: true,
+                        evidence_work_id: None,
                     },
                 )
                 .await?;
@@ -1483,6 +1511,7 @@ impl AuthorLinkDb for SqliteDb {
                             reason: AuthorLinkCandidateReason::LegacyContradiction,
                             verdict: AuthorVerdict::Agree,
                             previously_removed: false,
+                            evidence_work_id: None,
                         },
                     )
                     .await?;
@@ -1592,8 +1621,9 @@ impl AuthorLinkDb for SqliteDb {
                      (user_id, author_id, provider, route_value, candidate_name, reason, \
                       name_verdict, primary_name_verdict, top_work_preview, \
                       catalog_evidence_state, corroborated_title_count, settled_work_count, \
-                      previously_removed, status, evidence_generation, observed_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) \
+                      previously_removed, status, evidence_generation, observed_at, \
+                      evidence_work_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) \
                  ON CONFLICT(user_id, author_id, provider, route_value, reason, \
                              evidence_generation) DO UPDATE SET \
                      candidate_name = excluded.candidate_name, \
@@ -1604,7 +1634,9 @@ impl AuthorLinkDb for SqliteDb {
                      corroborated_title_count = excluded.corroborated_title_count, \
                      settled_work_count = excluded.settled_work_count, \
                      previously_removed = excluded.previously_removed, \
-                     observed_at = excluded.observed_at",
+                     observed_at = excluded.observed_at, \
+                     evidence_work_id = COALESCE(author_link_candidates.evidence_work_id, \
+                                                 excluded.evidence_work_id)",
             )
             .bind(claim.user_id)
             .bind(candidate.author_id)
@@ -1621,6 +1653,9 @@ impl AuthorLinkDb for SqliteDb {
             .bind(previously_removed)
             .bind(candidate.evidence_generation)
             .bind(ts(candidate.observed_at))
+            // First evidence wins: a repeated observation of the same credit
+            // never rewrites which book raised the question.
+            .bind(candidate.evidence_work_id)
             .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
@@ -1722,6 +1757,9 @@ impl AuthorLinkDb for SqliteDb {
                 reason: AuthorLinkCandidateReason::ReadarrNameGuardFailed,
                 verdict: rejected.verdict(),
                 previously_removed: false,
+                // A Readarr author record is a claim about a person, not a
+                // credit read off one of the user's books.
+                evidence_work_id: None,
             },
         )
         .await?;
@@ -1965,8 +2003,15 @@ impl AuthorLinkDb for SqliteDb {
                 .collect::<Result<Vec<_>, _>>()?;
             routes.sort_by_key(|route| (provenance_rank(route.provenance), route.id));
 
+            // The evidence book's title is joined, never stored on the
+            // candidate: a title the user renames must not go stale on a parked
+            // question, and a book they delete leaves NULL rather than a
+            // dangling name.
+            let candidate_columns = candidate_columns_from("c");
             let candidate_rows = sqlx::query(&format!(
-                "SELECT {CANDIDATE_COLUMNS} FROM author_link_candidates c \
+                "SELECT {candidate_columns}, w.title AS evidence_work_title \
+                   FROM author_link_candidates c \
+                   LEFT JOIN works w ON w.id = c.evidence_work_id \
                   WHERE c.user_id = ? AND c.author_id = ? AND c.status = 'pending' \
                     AND c.evidence_generation = \
                         (SELECT evidence_generation FROM author_link_progress WHERE author_id = ?)"

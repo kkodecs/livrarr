@@ -468,6 +468,8 @@ fn review_candidate(author_id: i64, raw: &str, name: &str) -> AuthorLinkCandidat
         status: AuthorLinkCandidateStatus::Pending,
         evidence_generation: 0,
         observed_at: Utc::now(),
+        evidence_work_id: None,
+        evidence_work_title: None,
     }
 }
 

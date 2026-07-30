@@ -139,6 +139,71 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     }
   });
 
+  // U8 D8-4. A question raised by a credit on one of the user's own books can
+  // name that book. Without one — a deleted book, or a question that never came
+  // from a book — the card says what kind of question it is instead of
+  // inventing a title.
+  it("names the book a credit was read on, and falls back when there is none", async () => {
+    const candidates = [
+      makeCandidate({
+        id: 51,
+        key: { hardcover: 4102 },
+        candidate_name: "Kobayashi Chiaki",
+        reason: "name_guard_failed",
+        primary_name_verdict: "Disagree",
+        catalog_evidence_state: "pending",
+        evidence_work_id: 88,
+        evidence_work_title: "The Left Hand of Darkness",
+      }),
+      // Same kind of question, but its book is gone.
+      makeCandidate({
+        id: 52,
+        key: { hardcover: 4103 },
+        candidate_name: "Someone Else",
+        reason: "name_guard_failed",
+        primary_name_verdict: "Disagree",
+        catalog_evidence_state: "pending",
+        evidence_work_id: null,
+        evidence_work_title: null,
+      }),
+    ];
+
+    stub((call) => {
+      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+        return { status: 200, body: [] };
+      }
+      if (call.path === "/author-link-review") {
+        return {
+          status: 200,
+          body: [{ author: makeAuthor({ linkState: "needs_review" }), candidates }],
+        };
+      }
+      throw new Error(`unexpected call ${call.method} ${call.path}`);
+    });
+
+    const client = newTestClient();
+    const { container, cleanup } = mountWith(client, <ReviewPage />);
+    try {
+      await vi.waitFor(
+        () => expect(authorSectionText(container)).toContain("Kobayashi Chiaki"),
+        { timeout: 5000 },
+      );
+
+      const text = authorSectionText(container);
+      expect(text).toContain(
+        'Hardcover credits "Kobayashi Chiaki" as an author of ' +
+          '"The Left Hand of Darkness". It doesn\'t match any name you have for ' +
+          "Ursula K. Le Guin.",
+      );
+      // The book-less question keeps the category wording.
+      expect(text).toContain(
+        "The provider's name for this author did not match",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("renders the book queries when the author query fails", async () => {
     stub((call) => {
       if (call.path === "/identity-review") {

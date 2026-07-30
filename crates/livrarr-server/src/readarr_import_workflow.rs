@@ -1784,6 +1784,18 @@ async fn resolve_readarr_author_route(
                 );
             }
         }
+        Some(AuthorRouteGuardResult::NonAuthorial(filtered)) => {
+            // Unreachable while this door certifies its own record as an author
+            // claim, which is what it is. If it ever stops, the credit is not an
+            // author claim and gets exactly what a non-author credit gets
+            // everywhere else: no route, no question, no name.
+            warn!(
+                author_id,
+                route = %filtered.key().value(),
+                role = filtered.role().unwrap_or("<uncertified>"),
+                "readarr import: author evidence was not certified as an author claim"
+            );
+        }
         None => {
             // No usable id, so no route question to answer — but the spelling
             // Readarr used is still a name this author is known by, and the
