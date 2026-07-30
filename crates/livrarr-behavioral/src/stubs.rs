@@ -684,6 +684,13 @@ impl AuthorLinkDb for StubAuthorLinkDb {
         todo!()
     }
 
+    async fn create_or_adopt_author(
+        &self,
+        _request: livrarr_db::CreateAuthorGateRequest,
+    ) -> Result<(livrarr_domain::Author, bool), DbError> {
+        Err(DbError::NotFound { entity: "author" })
+    }
+
     async fn ensure_missing_progress_rows(&self, limit: u32) -> Result<u32, DbError> {
         todo!()
     }
@@ -699,6 +706,24 @@ impl AuthorLinkDb for StubAuthorLinkDb {
 
     async fn load_road_input(&self, claim: AuthorLinkClaim) -> Result<AuthorRoadInput, DbError> {
         todo!()
+    }
+
+    async fn load_progress(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+    ) -> Result<livrarr_domain::AuthorLinkProgress, DbError> {
+        Err(DbError::NotFound {
+            entity: "author link progress",
+        })
+    }
+
+    async fn begin_evidence_generation(
+        &self,
+        _claim: AuthorLinkClaim,
+        _evidence_generation: i64,
+    ) -> Result<(), DbError> {
+        Err(DbError::ClaimLost)
     }
 
     async fn compute_evidence_fingerprint(

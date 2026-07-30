@@ -153,10 +153,16 @@ pub enum ProviderFetchError {
 impl std::fmt::Display for ProviderFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotConfigured
-            | Self::Retryable { .. }
-            | Self::Permanent(_)
-            | Self::LayoutDrift(_) => todo!(),
+            Self::NotConfigured => write!(f, "provider not configured"),
+            Self::Retryable {
+                error,
+                retry_not_before,
+            } => match retry_not_before {
+                Some(at) => write!(f, "retryable: {error} (not before {at})"),
+                None => write!(f, "retryable: {error}"),
+            },
+            Self::Permanent(detail) => write!(f, "permanent: {detail}"),
+            Self::LayoutDrift(detail) => write!(f, "layout drift: {detail}"),
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
             Self::NotFound => write!(f, "not found"),
             Self::RateLimited => write!(f, "rate limited"),

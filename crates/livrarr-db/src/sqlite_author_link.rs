@@ -20,12 +20,12 @@ use livrarr_domain::identity_matching::{canonical_author_key, AuthorVerdict};
 use livrarr_domain::{
     AuthorCandidateAlternateNameEvidence, AuthorCompatibilityProjection, AuthorEvidenceFingerprint,
     AuthorId, AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorKeyAttemptState,
-    AuthorLinkCandidate, AuthorLinkCandidateReason, AuthorLinkProgressUpdate, AuthorLinkReview,
-    AuthorLinkState, AuthorLinkTrigger, AuthorNameSource, AuthorNameVariant, AuthorProvider,
-    AuthorRoadInput, AuthorRoute, AuthorRouteEvidenceSource, AuthorRouteKey, AuthorRouteProvenance,
-    AuthorRouteState, AuthorSweepProgress, OpenLibraryNameRole, ProviderAuthorNameObservation,
-    RejectedAuthorRouteEvidence, RouteWriteOutcome, SettledAuthorWork, SettledWorkProviderKey,
-    UserId, WorkId,
+    AuthorLinkCandidate, AuthorLinkCandidateReason, AuthorLinkProgress, AuthorLinkProgressUpdate,
+    AuthorLinkReview, AuthorLinkState, AuthorLinkTrigger, AuthorNameSource, AuthorNameVariant,
+    AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteEvidenceSource, AuthorRouteKey,
+    AuthorRouteProvenance, AuthorRouteState, AuthorSweepProgress, OpenLibraryNameRole,
+    ProviderAuthorNameObservation, RejectedAuthorRouteEvidence, RouteWriteOutcome,
+    SettledAuthorWork, SettledWorkProviderKey, UserId, WorkId,
 };
 use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
@@ -232,7 +232,14 @@ async fn current_generation_tx(
 }
 
 /// Insert a progress row when absent, otherwise pull the existing row forward
-/// under `trigger` without replacing it or stealing a live lease.
+/// under `trigger` without replacing it.
+///
+/// An automatic trigger leaves a live lease alone — the worker holding it is
+/// evaluating the same question and finishing is better than restarting. A user
+/// re-resolve is the exception: the user just changed the state the worker is
+/// deciding from, so its claim is voided exactly as migration 078 voids it when
+/// work evidence changes. The stale worker then loses its claim rather than
+/// writing a route the user's action already answered.
 async fn ensure_progress_tx(
     conn: &mut SqliteConnection,
     user_id: UserId,
@@ -240,17 +247,21 @@ async fn ensure_progress_tx(
     trigger: AuthorLinkTrigger,
 ) -> Result<(), DbError> {
     let now = now_ts();
+    let user_directed = matches!(trigger, AuthorLinkTrigger::UserReResolve);
     sqlx::query(
         "INSERT INTO author_link_progress \
              (author_id, user_id, state, next_attempt_at, trigger, updated_at) \
          VALUES (?, ?, 'queued', ?, ?, ?) \
          ON CONFLICT(author_id) DO UPDATE SET \
              state = CASE \
+                 WHEN ? THEN 'queued' \
                  WHEN author_link_progress.lease_until IS NOT NULL \
                   AND author_link_progress.lease_until > excluded.updated_at \
                  THEN author_link_progress.state ELSE 'queued' END, \
              trigger = excluded.trigger, \
              next_attempt_at = MIN(author_link_progress.next_attempt_at, excluded.next_attempt_at), \
+             claim_token = CASE WHEN ? THEN NULL ELSE author_link_progress.claim_token END, \
+             lease_until = CASE WHEN ? THEN NULL ELSE author_link_progress.lease_until END, \
              updated_at = excluded.updated_at",
     )
     .bind(author_id)
@@ -258,6 +269,9 @@ async fn ensure_progress_tx(
     .bind(&now)
     .bind(trigger_str(trigger))
     .bind(&now)
+    .bind(user_directed)
+    .bind(user_directed)
+    .bind(user_directed)
     .execute(&mut *conn)
     .await
     .map_err(map_db_err)?;
@@ -822,6 +836,13 @@ impl AuthorLinkDb for SqliteDb {
         Ok(())
     }
 
+    async fn create_or_adopt_author(
+        &self,
+        request: crate::CreateAuthorGateRequest,
+    ) -> Result<(livrarr_domain::Author, bool), DbError> {
+        self.create_or_adopt_author_gate(request).await
+    }
+
     async fn ensure_missing_progress_rows(&self, limit: u32) -> Result<u32, DbError> {
         let rows: Vec<(i64, i64, String)> = sqlx::query_as(
             "SELECT a.id, a.user_id, a.name FROM authors a \
@@ -988,6 +1009,104 @@ impl AuthorLinkDb for SqliteDb {
             display_name_generation: progress.1,
             display_name_dirty: progress.2,
         })
+    }
+
+    async fn load_progress(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<AuthorLinkProgress, DbError> {
+        let row = sqlx::query(
+            "SELECT state, tier, cursor, evaluated_fingerprint, evidence_generation, \
+                    display_name_generation, display_name_dirty, attempt_count, next_attempt_at, \
+                    claim_token, lease_until, last_error, would_have_linked_at_090, updated_at \
+               FROM author_link_progress WHERE author_id = ? AND user_id = ?",
+        )
+        .bind(author_id)
+        .bind(user_id)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_db_err)?
+        .ok_or(DbError::NotFound {
+            entity: "author link progress",
+        })?;
+
+        let state: String = row.try_get("state").map_err(map_db_err)?;
+        let cursor: Option<String> = row.try_get("cursor").map_err(map_db_err)?;
+        let fingerprint: Option<String> =
+            row.try_get("evaluated_fingerprint").map_err(map_db_err)?;
+        let next_attempt_at: String = row.try_get("next_attempt_at").map_err(map_db_err)?;
+        let claim_token: Option<String> = row.try_get("claim_token").map_err(map_db_err)?;
+        let lease_until: Option<String> = row.try_get("lease_until").map_err(map_db_err)?;
+        let updated_at: String = row.try_get("updated_at").map_err(map_db_err)?;
+        Ok(AuthorLinkProgress {
+            author_id,
+            user_id,
+            state: parse_progress_state(&state)?,
+            tier: row
+                .try_get::<Option<i64>, _>("tier")
+                .map_err(map_db_err)?
+                .map(|tier| tier.clamp(0, i64::from(u8::MAX)) as u8),
+            cursor: cursor.as_deref().and_then(cursor_from_string),
+            evaluated_fingerprint: fingerprint.as_deref().and_then(fingerprint_from_string),
+            evidence_generation: row.try_get("evidence_generation").map_err(map_db_err)?,
+            display_name_generation: row.try_get("display_name_generation").map_err(map_db_err)?,
+            display_name_dirty: row.try_get("display_name_dirty").map_err(map_db_err)?,
+            attempt_count: row
+                .try_get::<i64, _>("attempt_count")
+                .map_err(map_db_err)?
+                .max(0) as u32,
+            next_attempt_at: parse_dt(&next_attempt_at)?,
+            lease_token: claim_token.and_then(|token| token.parse().ok()),
+            lease_expires_at: lease_until.as_deref().map(parse_dt).transpose()?,
+            last_error: row.try_get("last_error").map_err(map_db_err)?,
+            would_have_linked_at_090: row
+                .try_get("would_have_linked_at_090")
+                .map_err(map_db_err)?,
+            updated_at: parse_dt(&updated_at)?,
+        })
+    }
+
+    async fn begin_evidence_generation(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        verify_claim_tx(&mut tx, &claim).await?;
+
+        // MAX, not assignment: a generation only ever moves forward, so a stale
+        // worker cannot reopen a question a newer run already retired.
+        sqlx::query(
+            "UPDATE author_link_progress \
+                SET evidence_generation = MAX(evidence_generation, ?), cursor = NULL, \
+                    updated_at = ? \
+              WHERE author_id = ? AND user_id = ?",
+        )
+        .bind(evidence_generation)
+        .bind(now_ts())
+        .bind(claim.author_id)
+        .bind(claim.user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        sqlx::query(
+            "UPDATE author_link_candidates \
+                SET status = 'superseded', resolved_at = ? \
+              WHERE user_id = ? AND author_id = ? AND status = 'pending' \
+                AND evidence_generation < ?",
+        )
+        .bind(now_ts())
+        .bind(claim.user_id)
+        .bind(claim.author_id)
+        .bind(evidence_generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(())
     }
 
     async fn compute_evidence_fingerprint(

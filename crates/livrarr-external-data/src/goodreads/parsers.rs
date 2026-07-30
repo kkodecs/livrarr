@@ -906,6 +906,187 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
     }
 }
 
+/// One contributor credited on a specific Goodreads book page.
+///
+/// `raw_id` is the provider's own author identifier exactly as the page spells
+/// it; canonicalization belongs to `AuthorRouteKey::parse`, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoodreadsBookContributor {
+    pub raw_id: String,
+    pub name: String,
+    pub role: Option<String>,
+}
+
+/// A contributor edge that also carries the credited role.
+#[derive(serde::Deserialize)]
+struct ApolloRoleContributorEdge {
+    #[serde(default)]
+    node: Option<ApolloRef>,
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// The contributor half of the selected Book's edges.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloBookContributors {
+    #[serde(default)]
+    primary_contributor_edge: Option<ApolloRoleContributorEdge>,
+    #[serde(default)]
+    secondary_contributor_edges: Option<Vec<ApolloRoleContributorEdge>>,
+}
+
+/// A referenced Contributor entity: the credited name plus the numeric author
+/// id every Goodreads author URL is built from.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApolloContributorIdentity {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    legacy_id: Option<StringOrInt>,
+}
+
+/// Every contributor credited on the selected book, or `None` when the
+/// book→contributor association shape is unreadable.
+///
+/// `None` is layout drift, never "this book credits nobody": a Goodreads book
+/// page always names at least its primary contributor, so an empty read means
+/// the shape moved. Only edges hanging off the selected Book are followed —
+/// reviewer and user entities in the same Apollo cache also carry `legacyId`
+/// and are not contributors of this book.
+pub fn parse_book_contributors(html: &str) -> Option<Vec<GoodreadsBookContributor>> {
+    apollo_book_contributors(html).or_else(|| jsonld_book_contributors(html))
+}
+
+/// The current layout: `__NEXT_DATA__` → `apolloState` → this page's Book →
+/// primary/secondary contributor edges → referenced Contributor entities.
+fn apollo_book_contributors(html: &str) -> Option<Vec<GoodreadsBookContributor>> {
+    let cap = RE_NEXT_DATA.captures(html)?;
+    let root: serde_json::Value = serde_json::from_str(&cap[1]).ok()?;
+    let apollo = root
+        .get("props")
+        .and_then(|v| v.get("pageProps"))
+        .and_then(|v| v.get("apolloState"))
+        .and_then(|v| v.as_object())?;
+    let book = find_apollo_book(apollo)?;
+    let edges: ApolloBookContributors = serde_json::from_value(book.clone()).ok()?;
+
+    let mut contributors = Vec::new();
+    let secondary = edges.secondary_contributor_edges.unwrap_or_default();
+    for edge in edges
+        .primary_contributor_edge
+        .iter()
+        .chain(secondary.iter())
+    {
+        let Some(identity) = edge
+            .node
+            .as_ref()
+            .and_then(|node| node.r#ref.as_deref())
+            .and_then(|key| apollo.get(key))
+            .and_then(|value| {
+                serde_json::from_value::<ApolloContributorIdentity>(value.clone()).ok()
+            })
+        else {
+            continue;
+        };
+        let (Some(raw_id), Some(name)) = (
+            identity.legacy_id.map(StringOrInt::into_string),
+            identity.name,
+        ) else {
+            continue;
+        };
+        if raw_id.trim().is_empty() || name.trim().is_empty() {
+            continue;
+        }
+        contributors.push(GoodreadsBookContributor {
+            raw_id: raw_id.trim().to_string(),
+            name: name.trim().to_string(),
+            role: edge
+                .role
+                .as_deref()
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(str::to_string),
+        });
+    }
+
+    (!contributors.is_empty()).then_some(contributors)
+}
+
+/// The legacy layout: the page's JSON-LD Book entity, whose `author` entries
+/// carry the credited name and a `/author/show/<id>` link.
+fn jsonld_book_contributors(html: &str) -> Option<Vec<GoodreadsBookContributor>> {
+    let book = find_book_jsonld(html).or_else(|| find_jsonld_crediting_authors(html))?;
+    let entries = match book.get("author")? {
+        serde_json::Value::Array(items) => items.clone(),
+        object @ serde_json::Value::Object(_) => vec![object.clone()],
+        _ => return None,
+    };
+
+    let mut contributors = Vec::new();
+    for entry in &entries {
+        let Some(name) = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let Some(raw_id) = entry
+            .get("url")
+            .and_then(|v| v.as_str())
+            .and_then(author_show_id)
+        else {
+            continue;
+        };
+        contributors.push(GoodreadsBookContributor {
+            raw_id,
+            name: name.to_string(),
+            role: None,
+        });
+    }
+
+    (!contributors.is_empty()).then_some(contributors)
+}
+
+/// A JSON-LD entity crediting authors, for pages whose block omits the `Book`
+/// type marker.
+///
+/// Still scoped to this page's own JSON-LD, so the credits belong to this page's
+/// book — the type marker is how the entity is labelled, not what makes the
+/// credits associated.
+fn find_jsonld_crediting_authors(html: &str) -> Option<serde_json::Value> {
+    for cap in RE_JSONLD.captures_iter(html) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&cap[1]) else {
+            continue;
+        };
+        if value.get("author").is_some() {
+            return Some(value);
+        }
+        let nested = value
+            .as_array()
+            .or_else(|| value.get("@graph").and_then(|graph| graph.as_array()));
+        if let Some(item) = nested.and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("author").is_some())
+                .cloned()
+        }) {
+            return Some(item);
+        }
+    }
+    None
+}
+
+/// The numeric id in a `/author/show/<id>[.Slug]` link, ignoring anything else.
+fn author_show_id(url: &str) -> Option<String> {
+    let after = url.split("/author/show/").nth(1)?;
+    let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
 /// Scan all JSON-LD blocks and find the one with `@type: "Book"`.
 fn find_book_jsonld(html: &str) -> Option<serde_json::Value> {
     for cap in RE_JSONLD.captures_iter(html) {

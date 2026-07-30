@@ -40,6 +40,7 @@ where
         + ConfigDb
         + livrarr_db::SeriesDb
         + livrarr_db::HistoryDb
+        + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -257,6 +258,7 @@ where
         + ConfigDb
         + livrarr_db::SeriesDb
         + livrarr_db::HistoryDb
+        + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,

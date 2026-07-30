@@ -86,7 +86,10 @@ impl SqliteDb {
     /// pre-F1 [`AuthorDb::create_author`] writer stays as it is for legacy and
     /// fixture use; [`AuthorLinkDb::ensure_enqueued`] is what repairs an author
     /// that predates this gate.
-    pub async fn create_or_adopt_author(
+    ///
+    /// The operation itself is [`AuthorLinkDb::create_or_adopt_author`] — the
+    /// trait seam the generic add services reach it through.
+    pub(crate) async fn create_or_adopt_author_gate(
         &self,
         request: CreateAuthorGateRequest,
     ) -> Result<(Author, bool), DbError> {

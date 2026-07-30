@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::Utc;
-use livrarr_db::{
-    AuthorBibliographyDb, AuthorDb, ConfigDb, CreateAuthorDbRequest, UpdateAuthorDbRequest, WorkDb,
-};
+use livrarr_db::{AuthorBibliographyDb, AuthorDb, ConfigDb, UpdateAuthorDbRequest, WorkDb};
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 
@@ -55,7 +53,7 @@ impl<D, F, L> AuthorServiceImpl<D, F, L> {
 
 impl<D, F, L> AuthorService for AuthorServiceImpl<D, F, L>
 where
-    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + Send + Sync,
+    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + livrarr_db::AuthorLinkDb + Send + Sync,
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
@@ -86,6 +84,10 @@ where
                 message: "name must not be empty".into(),
             });
         }
+        // An explicitly supplied provider key is the user's own selection, so it
+        // becomes a UserPicked route on top of whatever the arms below do with
+        // the legacy scalar.
+        let requested_route = req.ol_key.clone();
 
         if let Some(existing) = self
             .db
@@ -121,6 +123,9 @@ where
                 )
                 .await
                 .map_err(AuthorServiceError::Db)?;
+            self.arm_author_link(user_id, existing.id).await;
+            self.attach_selected_author_route(user_id, existing.id, requested_route.as_deref())
+                .await;
             return Ok(AddAuthorResult::Updated(updated));
         }
 
@@ -157,24 +162,54 @@ where
                 )
                 .await
                 .map_err(AuthorServiceError::Db)?;
+            self.arm_author_link(user_id, adopted.id).await;
+            self.attach_selected_author_route(user_id, adopted.id, requested_route.as_deref())
+                .await;
             return Ok(AddAuthorResult::Updated(updated));
         }
 
-        let db_req = CreateAuthorDbRequest {
-            user_id,
-            name,
-            sort_name: req.sort_name,
-            ol_key: req.ol_key,
-            gr_key: None,
-            hc_key: None,
-            import_id: None,
-        };
-
+        // The shared create/adopt gate: the author row, its first name variant,
+        // and its due author-link task commit together, so a new author can
+        // never exist in a state the sweep cannot see.
         let (author, created) = self
             .db
-            .create_author(db_req)
+            .create_or_adopt_author(livrarr_db::CreateAuthorGateRequest {
+                user_id,
+                name,
+                sort_name: req.sort_name,
+                import_id: None,
+                initial_name_source: AuthorNameSource::User,
+                trigger: AuthorLinkTrigger::AuthorCreated,
+            })
             .await
             .map_err(AuthorServiceError::Db)?;
+
+        // The legacy scalar is still filled here for the pre-cutover consumers
+        // that read it; the route ledger below is what new code reads.
+        let author = match requested_route.as_deref() {
+            Some(key) if !key.trim().is_empty() => self
+                .db
+                .update_author(
+                    user_id,
+                    author.id,
+                    UpdateAuthorDbRequest {
+                        name: None,
+                        sort_name: None,
+                        ol_key: Some(Some(key.to_string())),
+                        gr_key: None,
+                        monitored: None,
+                        monitor_new_items: None,
+                        monitor_since: None,
+                        monitor_language: None,
+                    },
+                )
+                .await
+                .map_err(AuthorServiceError::Db)?,
+            _ => author,
+        };
+        self.attach_selected_author_route(user_id, author.id, requested_route.as_deref())
+            .await;
+
         // A creation-race loser converges on the winning row: same shape as
         // the adopted/exact-hit arms above, never a second Created (REQ-002).
         Ok(if created {
@@ -505,10 +540,56 @@ where
 // Private helper methods
 impl<D, F, L> AuthorServiceImpl<D, F, L>
 where
-    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + Send + Sync,
+    D: AuthorDb + WorkDb + AuthorBibliographyDb + ConfigDb + livrarr_db::AuthorLinkDb + Send + Sync,
     F: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
+    /// Make sure an author reached through an existing row has a due
+    /// author-link task.
+    ///
+    /// Warn-only: an add must not fail over bookkeeping, and the startup repair
+    /// pass covers a row that never got one.
+    async fn arm_author_link(&self, user_id: UserId, author_id: AuthorId) {
+        if let Err(e) = self
+            .db
+            .ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorAdopted)
+            .await
+        {
+            tracing::warn!(author_id, error = %e, "author-link enqueue failed for adopted author");
+        }
+    }
+
+    /// Record a provider route the user supplied with the add.
+    ///
+    /// It is stored as their selection, never as provider proof. A value that is
+    /// not a canonical author route is dropped with a warning, and a failure
+    /// here leaves the author enqueued rather than failing the add.
+    async fn attach_selected_author_route(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        requested_route: Option<&str>,
+    ) {
+        let Some(raw) = requested_route.map(str::trim).filter(|raw| !raw.is_empty()) else {
+            return;
+        };
+        let key = match AuthorRouteKey::parse(AuthorProvider::OpenLibrary, raw) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::warn!(
+                    author_id,
+                    %raw,
+                    ?e,
+                    "selected author route is not a canonical OpenLibrary author key"
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.db.attach_route_as_user(user_id, author_id, key).await {
+            tracing::warn!(author_id, error = %e, "selected author route attach failed");
+        }
+    }
+
     async fn resolve_ol_key(
         &self,
         user_id: UserId,

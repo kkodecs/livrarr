@@ -605,6 +605,18 @@ impl<F: HttpFetcher> HardcoverClient<F> {
         self
     }
 
+    /// The transport this client sends through, for sibling modules in this
+    /// crate that build their own Hardcover requests (`author_link`).
+    pub(crate) fn fetcher(&self) -> &F {
+        &self.fetcher
+    }
+
+    /// The live Hardcover enable/token snapshot source, read per call so a
+    /// config change takes effect without a restart.
+    pub(crate) fn live_config(&self) -> &crate::live_config::LiveMetadataConfig {
+        &self.live_config
+    }
+
     /// Anchor-only fetch (REQ-006). ISBN is the working anchor tier; no
     /// by-hc_key detail query exists in the current Hardcover integration, so
     /// the HcKey arm is a recorded gap that reports NotFound rather than
@@ -938,6 +950,12 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
         self.retry_backoff_secs = secs;
         self
+    }
+
+    /// The transport this client sends through, for sibling modules in this
+    /// crate that build their own OpenLibrary requests (`author_link`).
+    pub(crate) fn fetcher(&self) -> &F {
+        &self.fetcher
     }
 
     /// Anchor-only fetch (REQ-006): ol_key direct detail, or ISBN resolved to
@@ -2357,6 +2375,17 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
     pub fn with_retry_backoff(mut self, secs: i64) -> Self {
         self.retry_backoff_secs = secs;
         self
+    }
+
+    /// The transport this client sends through, for sibling modules in this
+    /// crate that build their own Goodreads requests (`author_link`).
+    pub(crate) fn fetcher(&self) -> &F {
+        &self.fetcher
+    }
+
+    /// The configured Goodreads origin every request is built against.
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Enable the LLM extraction fallback by giving the client a handle to

@@ -1,8 +1,7 @@
 use livrarr_db::{
-    AuthorDb, ConfigDb, CreateAuthorDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb,
-    LibraryItemDb, MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest,
-    UpdateAuthorDbRequest, UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, WorkDb,
-    WorkDbCreate,
+    AuthorDb, ConfigDb, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb, LibraryItemDb,
+    MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest, UpdateAuthorDbRequest,
+    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
@@ -323,6 +322,7 @@ where
         + ConfigDb
         + livrarr_db::SeriesDb
         + livrarr_db::HistoryDb
+        + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -2785,6 +2785,7 @@ where
         + livrarr_db::ProviderRetryStateDb
         + livrarr_db::SeriesDb
         + livrarr_db::HistoryDb
+        + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,
@@ -2834,6 +2835,14 @@ where
         }
     }
 
+    /// Find, adopt, or create the author of a work being added.
+    ///
+    /// Every arm leaves the author with one due author-link task: a new author
+    /// gets it from the shared create/adopt gate in the same transaction as the
+    /// row itself, and an author that predates the gate is repaired here. A
+    /// route the user explicitly selected in the add flow is attached as their
+    /// own choice afterwards — a separate, independently retryable step, so a
+    /// failure there leaves the author enqueued rather than orphaned.
     async fn find_or_create_author(
         &self,
         user_id: UserId,
@@ -2844,13 +2853,16 @@ where
             return Ok((false, None));
         }
         let normalized = cleaned_author.to_lowercase();
-        match self
+        let (created, author_id) = match self
             .db
             .find_author_by_name(user_id, &normalized)
             .await
             .map_err(WorkServiceError::Db)?
         {
-            Some(existing) => Ok((false, Some(existing.id))),
+            Some(existing) => {
+                self.arm_author_link(user_id, existing.id).await;
+                (false, existing.id)
+            }
             None => {
                 let authors = self
                     .db
@@ -2884,27 +2896,76 @@ where
                                 .map_err(WorkServiceError::Db)?;
                         }
                     }
-                    return Ok((false, Some(adopted.id)));
+                    self.arm_author_link(user_id, adopted.id).await;
+                    (false, adopted.id)
+                } else {
+                    // `created` is the DB's own verdict: a creation-race loser
+                    // converges on the winning row and reports false, exactly
+                    // like a lookup hit (REQ-002).
+                    let (author, created) = self
+                        .db
+                        .create_or_adopt_author(livrarr_db::CreateAuthorGateRequest {
+                            user_id,
+                            name: cleaned_author.to_string(),
+                            sort_name: None,
+                            import_id: None,
+                            initial_name_source: AuthorNameSource::Import,
+                            trigger: AuthorLinkTrigger::AuthorCreated,
+                        })
+                        .await
+                        .map_err(WorkServiceError::Db)?;
+                    (created, author.id)
                 }
-
-                // `created` is the DB's own verdict: a creation-race loser
-                // converges on the winning row and reports false, exactly
-                // like a lookup hit (REQ-002).
-                let (author, created) = self
-                    .db
-                    .create_author(CreateAuthorDbRequest {
-                        user_id,
-                        name: cleaned_author.to_string(),
-                        sort_name: None,
-                        ol_key: author_ol_key.map(|s| s.to_string()),
-                        gr_key: None,
-                        hc_key: None,
-                        import_id: None,
-                    })
-                    .await
-                    .map_err(WorkServiceError::Db)?;
-                Ok((created, Some(author.id)))
             }
+        };
+        self.attach_selected_author_route(user_id, author_id, author_ol_key)
+            .await;
+        Ok((created, Some(author_id)))
+    }
+
+    /// Make sure an adopted author has a due author-link task.
+    ///
+    /// Warn-only: an author that already exists is not made worse by a
+    /// bookkeeping failure here, and the startup repair pass covers a row that
+    /// never got one.
+    async fn arm_author_link(&self, user_id: UserId, author_id: AuthorId) {
+        if let Err(e) = self
+            .db
+            .ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorAdopted)
+            .await
+        {
+            tracing::warn!(author_id, error = %e, "author-link enqueue failed for adopted author");
+        }
+    }
+
+    /// Record a provider route the user picked in the add flow.
+    ///
+    /// This is a user selection, not provider proof, so it is stored as one. A
+    /// value that is not a canonical author route is dropped with a warning
+    /// rather than persisted raw, and no failure here fails the add.
+    async fn attach_selected_author_route(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        author_ol_key: Option<&str>,
+    ) {
+        let Some(raw) = author_ol_key.map(str::trim).filter(|raw| !raw.is_empty()) else {
+            return;
+        };
+        let key = match AuthorRouteKey::parse(AuthorProvider::OpenLibrary, raw) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::warn!(
+                    author_id,
+                    %raw,
+                    ?e,
+                    "selected author route is not a canonical OpenLibrary author key"
+                );
+                return;
+            }
+        };
+        if let Err(e) = self.db.attach_route_as_user(user_id, author_id, key).await {
+            tracing::warn!(author_id, error = %e, "selected author route attach failed");
         }
     }
 
@@ -3193,6 +3254,7 @@ where
         + livrarr_db::SeriesDb
         + livrarr_db::ProviderRetryStateDb
         + livrarr_db::HistoryDb
+        + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
         + Send
         + Sync,

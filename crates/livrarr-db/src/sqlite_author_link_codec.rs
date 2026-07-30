@@ -258,6 +258,21 @@ pub(crate) fn progress_state_str(state: AuthorLinkProgressState) -> &'static str
     }
 }
 
+pub(crate) fn parse_progress_state(raw: &str) -> Result<AuthorLinkProgressState, DbError> {
+    match raw {
+        "queued" => Ok(AuthorLinkProgressState::Queued),
+        "running" => Ok(AuthorLinkProgressState::Running),
+        "parked_no_settled_work" => Ok(AuthorLinkProgressState::ParkedNoSettledWork),
+        "parked_no_evidence" => Ok(AuthorLinkProgressState::ParkedNoEvidence),
+        "needs_review" => Ok(AuthorLinkProgressState::NeedsReview),
+        "linked" => Ok(AuthorLinkProgressState::Linked),
+        "retryable_failure" => Ok(AuthorLinkProgressState::RetryableFailure),
+        other => Err(DbError::Constraint {
+            message: format!("unknown author link progress state {other:?}"),
+        }),
+    }
+}
+
 pub(crate) fn attempt_state_str(state: AuthorKeyAttemptState) -> &'static str {
     match state {
         AuthorKeyAttemptState::Pending => "pending",

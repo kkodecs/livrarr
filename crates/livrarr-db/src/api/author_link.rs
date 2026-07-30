@@ -3,12 +3,12 @@ use uuid::Uuid;
 
 use crate::DbError;
 use livrarr_domain::{
-    AgreedAuthorRouteEvidence, AuthorCompatibilityProjection, AuthorEvidenceFingerprint, AuthorId,
-    AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCursor,
-    AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger, AuthorNameSource,
-    AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteKey, AuthorSweepProgress,
-    ProviderAuthorNameObservation, RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome,
-    SettledWorkProviderKey, UserId, WorkId,
+    AgreedAuthorRouteEvidence, Author, AuthorCompatibilityProjection, AuthorEvidenceFingerprint,
+    AuthorId, AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCursor,
+    AuthorLinkProgress, AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger,
+    AuthorNameSource, AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteKey,
+    AuthorSweepProgress, ProviderAuthorNameObservation, RejectedAuthorRouteEvidence,
+    RequestPriority, RouteWriteOutcome, SettledWorkProviderKey, UserId, WorkId,
 };
 
 #[derive(Debug, Clone)]
@@ -76,6 +76,18 @@ pub trait AuthorLinkDb: Send + Sync {
         trigger: AuthorLinkTrigger,
     ) -> Result<(), DbError>;
 
+    /// The shared author create/adopt gate: one transaction that converges a
+    /// creation race onto a single author row and leaves that winner with its
+    /// initial name variant and a due author-link progress row.
+    ///
+    /// Every add door enters here, so an author can never be committed in a
+    /// state the sweep cannot see. Returns the converged author and whether this
+    /// caller is the one that created it.
+    async fn create_or_adopt_author(
+        &self,
+        request: CreateAuthorGateRequest,
+    ) -> Result<(Author, bool), DbError>;
+
     async fn ensure_missing_progress_rows(&self, limit: u32) -> Result<u32, DbError>;
 
     async fn claim_due(
@@ -86,6 +98,31 @@ pub trait AuthorLinkDb: Send + Sync {
     ) -> Result<Vec<AuthorLinkClaim>, DbError>;
 
     async fn load_road_input(&self, claim: AuthorLinkClaim) -> Result<AuthorRoadInput, DbError>;
+
+    /// The author's durable progress row.
+    ///
+    /// The road needs the persisted evidence generation and attempt count that
+    /// `load_road_input` deliberately leaves out of its evidence snapshot, and
+    /// the user-facing re-resolve door returns this row directly.
+    async fn load_progress(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<AuthorLinkProgress, DbError>;
+
+    /// Open a new evidence generation for a claimed author.
+    ///
+    /// Changed settled evidence retires the previous generation's question:
+    /// the stored generation moves forward (never backward), still-pending
+    /// candidates from older generations are superseded, and the road cursor is
+    /// cleared so no tier resumes at a position the new evidence never
+    /// produced. Persisting the generation before any route or candidate write
+    /// is what keeps every effect of this run in one reviewable generation.
+    async fn begin_evidence_generation(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<(), DbError>;
 
     async fn compute_evidence_fingerprint(
         &self,
