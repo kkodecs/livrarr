@@ -33,10 +33,93 @@ pub enum AuthorRouteKey {
     Hardcover(HardcoverAuthorId),
 }
 
+/// The OpenLibrary author-URL forms that reduce to a canonical author key.
+const OPEN_LIBRARY_URL_PREFIXES: [&str; 4] = [
+    "https://openlibrary.org",
+    "http://openlibrary.org",
+    "https://www.openlibrary.org",
+    "http://www.openlibrary.org",
+];
+
 impl AuthorRouteKey {
+    /// Parse a raw provider author-route value into its canonical typed form.
+    ///
+    /// Only the aliases documented for each provider are accepted. Malformed,
+    /// zero, overflowed, and cross-provider values are rejected here, so no raw
+    /// string reaches route uniqueness, tombstone lookup, or a route consumer.
     pub fn parse(provider: AuthorProvider, raw: &str) -> Result<Self, AuthorLinkError> {
-        todo!()
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(AuthorLinkError::InvalidRoute(
+                "author route value is empty".to_string(),
+            ));
+        }
+        match provider {
+            AuthorProvider::OpenLibrary => {
+                parse_open_library_author_key(trimmed).map(Self::OpenLibrary)
+            }
+            AuthorProvider::Goodreads => parse_numeric_author_id(provider, trimmed)
+                .map(|id| Self::Goodreads(GoodreadsAuthorId(id))),
+            AuthorProvider::Hardcover => parse_numeric_author_id(provider, trimmed)
+                .map(|id| Self::Hardcover(HardcoverAuthorId(id))),
+        }
     }
+}
+
+/// `OL<number>A`, reached either directly, through an `/authors/` path, or
+/// through an author URL that may carry a trailing display slug.
+fn parse_open_library_author_key(trimmed: &str) -> Result<OpenLibraryAuthorKey, AuthorLinkError> {
+    let path = OPEN_LIBRARY_URL_PREFIXES
+        .iter()
+        .find_map(|prefix| trimmed.strip_prefix(prefix))
+        .unwrap_or(trimmed);
+    let candidate = match path.strip_prefix("/authors/") {
+        Some(after_prefix) => after_prefix.split('/').next().unwrap_or(after_prefix),
+        None => path,
+    };
+    let digits = candidate
+        .strip_prefix("OL")
+        .and_then(|rest| rest.strip_suffix('A'))
+        .filter(|digits| is_canonical_decimal(digits))
+        .ok_or_else(|| {
+            AuthorLinkError::InvalidRoute(format!(
+                "{trimmed:?} is not an OpenLibrary author key (expected OL<number>A)"
+            ))
+        })?;
+    if digits.parse::<u64>().is_err() {
+        return Err(AuthorLinkError::InvalidRoute(format!(
+            "{trimmed:?} exceeds the supported OpenLibrary author key range"
+        )));
+    }
+    Ok(OpenLibraryAuthorKey(candidate.to_string()))
+}
+
+/// A positive decimal provider id. Leading zeros are an alias of the same id,
+/// so the parsed number is the canonical value.
+fn parse_numeric_author_id(
+    provider: AuthorProvider,
+    trimmed: &str,
+) -> Result<u64, AuthorLinkError> {
+    if !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(AuthorLinkError::InvalidRoute(format!(
+            "{trimmed:?} is not a {provider:?} author id (expected a decimal number)"
+        )));
+    }
+    match trimmed.parse::<u64>() {
+        Ok(0) => Err(AuthorLinkError::InvalidRoute(format!(
+            "{provider:?} author id must be greater than zero"
+        ))),
+        Ok(id) => Ok(id),
+        Err(_) => Err(AuthorLinkError::InvalidRoute(format!(
+            "{trimmed:?} exceeds the supported {provider:?} author id range"
+        ))),
+    }
+}
+
+/// A decimal run with no leading zero, which is how a canonical provider
+/// identifier is written.
+fn is_canonical_decimal(digits: &str) -> bool {
+    !digits.is_empty() && !digits.starts_with('0') && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,7 +260,7 @@ pub struct AgreedAuthorRouteEvidence {
 
 impl AgreedAuthorRouteEvidence {
     pub fn evidence(&self) -> &AuthorRouteEvidence {
-        todo!()
+        &self.evidence
     }
 }
 
@@ -189,11 +272,11 @@ pub struct RejectedAuthorRouteEvidence {
 
 impl RejectedAuthorRouteEvidence {
     pub fn evidence(&self) -> &AuthorRouteEvidence {
-        todo!()
+        &self.evidence
     }
 
     pub fn verdict(&self) -> AuthorVerdict {
-        todo!()
+        self.verdict
     }
 }
 
@@ -203,13 +286,35 @@ pub enum AuthorRouteGuardResult {
     Rejected(RejectedAuthorRouteEvidence),
 }
 
+/// The one standard of proof for an automatic author-route write.
+///
+/// The canonical [`crate::identity_matching::author_verdict`] authority compares
+/// the provider's name for one author identifier against the author's full
+/// current associated-name snapshot. `Agree` is the only verdict that mints
+/// [`AgreedAuthorRouteEvidence`]; `Grey`, `Abstain`, and `Disagree` are retained
+/// as review evidence with the verdict that produced them.
 pub fn guard_author_route(
     current_display_names: &[String],
     provider_ref: ProviderAuthorRef,
     evidence_work_id: Option<WorkId>,
     source: AuthorRouteEvidenceSource,
 ) -> AuthorRouteGuardResult {
-    todo!()
+    let evidence = AuthorRouteEvidence {
+        key: provider_ref.key,
+        observed_name: provider_ref.name.trim().to_string(),
+        evidence_work_id,
+        source,
+    };
+    let provider_side = [evidence.observed_name.clone()];
+    match crate::identity_matching::author_verdict(&provider_side, current_display_names) {
+        AuthorVerdict::Agree => AuthorRouteGuardResult::Agreed(AgreedAuthorRouteEvidence {
+            evidence,
+            agree_proof: AuthorNameGuardAgree,
+        }),
+        verdict => {
+            AuthorRouteGuardResult::Rejected(RejectedAuthorRouteEvidence { evidence, verdict })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
