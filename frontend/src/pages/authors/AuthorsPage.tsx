@@ -13,9 +13,12 @@ import { EmptyState } from "@/components/Page/EmptyState";
 import { formatRelativeDate } from "@/utils/format";
 import { cn } from "@/utils/cn";
 import { HelpTip } from "@/components/HelpTip";
-import type { AuthorResponse } from "@/types/api";
+import { AuthorLinkBadge, AuthorLinkTag } from "@/components/AuthorLinkBadge";
+import { MONITORABLE_HELP, authorGateMessage } from "@/utils/authorLink";
+import type { AuthorLinkState, AuthorResponse } from "@/types/api";
 
 type FilterStatus = "all" | "monitored" | "unmonitored";
+type LinkFilter = "all" | AuthorLinkState;
 
 function sortAuthors(
   authors: AuthorResponse[],
@@ -45,6 +48,7 @@ export default function AuthorsPage() {
     setAuthorsSort,
   } = useUIStore();
   const [filter, setFilter] = useState<FilterStatus>("all");
+  const [linkFilter, setLinkFilter] = useState<LinkFilter>("all");
 
   const {
     data: authors,
@@ -64,12 +68,11 @@ export default function AuthorsPage() {
         old?.map((a) => (a.id === id ? { ...a, monitored } : a)),
       );
     },
-    onError: (err: Error) => {
-      if (err.message?.includes("OL linkage")) {
-        toast.error("Cannot monitor — author not linked to OpenLibrary");
-      } else {
-        toast.error("Failed to update author");
-      }
+    // The server owns the monitor gate. Show what it said rather than a
+    // guess of our own — the reason travels in the field error, not the
+    // envelope message.
+    onError: (err: unknown) => {
+      toast.error(authorGateMessage(err, "Failed to update author"));
     },
   });
 
@@ -107,8 +110,11 @@ export default function AuthorsPage() {
     let result = authors;
     if (filter === "monitored") result = result.filter((a) => a.monitored);
     if (filter === "unmonitored") result = result.filter((a) => !a.monitored);
+    if (linkFilter !== "all") {
+      result = result.filter((a) => a.linkState === linkFilter);
+    }
     return sortAuthors(result, authorsSort, authorsSortDir);
-  }, [authors, filter, authorsSort, authorsSortDir]);
+  }, [authors, filter, linkFilter, authorsSort, authorsSortDir]);
 
   if (isLoading) return <PageLoading />;
   if (error) return <ErrorState error={error as Error} onRetry={refetch} />;
@@ -151,6 +157,19 @@ export default function AuthorsPage() {
             <option value="all">All</option>
             <option value="monitored">Monitored</option>
             <option value="unmonitored">Unmonitored</option>
+          </select>
+
+          {/* Link-state filter */}
+          <select
+            value={linkFilter}
+            onChange={(e) => setLinkFilter(e.target.value as LinkFilter)}
+            aria-label="Filter by link state"
+            className="rounded border border-border bg-zinc-800 px-2 py-1 text-sm text-zinc-200"
+          >
+            <option value="all">Any link state</option>
+            <option value="linked">Linked</option>
+            <option value="needs_review">Needs review</option>
+            <option value="unlinked">Unlinked</option>
           </select>
 
           {/* View toggle */}
@@ -201,8 +220,8 @@ export default function AuthorsPage() {
             icon={<BookOpen size={32} />}
             title="No authors found"
             description={
-              filter !== "all"
-                ? "Try changing your filter."
+              filter !== "all" || linkFilter !== "all"
+                ? "Try changing your filters."
                 : "Add an author to get started."
             }
             action={
@@ -253,7 +272,8 @@ function TableView({
         <thead>
           <tr className="border-b border-border text-left text-xs font-medium uppercase text-muted">
             <th className="px-3 py-2">Name</th>
-            <th className="w-20 px-3 py-2"><span className="flex items-center gap-1">Monitor <HelpTip text="Monitor indexers for new uploads of all content by author." /></span></th>
+            <th className="w-28 px-3 py-2"><span className="flex items-center gap-1">Link <HelpTip text="Whether this author is matched to a provider page. Click a badge to fix it." /></span></th>
+            <th className="w-20 px-3 py-2"><span className="flex items-center gap-1">Monitor <HelpTip text={`Monitor indexers for new uploads of all content by author. ${MONITORABLE_HELP}`} /></span></th>
             <th className="hidden sm:table-cell w-24 px-3 py-2"><span className="flex items-center gap-1">Monitor New <HelpTip text="Monitor indexers for new content by author." /></span></th>
             <th className="hidden md:table-cell px-3 py-2">Added</th>
             <th className="w-10 px-3 py-2" />
@@ -272,6 +292,12 @@ function TableView({
                 >
                   {author.name}
                 </Link>
+              </td>
+              <td className="px-3 py-2">
+                <AuthorLinkBadge
+                  authorId={author.id}
+                  linkState={author.linkState}
+                />
               </td>
               <td className="px-3 py-2">
                 <button
@@ -362,6 +388,7 @@ function PosterView({ authors }: { authors: AuthorResponse[] }) {
           <p className="truncate text-sm font-medium text-zinc-100 group-hover:text-brand">
             {author.name}
           </p>
+          <AuthorLinkTag linkState={author.linkState} className="mt-1.5" />
         </Link>
       ))}
     </div>
@@ -383,6 +410,7 @@ function OverviewView({ authors }: { authors: AuthorResponse[] }) {
           <div className="min-w-0 flex-1">
             <p className="truncate font-medium text-zinc-100">{author.name}</p>
           </div>
+          <AuthorLinkTag linkState={author.linkState} className="shrink-0" />
           <span
             className={cn(
               "h-2.5 w-2.5 shrink-0 rounded-full",

@@ -278,7 +278,6 @@ function SeriesRow({
         <AuthorResolveModal
           authorId={flow.authorId}
           authorName={s.authorName}
-          onResolved={() => promote({ flags: flow.flags })}
           onCancel={cancelFlow}
         />
       )}
@@ -645,7 +644,6 @@ function AuthorSeriesExpanderRow({
         <AuthorResolveModal
           authorId={flow.authorId}
           authorName={authorName}
-          onResolved={() => promote({ flags: flow.flags })}
           onCancel={cancelFlow}
         />
       )}

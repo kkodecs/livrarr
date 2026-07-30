@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { resolveGr, updateAuthor } from "@/api";
+import { reResolveAuthor } from "@/api";
 import { FormModal } from "@/components/Page/FormModal";
 import type { SeriesResponse } from "@/types/api";
 
@@ -51,81 +51,76 @@ export function SeriesPickerModal({
   );
 }
 
-/** Author-resolution step of useSeriesPromote's flow: the author has no
- * Goodreads link yet, so there's no series list to resolve against. */
+/**
+ * Author-resolution step of useSeriesPromote's flow: the author has no
+ * Goodreads link yet, so there's no series list to resolve against.
+ *
+ * Picking a Goodreads author by name here is gone. A name match on its own
+ * was never proof, and this door wrote the link with nothing behind it. The
+ * author goes into the linking queue instead; anything uncertain arrives on
+ * the review page with its evidence, for the user to approve.
+ */
 export function AuthorResolveModal({
   authorId,
   authorName,
-  onResolved,
   onCancel,
 }: {
   authorId: number;
   authorName: string;
-  onResolved: () => void;
   onCancel: () => void;
 }) {
-  const [linking, setLinking] = useState(false);
+  const queryClient = useQueryClient();
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["resolve-gr", authorId],
-    queryFn: () => resolveGr(authorId),
-    staleTime: 0,
+  const lookAgain = useMutation({
+    mutationFn: () => reResolveAuthor(authorId),
+    onSuccess: () => {
+      toast.success("Queued — we'll look this author up in the background");
+      queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
+      queryClient.invalidateQueries({ queryKey: ["author-link-sweep"] });
+      onCancel();
+    },
+    onError: () => toast.error("Could not queue this author"),
   });
 
-  // resolve-gr may auto-link when there's a single unambiguous match.
-  const autoLinked = data?.autoLinked === true;
-  useEffect(() => {
-    if (autoLinked) onResolved();
-  }, [autoLinked]);
-  if (autoLinked) return null;
-
-  const pick = async (grKey: string) => {
-    setLinking(true);
-    try {
-      await updateAuthor(authorId, { grKey });
-      onResolved();
-    } catch {
-      toast.error("Failed to link author");
-      setLinking(false);
-    }
-  };
-
   return (
-    <FormModal open onOpenChange={(o) => !o && onCancel()} title="Link Author to Goodreads">
-      <p className="mb-3 text-xs text-muted">
+    <FormModal
+      open
+      onOpenChange={(o) => !o && onCancel()}
+      title="Link Author to Goodreads"
+    >
+      <p className="mb-3 text-sm text-muted">
         <span className="text-zinc-200">{authorName}</span> has no Goodreads
-        link yet — pick the right author to continue.
+        link yet, so there is no series list to work from.
       </p>
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2 text-sm text-zinc-500">
-          <Loader2 size={14} className="animate-spin" /> Searching Goodreads...
-        </div>
-      )}
-      {error != null && (
-        <p className="py-2 text-sm text-red-400">
-          Author lookup failed — try again later.
-        </p>
-      )}
-      {data && !data.autoLinked && data.candidates.length === 0 && (
-        <p className="py-2 text-sm text-zinc-500">
-          Author not found on Goodreads.
-        </p>
-      )}
-      <div className="space-y-1">
-        {(data?.candidates ?? []).map((c) => (
-          <button
-            key={c.grKey}
-            type="button"
-            disabled={linking}
-            onClick={() => void pick(c.grKey)}
-            className="flex w-full items-center justify-between rounded border border-border px-3 py-2 text-sm text-zinc-200 hover:border-brand hover:bg-surface-hover"
-          >
-            <span className="truncate">{c.name}</span>
-            <span className="ml-2 shrink-0 text-xs text-zinc-500">
-              {c.grKey}
-            </span>
-          </button>
-        ))}
+      <p className="mb-4 text-xs text-muted">
+        Links come from books of theirs we have already matched, or from a
+        suggestion you approve on the review page. Queue them for another look,
+        or check the review page for suggestions already waiting.
+      </p>
+      <div className="flex flex-wrap justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded px-4 py-2 text-sm text-muted hover:text-zinc-100"
+        >
+          Cancel
+        </button>
+        <Link
+          to="/review"
+          onClick={onCancel}
+          className="rounded border border-border px-4 py-2 text-sm text-zinc-200 hover:bg-surface-hover"
+        >
+          Review suggestions
+        </Link>
+        <button
+          type="button"
+          disabled={lookAgain.isPending}
+          onClick={() => lookAgain.mutate()}
+          className="inline-flex items-center gap-1.5 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+        >
+          {lookAgain.isPending && <Loader2 size={14} className="animate-spin" />}
+          Look again
+        </button>
       </div>
     </FormModal>
   );

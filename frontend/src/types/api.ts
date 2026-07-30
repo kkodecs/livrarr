@@ -364,10 +364,12 @@ export interface AddAuthorRequest {
   olKey: string;
 }
 
+/** Monitoring and language only. Provider keys are NOT settable here: routes
+ * are changed through the dedicated author-route endpoints, never through a
+ * generic author update. */
 export interface UpdateAuthorRequest {
   monitored?: boolean | null;
   monitorNewItems?: boolean | null;
-  grKey?: string | null;
   monitorLanguage?: string | null;
 }
 
@@ -375,8 +377,17 @@ export interface AuthorResponse {
   id: number;
   name: string;
   sortName: string | null;
+  /** Compatibility projection of the route ledger, not a stored column. */
   olKey: string | null;
   grKey: string | null;
+  hcKey: string | null;
+  /** Active routes first, then the removal history. */
+  routes: AuthorRouteResponse[];
+  nameVariants: AuthorNameVariantResponse[];
+  linkState: AuthorLinkState;
+  /** True only with an active Open Library route — a Goodreads or Hardcover
+   * route makes an author linked, never monitorable. */
+  monitorable: boolean;
   monitored: boolean;
   monitorNewItems: boolean;
   monitorLanguage: string | null;
@@ -386,6 +397,137 @@ export interface AuthorResponse {
 export interface AuthorDetailResponse {
   author: AuthorResponse;
   works: WorkDetailResponse[];
+}
+
+// --- Author provider linking ---
+// The route/name/candidate surface. Response casing is NOT uniform here: the
+// author, route and name-variant DTOs are camelCase like the rest of the API,
+// while the candidate rows and the sweep counters are the domain types
+// serialized as-is, i.e. snake_case. These declarations mirror the wire.
+
+export type AuthorProvider = "open_library" | "goodreads" | "hardcover";
+
+export type AuthorRouteState = "active" | "removed";
+
+export type AuthorRouteProvenance =
+  | "legacy_unguarded"
+  | "tier1_inherited"
+  | "readarr_guarded"
+  | "user_picked"
+  | "merge_coalesced";
+
+export type AuthorLinkState = "linked" | "needs_review" | "unlinked";
+
+export type AuthorNameSource =
+  | "user"
+  | "goodreads"
+  | "hardcover"
+  | "google_books"
+  | "open_library"
+  | "readarr"
+  | "import"
+  | "legacy";
+
+/** The shared author-name authority's verdict. Serialized unrenamed. */
+export type AuthorVerdict = "Agree" | "Grey" | "Disagree" | "Abstain";
+
+export type AuthorCandidateCatalogState =
+  | "pending"
+  | "partial"
+  | "retrying"
+  | "complete"
+  | "unavailable";
+
+export type AuthorLinkCandidateReason =
+  | "tier2_name_search"
+  | "name_guard_failed"
+  | "readarr_name_guard_failed"
+  | "tombstoned"
+  | "legacy_contradiction"
+  | "ownership_collision"
+  | "invalid_legacy_route";
+
+export type AuthorLinkCandidateStatus =
+  | "pending"
+  | "dismissed"
+  | "picked"
+  | "superseded";
+
+/** Externally-tagged provider key, exactly as the domain enum serializes. */
+export type AuthorRouteKey =
+  | { open_library: string }
+  | { goodreads: number }
+  | { hardcover: number };
+
+export interface AuthorRouteResponse {
+  id: number;
+  provider: AuthorProvider;
+  value: string;
+  state: AuthorRouteState;
+  provenance: AuthorRouteProvenance;
+  /** Set on a removed route: the tombstone no automatic process may undo. */
+  removedAt: string | null;
+}
+
+export interface AuthorNameVariantResponse {
+  id: number;
+  name: string;
+  source: AuthorNameSource;
+  /** The user's own choice, not whatever ranking happens to be showing. */
+  selected: boolean;
+}
+
+export interface AuthorCandidateAlternateNameEvidence {
+  name: string;
+  verdict: AuthorVerdict;
+}
+
+/** A parked route the user is being asked about. snake_case on the wire. */
+export interface AuthorLinkCandidate {
+  id: number;
+  author_id: number;
+  key: AuthorRouteKey;
+  candidate_name: string;
+  reason: AuthorLinkCandidateReason;
+  name_verdict: AuthorVerdict;
+  primary_name_verdict: AuthorVerdict;
+  alternate_name_evidence: AuthorCandidateAlternateNameEvidence[];
+  /** A fetch-order hint the provider volunteered. Never evidence, never counted. */
+  top_work_preview: string | null;
+  catalog_evidence_state: AuthorCandidateCatalogState;
+  corroborated_title_count: number;
+  settled_work_count: number;
+  previously_removed: boolean;
+  status: AuthorLinkCandidateStatus;
+  evidence_generation: number;
+  observed_at: string;
+}
+
+export interface AuthorLinkReview {
+  author: AuthorResponse;
+  candidates: AuthorLinkCandidate[];
+}
+
+/** Persisted sweep counters. snake_case on the wire. */
+export interface AuthorSweepProgress {
+  total: number;
+  completed: number;
+  queued: number;
+  running: number;
+  parked: number;
+  needs_review: number;
+  retryable_failures: number;
+  key_retryable: number;
+  key_skipped: number;
+  key_layout_drift: number;
+  would_have_linked_at_090: number;
+  oldest_due_at: string | null;
+}
+
+export interface AuthorMergeReport {
+  worksMoved: number;
+  seriesMoved: number;
+  seriesFolded: number;
 }
 
 // Author Bibliography
@@ -493,9 +635,11 @@ export interface SeriesDetailResponse {
   works: WorkDetailResponse[];
 }
 
+/** The wire still carries `autoLinked`, but it is always false — the
+ * name-similarity auto-link is gone. Leaving it out of the type is what stops
+ * a caller branching on it again. */
 export interface ResolveGrResponse {
   candidates: GrAuthorCandidate[];
-  autoLinked?: boolean;
 }
 
 export interface SeriesBookRowResponse {

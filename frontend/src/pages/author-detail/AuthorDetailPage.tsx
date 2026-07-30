@@ -21,7 +21,7 @@ import {
   getAuthorSeries,
   refreshAuthorSeries,
   updateSeries,
-  resolveGr,
+  reResolveAuthor,
 } from "@/api";
 import type { SeriesResponse } from "@/types/api";
 import { SUPPORTED_LANGUAGES } from "@/types/api";
@@ -31,7 +31,6 @@ import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
 import { EmptyState } from "@/components/Page/EmptyState";
 import { ConfirmModal } from "@/components/Page/ConfirmModal";
-import { FormModal } from "@/components/Page/FormModal";
 import { MediaStatusRow } from "@/components/MediaStatusRow";
 import { formatRelativeDate } from "@/utils/format";
 import { BookCover } from "@/components/BookCover";
@@ -39,6 +38,8 @@ import { cn } from "@/utils/cn";
 import { HelpTip } from "@/components/HelpTip";
 import { useSeriesPromote } from "@/hooks/useSeriesPromote";
 import { SeriesPickerModal, AuthorResolveModal as SeriesAuthorResolveModal } from "@/components/SeriesPromoteModals";
+import { AuthorLinkPanel } from "./AuthorLinkPanel";
+import { authorGateMessage } from "@/utils/authorLink";
 import type { AuthorDetailResponse } from "@/types/api";
 
 // #112: a plain, human-readable label for a language code — "Auto: ES"
@@ -96,7 +97,9 @@ export default function AuthorDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["author", id] });
       queryClient.invalidateQueries({ queryKey: ["authors"] });
     },
-    onError: () => toast.error("Failed to update author"),
+    // The monitor gate is the server's; show the reason it gave.
+    onError: (err: unknown) =>
+      toast.error(authorGateMessage(err, "Failed to update author")),
   });
 
   const deleteMutation = useMutation({
@@ -321,6 +324,8 @@ export default function AuthorDetailPage() {
             ))}
           </div>
         )}
+        {/* Who this author is: provider links, names, merge */}
+        <AuthorLinkPanel author={author} />
         {/* Series */}
         <SeriesSection
           authorId={authorId}
@@ -671,10 +676,9 @@ function SeriesSection({
   showAllLanguages: boolean;
 }) {
   const queryClient = useQueryClient();
-  const [resolveOpen, setResolveOpen] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
 
-  // Only show if author has grKey.
+  // Series listings come from the author's Goodreads route.
   const hasGrKey = !!author.grKey;
 
   const { data, isLoading } = useQuery({
@@ -716,29 +720,13 @@ function SeriesSection({
         <h2 className="text-sm font-semibold uppercase tracking-wider text-muted mb-3">
           Series
         </h2>
-        <div className="flex items-center gap-3 text-sm text-zinc-500">
+        <div className="flex flex-wrap items-center gap-3 text-sm text-zinc-500">
           <Library size={16} />
-          <span>Link Goodreads author to enable series monitoring.</span>
-          <button
-            onClick={() => setResolveOpen(true)}
-            className="text-xs text-brand hover:underline"
-          >
-            Link
-          </button>
+          <span>
+            Series monitoring needs a Goodreads link for this author.
+          </span>
+          <GoodreadsLinkHint authorId={authorId} />
         </div>
-        {resolveOpen && (
-          <ResolveGrModal
-            authorId={authorId}
-            authorName={author.name}
-            open={resolveOpen}
-            onOpenChange={setResolveOpen}
-            onLinked={() => {
-              queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
-              queryClient.invalidateQueries({ queryKey: ["series", authorId] });
-              setResolveOpen(false);
-            }}
-          />
-        )}
       </section>
     );
   }
@@ -960,7 +948,6 @@ function SeriesRow({
         <SeriesAuthorResolveModal
           authorId={flow.authorId}
           authorName={authorName}
-          onResolved={() => promote({ flags: flow.flags })}
           onCancel={cancelFlow}
         />
       )}
@@ -968,113 +955,42 @@ function SeriesRow({
   );
 }
 
-function ResolveGrModal({
-  authorId,
-  authorName,
-  open,
-  onOpenChange,
-  onLinked,
-}: {
-  authorId: number;
-  authorName: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onLinked: () => void;
-}) {
-  const [candidates, setCandidates] = useState<
-    { grKey: string; name: string; profileUrl: string }[]
-  >([]);
-  const [loading, setLoading] = useState(false);
-  const [linking, setLinking] = useState<string | null>(null);
+/**
+ * How an author gets a Goodreads link now.
+ *
+ * Hand-picking a Goodreads author from a name search is gone: a name match
+ * alone was never proof, and the link it wrote had no evidence behind it.
+ * Links are earned from matched books, or picked from the review page where
+ * the evidence is shown alongside them. All this door does is ask for another
+ * look.
+ */
+function GoodreadsLinkHint({ authorId }: { authorId: number }) {
+  const queryClient = useQueryClient();
 
-  const handleOpen = async () => {
-    setLoading(true);
-    try {
-      const resp = await resolveGr(authorId);
-      if (resp.autoLinked) {
-        toast.success("Goodreads author auto-linked");
-        onLinked();
-        return;
-      }
-      setCandidates(resp.candidates);
-    } catch {
-      toast.error("Failed to search Goodreads");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleLink = async (grKey: string) => {
-    setLinking(grKey);
-    try {
-      await updateAuthor(authorId, { grKey });
-      toast.success("Goodreads author linked");
-      onLinked();
-    } catch {
-      toast.error("Failed to link author");
-    } finally {
-      setLinking(null);
-    }
-  };
-
-  // Fetch on first open.
-  useEffect(() => {
-    if (open) handleOpen();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const lookAgain = useMutation({
+    mutationFn: () => reResolveAuthor(authorId),
+    onSuccess: () => {
+      toast.success("Queued — we'll look this author up in the background");
+      queryClient.invalidateQueries({ queryKey: ["author", String(authorId)] });
+      queryClient.invalidateQueries({ queryKey: ["author-link-sweep"] });
+    },
+    onError: () => toast.error("Could not queue this author"),
+  });
 
   return (
-    <FormModal open={open} onOpenChange={onOpenChange} title="Link Goodreads Author">
-      <div className="space-y-3">
-        <p className="text-sm text-muted">
-          Select the correct Goodreads author for "{authorName}":
-        </p>
-        {loading && (
-          <div className="flex items-center gap-2 text-sm text-zinc-500">
-            <Loader2 size={14} className="animate-spin" /> Searching Goodreads...
-          </div>
-        )}
-        {!loading && candidates.length === 0 && (
-          <p className="text-sm text-zinc-500">No matches found.</p>
-        )}
-        {candidates.map((c) => (
-          <div
-            key={c.grKey}
-            className="flex items-center justify-between rounded border border-border p-2"
-          >
-            <div>
-              <span className="text-sm text-zinc-200">{c.name}</span>
-              <a
-                href={c.profileUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-2 text-xs text-zinc-500 hover:text-zinc-300"
-              >
-                <ExternalLink size={10} className="inline" />
-              </a>
-            </div>
-            {linking === c.grKey ? (
-              <Loader2 size={14} className="animate-spin text-brand" />
-            ) : (
-              <button
-                onClick={() => handleLink(c.grKey)}
-                disabled={!!linking}
-                className="text-xs text-brand hover:underline"
-              >
-                Link
-              </button>
-            )}
-          </div>
-        ))}
-        <div className="flex justify-end pt-2">
-          <button
-            onClick={() => onOpenChange(false)}
-            className="rounded px-4 py-2 text-sm text-muted hover:text-zinc-100"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </FormModal>
+    <>
+      <button
+        type="button"
+        onClick={() => lookAgain.mutate()}
+        disabled={lookAgain.isPending}
+        className="text-xs text-brand hover:underline disabled:opacity-50"
+      >
+        {lookAgain.isPending ? "Queueing…" : "Look again"}
+      </button>
+      <Link to="/review" className="text-xs text-zinc-400 hover:underline">
+        Review suggestions
+      </Link>
+      <HelpTip text="Goodreads links come from books of theirs we have already matched, or from a suggestion you approve on the review page. There is no name-only linking any more." />
+    </>
   );
 }

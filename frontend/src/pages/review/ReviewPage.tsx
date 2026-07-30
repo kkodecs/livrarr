@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -9,8 +10,10 @@ import {
   listIdentityConflicts,
   resolveIdentityConflict,
   dismissIdentityConflict,
+  listAuthorLinkReview,
   getWork,
 } from "@/api";
+import { AuthorLinkReviewCard } from "./AuthorLinkReviewCard";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -255,7 +258,12 @@ function ConflictCard({ conflict }: { conflict: IdentityConflictSummary }) {
   );
 }
 
-export default function ReviewPage() {
+/**
+ * The books half of the page: the two work-identity queries, exactly as
+ * before. Its loading and error states are its own, so a books outage leaves
+ * the authors section on screen and usable.
+ */
+function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) {
   const {
     data: parks,
     isLoading: parksLoading,
@@ -276,6 +284,15 @@ export default function ReviewPage() {
     queryFn: listIdentityConflicts,
   });
 
+  const parkList = parks ?? [];
+  const conflictList = conflicts ?? [];
+  const settled = !parksLoading && !conflictsLoading;
+  const failed = parksError != null || conflictsError != null;
+
+  useEffect(() => {
+    onEmpty(settled && !failed && parkList.length === 0 && conflictList.length === 0);
+  }, [onEmpty, settled, failed, parkList.length, conflictList.length]);
+
   if (parksLoading || conflictsLoading) return <PageLoading />;
   if (parksError) {
     return <ErrorState error={parksError} onRetry={() => refetchParks()} />;
@@ -286,8 +303,88 @@ export default function ReviewPage() {
     );
   }
 
-  const parkList = parks ?? [];
-  const conflictList = conflicts ?? [];
+  return (
+    <>
+      {parkList.length > 0 && (
+        <section>
+          <h2 className="mb-2 text-sm font-semibold text-zinc-100">
+            Needs Your Pick ({parkList.length})
+          </h2>
+          <div className="flex flex-col gap-3">
+            {parkList.map((p) => (
+              <ParkedWorkCard key={p.workId} park={p} />
+            ))}
+          </div>
+        </section>
+      )}
+      {conflictList.length > 0 && (
+        <section>
+          <h2 className="mb-2 text-sm font-semibold text-zinc-100">
+            Conflicting Matches ({conflictList.length})
+          </h2>
+          <div className="flex flex-col gap-3">
+            {conflictList.map((c) => (
+              <ConflictCard key={c.id} conflict={c} />
+            ))}
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+/**
+ * The authors half: its own query, its own retry. Authors park for a different
+ * reason than books do, and one list being unreachable says nothing about the
+ * other, so neither waits on nor hides the other.
+ */
+function AuthorReviewSection({
+  onEmpty,
+}: {
+  onEmpty: (empty: boolean) => void;
+}) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["author-link-review"],
+    queryFn: listAuthorLinkReview,
+  });
+
+  const reviews = data ?? [];
+  const empty = !isLoading && error == null && reviews.length === 0;
+
+  useEffect(() => {
+    onEmpty(empty);
+  }, [onEmpty, empty]);
+
+  if (isLoading) return <PageLoading />;
+  if (error) {
+    return (
+      <section>
+        <h2 className="mb-2 text-sm font-semibold text-zinc-100">Authors</h2>
+        <ErrorState error={error} onRetry={() => refetch()} />
+      </section>
+    );
+  }
+  if (reviews.length === 0) return null;
+
+  return (
+    <section>
+      <h2 className="mb-2 text-sm font-semibold text-zinc-100">
+        Authors ({reviews.length})
+      </h2>
+      <div className="flex flex-col gap-3">
+        {reviews.map((r) => (
+          <AuthorLinkReviewCard key={r.author.id} review={r} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+export default function ReviewPage() {
+  // Only when BOTH halves have loaded and found nothing is the page truly
+  // empty; either half still working or failing is not an all-clear.
+  const [booksEmpty, setBooksEmpty] = useState(false);
+  const [authorsEmpty, setAuthorsEmpty] = useState(false);
 
   return (
     <>
@@ -295,39 +392,19 @@ export default function ReviewPage() {
         <h1 className="text-lg font-semibold text-zinc-100">Needs Review</h1>
       </PageToolbar>
       <PageContent>
-        {parkList.length === 0 && conflictList.length === 0 ? (
-          <EmptyState
-            title="Nothing needs review right now"
-            description="Books with uncertain or conflicting matches will show up here."
-          />
-        ) : (
-          <div className="space-y-6">
-            {parkList.length > 0 && (
-              <section>
-                <h2 className="mb-2 text-sm font-semibold text-zinc-100">
-                  Needs Your Pick ({parkList.length})
-                </h2>
-                <div className="flex flex-col gap-3">
-                  {parkList.map((p) => (
-                    <ParkedWorkCard key={p.workId} park={p} />
-                  ))}
-                </div>
-              </section>
-            )}
-            {conflictList.length > 0 && (
-              <section>
-                <h2 className="mb-2 text-sm font-semibold text-zinc-100">
-                  Conflicting Matches ({conflictList.length})
-                </h2>
-                <div className="flex flex-col gap-3">
-                  {conflictList.map((c) => (
-                    <ConflictCard key={c.id} conflict={c} />
-                  ))}
-                </div>
-              </section>
-            )}
-          </div>
-        )}
+        {/* Both halves stay mounted: unmounting them to show the empty state
+            would take their queries away, and nothing would bring the page
+            back when new work arrives. Each renders nothing when it is empty. */}
+        <div className="space-y-6">
+          {booksEmpty && authorsEmpty && (
+            <EmptyState
+              title="Nothing needs review right now"
+              description="Books and authors with uncertain or conflicting matches will show up here."
+            />
+          )}
+          <BookReviewSections onEmpty={setBooksEmpty} />
+          <AuthorReviewSection onEmpty={setAuthorsEmpty} />
+        </div>
       </PageContent>
     </>
   );

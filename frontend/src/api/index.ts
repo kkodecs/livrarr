@@ -30,6 +30,10 @@ import type {
   AuthorDetailResponse,
   UpdateAuthorRequest,
   AuthorBibliography,
+  AuthorLinkReview,
+  AuthorRouteResponse,
+  AuthorSweepProgress,
+  AuthorMergeReport,
   NotificationResponse,
   QueueListResponse,
   ReleaseSearchResponse,
@@ -283,6 +287,45 @@ export const refreshAuthorBibliography = (id: number) =>
   apiFetch<AuthorBibliography>(`/author/${id}/bibliography/refresh`, {
     method: "POST",
   });
+
+// Author provider linking
+//
+// Every route change lives here. `updateAuthor` carries monitoring settings
+// only — a provider key sent through it is ignored server-side, so the request
+// type no longer has the field.
+export const listAuthorLinkReview = () =>
+  apiFetch<AuthorLinkReview[]>("/author-link-review");
+export const pickAuthorLinkCandidate = (candidateId: number) =>
+  apiFetch<AuthorRouteResponse>(`/author-link-review/${candidateId}/pick`, {
+    method: "POST",
+  });
+export const dismissAuthorLinkCandidate = (candidateId: number) =>
+  apiFetch<void>(`/author-link-review/${candidateId}/dismiss`, {
+    method: "POST",
+  });
+export const removeAuthorRoute = (authorId: number, routeId: number) =>
+  apiFetch<void>(`/author/${authorId}/route/${routeId}`, { method: "DELETE" });
+/** Queues the author for the linking road. 202 — never a finished result. */
+export const reResolveAuthor = (authorId: number) =>
+  apiFetch<void>(`/author/${authorId}/resolve`, { method: "POST" });
+export const renameAuthor = (authorId: number, name: string) =>
+  apiFetch<AuthorResponse>(`/author/${authorId}/name`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+export const selectAuthorName = (authorId: number, variantId: number) =>
+  apiFetch<AuthorResponse>(`/author/${authorId}/display-name`, {
+    method: "PUT",
+    body: JSON.stringify({ variantId }),
+  });
+export const mergeAuthors = (survivorId: number, loserId: number) =>
+  apiFetch<AuthorMergeReport>(`/author/${survivorId}/merge`, {
+    method: "POST",
+    // The merge door reads a snake_case body.
+    body: JSON.stringify({ loser_id: loserId }),
+  });
+export const getAuthorLinkSweepProgress = () =>
+  apiFetch<AuthorSweepProgress>("/author-link-sweep/progress");
 
 // Series
 export const listAllSeries = () =>
