@@ -29,6 +29,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub metadata_cache: MetadataCacheConfig,
+
+    #[serde(default)]
+    pub author_link: AuthorLinkConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +238,52 @@ fn default_metadata_cache_max_rows() -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// AuthorLinkConfig
+// ---------------------------------------------------------------------------
+
+/// [author_link] section — the background author-provider linking sweep.
+///
+/// Enabled by default; `[author_link] enabled = false` opts out and the recurring
+/// tick then does nothing (user actions still enqueue, so the work is not lost).
+/// Every provider call the sweep makes rides the outbound queue at Low priority,
+/// so it yields to interactive traffic. `interval_secs` is the tick cadence;
+/// `batch_size` caps how many authors one tick claims, which is what keeps a tick
+/// interruptible and resumable. TOML only — no environment-variable override.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorLinkConfig {
+    #[serde(default = "default_author_link_enabled")]
+    pub enabled: bool,
+
+    #[serde(default = "default_author_link_interval_secs")]
+    pub interval_secs: u64,
+
+    #[serde(default = "default_author_link_batch_size")]
+    pub batch_size: i64,
+}
+
+impl Default for AuthorLinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_author_link_enabled(),
+            interval_secs: default_author_link_interval_secs(),
+            batch_size: default_author_link_batch_size(),
+        }
+    }
+}
+
+fn default_author_link_enabled() -> bool {
+    true
+}
+
+fn default_author_link_interval_secs() -> u64 {
+    900
+}
+
+fn default_author_link_batch_size() -> i64 {
+    25
+}
+
+// ---------------------------------------------------------------------------
 // ConfigError
 // ---------------------------------------------------------------------------
 
@@ -320,6 +369,21 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
         });
     }
 
+    // Same reasoning as convergence: a zero interval busy-loops the job runner
+    // and a non-positive batch claims nothing.
+    if config.author_link.interval_secs == 0 {
+        return Err(ConfigError::InvalidValue {
+            field: "author_link.interval_secs".to_string(),
+            message: "interval_secs must be at least 1".to_string(),
+        });
+    }
+    if config.author_link.batch_size < 1 {
+        return Err(ConfigError::InvalidValue {
+            field: "author_link.batch_size".to_string(),
+            message: "batch_size must be at least 1".to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -351,7 +415,7 @@ fn parse_cidr(cidr: &str) -> Result<(), String> {
 ///
 /// Satisfies: RUNTIME-CONFIG-003
 pub fn warn_unknown_keys(raw: &toml::Value) {
-    const KNOWN_ROOT: &[&str] = &["server", "auth", "log", "convergence"];
+    const KNOWN_ROOT: &[&str] = &["server", "auth", "log", "convergence", "author_link"];
     const KNOWN_SERVER: &[&str] = &["bind_address", "port", "url_base"];
     const KNOWN_AUTH: &[&str] = &["external_header", "trusted_proxies"];
     const KNOWN_LOG: &[&str] = &["level", "format"];
@@ -361,6 +425,7 @@ pub fn warn_unknown_keys(raw: &toml::Value) {
         "batch_size",
         "attempt_threshold",
     ];
+    const KNOWN_AUTHOR_LINK: &[&str] = &["enabled", "interval_secs", "batch_size"];
 
     if let Some(table) = raw.as_table() {
         for key in table.keys() {
@@ -397,6 +462,14 @@ pub fn warn_unknown_keys(raw: &toml::Value) {
             for key in convergence.keys() {
                 if !KNOWN_CONVERGENCE.contains(&key.as_str()) {
                     warn!("Unknown config key: convergence.{key}");
+                }
+            }
+        }
+
+        if let Some(author_link) = table.get("author_link").and_then(|v| v.as_table()) {
+            for key in author_link.keys() {
+                if !KNOWN_AUTHOR_LINK.contains(&key.as_str()) {
+                    warn!("Unknown config key: author_link.{key}");
                 }
             }
         }

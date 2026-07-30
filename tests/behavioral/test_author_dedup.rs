@@ -194,10 +194,22 @@ async fn work_add_author_gate_adopts_variants_preserves_key_policy_and_keeps_amb
         db.get_author(user_id, existing.id)
             .await
             .expect("adopted author")
-            .ol_key
-            .as_deref(),
-        Some("OLHEINLEINA"),
-        "adoption must fill a missing stored ol_key"
+            .ol_key,
+        None,
+        "the legacy scalar column is frozen after the cutover"
+    );
+    assert!(
+        livrarr_db::AuthorLinkDb::list_active_routes(
+            &db,
+            user_id,
+            existing.id,
+            Some(livrarr_domain::AuthorProvider::OpenLibrary),
+        )
+        .await
+        .expect("adopted author routes")
+        .is_empty(),
+        "\"OLHEINLEINA\" is not a canonical OpenLibrary author key, so it becomes \
+         neither a scalar nor a route — a raw string never reaches the ledger"
     );
 
     let populated = create_author(&db, user_id, "J.K. Rowling", Some("OL_STORED")).await;
@@ -786,9 +798,11 @@ async fn merge_authors_repoints_works_folds_and_moves_series_preserves_state_and
     );
     assert_eq!(merged_author.monitor_language.as_deref(), Some("en"));
     assert_eq!(merged_author.sort_name.as_deref(), Some("Survivor Sort"));
-    assert_eq!(merged_author.ol_key.as_deref(), Some("LOSER_OL"));
+    // The merge no longer coalesces the frozen scalar columns: linkage moves as
+    // route rows, so the survivor's columns are exactly what they were.
+    assert_eq!(merged_author.ol_key, None);
     assert_eq!(merged_author.gr_key.as_deref(), Some("SURVIVOR_GR"));
-    assert_eq!(merged_author.hc_key.as_deref(), Some("LOSER_HC"));
+    assert_eq!(merged_author.hc_key, None);
     assert_eq!(merged_author.import_id.as_deref(), Some("LOSER_IMPORT"));
 
     assert!(matches!(

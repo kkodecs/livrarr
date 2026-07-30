@@ -84,9 +84,10 @@ where
                 message: "name must not be empty".into(),
             });
         }
-        // An explicitly supplied provider key is the user's own selection, so it
-        // becomes a UserPicked route on top of whatever the arms below do with
-        // the legacy scalar.
+        // An explicitly supplied provider key is the user's own selection: it
+        // becomes a UserPicked route row, and only that. The frozen
+        // `authors.ol_key` column is never written (FP-031) — the route ledger
+        // is the one authority for what an author is linked to.
         let requested_route = req.ol_key.clone();
 
         if let Some(existing) = self
@@ -95,16 +96,6 @@ where
             .await
             .map_err(AuthorServiceError::Db)?
         {
-            // Monotonic key policy [REV codex R-13]: fill a missing stored
-            // ol_key from the request, never overwrite a populated one — OL
-            // assigns different keys to the same person across spellings, so
-            // passing a conflicting key straight through would corrupt the
-            // stored identity on a same-name re-add.
-            let ol_key = if existing.ol_key.is_none() {
-                req.ol_key.map(Some)
-            } else {
-                None
-            };
             let updated = self
                 .db
                 .update_author(
@@ -113,7 +104,7 @@ where
                     UpdateAuthorDbRequest {
                         name: None,
                         sort_name: req.sort_name.map(Some),
-                        ol_key,
+                        ol_key: None,
                         gr_key: None,
                         monitored: None,
                         monitor_new_items: None,
@@ -138,12 +129,6 @@ where
         if let Some(i) = livrarr_domain::identity_matching::unambiguous_author_match(&name, &names)
         {
             let adopted = &authors[i];
-            // Same monotonic key policy as the exact-hit arm above.
-            let ol_key = if adopted.ol_key.is_none() {
-                req.ol_key.map(Some)
-            } else {
-                None
-            };
             let updated = self
                 .db
                 .update_author(
@@ -152,7 +137,7 @@ where
                     UpdateAuthorDbRequest {
                         name: None,
                         sort_name: req.sort_name.map(Some),
-                        ol_key,
+                        ol_key: None,
                         gr_key: None,
                         monitored: None,
                         monitor_new_items: None,
@@ -184,29 +169,6 @@ where
             .await
             .map_err(AuthorServiceError::Db)?;
 
-        // The legacy scalar is still filled here for the pre-cutover consumers
-        // that read it; the route ledger below is what new code reads.
-        let author = match requested_route.as_deref() {
-            Some(key) if !key.trim().is_empty() => self
-                .db
-                .update_author(
-                    user_id,
-                    author.id,
-                    UpdateAuthorDbRequest {
-                        name: None,
-                        sort_name: None,
-                        ol_key: Some(Some(key.to_string())),
-                        gr_key: None,
-                        monitored: None,
-                        monitor_new_items: None,
-                        monitor_since: None,
-                        monitor_language: None,
-                    },
-                )
-                .await
-                .map_err(AuthorServiceError::Db)?,
-            _ => author,
-        };
         self.attach_selected_author_route(user_id, author.id, requested_route.as_deref())
             .await;
 
@@ -255,12 +217,16 @@ where
                 other => AuthorServiceError::Db(other),
             })?;
 
-        let will_have_ol_key = req.ol_key.is_some() || author.ol_key.is_some();
-        if req.monitored == Some(true) && !will_have_ol_key {
-            return Err(AuthorServiceError::Validation {
-                field: "monitored".into(),
-                message: "cannot monitor author without OL linkage".into(),
-            });
+        if req.monitored == Some(true) {
+            self.require_open_library_route(user_id, author_id).await?;
+        }
+        if req.ol_key.is_some() || req.gr_key.is_some() {
+            // The frozen scalar columns are not a route-change channel any more
+            // (FP-031/FP-032): the dedicated author-route endpoints own that.
+            tracing::warn!(
+                author_id,
+                "author update carried a provider key; ignored — use the author-route endpoints"
+            );
         }
 
         let monitored = req.monitored;
@@ -274,8 +240,8 @@ where
         let db_req = UpdateAuthorDbRequest {
             name: req.name,
             sort_name: req.sort_name,
-            ol_key: req.ol_key,
-            gr_key: req.gr_key,
+            ol_key: None,
+            gr_key: None,
             monitored,
             monitor_new_items,
             monitor_since,
@@ -345,40 +311,6 @@ where
                 sort_name: None,
             })
             .collect())
-    }
-
-    async fn search(
-        &self,
-        _user_id: UserId,
-        query: &str,
-    ) -> Result<Vec<Author>, AuthorServiceError> {
-        let url = format!(
-            "https://openlibrary.org/search/authors.json?q={}&limit=20",
-            urlencoding::encode(query)
-        );
-        let req = FetchRequest {
-            url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 512 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-            priority: RequestPriority::Normal,
-        };
-        let _resp = self
-            .fetcher
-            .fetch(req)
-            .await
-            .map_err(|e| AuthorServiceError::Provider(e.to_string()))?;
-        // OL search returns JSON with author docs — but this method returns Vec<Author>
-        // which doesn't match OL search results. The handler currently uses a separate
-        // lookup_ol_authors function that returns AuthorSearchResult, not Author.
-        // This trait method signature needs revision in a future IR pass.
-        // For now, return empty — the handler still uses the standalone lookup function.
-        Ok(vec![])
     }
 
     async fn bibliography(
@@ -530,6 +462,12 @@ where
             .await?)
     }
 
+    /// Turn author monitoring on or off.
+    ///
+    /// Enabling needs a live Open Library link, because the monitor feed *is* the
+    /// author's OpenLibrary works list — a Goodreads or Hardcover route makes an
+    /// author linked, never monitorable (FP-001/FP-033). Turning monitoring off
+    /// asks nothing of the route ledger and removes no route.
     async fn set_monitoring(
         &self,
         user_id: UserId,
@@ -538,13 +476,50 @@ where
         monitor_new_items: Option<bool>,
         monitor_language: Option<String>,
     ) -> Result<Author, AuthorServiceError> {
-        todo!()
+        let author = self
+            .db
+            .get_author(user_id, author_id)
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => AuthorServiceError::NotFound,
+                other => AuthorServiceError::Db(other),
+            })?;
+
+        if monitored {
+            self.require_open_library_route(user_id, author_id).await?;
+        }
+
+        // First enable stamps the watch start, so a back catalogue is not
+        // reported as new; a repeat enable leaves the original stamp alone.
+        let monitor_since = (monitored && !author.monitored).then(Utc::now);
+
+        self.db
+            .update_author(
+                user_id,
+                author_id,
+                UpdateAuthorDbRequest {
+                    name: None,
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    monitored: Some(monitored),
+                    monitor_new_items,
+                    monitor_since,
+                    monitor_language: monitor_language
+                        .map(|lang| Some(livrarr_domain::normalize_language(&lang))),
+                },
+            )
+            .await
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => AuthorServiceError::NotFound,
+                other => AuthorServiceError::Db(other),
+            })
     }
 }
 
 impl<D, F, L> AuthorViewService for AuthorServiceImpl<D, F, L>
 where
-    D: livrarr_db::AuthorLinkDb + Send + Sync,
+    D: livrarr_db::AuthorLinkDb + livrarr_db::AuthorNameVariantDb + Send + Sync,
     F: Send + Sync,
     L: Send + Sync,
 {
@@ -555,6 +530,16 @@ where
     ) -> Result<AuthorRouteView, AuthorServiceError> {
         crate::author_linking::AuthorResponseAssembler { db: &self.db }
             .route_view(user_id, author)
+            .await
+    }
+
+    async fn route_views(
+        &self,
+        user_id: UserId,
+        authors: &[Author],
+    ) -> Result<Vec<AuthorRouteView>, AuthorServiceError> {
+        crate::author_linking::AuthorResponseAssembler { db: &self.db }
+            .route_views(user_id, authors)
             .await
     }
 }
@@ -612,57 +597,111 @@ where
         }
     }
 
-    async fn resolve_ol_key(
+    /// The monitor-enable gate: one body, both doors.
+    ///
+    /// It asks the route ledger, never `authors.ol_key` (FP-036) — a frozen
+    /// scalar is not linkage. The field and message are the established API
+    /// contract and must not drift (FP-049).
+    async fn require_open_library_route(
         &self,
         user_id: UserId,
-        author: &Author,
-    ) -> Result<String, AuthorServiceError> {
-        let results = self.lookup(&author.name, 5).await?;
-        let best = results.first().ok_or_else(|| {
-            AuthorServiceError::Provider(format!(
-                "No OpenLibrary match for author '{}'",
-                author.name
-            ))
-        })?;
-        let ol_key = best.ol_key.clone();
-        match self
+        author_id: AuthorId,
+    ) -> Result<(), AuthorServiceError> {
+        let linked = self
             .db
-            .update_author(
-                user_id,
-                author.id,
-                UpdateAuthorDbRequest {
-                    name: None,
-                    sort_name: None,
-                    ol_key: Some(Some(ol_key.clone())),
-                    gr_key: None,
-                    monitored: None,
-                    monitor_new_items: None,
-                    monitor_since: None,
-                    monitor_language: None,
-                },
-            )
+            .has_active_route(user_id, author_id, AuthorProvider::OpenLibrary)
             .await
-        {
-            Ok(_) => tracing::info!(
-                author_id = author.id,
-                %ol_key,
-                "auto-resolved OL key for '{}'", author.name
-            ),
-            Err(e) => tracing::warn!(
-                author_id = author.id,
-                %ol_key,
-                "auto-resolved OL key for '{}' but failed to persist it: {e}", author.name
-            ),
+            .map_err(AuthorServiceError::Db)?;
+        if linked {
+            return Ok(());
         }
-        Ok(ol_key)
+        Err(AuthorServiceError::Validation {
+            field: "monitored".into(),
+            message: "cannot monitor author without OL linkage".into(),
+        })
     }
 
+    /// The author's bibliography, read from the route ledger.
+    ///
+    /// Every active OpenLibrary route is fetched and the results are unioned by
+    /// canonical work key, so a person with two OL keys gets one combined list
+    /// rather than whichever key happened to be stored (FP-039). One failing
+    /// route never erases a sibling's results. Google Books remains the fallback
+    /// for an author with no OL link at all, or whose OL routes yield nothing.
+    ///
+    /// There is no name search and no first-hit adoption here: an author with no
+    /// OL route stays unlinked until someone picks one (FP-015).
     pub async fn fetch_bibliography_entries(
         &self,
         user_id: UserId,
         author: &Author,
     ) -> Result<Vec<livrarr_db::BibliographyEntry>, AuthorServiceError> {
-        todo!()
+        let target_language = match &author.monitor_language {
+            Some(lang) => lang.clone(),
+            None => self
+                .db
+                .get_default_language()
+                .await
+                .unwrap_or_else(|_| "en".to_string()),
+        };
+
+        let routes = self
+            .db
+            .list_active_routes(user_id, author.id, Some(AuthorProvider::OpenLibrary))
+            .await
+            .map_err(AuthorServiceError::Db)?;
+
+        let mut union: Vec<livrarr_db::BibliographyEntry> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut route_failures = 0usize;
+        for route in &routes {
+            let ol_key = route.key.value();
+            match self.fetch_ol_bibliography(&ol_key, &target_language).await {
+                Ok(entries) => {
+                    for entry in entries {
+                        // Canonical OL work key is the identity; an entry with no
+                        // key falls back to normalized title + year.
+                        let identity = match entry.ol_key.as_deref() {
+                            Some(key) => format!("ol:{key}"),
+                            None => format!(
+                                "title:{}:{}",
+                                livrarr_matching::work_dedup::normalize_title_for_match(
+                                    &entry.title
+                                ),
+                                entry.year.map(|y| y.to_string()).unwrap_or_default()
+                            ),
+                        };
+                        if seen.contains(&identity) {
+                            continue;
+                        }
+                        seen.push(identity);
+                        union.push(entry);
+                    }
+                }
+                Err(e) => {
+                    route_failures += 1;
+                    tracing::warn!(
+                        author_id = author.id,
+                        %ol_key,
+                        "bibliography: OpenLibrary route unavailable, keeping sibling results: {e}"
+                    );
+                }
+            }
+        }
+
+        if !union.is_empty() {
+            return Ok(union);
+        }
+        if route_failures > 0 && route_failures == routes.len() {
+            // Every route failed: an empty answer would read as "this author has
+            // written nothing", and the Google Books fallback would silently
+            // replace an OL catalogue that exists.
+            return Err(AuthorServiceError::Provider(format!(
+                "all {route_failures} OpenLibrary author routes failed"
+            )));
+        }
+        self.fetch_gb_bibliography(&author.name, &target_language)
+            .await
     }
 
     async fn fetch_ol_bibliography(

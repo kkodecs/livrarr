@@ -263,9 +263,13 @@ where
         user_id: UserId,
         cancel: CancellationToken,
     ) -> Result<MonitorReport, MonitorError> {
-        let authors = self
+        // One target per monitored author, carrying every active OpenLibrary
+        // route (FP-038). Plural routes widen the feed a person is watched
+        // through; they never turn one author into several monitor entries, and
+        // they never multiply what gets added or reported.
+        let targets = self
             .db
-            .list_monitored_authors(user_id)
+            .list_author_monitor_targets(user_id)
             .await
             .map_err(MonitorError::Db)?;
 
@@ -290,60 +294,113 @@ where
         let mut retry_counts: HashMap<usize, u32> = HashMap::new();
         let mut rate_limit_notified = false;
 
-        while i < authors.len() {
-            let author = &authors[i];
-            let ol_key = match &author.ol_key {
-                Some(k) => k.clone(),
-                None => {
-                    i += 1;
-                    continue;
-                }
-            };
+        while i < targets.len() {
+            let author = &targets[i].author;
+            let ol_routes: Vec<String> = targets[i]
+                .ol_routes
+                .iter()
+                .map(|route| route.key.value())
+                .collect();
 
             // Only count each author once (not on retries)
             if !retry_counts.contains_key(&i) {
                 report.authors_checked += 1;
             }
 
-            // Fetch OL author works
-            let works_url = format!(
-                "https://openlibrary.org/authors/{}/works.json?limit=100",
-                ol_key
-            );
+            // Every active route's feed is read, then unioned by canonical OL
+            // work key, and only then does anything get screened, added, or
+            // notified (FP-038). First route wins a duplicate, so the seed's
+            // author key is stable across runs. A route that fails is warned
+            // about and its siblings' results stand; only a rate limit pauses the
+            // whole author, because that is a signal about the provider, not
+            // about one feed.
+            let mut union: Vec<OlWorkEntry> = Vec::new();
+            let mut union_keys: Vec<String> = Vec::new();
+            let mut seed_route: Vec<String> = Vec::new();
+            let mut successful_routes = 0usize;
+            let mut rate_limited = false;
 
-            let req = FetchRequest {
-                url: works_url,
-                method: HttpMethod::Get,
-                headers: vec![],
-                body: None,
-                timeout: Duration::from_secs(30),
-                rate_bucket: RateBucket::OpenLibrary,
-                max_body_bytes: 2 * 1024 * 1024,
-                anti_bot_check: false,
-                user_agent: UserAgentProfile::Server,
-                // Low: background author monitor scan (B4 table).
-                priority: RequestPriority::Low,
-            };
+            for ol_key in &ol_routes {
+                let works_url = format!(
+                    "https://openlibrary.org/authors/{}/works.json?limit=100",
+                    ol_key
+                );
 
-            let fetch_result = self.http.fetch(req).await;
+                let req = FetchRequest {
+                    url: works_url,
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: None,
+                    timeout: Duration::from_secs(30),
+                    rate_bucket: RateBucket::OpenLibrary,
+                    max_body_bytes: 2 * 1024 * 1024,
+                    anti_bot_check: false,
+                    user_agent: UserAgentProfile::Server,
+                    // Low: background author monitor scan (B4 table).
+                    priority: RequestPriority::Low,
+                };
 
-            // Handle fetch error
-            let resp = match fetch_result {
-                Ok(r) => r,
-                Err(e) => {
+                let resp = match self.http.fetch(req).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            author_id = author.id,
+                            author_name = %author.name,
+                            %ol_key,
+                            error = %e,
+                            "author monitor: OL request failed for one route, keeping siblings"
+                        );
+                        continue;
+                    }
+                };
+
+                if resp.status == 429 {
+                    rate_limited = true;
+                    break;
+                }
+
+                if resp.status >= 400 {
                     tracing::warn!(
                         author_id = author.id,
                         author_name = %author.name,
-                        error = %e,
-                        "author monitor: OL request failed, skipping"
+                        %ol_key,
+                        status = resp.status,
+                        "author monitor: OL returned non-success status for one route, keeping siblings"
                     );
-                    i += 1;
                     continue;
                 }
-            };
 
-            // Handle 429 with backoff and retry
-            if resp.status == 429 {
+                let works_response: OlWorksResponse = match serde_json::from_slice(&resp.body) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        tracing::warn!(
+                            author_id = author.id,
+                            author_name = %author.name,
+                            %ol_key,
+                            error = %e,
+                            "author monitor: OL parse error for one route, keeping siblings"
+                        );
+                        continue;
+                    }
+                };
+
+                successful_routes += 1;
+                for entry in works_response.entries {
+                    // No canonical work key is no identity to union on: keep the
+                    // entry and let the screen and the local dedup judge it.
+                    let identity = entry.ol_key().map(str::to_string);
+                    if let Some(key) = identity {
+                        if union_keys.contains(&key) {
+                            continue;
+                        }
+                        union_keys.push(key);
+                    }
+                    union.push(entry);
+                    seed_route.push(ol_key.clone());
+                }
+            }
+
+            if rate_limited {
                 let retries = retry_counts.entry(i).or_insert(0);
                 *retries += 1;
                 if *retries > 3 {
@@ -390,32 +447,18 @@ where
                 continue;
             }
 
-            // Handle non-success HTTP
-            if resp.status >= 400 {
+            if successful_routes == 0 {
                 tracing::warn!(
                     author_id = author.id,
                     author_name = %author.name,
-                    status = resp.status,
-                    "author monitor: OL returned non-success status, skipping"
+                    routes = ol_routes.len(),
+                    "author monitor: every OpenLibrary route failed, skipping author"
                 );
                 i += 1;
                 continue;
             }
 
-            // Parse JSON response
-            let works_response: OlWorksResponse = match serde_json::from_slice(&resp.body) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    tracing::warn!(
-                        author_id = author.id,
-                        author_name = %author.name,
-                        error = %e,
-                        "author monitor: OL parse error, skipping"
-                    );
-                    i += 1;
-                    continue;
-                }
-            };
+            let works_response = OlWorksResponse { entries: union };
 
             // Determine monitor_since year
             let monitor_since_year = author.monitor_since.map(|dt| dt.year()).unwrap_or(0);
@@ -436,14 +479,18 @@ where
             // the serial post-pass folds into `report`.
             let cleaned_author_ref = &cleaned_author;
             let author_ref = &author;
-            let ol_key_ref = &ol_key;
             let default_language_ref = &default_language;
             let mut entries_screened = 0usize;
-            let eligible: Vec<(String, i32, String, Option<String>)> = works_response
+            let eligible: Vec<(String, i32, String, Option<String>, String)> = works_response
                 .entries
                 .iter()
-                .filter_map(|entry| {
+                .enumerate()
+                .filter_map(|(idx, entry)| {
                     let stripped_ol_key = entry.ol_key()?.to_string();
+                    // The route that first surfaced this work seeds it, so the
+                    // seed's author key does not depend on which feed answered
+                    // fastest.
+                    let seed_ol_key = seed_route[idx].clone();
                     if existing_keys
                         .iter()
                         .any(|(ol, _gr)| ol.as_deref() == Some(stripped_ol_key.as_str()))
@@ -484,7 +531,7 @@ where
                         .as_deref()
                         .and_then(|cs| cs.iter().find(|&&id| id > 0))
                         .map(|id| format!("https://covers.openlibrary.org/b/id/{id}-L.jpg"));
-                    Some((stripped_ol_key, year, work_title, cover_url))
+                    Some((stripped_ol_key, year, work_title, cover_url, seed_ol_key))
                 })
                 .collect();
 
@@ -498,7 +545,7 @@ where
 
             let outcomes: Vec<EntryOutcome> = stream::iter(eligible.into_iter())
                 .map(
-                    |(stripped_ol_key, year, work_title, cover_url)| async move {
+                    |(stripped_ol_key, year, work_title, cover_url, seed_ol_key)| async move {
                         tracing::info!(
                             author_id = author_ref.id,
                             year = year,
@@ -518,7 +565,7 @@ where
                                         author_ref.monitor_language.as_deref(),
                                         default_language_ref,
                                     ),
-                                    author_ol_key: Some(ol_key_ref.clone()),
+                                    author_ol_key: Some(seed_ol_key.clone()),
                                     year: Some(year),
                                     cover_url,
                                     detail_url: None,

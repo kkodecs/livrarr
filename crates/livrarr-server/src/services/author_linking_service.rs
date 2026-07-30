@@ -32,7 +32,7 @@ impl AppState {
     /// clients are clones of the process-wide transports (one shared
     /// `HttpFetcherImpl`, one shared `HttpClient`, one live config snapshot), so
     /// no connection pool, socket, or queue is created here.
-    fn author_link_road(&self) -> LiveAuthorLinkRoad {
+    pub(crate) fn author_link_road(&self) -> LiveAuthorLinkRoad {
         let gateway = livrarr_external_data::AuthorProviderGatewayImpl::new(
             livrarr_external_data::OpenLibraryClient::new(self.http_fetcher.clone()),
             livrarr_external_data::GoodreadsClient::new(
@@ -112,14 +112,20 @@ impl AuthorLinkService for AppState {
     }
 }
 
-impl AuthorLinkWorkflow for LiveAuthorLinkingService {
+/// The automatic side of the author-link road, composed the same way as the
+/// user-facing side: [`AppState`] answers it, because the road needs the
+/// repository *and* the shared provider transports and this is the one place
+/// both are already in hand.
+impl AuthorLinkWorkflow for AppState {
     async fn enqueue(
         &self,
         user_id: UserId,
         author_id: AuthorId,
         trigger: AuthorLinkTrigger,
     ) -> Result<(), AuthorLinkError> {
-        todo!()
+        self.author_link_road()
+            .enqueue(user_id, author_id, trigger)
+            .await
     }
 
     async fn submit_evidence(
@@ -128,7 +134,9 @@ impl AuthorLinkWorkflow for LiveAuthorLinkingService {
         author_id: AuthorId,
         evidence: AgreedAuthorRouteEvidence,
     ) -> Result<RouteWriteOutcome, AuthorLinkError> {
-        todo!()
+        self.author_link_road()
+            .submit_evidence(user_id, author_id, evidence)
+            .await
     }
 
     async fn record_readarr_rejection(
@@ -137,7 +145,9 @@ impl AuthorLinkWorkflow for LiveAuthorLinkingService {
         author_id: AuthorId,
         rejected: RejectedAuthorRouteEvidence,
     ) -> Result<AuthorLinkCandidate, AuthorLinkError> {
-        todo!()
+        self.author_link_road()
+            .record_readarr_rejection(user_id, author_id, rejected)
+            .await
     }
 
     async fn run_due(
@@ -145,6 +155,6 @@ impl AuthorLinkWorkflow for LiveAuthorLinkingService {
         batch_size: u32,
         cancel: CancellationToken,
     ) -> Result<AuthorSweepTickSummary, AuthorLinkError> {
-        todo!()
+        self.author_link_road().run_due(batch_size, cancel).await
     }
 }

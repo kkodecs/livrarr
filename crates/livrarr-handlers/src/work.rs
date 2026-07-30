@@ -180,7 +180,6 @@ pub async fn add<
     ctx: AuthContext,
     Json(req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
-    let author_name_for_gr = req.author_name.clone();
     use livrarr_domain::identity::RawHarvest;
     use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 
@@ -289,49 +288,19 @@ pub async fn add<
                 }
             });
 
+            // Goodreads candidate discovery for the author picker. It links
+            // nothing: a name-similarity score is not proof of identity, so the
+            // author's Goodreads route stays the user's choice (REQ-004/AC-005).
             let s_gr = state.clone();
             let uid = ctx.user.id;
-            let author_name = author_name_for_gr;
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                match s_gr
+                if let Err(e) = s_gr
                     .series_query_service()
                     .resolve_gr_candidates(uid, author_id)
                     .await
                 {
-                    Ok(candidates) => {
-                        if let Some(first) = candidates.first() {
-                            let sim =
-                                livrarr_matching::author_similarity(&author_name, &first.name);
-                            if sim >= 0.90 {
-                                tracing::info!(
-                                    author = %author_name,
-                                    gr_candidate = %first.name,
-                                    similarity = %sim,
-                                    "auto-linking Goodreads author (work add)"
-                                );
-                                let _ = s_gr
-                                    .author_service()
-                                    .update(
-                                        uid,
-                                        author_id,
-                                        livrarr_domain::services::UpdateAuthorRequest {
-                                            name: None,
-                                            sort_name: None,
-                                            ol_key: None,
-                                            gr_key: Some(Some(first.gr_key.clone())),
-                                            monitored: None,
-                                            monitor_new_items: None,
-                                            monitor_language: None,
-                                        },
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(author_id, "background GR resolve skipped: {e}");
-                    }
+                    tracing::debug!(author_id, "background GR resolve skipped: {e}");
                 }
             });
         }

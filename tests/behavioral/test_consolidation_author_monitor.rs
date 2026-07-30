@@ -314,6 +314,17 @@ async fn seed_monitored_author(
         .await
         .unwrap();
 
+    // The monitor reads the route ledger, so the seeded author has the route
+    // startup ingestion would have given it. A scalar key with no route is not a
+    // state production can be in after the cutover.
+    db.attach_route_as_user(
+        user_id,
+        author.id,
+        AuthorRouteKey::parse(AuthorProvider::OpenLibrary, ol_key).expect("canonical OL key"),
+    )
+    .await
+    .expect("seeded OpenLibrary route");
+
     // Update monitoring settings
     db.update_author(
         user_id,
@@ -514,8 +525,8 @@ async fn test_monitor_ol_error_continues_to_next_author() {
     let user_id = create_test_user(&db).await;
 
     // Two monitored authors
-    let _author1 = seed_monitored_author(&db, user_id, "Author One", "OL_FAIL_A", true, None).await;
-    let _author2 = seed_monitored_author(&db, user_id, "Author Two", "OL_OK_A", true, None).await;
+    let _author1 = seed_monitored_author(&db, user_id, "Author One", "OL9001A", true, None).await;
+    let _author2 = seed_monitored_author(&db, user_id, "Author Two", "OL9002A", true, None).await;
 
     let http = StubHttpFetcher::new();
     // First author: 500 error
@@ -672,8 +683,8 @@ async fn test_monitor_run_per_user_processes_only_that_users_authors() {
     let user2 = create_second_test_user(&db).await;
 
     // Each user has a monitored author with distinct OL key
-    let _author1 = seed_monitored_author(&db, user1, "Author One", "OL_USER1_A", true, None).await;
-    let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL_USER2_A", true, None).await;
+    let _author1 = seed_monitored_author(&db, user1, "Author One", "OL9003A", true, None).await;
+    let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL9004A", true, None).await;
 
     let http = StubHttpFetcher::new();
     // user1 call returns a work for author1
@@ -737,8 +748,8 @@ async fn test_monitor_every_db_mutation_carries_owning_user_id() {
     let user2 = create_second_test_user(&db).await;
 
     // User1 monitors (auto-add), user2 notification-only
-    let _author1 = seed_monitored_author(&db, user1, "Author One", "OL_A1", true, None).await;
-    let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL_A2", false, None).await;
+    let _author1 = seed_monitored_author(&db, user1, "Author One", "OL9005A", true, None).await;
+    let _author2 = seed_monitored_author(&db, user2, "Author Two", "OL9006A", false, None).await;
 
     let http = StubHttpFetcher::new();
     http.push_response(Ok(FetchResponse {
@@ -838,9 +849,9 @@ async fn test_monitor_honors_cancellation_token() {
     let user_id = create_test_user(&db).await;
 
     // Seed multiple monitored authors
-    let _a1 = seed_monitored_author(&db, user_id, "Author A", "OL_A", true, None).await;
-    let _a2 = seed_monitored_author(&db, user_id, "Author B", "OL_B", true, None).await;
-    let _a3 = seed_monitored_author(&db, user_id, "Author C", "OL_C", true, None).await;
+    let _a1 = seed_monitored_author(&db, user_id, "Author A", "OL9007A", true, None).await;
+    let _a2 = seed_monitored_author(&db, user_id, "Author B", "OL9008A", true, None).await;
+    let _a3 = seed_monitored_author(&db, user_id, "Author C", "OL9009A", true, None).await;
 
     // Each author gets a successful response
     let http = StubHttpFetcher::new();

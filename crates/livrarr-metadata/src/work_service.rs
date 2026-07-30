@@ -1,7 +1,7 @@
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb, LibraryItemDb,
-    MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest, UpdateAuthorDbRequest,
-    UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
+    MergeWorksDbRequest, ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkEnrichmentDbRequest,
+    UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::*;
@@ -2874,28 +2874,10 @@ where
                     cleaned_author,
                     &names,
                 ) {
+                    // The adopted author's provider key is not filled in here:
+                    // `authors.ol_key` is frozen (FP-031) and the selected key
+                    // becomes a route row below, the same as on every other arm.
                     let adopted = &authors[i];
-                    if adopted.ol_key.is_none() {
-                        if let Some(key) = author_ol_key {
-                            self.db
-                                .update_author(
-                                    user_id,
-                                    adopted.id,
-                                    UpdateAuthorDbRequest {
-                                        name: None,
-                                        sort_name: None,
-                                        ol_key: Some(Some(key.to_string())),
-                                        gr_key: None,
-                                        monitored: None,
-                                        monitor_new_items: None,
-                                        monitor_since: None,
-                                        monitor_language: None,
-                                    },
-                                )
-                                .await
-                                .map_err(WorkServiceError::Db)?;
-                        }
-                    }
                     self.arm_author_link(user_id, adopted.id).await;
                     (false, adopted.id)
                 } else {

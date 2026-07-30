@@ -45,10 +45,11 @@ pub use livrarr_enrichment::provider_queue::{
     ApplicabilityRule, DefaultProviderQueue, DefaultProviderQueueBuilder,
 };
 pub use livrarr_enrichment::{
-    cover_rank, cover_resolution, provider_queue, DefaultMergeEngine, EnrichmentContext,
-    EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService, EnrichmentServiceImpl,
-    MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel, ProviderQueue,
-    ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome, ScatterGatherResult,
+    author_name_variant_observer, cover_rank, cover_resolution, provider_queue, DefaultMergeEngine,
+    EnrichmentContext, EnrichmentError, EnrichmentMode, EnrichmentResult, EnrichmentService,
+    EnrichmentServiceImpl, MergeEngine, MergeError, MergeInput, MergeOutput, PriorityModel,
+    ProviderQueue, ProviderQueueConfig, ProviderQueueError, ReconstructedOutcome,
+    ScatterGatherResult,
 };
 
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};

@@ -116,17 +116,10 @@ fn ol_works(entries: &[(&str, &str, &str)]) -> Vec<u8> {
 }
 
 fn series_page(series_id: &str, title: &str) -> Vec<u8> {
-    format!(
-        r#"<html><body>
-        <div data-react-class="ReactComponents.SeriesHeader"
-             data-react-props="{{&quot;title&quot;:&quot;{title}&quot;,&quot;subtitle&quot;:&quot;1 primary works • 1 total works&quot;,&quot;description&quot;:{{&quot;html&quot;:&quot;&quot;}}}}"></div>
-        <div data-react-class="ReactComponents.SeriesList"
-             data-react-props="{{&quot;series&quot;:[{{&quot;book&quot;:{{&quot;bookId&quot;:&quot;{series_id}&quot;,&quot;title&quot;:&quot;{title} Book ({title}, #1)&quot;,&quot;bookTitleBare&quot;:&quot;{title} Book&quot;,&quot;publicationDate&quot;:&quot;2026&quot;}}}}]}}"></div>
-        <div data-react-class="ReactComponents.FullPagePaginationControls"
-             data-react-props="{{&quot;numWorks&quot;:1,&quot;currentPageNumber&quot;:1,&quot;perPage&quot;:100}}"></div>
-        </body></html>"#
-    )
-    .into_bytes()
+    // The author's series-LIST page (`/series/list?id=<author>`), which is what
+    // `list_author_series` reads — anchors, not the React roster-detail layout.
+    format!(r#"<html><body><a href="/series/{series_id}-x">{title}</a> (1 books)</body></html>"#)
+        .into_bytes()
 }
 
 fn rd_author(name: Option<&str>, foreign_id: Option<&str>) -> RdAuthor {
@@ -462,10 +455,7 @@ async fn ac014_bibliography_unions_plural_active_ol_routes_and_ignores_stale_sca
         .iter()
         .filter_map(|entry| entry.ol_key.as_deref())
         .collect::<Vec<_>>();
-    assert_eq!(
-        keys.iter().filter(|key| **key == "/works/OL7201W").count(),
-        1
-    );
+    assert_eq!(keys.iter().filter(|key| **key == "OL7201W").count(), 1);
 }
 
 /// Door: Author series list -> plural active Goodreads routes.

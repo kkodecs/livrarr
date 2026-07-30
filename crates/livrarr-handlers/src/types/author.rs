@@ -102,7 +102,11 @@ impl AuthorResponse {
                 .iter()
                 .map(AuthorRouteResponse::from_route)
                 .collect(),
-            name_variants: Vec::new(),
+            name_variants: view
+                .name_variants
+                .iter()
+                .map(AuthorNameVariantResponse::from_variant)
+                .collect(),
             link_state: view.link_state,
             monitorable: view.monitorable,
             monitored: author.monitored,
@@ -144,6 +148,19 @@ pub struct AuthorNameVariantResponse {
     pub name: String,
     pub source: AuthorNameSource,
     pub selected: bool,
+}
+
+impl AuthorNameVariantResponse {
+    pub fn from_variant(variant: &livrarr_domain::AuthorNameVariant) -> Self {
+        Self {
+            id: variant.id,
+            name: variant.name.clone(),
+            source: variant.source,
+            // "Selected" is the user's own choice, not whatever ranking happens
+            // to be showing right now.
+            selected: variant.user_selected_at.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

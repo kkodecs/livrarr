@@ -435,6 +435,12 @@ pub struct EnrichmentServiceImpl<DB, Q, ME> {
     /// come from the clients and the queue. `None` in compositions that don't
     /// record (tests, CLI tools).
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
+    /// Author-name observation sink: every successful provider payload's author
+    /// name is retained as a ranked name variant so the library can converge on
+    /// the best spelling (REQ-002). Record-only and infallible — it never
+    /// changes an enrichment result. `None` where no name-variant repository is
+    /// composed. Set via `with_author_name_observer`.
+    name_observer: Option<Arc<dyn author_name_variant_observer::AuthorNameObservationSink>>,
 }
 
 impl<DB, Q, ME> EnrichmentServiceImpl<DB, Q, ME>
@@ -461,6 +467,7 @@ where
             source_data_store: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             transport_cache: None,
             call_sink: None,
+            name_observer: None,
         }
     }
 
@@ -472,6 +479,41 @@ where
     ) -> Self {
         self.call_sink = Some(sink);
         self
+    }
+
+    /// Wire the author-name observation sink (REQ-002). Every completion path
+    /// that returns successful provider payloads records their author names
+    /// through it; without one, no observation is recorded.
+    pub fn with_author_name_observer(
+        mut self,
+        observer: Arc<dyn author_name_variant_observer::AuthorNameObservationSink>,
+    ) -> Self {
+        self.name_observer = Some(observer);
+        self
+    }
+
+    /// Record the author names a set of successful payloads carried.
+    ///
+    /// One helper for all three completion paths, so a path cannot quietly skip
+    /// the observation: the shape of every call site is the same.
+    async fn observe_author_names<'a>(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        payloads: impl Iterator<Item = (livrarr_domain::MetadataProvider, &'a NormalizedWorkDetail)>,
+    ) {
+        let Some(observer) = self.name_observer.as_ref() else {
+            return;
+        };
+        let observations: Vec<_> = payloads
+            .filter_map(|(provider, detail)| {
+                author_name_variant_observer::observed_author_name(provider, detail)
+            })
+            .collect();
+        if observations.is_empty() {
+            return;
+        }
+        observer.record(user_id, work_id, observations).await;
     }
 
     /// Wire the transport cache (produced by the identity resolver at composition
@@ -590,6 +632,13 @@ where
                     });
                 }
             }
+            // REQ-002: the cached payloads are consumed by the merge below, so
+            // their author names are read while they are still in hand.
+            let observed_names: Vec<(livrarr_domain::MetadataProvider, NormalizedWorkDetail)> =
+                payloads
+                    .iter()
+                    .map(|(provider, detail)| (*provider, detail.clone()))
+                    .collect();
             // Snapshot generation + provenance for CAS correctness; a DB read
             // failure here returns None → network fallback (never empty
             // provenance, which would silently drop user field-locks).
@@ -624,6 +673,12 @@ where
                     let changed = content_changed(&work, &result_work)
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
+                    self.observe_author_names(
+                        user_id,
+                        work_id,
+                        observed_names.iter().map(|(p, d)| (*p, d)),
+                    )
+                    .await;
                     Some(EnrichmentResult {
                         enrichment_status: merge_output.enrichment_status,
                         enrichment_source: merge_output.enrichment_source,
@@ -704,8 +759,19 @@ where
         let should_merge = !merge_deferred;
 
         if !should_merge {
-            // Return early with deferred result, no merge
+            // Return early with deferred result, no merge. The scatter outcomes
+            // are still in hand, so their author names are observed here too
+            // (REQ-002) — a deferred merge is still a successful fetch.
             let result_work = self.db.get_work(user_id, work_id).await?;
+            self.observe_author_names(
+                user_id,
+                work_id,
+                scatter_result.outcomes.iter().filter_map(|(p, o)| match o {
+                    ProviderOutcome::Success(in_mem) => Some((*p, in_mem.as_ref())),
+                    _ => None,
+                }),
+            )
+            .await;
             return Ok(EnrichmentResult {
                 enrichment_status: result_work.enrichment_status,
                 enrichment_source: result_work.enrichment_source.clone(),
@@ -862,6 +928,18 @@ where
                     let changed = content_changed(&current_work, &result_work)
                         || merge_output.cover_resolution.is_some()
                         || merge_output.audiobook_cover_resolution.is_some();
+                    // REQ-002: observed from the in-memory success payloads —
+                    // including an injected Readarr detail — never a second time
+                    // from the reconstructed cached JSON of the same outcome.
+                    self.observe_author_names(
+                        user_id,
+                        work_id,
+                        scatter_result.outcomes.iter().filter_map(|(p, o)| match o {
+                            ProviderOutcome::Success(in_mem) => Some((*p, in_mem.as_ref())),
+                            _ => None,
+                        }),
+                    )
+                    .await;
                     return Ok(EnrichmentResult {
                         enrichment_status: merge_output.enrichment_status,
                         enrichment_source: merge_output.enrichment_source,

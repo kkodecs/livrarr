@@ -1182,21 +1182,7 @@ where
         author_id: AuthorId,
         evidence: AgreedAuthorRouteEvidence,
     ) -> Result<RouteWriteOutcome, AuthorLinkError> {
-        // Ownership first: the guarded writer resolves the author's real owner
-        // itself, so a caller passing someone else's author id would otherwise
-        // write for that owner. This user-scoped read is the check.
-        self.db
-            .list_active_routes(user_id, author_id, None)
-            .await
-            .map_err(link_error)?;
-        self.db
-            .apply_guarded_route(GuardedRouteWrite {
-                claim_token: None,
-                author_id,
-                evidence,
-            })
-            .await
-            .map_err(link_error)
+        submit_agreed_evidence(&self.db, user_id, author_id, evidence).await
     }
 
     async fn record_readarr_rejection(
@@ -1266,6 +1252,37 @@ where
     }
 }
 
+/// Route one agreed-with piece of evidence, with no worker claim.
+///
+/// The single body behind `AuthorLinkWorkflow::submit_evidence`, shared with the
+/// Readarr import door, which reaches the same repository seam without being able
+/// to compose the full road (its composition has no provider gateway). Keeping one
+/// body is what stops the claimless guarded write from drifting into two
+/// slightly different rules.
+pub async fn submit_agreed_evidence<D>(
+    db: &D,
+    user_id: UserId,
+    author_id: AuthorId,
+    evidence: AgreedAuthorRouteEvidence,
+) -> Result<RouteWriteOutcome, AuthorLinkError>
+where
+    D: AuthorLinkDb + Send + Sync,
+{
+    // Ownership first: the guarded writer resolves the author's real owner
+    // itself, so a caller passing someone else's author id would otherwise
+    // write for that owner. This user-scoped read is the check.
+    db.list_active_routes(user_id, author_id, None)
+        .await
+        .map_err(link_error)?;
+    db.apply_guarded_route(GuardedRouteWrite {
+        claim_token: None,
+        author_id,
+        evidence,
+    })
+    .await
+    .map_err(link_error)
+}
+
 /// Assembles the author-detail route panel from the route ledger.
 ///
 /// It borrows the repository rather than owning one: every caller already holds
@@ -1277,7 +1294,7 @@ pub struct AuthorResponseAssembler<'a, D> {
 
 impl<'a, D> AuthorResponseAssembler<'a, D>
 where
-    D: AuthorLinkDb + Send + Sync,
+    D: AuthorLinkDb + livrarr_db::AuthorNameVariantDb + Send + Sync,
 {
     /// The route panel's four derived values.
     ///
@@ -1290,14 +1307,46 @@ where
         user_id: UserId,
         author: &Author,
     ) -> Result<AuthorRouteView, AuthorServiceError> {
-        let routes = self.db.list_active_routes(user_id, author.id, None).await?;
+        let routes = self.db.list_routes_for_view(user_id, author.id).await?;
+        let variants = self.db.list_name_variants(user_id, author.id).await?;
         let under_review = self
             .db
             .list_review(user_id)
             .await?
             .iter()
             .any(|review| review.author.id == author.id);
-        Ok(AuthorRouteView::from_active_routes(routes, under_review))
+        Ok(AuthorRouteView::from_route_history(
+            routes,
+            under_review,
+            variants,
+        ))
+    }
+
+    /// The same panel for a list of authors.
+    ///
+    /// The review surface is read once for the whole list, not once per row.
+    pub async fn route_views(
+        &self,
+        user_id: UserId,
+        authors: &[Author],
+    ) -> Result<Vec<AuthorRouteView>, AuthorServiceError> {
+        let under_review: Vec<AuthorId> = self
+            .db
+            .list_review(user_id)
+            .await?
+            .iter()
+            .map(|review| review.author.id)
+            .collect();
+        let mut views = Vec::with_capacity(authors.len());
+        for author in authors {
+            let routes = self.db.list_routes_for_view(user_id, author.id).await?;
+            views.push(AuthorRouteView::from_route_history(
+                routes,
+                under_review.contains(&author.id),
+                Vec::new(),
+            ));
+        }
+        Ok(views)
     }
 }
 

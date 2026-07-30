@@ -265,13 +265,6 @@ impl AuthorService for ScriptedAuthorService {
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError> {
         Ok(vec![])
     }
-    async fn search(
-        &self,
-        _user_id: UserId,
-        _query: &str,
-    ) -> Result<Vec<Author>, AuthorServiceError> {
-        unreachable!("author search is not driven by these tests")
-    }
     async fn bibliography(
         &self,
         _user_id: UserId,

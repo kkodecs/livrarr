@@ -134,8 +134,6 @@ pub trait AuthorService: Send + Sync {
         query: &str,
         limit: u32,
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError>;
-    async fn search(&self, user_id: UserId, query: &str)
-        -> Result<Vec<Author>, AuthorServiceError>;
     async fn bibliography(
         &self,
         user_id: UserId,
@@ -194,34 +192,68 @@ pub trait AuthorViewService: Send + Sync {
         user_id: UserId,
         author: &Author,
     ) -> Result<AuthorRouteView, AuthorServiceError>;
+
+    /// The same panel for a whole list, in the order given.
+    ///
+    /// The authors list needs every row's real link state — reporting them all as
+    /// unlinked was the fabrication this replaces — but it has no name picker, so
+    /// these views carry no name variants and the review surface is read once for
+    /// the list rather than once per row.
+    async fn route_views(
+        &self,
+        user_id: UserId,
+        authors: &[Author],
+    ) -> Result<Vec<AuthorRouteView>, AuthorServiceError>;
 }
 
-/// The four derived values every author response carries.
+/// The four derived values every author response carries, plus the names the
+/// author is known by.
 #[derive(Debug, Clone)]
 pub struct AuthorRouteView {
+    /// Every route row the panel shows — active first, then the removal history
+    /// so a user can see what they took away. Only the active rows feed the
+    /// derived answers below.
     pub routes: Vec<crate::AuthorRoute>,
     pub link_state: crate::AuthorLinkState,
     /// True only for an active OpenLibrary route: a Goodreads or Hardcover route
     /// makes an author linked, never monitorable.
     pub monitorable: bool,
     pub compatibility: crate::AuthorCompatibilityProjection,
+    /// Every observed spelling of the author's name, so the display-name picker
+    /// can offer the choices that exist rather than guess at them.
+    pub name_variants: Vec<crate::AuthorNameVariant>,
 }
 
 impl AuthorRouteView {
     /// Derive the panel from an author's active route rows.
     ///
+    /// For a caller that already holds only the active set (the review list) and
+    /// has no name variants in hand.
+    pub fn from_active_routes(routes: Vec<crate::AuthorRoute>, under_review: bool) -> Self {
+        Self::from_route_history(routes, under_review, Vec::new())
+    }
+
+    /// Derive the panel from an author's full route history.
+    ///
     /// The one place these three answers are computed, so a caller that already
     /// holds the route set cannot reach a different conclusion than a caller
-    /// that reads it again. Pending review evidence outranks an existing route:
-    /// a linked author with an open question is still a question. Every value
-    /// comes from the route ledger — never from the frozen `authors.*_key`
-    /// columns.
-    pub fn from_active_routes(routes: Vec<crate::AuthorRoute>, under_review: bool) -> Self {
-        use crate::{AuthorLinkState, AuthorProvider};
+    /// that reads it again. **Only `Active` rows decide them** — a removed row is
+    /// provenance the panel shows, never linkage. Pending review evidence
+    /// outranks an existing route: a linked author with an open question is
+    /// still a question. Every value comes from the route ledger — never from
+    /// the frozen `authors.*_key` columns.
+    pub fn from_route_history(
+        routes: Vec<crate::AuthorRoute>,
+        under_review: bool,
+        name_variants: Vec<crate::AuthorNameVariant>,
+    ) -> Self {
+        use crate::{AuthorLinkState, AuthorProvider, AuthorRouteState};
 
+        let is_active = |route: &&crate::AuthorRoute| route.state == AuthorRouteState::Active;
         let key_for = |provider: AuthorProvider| {
             routes
                 .iter()
+                .filter(is_active)
                 .find(|route| route.key.provider() == provider)
                 .map(|route| route.key.value())
         };
@@ -230,18 +262,20 @@ impl AuthorRouteView {
             gr_key: key_for(AuthorProvider::Goodreads),
             hc_key: key_for(AuthorProvider::Hardcover),
         };
+        let any_active = routes.iter().any(|route| is_active(&route));
         let link_state = if under_review {
             AuthorLinkState::NeedsReview
-        } else if routes.is_empty() {
-            AuthorLinkState::Unlinked
-        } else {
+        } else if any_active {
             AuthorLinkState::Linked
+        } else {
+            AuthorLinkState::Unlinked
         };
         Self {
             monitorable: compatibility.ol_key.is_some(),
             routes,
             link_state,
             compatibility,
+            name_variants,
         }
     }
 }

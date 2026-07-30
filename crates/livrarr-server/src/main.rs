@@ -369,11 +369,10 @@ async fn main() {
                 http_fetcher.clone(),
                 data_dir.clone(),
             );
-            Arc::new(livrarr_metadata::list_service::ListServiceImpl::new(
+            Arc::new(livrarr_server::state::build_live_list_service(
                 svc_db.clone(),
                 ws,
                 http_fetcher.clone(),
-                livrarr_metadata::list_service::NoOpBibliographyTrigger,
             ))
         },
         identity_conflict_service: Arc::new(
@@ -533,8 +532,50 @@ async fn main() {
 
     prewarm_sqlite_cache(&state).await;
 
+    // Step 11a: the author-link cutover gate. Every author's legacy provider key
+    // becomes a canonical route row, and nothing is served until the route ledger
+    // can answer for every author on its own — an author the route-only consumers
+    // cannot see would silently lose its bibliography, series, and monitoring.
+    let cutover =
+        match livrarr_server::author_link::verify_author_link_cutover_before_serving(&svc_db).await
+        {
+            Ok(report) => report,
+            Err(e) => {
+                error!("Refusing to start: {e}");
+                if let Some(report) = e.report {
+                    error!(
+                        "author-link cutover report: {} legacy values, {} canonical routes, \
+                     {} missing routes, {} invalid values, {} authors without a link task",
+                        report.legacy_values,
+                        report.canonical_routes,
+                        report.missing_routes,
+                        report.invalid_values,
+                        report.missing_progress_rows
+                    );
+                }
+                std::process::exit(1);
+            }
+        };
+
     // Step 12: Start background jobs (JOBS-001).
     job_runner.start(state.clone()).await;
+
+    // Step 12a: the recurring author-link sweep registers last, and only now —
+    // after the gate above passed and every route consumer is composed. A sweep
+    // that wrote routes while a consumer still read the frozen columns would race
+    // an incomplete cutover.
+    info!(
+        canonical_routes = cutover.canonical_routes,
+        "author-link consumer cutover complete; registering the recurring sweep"
+    );
+    job_runner
+        .register_interval_job(
+            "author_link_sweep",
+            std::time::Duration::from_secs(config.author_link.interval_secs),
+            state.clone(),
+            livrarr_server::author_link::author_link_sweep_tick,
+        )
+        .await;
 
     // Step 13: Build router.
     let app = build_router(state, ui_dir);
@@ -969,10 +1010,19 @@ fn build_enrichment_pipeline(
     let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
 
     let llm_configured = live_metadata_config.snapshot().llm_enabled;
+    // Author-name observation (REQ-002): every successful provider payload's
+    // author name is retained as a ranked variant, so the library can converge on
+    // the spelling the providers agree on instead of the first one imported.
+    let name_observer = Arc::new(
+        livrarr_metadata::author_name_variant_observer::DbAuthorNameObservationSink::new(
+            db_arc.clone(),
+        ),
+    );
     let service = Arc::new(
         m::EnrichmentServiceImpl::new(db_arc, queue.clone(), merge_engine, llm_configured)
             .with_transport_cache(transport_cache.clone())
-            .with_call_sink(call_sink.clone()),
+            .with_call_sink(call_sink.clone())
+            .with_author_name_observer(name_observer),
     );
     (queue, service)
 }

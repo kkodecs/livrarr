@@ -273,6 +273,20 @@ async fn test_wcc_path_seams_ac_025_author_monitor_create_persists_native_ol_anc
         })
         .await
         .expect("seed monitored author");
+    // The monitor reads the route ledger; startup ingestion gives every migrated
+    // author this route before anything is served.
+    livrarr_db::AuthorLinkDb::attach_route_as_user(
+        &db,
+        user_id,
+        author.id,
+        livrarr_domain::AuthorRouteKey::parse(
+            livrarr_domain::AuthorProvider::OpenLibrary,
+            "OL79034A",
+        )
+        .expect("canonical OL key"),
+    )
+    .await
+    .expect("seeded OpenLibrary route");
     db.update_author(
         user_id,
         author.id,

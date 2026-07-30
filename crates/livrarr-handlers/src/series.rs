@@ -13,8 +13,7 @@ use crate::types::series::{
 use crate::types::work::work_to_detail;
 use crate::LibraryItemResponse;
 use livrarr_domain::services::{
-    AuthorService, MonitorSeriesServiceRequest, SeriesMonitorWorkerParams, SeriesQueryService,
-    UpdateAuthorRequest,
+    MonitorSeriesServiceRequest, SeriesMonitorWorkerParams, SeriesQueryService,
 };
 
 pub async fn list_all<S: HasSeriesQueryService>(
@@ -103,46 +102,15 @@ pub async fn resolve_gr<S: HasSeriesQueryService + HasAuthorService>(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<ResolveGrResponse>, ApiError> {
-    let author = state.author_service().get(ctx.user.id, id).await?;
-    let had_gr_key = author.gr_key.is_some();
-
     let views = state
         .series_query_service()
         .resolve_gr_candidates(ctx.user.id, id)
         .await?;
 
-    // Auto-link if the first candidate is a strong name match (handler-level side effect).
-    let mut auto_linked = false;
-    if !had_gr_key {
-        if let Some(first) = views.first() {
-            let sim = livrarr_matching::author_similarity(&author.name, &first.name);
-            if sim >= 0.90 {
-                tracing::info!(
-                    author = %author.name,
-                    gr_candidate = %first.name,
-                    similarity = %sim,
-                    "auto-linking Goodreads author"
-                );
-                state
-                    .author_service()
-                    .update(
-                        ctx.user.id,
-                        id,
-                        UpdateAuthorRequest {
-                            name: None,
-                            sort_name: None,
-                            ol_key: None,
-                            gr_key: Some(Some(first.gr_key.clone())),
-                            monitored: None,
-                            monitor_new_items: None,
-                            monitor_language: None,
-                        },
-                    )
-                    .await?;
-                auto_linked = true;
-            }
-        }
-    }
+    // Candidate discovery only. A name-similarity score is not proof that two
+    // people are the same person, so nothing here links an author: the results
+    // stay candidates until the user picks one (REQ-004/AC-005).
+    let auto_linked = false;
 
     let candidates = views
         .into_iter()

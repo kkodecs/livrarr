@@ -1056,13 +1056,27 @@ async fn a1_author_monitor_adds_auto_added_pending_work_candidate() {
             user_id,
             name: "A1 Author".to_string(),
             sort_name: None,
-            ol_key: Some("OLA1A".to_string()),
+            ol_key: Some("OL1001A".to_string()),
             gr_key: None,
             hc_key: None,
             import_id: None,
         })
         .await
         .expect("author");
+    // The monitor reads the route ledger; startup ingestion gives every migrated
+    // author this route before anything is served.
+    livrarr_db::AuthorLinkDb::attach_route_as_user(
+        &db,
+        user_id,
+        author.id,
+        livrarr_domain::AuthorRouteKey::parse(
+            livrarr_domain::AuthorProvider::OpenLibrary,
+            "OL1001A",
+        )
+        .expect("canonical OL key"),
+    )
+    .await
+    .expect("seeded OpenLibrary route");
     db.update_author(
         user_id,
         author.id,
@@ -1263,13 +1277,6 @@ impl AuthorService for InertAuthorService {
         _query: &str,
         _limit: u32,
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn search(
-        &self,
-        _user_id: UserId,
-        _query: &str,
-    ) -> Result<Vec<Author>, AuthorServiceError> {
         todo!("not exercised by door-gate")
     }
     async fn bibliography(

@@ -94,6 +94,17 @@ async fn seed_series(db: &SqliteDb, gr_key: &str) -> (UserId, i64, i64) {
         })
         .await
         .expect("author");
+    // The series consumers read the route ledger; startup ingestion gives every
+    // migrated author this route before anything is served.
+    livrarr_db::AuthorLinkDb::attach_route_as_user(
+        db,
+        user_id,
+        author.id,
+        livrarr_domain::AuthorRouteKey::parse(livrarr_domain::AuthorProvider::Goodreads, "12345")
+            .expect("canonical GR key"),
+    )
+    .await
+    .expect("seeded Goodreads route");
     let series = db
         .upsert_series(CreateSeriesDbRequest {
             user_id,
@@ -400,6 +411,17 @@ async fn stub_collision_with_stored_empty_roster_refetches_and_heals() {
         })
         .await
         .expect("author");
+    // The series consumers read the route ledger; startup ingestion gives every
+    // migrated author this route before anything is served.
+    livrarr_db::AuthorLinkDb::attach_route_as_user(
+        &db,
+        user_id,
+        author.id,
+        livrarr_domain::AuthorRouteKey::parse(livrarr_domain::AuthorProvider::Goodreads, "12345")
+            .expect("canonical GR key"),
+    )
+    .await
+    .expect("seeded Goodreads route");
     // Existing GR-backed row that already owns the key the stub resolves to,
     // holding a stored-EMPTY roster AND the stale work_count 0 the
     // broken-parser window left behind.

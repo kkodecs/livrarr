@@ -45,6 +45,7 @@ where
         + SeriesCacheDb
         + SeriesRosterDb
         + ConfigDb
+        + livrarr_db::AuthorLinkDb
         + Clone
         + Send
         + Sync
@@ -220,43 +221,71 @@ where
             .collect())
     }
 
-    /// Silent author resolution — the same rule the resolve-gr handler
-    /// auto-links with: first autocomplete candidate at name similarity
-    /// ≥ 0.90 (livrarr_matching::author_similarity is the authority).
-    /// Persists the adopted key. `None` = genuinely ambiguous; caller
-    /// degrades (expansion) or surfaces the picker (promotion).
-    async fn silently_resolve_author_key(
+    /// The author's active Goodreads routes, in stable order.
+    ///
+    /// The one authority for "which Goodreads feeds belong to this person" —
+    /// never `authors.gr_key` (FP-036) and never a name guess (FP-013). An empty
+    /// answer means the author is not linked to Goodreads; the caller degrades or
+    /// shows the picker rather than adopting a lookalike.
+    async fn active_goodreads_routes(
         &self,
         user_id: UserId,
-        author: &livrarr_domain::Author,
-    ) -> Option<String> {
-        let candidates = SeriesQueryService::resolve_gr_candidates(self, user_id, author.id)
+        author_id: AuthorId,
+    ) -> Result<Vec<String>, SeriesServiceError> {
+        let routes = self
+            .db
+            .list_active_routes(user_id, author_id, Some(AuthorProvider::Goodreads))
             .await
-            .ok()?;
-        let first = candidates.first()?;
-        if livrarr_matching::author_similarity(&author.name, &first.name) < 0.90 {
-            return None;
+            .map_err(SeriesServiceError::Db)?;
+        Ok(routes.iter().map(|route| route.key.value()).collect())
+    }
+
+    /// Fetch every active Goodreads feed and union the series by canonical
+    /// Goodreads series key.
+    ///
+    /// A person with two Goodreads author pages has one set of series, not two
+    /// lists (FP-039). One feed failing is isolated: the siblings' results
+    /// survive, and only a total failure is reported as an error, because an
+    /// empty list would be cached and read as "this author has no series".
+    async fn union_author_series_feeds(
+        &self,
+        gr_routes: &[String],
+    ) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError> {
+        let mut union: Vec<SeriesCacheEntry> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut last_error: Option<SeriesServiceError> = None;
+        for gr_key in gr_routes {
+            match fetch_author_series_pages(&self.fetcher, gr_key, None).await {
+                Ok(entries) => {
+                    for entry in entries {
+                        let identity = if entry.gr_key.is_empty() {
+                            format!(
+                                "name:{}",
+                                identity_matching::identity_key(&entry.name, "").0
+                            )
+                        } else {
+                            format!("gr:{}", entry.gr_key)
+                        };
+                        if seen.contains(&identity) {
+                            continue;
+                        }
+                        seen.push(identity);
+                        union.push(entry);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        %gr_key,
+                        "author series: Goodreads feed unavailable, keeping sibling results: {e}"
+                    );
+                    last_error = Some(e);
+                }
+            }
         }
-        let gr_key = first.gr_key.clone();
-        self.db
-            .update_author(
-                user_id,
-                author.id,
-                livrarr_db::UpdateAuthorDbRequest {
-                    name: None,
-                    sort_name: None,
-                    ol_key: None,
-                    gr_key: Some(Some(gr_key.clone())),
-                    monitored: None,
-                    monitor_new_items: None,
-                    monitor_since: None,
-                    monitor_language: None,
-                },
-            )
-            .await
-            .ok()?;
-        tracing::info!(author = %author.name, gr_key = %gr_key, "author silently resolved");
-        Some(gr_key)
+        match last_error {
+            Some(e) if union.is_empty() => Err(e),
+            _ => Ok(union),
+        }
     }
 
     async fn silently_resolve_stub_roster(
@@ -265,14 +294,14 @@ where
         series: &Series,
     ) -> Option<Vec<SeriesRosterEntry>> {
         let author = self.db.get_author(user_id, series.author_id).await.ok()?;
-        if author.gr_key.is_none()
-            && self
-                .silently_resolve_author_key(user_id, &author)
-                .await
-                .is_none()
+        if self
+            .active_goodreads_routes(user_id, series.author_id)
+            .await
+            .ok()?
+            .is_empty()
         {
             tracing::debug!(series = %series.name, author = %author.name,
-                "silent resolution: author has no GR key and auto-link was ambiguous");
+                "silent resolution: author has no active Goodreads route");
             return None;
         }
 
@@ -388,6 +417,7 @@ where
         + SeriesCacheDb
         + SeriesRosterDb
         + ConfigDb
+        + livrarr_db::AuthorLinkDb
         + Clone
         + Send
         + Sync
@@ -610,41 +640,40 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        // REQ-003 degraded mode: an author with no gr_key cannot reach GR,
-        // but their DB-backed series (stubs included) must still be served —
-        // the GR cache/fetch leg is skipped, never an error.
-        let (filtered_entries, raw_entries_opt, fetched_at) = match author.gr_key.as_deref() {
-            None => (Vec::new(), None, None),
-            Some(gr_key) => {
-                let cache = self.db.get_series_cache(author_id).await.unwrap_or(None);
-                if let Some(cached) = cache {
-                    (cached.entries, cached.raw_entries, Some(cached.fetched_at))
-                } else {
-                    let raw_entries =
-                        fetch_author_series_pages(&self.fetcher, gr_key, None).await?;
-                    let target_language = self.effective_target_language(&author).await;
-                    let raw_entries = self
-                        .classify_series_languages(&author.name, &target_language, raw_entries)
-                        .await;
-                    let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
-                        .await
-                        .unwrap_or_else(|| raw_entries.clone());
-                    let llm_changed = entries.len() != raw_entries.len();
-                    let saved = self
-                        .db
-                        .save_series_cache(
-                            author_id,
-                            &entries,
-                            if llm_changed {
-                                Some(raw_entries.as_slice())
-                            } else {
-                                None
-                            },
-                        )
-                        .await
-                        .map_err(SeriesServiceError::Db)?;
-                    (saved.entries, saved.raw_entries, Some(saved.fetched_at))
-                }
+        // REQ-003 degraded mode: an author with no active Goodreads route cannot
+        // reach GR, but their DB-backed series (stubs included) must still be
+        // served — the GR cache/fetch leg is skipped, never an error.
+        let gr_routes = self.active_goodreads_routes(user_id, author_id).await?;
+        let (filtered_entries, raw_entries_opt, fetched_at) = if gr_routes.is_empty() {
+            (Vec::new(), None, None)
+        } else {
+            let cache = self.db.get_series_cache(author_id).await.unwrap_or(None);
+            if let Some(cached) = cache {
+                (cached.entries, cached.raw_entries, Some(cached.fetched_at))
+            } else {
+                let raw_entries = self.union_author_series_feeds(&gr_routes).await?;
+                let target_language = self.effective_target_language(&author).await;
+                let raw_entries = self
+                    .classify_series_languages(&author.name, &target_language, raw_entries)
+                    .await;
+                let entries = llm_clean_series_list(&self.llm, &author.name, &raw_entries)
+                    .await
+                    .unwrap_or_else(|| raw_entries.clone());
+                let llm_changed = entries.len() != raw_entries.len();
+                let saved = self
+                    .db
+                    .save_series_cache(
+                        author_id,
+                        &entries,
+                        if llm_changed {
+                            Some(raw_entries.as_slice())
+                        } else {
+                            None
+                        },
+                    )
+                    .await
+                    .map_err(SeriesServiceError::Db)?;
+                (saved.entries, saved.raw_entries, Some(saved.fetched_at))
             }
         };
 
@@ -697,16 +726,16 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        let gr_key = author
-            .gr_key
-            .as_deref()
-            .ok_or_else(|| SeriesServiceError::Validation {
-                field: "gr_key".into(),
-                message: "Author has no Goodreads key".into(),
-            })?;
+        // No active Goodreads route means there is nothing to refresh from. The
+        // typed answer sends the user to the picker; nothing here guesses at a
+        // Goodreads author by name (FP-013).
+        let gr_routes = self.active_goodreads_routes(user_id, author_id).await?;
+        if gr_routes.is_empty() {
+            return Err(SeriesServiceError::MissingGoodreadsRoute);
+        }
 
         let _ = self.db.delete_series_cache(author_id).await;
-        let raw_entries = fetch_author_series_pages(&self.fetcher, gr_key, None).await?;
+        let raw_entries = self.union_author_series_feeds(&gr_routes).await?;
         let target_language = self.effective_target_language(&author).await;
         let raw_entries = self
             .classify_series_languages(&author.name, &target_language, raw_entries)
@@ -1117,16 +1146,16 @@ where
                 other => SeriesServiceError::Db(other),
             })?;
 
-        // REQ-009: the series-list fetch hard-requires an author gr_key.
-        // Try the silent road first (same ≥0.90 similarity rule as the
-        // resolve-gr auto-link); only genuine ambiguity surfaces the
-        // author-candidate flow.
-        if author.gr_key.is_none()
-            && self
-                .silently_resolve_author_key(user_id, &author)
-                .await
-                .is_none()
+        // REQ-009: the series-list fetch needs the author's Goodreads link. There
+        // is no silent name-similarity adoption any more (FP-013/FP-014) — an
+        // author with no active Goodreads route goes to the author-candidate flow,
+        // where the user picks.
+        if self
+            .active_goodreads_routes(user_id, author_id)
+            .await?
+            .is_empty()
         {
+            tracing::debug!(author = %author.name, "promote stub: author has no active Goodreads route");
             return Ok(PromoteStubOutcome::NeedsAuthorResolution { author_id });
         }
 

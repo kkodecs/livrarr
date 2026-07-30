@@ -8,16 +8,15 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{
-    record_history, ConfigDb, CreateAuthorDbRequest, CreateImportDbRequest, ReadarrOriginDb, WorkDb,
-};
+use livrarr_db::{record_history, ConfigDb, CreateImportDbRequest, ReadarrOriginDb, WorkDb};
 use livrarr_domain::identity_matching::{identity_key, unambiguous_author_match};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
     ReadarrImportWorkflow, ServiceError, SourceProviderData, WorkService,
 };
 use livrarr_domain::{
-    derive_sort_name, history_events, sanitize_path_component, Author, AuthorId, Import, MediaType,
+    derive_sort_name, history_events, sanitize_path_component, Author, AuthorId, AuthorLinkTrigger,
+    AuthorRouteGuardResult, Import, MediaType,
 };
 
 use livrarr_http::fetcher::HttpFetcherImpl;
@@ -1667,15 +1666,19 @@ async fn process_authors_batch(
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| derive_sort_name(name));
 
+                // The shared create/adopt gate (FP-019): the author row, its
+                // first name variant, and a due author-link task commit
+                // together, so an imported author can never exist in a state the
+                // linking sweep cannot see. The Readarr name is retained as a
+                // Readarr-sourced variant, not as an anonymous one.
                 match readarr_import_service
-                    .create_author(CreateAuthorDbRequest {
+                    .create_or_adopt_author(livrarr_db::CreateAuthorGateRequest {
                         user_id,
                         name: name.to_string(),
                         sort_name: Some(sort_name),
-                        ol_key: None,
-                        gr_key: None,
-                        hc_key: None,
                         import_id: Some(import_id.to_string()),
+                        initial_name_source: livrarr_domain::AuthorNameSource::Readarr,
+                        trigger: livrarr_domain::AuthorLinkTrigger::AuthorCreated,
                     })
                     .await
                 {
@@ -1711,12 +1714,100 @@ async fn process_authors_batch(
 
         author_map_rd.insert(rd_author.id, livrarr_author_id);
 
+        resolve_readarr_author_route(
+            readarr_import_service,
+            user_id,
+            livrarr_author_id,
+            rd_author,
+        )
+        .await;
+
         {
             let mut prog = progress.lock().await;
             prog.authors_processed += 1;
         }
     }
     Ok(())
+}
+
+/// What Readarr's own record says about this author's Goodreads identity.
+///
+/// Readarr gives a name and a Goodreads author id on the same record. That is
+/// evidence, not a user's pick, so it goes through the one name guard every
+/// automatic route write goes through — and the names it is compared against are
+/// read *before* the Readarr spelling is recorded, or Readarr would end up
+/// proving itself.
+///
+/// Agreed evidence attaches a route. A Grey, Abstain, or Disagree verdict is kept
+/// as reviewable evidence and writes no route. An unusable id does neither. In all
+/// three cases the author is left with a due author-link task, in a transaction of
+/// its own, so a failure on this side never leaves the author unlinked *and*
+/// unqueued.
+async fn resolve_readarr_author_route(
+    readarr_import_service: &ReadarrImportServiceImpl,
+    user_id: i64,
+    author_id: AuthorId,
+    rd_author: &RdAuthor,
+) {
+    let names = match readarr_import_service
+        .author_associated_names(user_id, author_id)
+        .await
+    {
+        Ok(names) => names,
+        Err(e) => {
+            warn!(
+                author_id,
+                "readarr import: author name snapshot failed: {e}"
+            );
+            Vec::new()
+        }
+    };
+
+    match crate::author_link::readarr_author_route_evidence(rd_author, &names) {
+        Some(AuthorRouteGuardResult::Agreed(evidence)) => {
+            match readarr_import_service
+                .submit_author_route_evidence(user_id, author_id, evidence)
+                .await
+            {
+                Ok(outcome) => debug!(author_id, ?outcome, "readarr import: author route applied"),
+                Err(e) => warn!(author_id, "readarr import: author route write failed: {e}"),
+            }
+        }
+        Some(AuthorRouteGuardResult::Rejected(rejected)) => {
+            if let Err(e) = readarr_import_service
+                .record_author_route_rejection(user_id, author_id, rejected)
+                .await
+            {
+                warn!(
+                    author_id,
+                    "readarr import: rejected author evidence not recorded: {e}"
+                );
+            }
+        }
+        None => {
+            // No usable id, so no route question to answer — but the spelling
+            // Readarr used is still a name this author is known by, and the
+            // adopt arm never wrote it (FP-035).
+            if let Some(name) = rd_author.author_name.as_deref().map(str::trim) {
+                if !name.is_empty() {
+                    if let Err(e) = readarr_import_service
+                        .record_readarr_author_name(user_id, author_id, name)
+                        .await
+                    {
+                        warn!(author_id, "readarr import: author name not retained: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Independent of everything above (REQ-005).
+    if let Err(e) = readarr_import_service
+        .enqueue_author_link(user_id, author_id, AuthorLinkTrigger::AuthorAdopted)
+        .await
+    {
+        warn!(author_id, "readarr import: author-link enqueue failed: {e}");
+    }
 }
 
 impl ImportRunner {
@@ -2420,7 +2511,7 @@ mod process_authors_batch_tests {
     use super::*;
     use crate::readarr_import_service::LiveReadarrImportService;
     use livrarr_db::test_helpers::create_test_db;
-    use livrarr_db::{AuthorDb, CreateUserDbRequest, UserDb};
+    use livrarr_db::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb};
     use livrarr_domain::UserRole;
 
     fn rd_author(id: i64, name: &str) -> RdAuthor {

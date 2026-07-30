@@ -7,7 +7,7 @@ use livrarr_behavioral::stubs::{StubHttpFetcher, StubLlmCaller};
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    AuthorDb, CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate,
+    AuthorDb, AuthorLinkDb, CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::services::*;
 use livrarr_domain::UserRole;
@@ -85,7 +85,19 @@ async fn test_author_add_creates_and_returns() {
     assert!(author.id > 0);
     assert_eq!(author.user_id, user_id);
     assert_eq!(author.name, "Brandon Sanderson");
-    assert_eq!(author.ol_key.as_deref(), Some("/authors/OL123A"));
+    // The selected key is a route row, not a scalar column: `authors.ol_key` is
+    // frozen after the cutover and the route ledger is the one authority.
+    assert_eq!(author.ol_key, None);
+    let routes = db2
+        .list_active_routes(
+            user_id,
+            author.id,
+            Some(livrarr_domain::AuthorProvider::OpenLibrary),
+        )
+        .await
+        .expect("selected route");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].key.value(), "OL123A");
 
     let after_count = db2.list_authors(user_id).await.unwrap().len();
     assert_eq!(
@@ -133,10 +145,19 @@ async fn test_author_add_duplicate_upserts_existing() {
         .unwrap();
 
     assert!(!result.is_created(), "expected Updated, got Created");
+    assert_eq!(result.author().ol_key, None);
+    let routes = db2
+        .list_active_routes(
+            user_id,
+            result.author().id,
+            Some(livrarr_domain::AuthorProvider::OpenLibrary),
+        )
+        .await
+        .expect("selected route");
     assert_eq!(
-        result.author().ol_key.as_deref(),
-        Some("/authors/OL999A"),
-        "ol_key should be updated on upsert"
+        routes.iter().map(|r| r.key.value()).collect::<Vec<_>>(),
+        vec!["OL999A".to_string()],
+        "the re-add's selected key becomes a route on the existing author"
     );
 
     let count_after = db2.list_authors(user_id).await.unwrap().len();
@@ -155,6 +176,7 @@ async fn test_author_get_existing_returns_author() {
     // SVC-AUTHOR-001: Given existing author, returns it
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
+    let db2 = db.clone();
     let svc = make_svc(db);
 
     let added = svc
@@ -177,7 +199,17 @@ async fn test_author_get_existing_returns_author() {
     assert_eq!(author.id, added.author().id);
     assert_eq!(author.user_id, user_id);
     assert_eq!(author.name, "N.K. Jemisin");
-    assert_eq!(author.ol_key.as_deref(), Some("/authors/OL456A"));
+    assert_eq!(author.ol_key, None);
+    let routes = db2
+        .list_active_routes(
+            user_id,
+            author.id,
+            Some(livrarr_domain::AuthorProvider::OpenLibrary),
+        )
+        .await
+        .expect("selected route");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].key.value(), "OL456A");
 }
 
 #[tokio::test]

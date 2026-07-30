@@ -334,20 +334,17 @@ pub(crate) async fn merge_authors_tx(
         );
     }
 
+    // The provider key columns are deliberately absent: they are frozen legacy
+    // compatibility input after the cutover (FP-031), and the loser's linkage
+    // moves as route rows in step 5b below, where a tombstone still wins.
     sqlx::query(
         "UPDATE authors SET \
          sort_name = COALESCE(sort_name, ?), \
-         ol_key = COALESCE(ol_key, ?), \
-         gr_key = COALESCE(gr_key, ?), \
-         hc_key = COALESCE(hc_key, ?), \
          import_id = COALESCE(import_id, ?), \
          monitored = ?, monitor_new_items = ?, monitor_since = ?, monitor_language = ? \
          WHERE id = ? AND user_id = ?",
     )
     .bind(&loser.sort_name)
-    .bind(&loser.ol_key)
-    .bind(&loser.gr_key)
-    .bind(&loser.hc_key)
     .bind(&loser.import_id)
     .bind(monitored)
     .bind(monitor_new_items)

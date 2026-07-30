@@ -6,9 +6,10 @@ use livrarr_domain::{
     AgreedAuthorRouteEvidence, Author, AuthorCompatibilityProjection, AuthorEvidenceFingerprint,
     AuthorId, AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCursor,
     AuthorLinkProgress, AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger,
-    AuthorNameSource, AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteKey,
-    AuthorSweepProgress, ProviderAuthorNameObservation, RejectedAuthorRouteEvidence,
-    RequestPriority, RouteWriteOutcome, SettledWorkProviderKey, UserId, WorkId,
+    AuthorNameSource, AuthorNameVariant, AuthorProvider, AuthorRoadInput, AuthorRoute,
+    AuthorRouteKey, AuthorSweepProgress, ProviderAuthorNameObservation,
+    RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome, SettledWorkProviderKey,
+    UserId, WorkId,
 };
 
 #[derive(Debug, Clone)]
@@ -205,6 +206,18 @@ pub trait AuthorLinkDb: Send + Sync {
         provider: Option<AuthorProvider>,
     ) -> Result<Vec<AuthorRoute>, DbError>;
 
+    /// Every route row the author-detail panel shows: active rows first, then the
+    /// removal history.
+    ///
+    /// Removed rows are provenance — "you took this away" — never linkage, so a
+    /// caller must derive link state and monitorability from the active rows
+    /// alone (`AuthorRouteView::from_route_history` is the one place that does).
+    async fn list_routes_for_view(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<AuthorRoute>, DbError>;
+
     async fn has_active_route(
         &self,
         user_id: UserId,
@@ -231,4 +244,27 @@ pub trait AuthorNameVariantDb: Send + Sync {
         work_id: WorkId,
         observations: &[ProviderAuthorNameObservation],
     ) -> Result<u32, DbError>;
+
+    /// The same observation write for a caller that already holds the author.
+    ///
+    /// The work-scoped form resolves the author *from a work*; an import that is
+    /// processing an author list has no work in hand, and a name it drops there
+    /// is a name the display picker can never offer again (FP-035).
+    async fn record_author_observed_names(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        observations: &[ProviderAuthorNameObservation],
+    ) -> Result<u32, DbError>;
+
+    /// Every spelling recorded for the author, oldest row first.
+    ///
+    /// The display-name picker cannot offer choices it cannot list, and the
+    /// name guard needs the author's full associated-name snapshot rather than
+    /// just `authors.name`.
+    async fn list_name_variants(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<AuthorNameVariant>, DbError>;
 }

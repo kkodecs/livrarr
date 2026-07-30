@@ -2519,10 +2519,14 @@ mod backfill_author_identity_tests {
         .unwrap();
         assert_eq!(jk.len(), 1, "one Rowling row must survive: {jk:?}");
         assert_eq!(jk[0].0, b1, "keeper by most works");
+        // The frozen scalar column is not filled by a merge any more (FP-031).
+        // The loser's provider linkage survives instead as its *staged* legacy
+        // value moving to the keeper, which is what the later cutover ingestion
+        // reads; that move is pinned in
+        // `sqlite_author_link::route_history_and_variant_tests`.
         assert_eq!(
-            jk[0].1.as_deref(),
-            Some("OL-B2"),
-            "loser's ol_key fills the keeper's missing key"
+            jk[0].1, None,
+            "the merge must not write the frozen scalar column"
         );
         assert!(jk[0].2, "loser's monitored must OR onto the keeper");
         let bw_display: String = sqlx::query_scalar("SELECT author_name FROM works WHERE id = ?")

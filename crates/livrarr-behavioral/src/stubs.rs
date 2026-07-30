@@ -844,6 +844,14 @@ impl AuthorLinkDb for StubAuthorLinkDb {
         todo!()
     }
 
+    async fn list_routes_for_view(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+    ) -> Result<Vec<AuthorRoute>, DbError> {
+        todo!()
+    }
+
     async fn compatibility_projection(
         &self,
         user_id: UserId,
@@ -868,6 +876,23 @@ impl AuthorNameVariantDb for StubAuthorLinkDb {
         work_id: WorkId,
         observations: &[ProviderAuthorNameObservation],
     ) -> Result<u32, DbError> {
+        todo!()
+    }
+
+    async fn record_author_observed_names(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _observations: &[ProviderAuthorNameObservation],
+    ) -> Result<u32, DbError> {
+        todo!()
+    }
+
+    async fn list_name_variants(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+    ) -> Result<Vec<livrarr_domain::AuthorNameVariant>, DbError> {
         todo!()
     }
 }

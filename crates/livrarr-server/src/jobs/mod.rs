@@ -142,6 +142,25 @@ impl JobRunner {
         .await;
     }
 
+    /// Register one recurring job after [`JobRunner::start`] has already run.
+    ///
+    /// Some jobs may only exist once a startup precondition holds — the
+    /// author-link sweep must not be registered before the cutover gate passes
+    /// (FP-044) — so the composition root registers those itself, at the point
+    /// where the precondition is known to be met.
+    pub async fn register_interval_job<F, Fut>(
+        &self,
+        name: &str,
+        interval: Duration,
+        state: AppState,
+        tick_fn: F,
+    ) where
+        F: Fn(AppState, CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send,
+    {
+        self.spawn_job(name, interval, state, tick_fn).await;
+    }
+
     async fn spawn_job<F, Fut>(&self, name: &str, interval: Duration, state: AppState, tick_fn: F)
     where
         F: Fn(AppState, CancellationToken) -> Fut + Send + Sync + 'static,

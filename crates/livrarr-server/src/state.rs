@@ -76,6 +76,28 @@ pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_metadata::list_service::NoOpBibliographyTrigger,
 >;
+
+/// Build the production list service.
+///
+/// The durable author-link task a list import owes each author it creates comes
+/// from the shared create/adopt gate inside `WorkService::add`
+/// (`crates/livrarr-db/src/sqlite_author_link.rs::create_or_adopt_author_tx`),
+/// which commits the author, its first name variant, and a due progress row in
+/// one transaction. The `BibliographyTrigger` slot is therefore a no-op here: it
+/// would duplicate a guarantee the write path already makes, and two behavioural
+/// `AppState` fixtures pin this exact type parameter.
+pub fn build_live_list_service(
+    db: SqliteDb,
+    work_service: LiveWorkService,
+    http_fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+) -> LiveListService {
+    livrarr_metadata::list_service::ListServiceImpl::new(
+        db,
+        work_service,
+        http_fetcher,
+        livrarr_metadata::list_service::NoOpBibliographyTrigger,
+    )
+}
 pub type LiveAuthorMonitorWorkflow =
     livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl<
         SqliteDb,

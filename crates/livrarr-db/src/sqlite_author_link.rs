@@ -278,6 +278,57 @@ async fn ensure_progress_tx(
     Ok(())
 }
 
+/// Record a set of observed names against one author and wake its display work.
+///
+/// The one body behind both public observation writes: the work-scoped form used
+/// by enrichment and the author-scoped form used by an import that has the author
+/// in hand. Both must leave a live worker lease alone and both must make the
+/// author's display work immediately due, so there is one implementation of that
+/// rule rather than two that can drift (FP-050).
+async fn record_observed_names_tx(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    author_id: AuthorId,
+    observations: &[ProviderAuthorNameObservation],
+) -> Result<u32, DbError> {
+    let mut inserted = 0u32;
+    for observation in observations {
+        let landed = insert_name_variant_tx(
+            conn,
+            user_id,
+            author_id,
+            observation.source,
+            &observation.name,
+            None,
+            None,
+        )
+        .await?;
+        inserted += u32::from(landed);
+    }
+
+    if inserted > 0 {
+        // One generation bump for the whole transaction, the author is due
+        // now, and a live lease is left alone — the worker holding it will
+        // fail its compare-and-set and the author stays dirty.
+        sqlx::query(
+            "UPDATE author_link_progress \
+                SET display_name_generation = display_name_generation + 1, \
+                    display_name_dirty = 1, \
+                    next_attempt_at = MIN(next_attempt_at, ?), \
+                    updated_at = ? \
+              WHERE author_id = ?",
+        )
+        .bind(now_ts())
+        .bind(now_ts())
+        .bind(author_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    }
+
+    Ok(inserted)
+}
+
 /// Record an observed name against an author without replacing an existing row.
 /// Returns `true` only when a new distinct variant landed.
 #[allow(clippy::too_many_arguments)]
@@ -2082,6 +2133,39 @@ impl AuthorLinkDb for SqliteDb {
         Ok(routes)
     }
 
+    async fn list_routes_for_view(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<AuthorRoute>, DbError> {
+        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
+        require_author_owned_tx(&mut conn, user_id, author_id).await?;
+
+        let rows = sqlx::query(&format!(
+            "SELECT {ROUTE_COLUMNS} FROM author_provider_routes \
+              WHERE user_id = ? AND author_id = ?"
+        ))
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+        let mut routes = rows
+            .iter()
+            .map(row_to_route)
+            .collect::<Result<Vec<_>, _>>()?;
+        // Active rows first in the same provenance order `list_active_routes`
+        // uses, then the removal history — one stable panel order.
+        routes.sort_by_key(|route| {
+            (
+                route.state != AuthorRouteState::Active,
+                provenance_rank(route.provenance),
+                route.id,
+            )
+        });
+        Ok(routes)
+    }
+
     async fn has_active_route(
         &self,
         user_id: UserId,
@@ -2327,6 +2411,39 @@ pub(crate) async fn fold_author_link_state_tx(
     .await
     .map_err(map_db_err)?;
 
+    // Staged legacy values move too, or a merge that happens *before* the
+    // cutover ingestion silently destroys the loser's provider linkage: the
+    // staging rows are `ON DELETE CASCADE` on the author, and the startup
+    // duplicate-author repair (`pool::backfill_author_identity`) runs before
+    // `ingest_legacy_routes`. The survivor's own staged value wins a provider
+    // collision — the same precedence the retired scalar COALESCE had — and the
+    // loser's row is then dropped rather than left to violate
+    // `UNIQUE(user_id, author_id, provider)`.
+    sqlx::query(
+        "DELETE FROM author_route_legacy_staging \
+          WHERE user_id = ? AND author_id = ? AND provider IN ( \
+                SELECT provider FROM author_route_legacy_staging \
+                 WHERE user_id = ? AND author_id = ?)",
+    )
+    .bind(user_id)
+    .bind(loser_id)
+    .bind(user_id)
+    .bind(survivor_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+    sqlx::query(
+        "UPDATE author_route_legacy_staging SET author_id = ?, updated_at = ? \
+          WHERE user_id = ? AND author_id = ?",
+    )
+    .bind(survivor_id)
+    .bind(now_ts())
+    .bind(user_id)
+    .bind(loser_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+
     // Names: every distinct associated name survives the merge. A duplicate
     // canonical OpenLibrary name keeps the strongest role it was ever observed
     // with — Primary over Alias over "no role asserted".
@@ -2546,42 +2663,297 @@ impl AuthorNameVariantDb for SqliteDb {
                 .flatten()
                 .ok_or(DbError::NotFound { entity: "work" })?;
 
-        let mut inserted = 0u32;
-        for observation in observations {
-            let landed = insert_name_variant_tx(
-                &mut tx,
-                user_id,
-                author_id,
-                observation.source,
-                &observation.name,
-                None,
-                None,
-            )
-            .await?;
-            inserted += u32::from(landed);
-        }
-
-        if inserted > 0 {
-            // One generation bump for the whole transaction, the author is due
-            // now, and a live lease is left alone — the worker holding it will
-            // fail its compare-and-set and the author stays dirty.
-            sqlx::query(
-                "UPDATE author_link_progress \
-                    SET display_name_generation = display_name_generation + 1, \
-                        display_name_dirty = 1, \
-                        next_attempt_at = MIN(next_attempt_at, ?), \
-                        updated_at = ? \
-                  WHERE author_id = ?",
-            )
-            .bind(now_ts())
-            .bind(now_ts())
-            .bind(author_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_db_err)?;
-        }
-
+        let inserted = record_observed_names_tx(&mut tx, user_id, author_id, observations).await?;
         tx.commit().await.map_err(map_db_err)?;
         Ok(inserted)
+    }
+
+    async fn record_author_observed_names(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        observations: &[ProviderAuthorNameObservation],
+    ) -> Result<u32, DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        require_author_owned_tx(&mut tx, user_id, author_id).await?;
+        let inserted = record_observed_names_tx(&mut tx, user_id, author_id, observations).await?;
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(inserted)
+    }
+
+    async fn list_name_variants(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<Vec<AuthorNameVariant>, DbError> {
+        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
+        require_author_owned_tx(&mut conn, user_id, author_id).await?;
+
+        let rows = sqlx::query(
+            "SELECT * FROM author_name_variants WHERE user_id = ? AND author_id = ? ORDER BY id",
+        )
+        .bind(user_id)
+        .bind(author_id)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+        rows.iter().map(row_to_name_variant).collect()
+    }
+}
+
+/// The three reads and one write U6 added to this module, over a real migrated
+/// SQLite database and the real writers.
+///
+/// They exist because the behavioural suite reaches these seams only through the
+/// author-detail door, which cannot show what the route-history read does with a
+/// *removed* row, nor what the author-scoped observation write does when the
+/// caller has no work in hand. Same in-crate precedent as
+/// `sqlite_author::display_name_origin_tests`.
+#[cfg(test)]
+mod route_history_and_variant_tests {
+    use super::*;
+    use crate::test_helpers::create_test_db;
+    use crate::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb};
+    use livrarr_domain::UserRole;
+
+    async fn seed(db: &SqliteDb, username: &str) -> (i64, i64) {
+        let user = db
+            .create_user(CreateUserDbRequest {
+                username: username.into(),
+                password_hash: "hash".into(),
+                role: UserRole::User,
+                api_key_hash: format!("{username}-key"),
+            })
+            .await
+            .expect("user");
+        let (author, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user.id,
+                name: "Routed Author".into(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("author");
+        (user.id, author.id)
+    }
+
+    /// The panel read shows a removed route, and shows it after the active ones.
+    /// The active-only read still cannot see it — that is what keeps a tombstone
+    /// out of every linkage answer.
+    #[tokio::test]
+    async fn route_history_keeps_removed_rows_after_the_active_ones() {
+        let db = create_test_db().await;
+        let (user_id, author_id) = seed(&db, "route-history").await;
+
+        let kept = AuthorRouteKey::parse(AuthorProvider::OpenLibrary, "OL9001A").expect("key");
+        let removed = AuthorRouteKey::parse(AuthorProvider::Goodreads, "9002").expect("key");
+        db.attach_route_as_user(user_id, author_id, kept)
+            .await
+            .expect("attach kept");
+        let removed_route = db
+            .attach_route_as_user(user_id, author_id, removed)
+            .await
+            .expect("attach removed");
+        db.remove_route_as_user(user_id, author_id, removed_route.id)
+            .await
+            .expect("remove");
+
+        let panel = db
+            .list_routes_for_view(user_id, author_id)
+            .await
+            .expect("route history");
+        assert_eq!(panel.len(), 2);
+        assert_eq!(panel[0].key.value(), "OL9001A");
+        assert_eq!(panel[0].state, AuthorRouteState::Active);
+        assert_eq!(panel[1].key.value(), "9002");
+        assert_eq!(panel[1].state, AuthorRouteState::Removed);
+        assert!(panel[1].removed_at.is_some());
+
+        let active = db
+            .list_active_routes(user_id, author_id, None)
+            .await
+            .expect("active routes");
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key.value(), "OL9001A");
+    }
+
+    /// Both new reads are user-scoped: another user's id gets nothing back, not
+    /// someone else's author.
+    #[tokio::test]
+    async fn the_new_reads_refuse_another_users_author() {
+        let db = create_test_db().await;
+        let (user_id, author_id) = seed(&db, "owner").await;
+        let (other_user_id, _) = seed(&db, "other").await;
+
+        db.attach_route_as_user(
+            user_id,
+            author_id,
+            AuthorRouteKey::parse(AuthorProvider::OpenLibrary, "OL9003A").expect("key"),
+        )
+        .await
+        .expect("attach");
+
+        assert!(db
+            .list_routes_for_view(other_user_id, author_id)
+            .await
+            .is_err());
+        assert!(db
+            .list_name_variants(other_user_id, author_id)
+            .await
+            .is_err());
+        assert!(db
+            .record_author_observed_names(
+                other_user_id,
+                author_id,
+                &[ProviderAuthorNameObservation {
+                    source: AuthorNameSource::Readarr,
+                    name: "Someone Else".into(),
+                }],
+            )
+            .await
+            .is_err());
+    }
+
+    /// The author-scoped observation write records the name and wakes the
+    /// author's display work, exactly like the work-scoped form — and a repeat of
+    /// the same spelling from the same source adds nothing.
+    #[tokio::test]
+    async fn an_author_scoped_observation_records_the_name_and_makes_display_work_due() {
+        let db = create_test_db().await;
+        let (user_id, author_id) = seed(&db, "author-observe").await;
+        db.ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorCreated)
+            .await
+            .expect("progress row");
+        sqlx::query(
+            "UPDATE author_link_progress \
+                SET display_name_dirty = 0, next_attempt_at = '2999-01-01T00:00:00.000Z' \
+              WHERE author_id = ?",
+        )
+        .bind(author_id)
+        .execute(db.pool())
+        .await
+        .expect("park the author");
+
+        let observation = |name: &str| ProviderAuthorNameObservation {
+            source: AuthorNameSource::Readarr,
+            name: name.to_string(),
+        };
+        let inserted = db
+            .record_author_observed_names(user_id, author_id, &[observation("Readarr Spelling")])
+            .await
+            .expect("observation");
+        assert_eq!(inserted, 1);
+
+        let variants = db
+            .list_name_variants(user_id, author_id)
+            .await
+            .expect("variants");
+        assert!(variants
+            .iter()
+            .any(|v| v.name == "Readarr Spelling" && v.source == AuthorNameSource::Readarr));
+
+        let (dirty, due): (i64, i64) = sqlx::query_as(
+            "SELECT display_name_dirty, julianday(next_attempt_at) <= julianday('now') \
+               FROM author_link_progress WHERE author_id = ?",
+        )
+        .bind(author_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("progress");
+        assert_eq!((dirty, due), (1, 1));
+
+        // A repeat of the same spelling is not a new observation.
+        let repeat = db
+            .record_author_observed_names(user_id, author_id, &[observation("Readarr Spelling")])
+            .await
+            .expect("repeat observation");
+        assert_eq!(repeat, 0);
+    }
+    /// A merge that happens **before** the cutover ingestion must not destroy the
+    /// loser's provider linkage.
+    ///
+    /// The startup duplicate-author repair (`pool::backfill_author_identity`) runs
+    /// before `ingest_legacy_routes`, and the staging rows are `ON DELETE CASCADE`
+    /// on the author — so the loser's staged legacy value has to move to the
+    /// survivor or it is gone with no way to recover it. The survivor's own staged
+    /// value wins a provider collision, the same precedence the retired scalar
+    /// COALESCE had.
+    #[tokio::test]
+    async fn merge_moves_the_losers_staged_legacy_route_to_the_survivor() {
+        let db = create_test_db().await;
+        let (user_id, survivor_id) = seed(&db, "merge-staging").await;
+        let (_, loser_id) = {
+            let (author, _) = db
+                .create_author(CreateAuthorDbRequest {
+                    user_id,
+                    name: "Routed Author Duplicate".into(),
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    hc_key: None,
+                    import_id: None,
+                })
+                .await
+                .expect("loser author");
+            (user_id, author.id)
+        };
+
+        // Migration 079 stages every nonempty scalar at migration time; this is
+        // the same row it would have written for each of these two authors.
+        let stage = |author_id: AuthorId, provider: &'static str, raw: &'static str| {
+            sqlx::query(
+                "INSERT INTO author_route_legacy_staging \
+                     (user_id, author_id, provider, raw_value, status, staged_at, updated_at) \
+                 VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+            )
+            .bind(user_id)
+            .bind(author_id)
+            .bind(provider)
+            .bind(raw)
+            .bind(now_ts())
+            .bind(now_ts())
+        };
+        stage(survivor_id, "open_library", "OL-SURVIVOR")
+            .execute(db.pool())
+            .await
+            .expect("stage survivor OL");
+        stage(loser_id, "open_library", "OL-LOSER")
+            .execute(db.pool())
+            .await
+            .expect("stage loser OL");
+        stage(loser_id, "goodreads", "5150")
+            .execute(db.pool())
+            .await
+            .expect("stage loser GR");
+
+        db.merge_authors(user_id, survivor_id, loser_id)
+            .await
+            .expect("merge");
+
+        let staged: Vec<(String, String)> = sqlx::query_as(
+            "SELECT provider, raw_value FROM author_route_legacy_staging \
+              WHERE author_id = ? ORDER BY provider",
+        )
+        .bind(survivor_id)
+        .fetch_all(db.pool())
+        .await
+        .expect("survivor staging");
+        assert_eq!(
+            staged,
+            vec![
+                ("goodreads".to_string(), "5150".to_string()),
+                ("open_library".to_string(), "OL-SURVIVOR".to_string()),
+            ],
+            "the loser's unique provider moves; a collision keeps the survivor's own value"
+        );
+
+        // The frozen scalar columns stay frozen either way.
+        let survivor = db.get_author(user_id, survivor_id).await.expect("survivor");
+        assert_eq!(survivor.ol_key, None);
+        assert_eq!(survivor.gr_key, None);
     }
 }
