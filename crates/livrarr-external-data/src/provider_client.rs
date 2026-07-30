@@ -930,6 +930,9 @@ pub struct OpenLibraryClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcher
     fetcher: F,
     retry_backoff_secs: i64,
     call_sink: Option<Arc<dyn ProviderCallSink>>,
+    /// Author-name hydration state for the author-link road, shared by every
+    /// clone of this client so one author key is fetched once across works.
+    hydrator: Arc<crate::author_link::OpenLibraryAuthorHydrator>,
 }
 
 impl<F: HttpFetcher> OpenLibraryClient<F> {
@@ -938,6 +941,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             fetcher,
             retry_backoff_secs: 5 * 60,
             call_sink: None,
+            hydrator: Arc::new(crate::author_link::OpenLibraryAuthorHydrator::new()),
         }
     }
 
@@ -956,6 +960,12 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
     /// crate that build their own OpenLibrary requests (`author_link`).
     pub(crate) fn fetcher(&self) -> &F {
         &self.fetcher
+    }
+
+    /// The shared author-name hydration cache behind
+    /// [`OpenLibraryClient::fetch_work_authors`]'s name-absent path.
+    pub(crate) fn hydrator(&self) -> &crate::author_link::OpenLibraryAuthorHydrator {
+        &self.hydrator
     }
 
     /// Anchor-only fetch (REQ-006): ol_key direct detail, or ISBN resolved to

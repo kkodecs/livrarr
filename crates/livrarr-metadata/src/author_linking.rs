@@ -1283,3 +1283,55 @@ impl AuthorResponseAssembler {
         todo!()
     }
 }
+
+#[cfg(test)]
+mod production_gateway_composition {
+    use super::AuthorLinkingServiceImpl;
+    use livrarr_db::test_helpers::create_test_db;
+    use livrarr_external_data::live_config::LiveMetadataConfig;
+    use livrarr_external_data::{
+        AuthorProviderGatewayImpl, GoodreadsClient, HardcoverClient, OpenLibraryClient,
+    };
+    use livrarr_http::fetcher::HttpFetcherImpl;
+
+    fn metadata_config() -> livrarr_domain::settings::MetadataConfig {
+        livrarr_domain::settings::MetadataConfig {
+            hardcover_enabled: false,
+            hardcover_api_token: None,
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: "https://api.audnex.us".to_string(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        }
+    }
+
+    /// The road runs on the production gateway.
+    ///
+    /// Server wiring is a later unit, so nothing constructs this pair yet. This
+    /// builds it from the real concrete transport the server will hand it, which
+    /// is what proves the type actually satisfies the road's bounds rather than
+    /// only resembling them.
+    #[tokio::test]
+    async fn road_is_constructible_with_the_production_gateway() {
+        let db = create_test_db().await;
+        let fetcher = HttpFetcherImpl::new().expect("production fetcher");
+        let http = livrarr_http::HttpClient::builder()
+            .user_agent("livrarr-gateway-composition-test")
+            .build()
+            .expect("goodreads llm client");
+        let live_config = LiveMetadataConfig::new(metadata_config());
+
+        let gateway = AuthorProviderGatewayImpl::new(
+            OpenLibraryClient::new(fetcher.clone()),
+            GoodreadsClient::new(fetcher.clone(), http, "https://www.goodreads.com"),
+            HardcoverClient::new(fetcher, live_config),
+        );
+
+        let _road: AuthorLinkingServiceImpl<_, AuthorProviderGatewayImpl<HttpFetcherImpl>> =
+            AuthorLinkingServiceImpl { db, gateway };
+    }
+}

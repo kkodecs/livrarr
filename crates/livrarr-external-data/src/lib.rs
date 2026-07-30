@@ -3,7 +3,7 @@
 //! fetch-and-normalize pipe with no knowledge of enrichment policy, the work
 //! store, or merge logic.
 
-mod author_link;
+pub mod author_link;
 pub mod types;
 
 pub mod audible;
@@ -27,6 +27,7 @@ mod test_support;
 pub use livrarr_domain::OpenLibraryAuthorCandidate;
 pub use types::{NormalizedWorkDetail, ProviderOutcome};
 
+pub use author_link::{AuthorProviderGatewayImpl, OpenLibraryAuthorHydrator};
 pub use google_books::GoogleBooksClient;
 pub use provider_client::{
     AudnexusClient, GoodreadsClient, HardcoverClient, OpenLibraryClient, ProviderClient,

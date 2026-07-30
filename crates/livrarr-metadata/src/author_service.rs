@@ -324,56 +324,25 @@ where
         query: &str,
         limit: u32,
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError> {
-        let url = format!(
-            "https://openlibrary.org/search/authors.json?q={}&limit={}",
-            urlencoding::encode(query),
-            limit
-        );
-        let req = FetchRequest {
-            url,
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(10),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 512 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
-            priority: RequestPriority::Normal,
-        };
-        let resp = self
-            .fetcher
-            .fetch(req)
-            .await
-            .map_err(|e| AuthorServiceError::Provider(e.to_string()))?;
+        // One OpenLibrary author-search implementation serves this door and the
+        // background linking road; only the queue priority differs.
+        let candidates = livrarr_external_data::author_link::open_library_author_search(
+            &self.fetcher,
+            query,
+            limit,
+            RequestPriority::Normal,
+        )
+        .await
+        .map_err(|e| {
+            AuthorServiceError::Provider(format!("OpenLibrary author search failed: {e:?}"))
+        })?;
 
-        if resp.status != 200 {
-            return Err(AuthorServiceError::Provider(format!(
-                "OpenLibrary returned {}",
-                resp.status
-            )));
-        }
-
-        let data: serde_json::Value = serde_json::from_slice(&resp.body)
-            .map_err(|e| AuthorServiceError::Provider(format!("OpenLibrary parse error: {e}")))?;
-
-        let docs = data
-            .get("docs")
-            .and_then(|d| d.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(docs
-            .iter()
-            .filter_map(|doc| {
-                let key = doc.get("key")?.as_str()?;
-                let name = doc.get("name")?.as_str()?;
-                let ol_key = key.trim_start_matches("/authors/").to_string();
-                Some(AuthorLookupResult {
-                    ol_key,
-                    name: name.to_string(),
-                    sort_name: None,
-                })
+        Ok(candidates
+            .into_iter()
+            .map(|candidate| AuthorLookupResult {
+                ol_key: candidate.route_key.as_str().to_string(),
+                name: candidate.name,
+                sort_name: None,
             })
             .collect())
     }

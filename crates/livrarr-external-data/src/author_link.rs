@@ -1,19 +1,32 @@
-//! Road-scoped keyed contributor fetches: every author credited on ONE
-//! selected work, for OpenLibrary, Goodreads, and Hardcover.
+//! Road-scoped author transport: every author credited on ONE selected work
+//! (OpenLibrary, Goodreads, Hardcover), OpenLibrary author-name search, and
+//! OpenLibrary catalog paging — composed into the production
+//! [`AuthorProviderGatewayImpl`].
 //!
-//! These adapters return contributors, never a chosen author. Selection is the
-//! caller's guard, so a multi-contributor work reaches it whole. Three shapes
-//! are kept apart on purpose: a readable record crediting nobody is an empty
-//! success, an unreadable association shape is `LayoutDrift`, and a transport
-//! failure keeps its retry timing.
+//! These adapters return contributors and candidates, never a chosen author.
+//! Selection is the caller's guard, so a multi-contributor work reaches it
+//! whole. Three shapes are kept apart on purpose: a readable record crediting
+//! nobody is an empty success, an unreadable association shape is
+//! `LayoutDrift`, and a transport failure keeps its retry timing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
+use livrarr_domain::identity_matching::canonical_author_key;
 use livrarr_domain::services::{
-    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
+    AuthorProviderGateway, FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket,
+    UserAgentProfile,
 };
-use livrarr_domain::{AuthorProvider, AuthorRouteKey, ProviderAuthorRef, RequestPriority};
+use livrarr_domain::{
+    AuthorProvider, AuthorProviderError, AuthorRouteKey, OpenLibraryAuthorCandidate,
+    OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, RequestPriority,
+};
+use lru::LruCache;
+use tokio::sync::{broadcast, Semaphore};
+use tokio::time::Instant;
 
 use crate::goodreads;
 use crate::hardcover::{hc_post, HardcoverError};
@@ -25,6 +38,37 @@ use crate::types::ProviderFetchError;
 /// Editions of the same book credit the same people; the cap bounds a
 /// pathological catalogue without narrowing a real contributor set.
 const HARDCOVER_EDITION_SCAN_LIMIT: u32 = 20;
+
+/// Timeout and body cap for a keyed OpenLibrary record (work or author).
+const OL_RECORD_TIMEOUT: Duration = Duration::from_secs(30);
+const OL_RECORD_MAX_BODY: usize = 2 * 1024 * 1024;
+
+/// Timeout and body cap for OpenLibrary author search — the interactive
+/// add-author door's established budget, kept so background Tier 2 and the
+/// door share one request shape.
+const OL_AUTHOR_SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
+const OL_AUTHOR_SEARCH_MAX_BODY: usize = 512 * 1024;
+
+/// One catalog request reads a batch, never one work per round-trip: the
+/// author-works endpoint is a batch endpoint and OpenLibrary names N
+/// single-record fetches as a bad-citizen pattern.
+const OL_CATALOG_PAGE_LIMIT: u32 = 100;
+const OL_CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
+const OL_CATALOG_MAX_BODY: usize = 2 * 1024 * 1024;
+
+/// How long one hydrated OpenLibrary author name is trusted. Author records
+/// change rarely and a stale display name is corrected by the next sweep, so
+/// this trades a long window against repeat traffic on the shared OL bucket.
+const OL_AUTHOR_NAME_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How many hydrated names are retained. One sweep over a large library sees
+/// far fewer distinct contributors than works, so this holds a whole pass.
+const OL_AUTHOR_NAME_CACHE_CAPACITY: usize = 1024;
+
+/// How many hydration requests may be outstanding at once. The shared
+/// OpenLibrary bucket remains the pacing authority; this only bounds how many
+/// slow requests one sweep can be waiting on.
+const OL_HYDRATION_MAX_IN_FLIGHT: usize = 2;
 
 /// Keep only the first ref per canonical route key, preserving the order the
 /// provider credited them in.
@@ -98,10 +142,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 .filter(|name| !name.is_empty())
             {
                 Some(name) => name.to_string(),
-                None => {
-                    self.hydrate_author_name(author_key.as_str(), priority)
-                        .await?
-                }
+                None => self.hydrate_author_name(author_key, priority).await?,
             };
 
             refs.push(ProviderAuthorRef {
@@ -117,33 +158,20 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         Ok(canonical_distinct(refs))
     }
 
-    /// The credited name on one OpenLibrary author record.
+    /// The credited name on one OpenLibrary author record, served by the
+    /// client's shared hydrator.
     ///
     /// A missing or blank name is a failure, never an empty name: an author
     /// ref with no name cannot be guarded, and pretending otherwise would put
     /// an unverifiable route in front of the guard.
     async fn hydrate_author_name(
         &self,
-        author_key: &str,
+        author_key: &OpenLibraryAuthorKey,
         priority: RequestPriority,
     ) -> Result<String, ProviderFetchError> {
-        let record = self
-            .fetch_ol_json(
-                &format!("https://openlibrary.org/authors/{author_key}.json"),
-                priority,
-            )
-            .await?;
-        record
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| {
-                ProviderFetchError::Permanent(format!(
-                    "OpenLibrary author {author_key} record carries no name"
-                ))
-            })
+        self.hydrator()
+            .name_for_key(self.fetcher(), author_key, priority)
+            .await
     }
 
     /// One paced OpenLibrary GET, through the shared queue bucket and the
@@ -153,29 +181,49 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
         url: &str,
         priority: RequestPriority,
     ) -> Result<serde_json::Value, ProviderFetchError> {
-        let request = FetchRequest {
-            url: url.to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: None,
-            timeout: Duration::from_secs(30),
-            rate_bucket: RateBucket::OpenLibrary,
-            max_body_bytes: 2 * 1024 * 1024,
-            anti_bot_check: false,
-            user_agent: UserAgentProfile::Server,
+        fetch_ol_json(
+            self.fetcher(),
+            url,
+            OL_RECORD_TIMEOUT,
+            OL_RECORD_MAX_BODY,
             priority,
-        };
-        let response = match self.fetcher().fetch(request).await {
-            Ok(response) => response,
-            Err(error) => return Err(map_ol_transport_error(error)),
-        };
-        if !(200..300).contains(&response.status) {
-            return Err(map_ol_status(response.status));
-        }
-        serde_json::from_slice(&response.body).map_err(|error| {
-            ProviderFetchError::LayoutDrift(format!("OpenLibrary response is not JSON: {error}"))
-        })
+        )
+        .await
     }
+}
+
+/// One paced OpenLibrary GET for any author-road request, through the shared
+/// queue bucket and the established server identity.
+async fn fetch_ol_json<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    timeout: Duration,
+    max_body_bytes: usize,
+    priority: RequestPriority,
+) -> Result<serde_json::Value, ProviderFetchError> {
+    let request = FetchRequest {
+        url: url.to_string(),
+        method: HttpMethod::Get,
+        headers: vec![],
+        body: None,
+        timeout,
+        rate_bucket: RateBucket::OpenLibrary,
+        max_body_bytes,
+        anti_bot_check: false,
+        user_agent: UserAgentProfile::Server,
+        priority,
+    };
+    let response = match fetcher.fetch(request).await {
+        Ok(response) => response,
+        Err(error) => return Err(map_ol_transport_error(error)),
+    };
+    if !(200..300).contains(&response.status) {
+        return Err(map_ol_status(response.status, &response.headers));
+    }
+    serde_json::from_slice(&response.body).map_err(|error| {
+        tracing::warn!(url, %error, "OpenLibrary response body is not JSON");
+        ProviderFetchError::LayoutDrift(format!("OpenLibrary response is not JSON: {error}"))
+    })
 }
 
 /// A transport failure keeps its class: a pause, a rate limit with its wait, or
@@ -188,7 +236,7 @@ fn map_ol_transport_error(error: FetchError) -> ProviderFetchError {
         },
         FetchError::CircuitOpen { retry_after } => ProviderFetchError::CircuitOpen(retry_after),
         FetchError::QueueFull { retry_after } => ProviderFetchError::QueueFull(retry_after),
-        FetchError::HttpError { status, .. } => map_ol_status(status),
+        FetchError::HttpError { status, .. } => map_ol_status(status, &[]),
         other => ProviderFetchError::Retryable {
             error: format!("OpenLibrary transport failure: {other}"),
             retry_not_before: None,
@@ -198,7 +246,11 @@ fn map_ol_transport_error(error: FetchError) -> ProviderFetchError {
 
 /// A non-2xx OpenLibrary status, classified through the shared authority so
 /// this surface cannot disagree with the enrichment surface about a status.
-fn map_ol_status(status: u16) -> ProviderFetchError {
+///
+/// A retryable status carries the provider's own `Retry-After` when it sent a
+/// readable one, so the road waits as long as OpenLibrary asked rather than
+/// guessing.
+fn map_ol_status(status: u16, headers: &[(String, String)]) -> ProviderFetchError {
     if status == 404 || status == 410 {
         return ProviderFetchError::Permanent(format!("OpenLibrary HTTP {status}"));
     }
@@ -206,11 +258,244 @@ fn map_ol_status(status: u16) -> ProviderFetchError {
         ProviderFetchError::RateLimited | ProviderFetchError::Transient => {
             ProviderFetchError::Retryable {
                 error: format!("OpenLibrary HTTP {status}"),
-                retry_not_before: None,
+                retry_not_before: retry_after_hint(headers),
             }
         }
         _ => ProviderFetchError::Permanent(format!("OpenLibrary HTTP {status}")),
     }
+}
+
+/// `Retry-After` in either documented form — delay-seconds or an HTTP-date —
+/// resolved at response-receipt time into an absolute UTC lower bound.
+///
+/// An absent header is simply no hint. A header that is present but unreadable
+/// is a provider-side oddity worth a warning, and still only costs the hint:
+/// the caller's own backoff decides when to try again.
+fn retry_after_hint(headers: &[(String, String)]) -> Option<DateTime<Utc>> {
+    let raw = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, value)| value.trim())?;
+    if let Ok(seconds) = raw.parse::<i64>() {
+        if seconds >= 0 {
+            return Some(Utc::now() + chrono::Duration::seconds(seconds));
+        }
+    }
+    if let Ok(at) = DateTime::parse_from_rfc2822(raw) {
+        return Some(at.with_timezone(&Utc));
+    }
+    if let Ok(at) = chrono::NaiveDateTime::parse_from_str(raw, "%a, %d %b %Y %H:%M:%S GMT") {
+        return Some(DateTime::from_naive_utc_and_offset(at, Utc));
+    }
+    tracing::warn!(
+        retry_after = raw,
+        "provider Retry-After header is neither a delay nor an HTTP-date"
+    );
+    None
+}
+
+/// One hydrated OpenLibrary author name and when it stops being trusted.
+struct CachedAuthorName {
+    name: String,
+    expires_at: Instant,
+}
+
+/// What a hydration publishes to every caller waiting on the same key.
+type HydrationResult = Result<String, ProviderFetchError>;
+
+/// The cache and the set of hydrations currently in flight, guarded together so
+/// a caller decides "serve, join, or lead" in one atomic step.
+struct HydrationState {
+    names: LruCache<String, CachedAuthorName>,
+    flights: HashMap<String, broadcast::Sender<HydrationResult>>,
+}
+
+impl HydrationState {
+    /// A cached name that has not expired. An expired entry is dropped here so
+    /// it cannot be served and cannot hold capacity.
+    fn fresh(&mut self, key: &str) -> Option<String> {
+        let hit = self
+            .names
+            .get(key)
+            .map(|entry| (entry.name.clone(), entry.expires_at));
+        match hit {
+            Some((name, expires_at)) if expires_at > Instant::now() => Some(name),
+            Some(_) => {
+                self.names.pop(key);
+                None
+            }
+            None => None,
+        }
+    }
+}
+
+/// Names for OpenLibrary author keys, fetched at most once per key while the
+/// name stays fresh.
+///
+/// An OpenLibrary work record credits its authors by key and often carries no
+/// name, and one author is credited on many works — so the naive adapter turns
+/// one sweep into hundreds of `/authors/<key>.json` round-trips, exactly the
+/// pattern OpenLibrary names as bad citizenship. Three things prevent that: a
+/// positive TTL cache, same-key coalescing so concurrent lookups of one key
+/// make one request, and a small in-flight cap so a sweep never has more than
+/// two hydrations outstanding on the shared bucket.
+///
+/// Only validated names are cached. A failure, an empty name, and a malformed
+/// record are all eligible for a real retry — durable absence must never be
+/// manufactured from a transient answer.
+pub struct OpenLibraryAuthorHydrator {
+    state: Mutex<HydrationState>,
+    in_flight: Semaphore,
+}
+
+impl Default for OpenLibraryAuthorHydrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Removes this caller's flight registration however the caller leaves — including
+/// a cancelled sweep. Without it a dropped leader would strand every waiter on a
+/// hydration that will never publish.
+struct FlightGuard<'a> {
+    hydrator: &'a OpenLibraryAuthorHydrator,
+    key: Option<String>,
+}
+
+impl FlightGuard<'_> {
+    /// The leader retired the flight itself, under the same lock that published
+    /// the name; there is nothing left to clean up.
+    fn disarm(&mut self) {
+        self.key = None;
+    }
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.hydrator.lock_state().flights.remove(&key);
+        }
+    }
+}
+
+impl OpenLibraryAuthorHydrator {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(HydrationState {
+                names: LruCache::new(
+                    NonZeroUsize::new(OL_AUTHOR_NAME_CACHE_CAPACITY)
+                        .expect("hydration cache capacity is a nonzero constant"),
+                ),
+                flights: HashMap::new(),
+            }),
+            in_flight: Semaphore::new(OL_HYDRATION_MAX_IN_FLIGHT),
+        }
+    }
+
+    /// The lock is only ever held across map and cache operations, never across
+    /// a request, so a poisoned lock carries no half-written state.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HydrationState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The credited name for one canonical OpenLibrary author key.
+    pub(crate) async fn name_for_key<F: HttpFetcher>(
+        &self,
+        fetcher: &F,
+        author_key: &OpenLibraryAuthorKey,
+        priority: RequestPriority,
+    ) -> HydrationResult {
+        let key = author_key.as_str();
+        loop {
+            let leader = {
+                let mut state = self.lock_state();
+                if let Some(name) = state.fresh(key) {
+                    return Ok(name);
+                }
+                match state.flights.get(key) {
+                    Some(sender) => Err(sender.subscribe()),
+                    None => {
+                        let (sender, _) = broadcast::channel(1);
+                        state.flights.insert(key.to_string(), sender.clone());
+                        Ok(sender)
+                    }
+                }
+            };
+
+            let sender = match leader {
+                Ok(sender) => sender,
+                Err(mut waiting) => match waiting.recv().await {
+                    Ok(result) => return result,
+                    // The leader left without publishing (a cancelled sweep).
+                    // Compete to lead the next attempt rather than reporting a
+                    // failure the provider never gave.
+                    Err(_) => continue,
+                },
+            };
+
+            let mut flight = FlightGuard {
+                hydrator: self,
+                key: Some(key.to_string()),
+            };
+            let outcome = {
+                let _permit = self
+                    .in_flight
+                    .acquire()
+                    .await
+                    .expect("hydration semaphore is never closed");
+                fetch_author_name(fetcher, key, priority).await
+            };
+
+            {
+                let mut state = self.lock_state();
+                if let Ok(name) = &outcome {
+                    state.names.put(
+                        key.to_string(),
+                        CachedAuthorName {
+                            name: name.clone(),
+                            expires_at: Instant::now() + OL_AUTHOR_NAME_TTL,
+                        },
+                    );
+                }
+                state.flights.remove(key);
+            }
+            flight.disarm();
+            // Fails only when every waiter has gone; the result is this
+            // caller's regardless.
+            let _ = sender.send(outcome.clone());
+            return outcome;
+        }
+    }
+}
+
+/// One keyed OpenLibrary author record, read for its credited name.
+async fn fetch_author_name<F: HttpFetcher>(
+    fetcher: &F,
+    author_key: &str,
+    priority: RequestPriority,
+) -> Result<String, ProviderFetchError> {
+    let record = fetch_ol_json(
+        fetcher,
+        &format!("https://openlibrary.org/authors/{author_key}.json"),
+        OL_RECORD_TIMEOUT,
+        OL_RECORD_MAX_BODY,
+        priority,
+    )
+    .await?;
+    record
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            tracing::warn!(author_key, "OpenLibrary author record carries no name");
+            ProviderFetchError::Permanent(format!(
+                "OpenLibrary author {author_key} record carries no name"
+            ))
+        })
 }
 
 impl<F: HttpFetcher> GoodreadsClient<F> {
@@ -447,4 +732,850 @@ fn is_retryable_hardcover_failure(detail: &str) -> bool {
         .strip_prefix("HTTP ")
         .and_then(|status| status.trim().parse::<u16>().ok())
         .is_some_and(|status| status == 429 || (500..600).contains(&status))
+}
+
+/// OpenLibrary authors whose name matches `query`.
+///
+/// The one author-name search implementation: the interactive add-author door
+/// and the background linking road both come through here, differing only in
+/// the priority they hand the shared queue. Candidates are evidence for a
+/// person to read — this never mints a route and never writes state.
+pub async fn open_library_author_search<F: HttpFetcher>(
+    fetcher: &F,
+    query: &str,
+    limit: u32,
+    priority: RequestPriority,
+) -> Result<Vec<OpenLibraryAuthorCandidate>, ProviderFetchError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+    let url = format!(
+        "https://openlibrary.org/search/authors.json?q={}&limit={limit}",
+        urlencoding::encode(trimmed)
+    );
+    let payload = fetch_ol_json(
+        fetcher,
+        &url,
+        OL_AUTHOR_SEARCH_TIMEOUT,
+        OL_AUTHOR_SEARCH_MAX_BODY,
+        priority,
+    )
+    .await?;
+
+    let Some(docs) = payload.get("docs").and_then(|value| value.as_array()) else {
+        tracing::warn!(
+            query = trimmed,
+            "OpenLibrary author search carries no docs array"
+        );
+        return Err(ProviderFetchError::Permanent(
+            "OpenLibrary author search response carries no docs array".to_string(),
+        ));
+    };
+
+    let mut candidates = Vec::with_capacity(docs.len());
+    for doc in docs {
+        match parse_author_candidate(doc) {
+            Some(candidate) => candidates.push(candidate),
+            None => tracing::warn!(
+                query = trimmed,
+                "OpenLibrary author search document is not a readable author candidate"
+            ),
+        }
+    }
+    // A page of documents none of which is readable is drift, not an author
+    // nobody has heard of. Reporting it as "no candidates" would park the
+    // author with a confident empty answer.
+    if candidates.is_empty() && !docs.is_empty() {
+        return Err(ProviderFetchError::Permanent(
+            "OpenLibrary author search returned only unreadable documents".to_string(),
+        ));
+    }
+    Ok(candidates)
+}
+
+/// One search document as a candidate, or `None` when it cannot be read.
+fn parse_author_candidate(doc: &serde_json::Value) -> Option<OpenLibraryAuthorCandidate> {
+    let raw_key = doc
+        .get("key")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())?;
+    let route_key = match AuthorRouteKey::parse(AuthorProvider::OpenLibrary, raw_key) {
+        Ok(AuthorRouteKey::OpenLibrary(key)) => key,
+        _ => return None,
+    };
+    let name = doc
+        .get("name")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())?
+        .to_string();
+
+    // One spelling family contributes one alias. Deduplicating on the shared
+    // canonical form — including against the primary name — keeps a candidate
+    // from producing several verdict rows that all say the same thing.
+    let mut seen = HashSet::new();
+    seen.insert(alias_fingerprint(&name));
+    let alternate_names = doc
+        .get("alternate_names")
+        .and_then(|value| value.as_array())
+        .map(|aliases| {
+            aliases
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(str::trim)
+                .filter(|alias| !alias.is_empty())
+                .filter(|alias| seen.insert(alias_fingerprint(alias)))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(OpenLibraryAuthorCandidate {
+        route_key,
+        name,
+        alternate_names,
+        top_work: doc
+            .get("top_work")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string),
+        work_count: doc
+            .get("work_count")
+            .and_then(|value| value.as_u64())
+            .and_then(|count| u32::try_from(count).ok()),
+    })
+}
+
+/// What makes two spellings the same alias. The shared canonical author key
+/// where it produces one — a script it cannot canonicalize falls back to the
+/// alias itself, so unrelated non-Latin spellings never collapse together.
+fn alias_fingerprint(alias: &str) -> String {
+    let canonical = canonical_author_key(alias);
+    if canonical.is_empty() {
+        alias.to_lowercase()
+    } else {
+        canonical
+    }
+}
+
+/// One page of an OpenLibrary author's catalog.
+///
+/// The cursor is the offset the next page starts at, so an interrupted walk
+/// resumes exactly where it stopped. A page that reads cleanly and lists
+/// nothing is a successful empty page; a page that cannot be read is an error,
+/// never a catalog with no titles in it.
+pub async fn open_library_catalog_page<F: HttpFetcher>(
+    fetcher: &F,
+    author_route: &OpenLibraryAuthorKey,
+    cursor: Option<&str>,
+    priority: RequestPriority,
+) -> Result<OpenLibraryCatalogPage, ProviderFetchError> {
+    let offset = match cursor {
+        None => 0u32,
+        Some(raw) => raw.trim().parse::<u32>().map_err(|_| {
+            ProviderFetchError::Permanent(format!(
+                "OpenLibrary catalog cursor {raw:?} is not an offset"
+            ))
+        })?,
+    };
+    let url = format!(
+        "https://openlibrary.org/authors/{}/works.json?limit={OL_CATALOG_PAGE_LIMIT}&offset={offset}",
+        author_route.as_str()
+    );
+    let payload = fetch_ol_json(
+        fetcher,
+        &url,
+        OL_CATALOG_TIMEOUT,
+        OL_CATALOG_MAX_BODY,
+        priority,
+    )
+    .await?;
+
+    let Some(entries) = payload.get("entries").and_then(|value| value.as_array()) else {
+        tracing::warn!(
+            author_key = author_route.as_str(),
+            "OpenLibrary author works response carries no entries array"
+        );
+        return Err(ProviderFetchError::Permanent(
+            "OpenLibrary author works response carries no entries array".to_string(),
+        ));
+    };
+
+    let mut titles = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry
+            .get("title")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            Some(title) => titles.push(title.to_string()),
+            None => tracing::warn!(
+                author_key = author_route.as_str(),
+                "OpenLibrary catalog entry carries no title"
+            ),
+        }
+    }
+    if titles.is_empty() && !entries.is_empty() {
+        return Err(ProviderFetchError::Permanent(
+            "OpenLibrary author works page carries no readable entry".to_string(),
+        ));
+    }
+
+    // The provider's own `next` link is the authority on whether more exists;
+    // a response without a links object falls back to "a full batch may have
+    // more behind it". An empty page ends the walk either way — a cursor that
+    // did not advance would read the same page forever.
+    let has_next = payload
+        .pointer("/links/next")
+        .and_then(|value| value.as_str())
+        .is_some()
+        || (payload.get("links").is_none() && entries.len() as u32 >= OL_CATALOG_PAGE_LIMIT);
+    let next_cursor =
+        (has_next && !entries.is_empty()).then(|| (offset as usize + entries.len()).to_string());
+
+    Ok(OpenLibraryCatalogPage {
+        titles,
+        next_cursor,
+    })
+}
+
+/// The production [`AuthorProviderGateway`]: the three keyed contributor
+/// adapters plus OpenLibrary author search and catalog paging, behind one
+/// domain trait.
+///
+/// It classifies, it does not decide. Every failure comes back keyed to the one
+/// call that produced it, so the road can park one provider key and keep
+/// walking the rest.
+pub struct AuthorProviderGatewayImpl<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
+    open_library: OpenLibraryClient<F>,
+    goodreads: GoodreadsClient<F>,
+    hardcover: HardcoverClient<F>,
+}
+
+impl<F: HttpFetcher> AuthorProviderGatewayImpl<F> {
+    pub fn new(
+        open_library: OpenLibraryClient<F>,
+        goodreads: GoodreadsClient<F>,
+        hardcover: HardcoverClient<F>,
+    ) -> Self {
+        Self {
+            open_library,
+            goodreads,
+            hardcover,
+        }
+    }
+}
+
+impl<F: HttpFetcher> AuthorProviderGateway for AuthorProviderGatewayImpl<F> {
+    async fn fetch_work_authors(
+        &self,
+        provider: AuthorProvider,
+        work_route: String,
+        priority: RequestPriority,
+    ) -> Result<Vec<ProviderAuthorRef>, AuthorProviderError> {
+        let refs = match provider {
+            AuthorProvider::OpenLibrary => {
+                self.open_library
+                    .fetch_work_authors(work_route, priority)
+                    .await
+            }
+            AuthorProvider::Goodreads => {
+                self.goodreads
+                    .fetch_work_authors(work_route, priority)
+                    .await
+            }
+            AuthorProvider::Hardcover => {
+                self.hardcover
+                    .fetch_work_authors(work_route, priority)
+                    .await
+            }
+        };
+        refs.map_err(map_gateway_error)
+    }
+
+    async fn search_open_library_authors(
+        &self,
+        query: String,
+        limit: u32,
+        priority: RequestPriority,
+    ) -> Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError> {
+        open_library_author_search(self.open_library.fetcher(), &query, limit, priority)
+            .await
+            .map_err(map_gateway_error)
+    }
+
+    async fn fetch_open_library_catalog_page(
+        &self,
+        author_route: OpenLibraryAuthorKey,
+        cursor: Option<String>,
+        priority: RequestPriority,
+    ) -> Result<OpenLibraryCatalogPage, AuthorProviderError> {
+        open_library_catalog_page(
+            self.open_library.fetcher(),
+            &author_route,
+            cursor.as_deref(),
+            priority,
+        )
+        .await
+        .map_err(map_gateway_error)
+    }
+}
+
+/// An adapter failure as the road reads it.
+///
+/// The two local pauses — an open breaker and a full outbound queue — are
+/// retryable with the wait the queue itself reported, so the road parks the key
+/// until then instead of treating a pause as a provider verdict.
+fn map_gateway_error(error: ProviderFetchError) -> AuthorProviderError {
+    match error {
+        ProviderFetchError::NotConfigured => AuthorProviderError::NotConfigured,
+        ProviderFetchError::Retryable {
+            error,
+            retry_not_before,
+        } => AuthorProviderError::Retryable {
+            error,
+            retry_not_before,
+        },
+        ProviderFetchError::Permanent(detail) => AuthorProviderError::Permanent(detail),
+        ProviderFetchError::LayoutDrift(detail) => AuthorProviderError::LayoutDrift(detail),
+        ProviderFetchError::CircuitOpen(retry_after) => AuthorProviderError::Retryable {
+            error: format!(
+                "provider circuit is open for another {}s",
+                retry_after.as_secs()
+            ),
+            retry_not_before: absolute_retry_hint(retry_after),
+        },
+        ProviderFetchError::QueueFull(retry_after) => AuthorProviderError::Retryable {
+            error: format!(
+                "outbound queue is full for another {}s",
+                retry_after.as_secs()
+            ),
+            retry_not_before: absolute_retry_hint(retry_after),
+        },
+        ProviderFetchError::RateLimited => AuthorProviderError::Retryable {
+            error: "provider rate limited this request".to_string(),
+            retry_not_before: None,
+        },
+        ProviderFetchError::Transient => AuthorProviderError::Retryable {
+            error: "provider transport failed transiently".to_string(),
+            retry_not_before: None,
+        },
+        ProviderFetchError::NotFound => {
+            AuthorProviderError::Permanent("provider has no record for this key".to_string())
+        }
+        ProviderFetchError::Other(detail) => AuthorProviderError::Permanent(detail),
+    }
+}
+
+/// A local pause expressed as the absolute time it ends.
+fn absolute_retry_hint(retry_after: Duration) -> Option<DateTime<Utc>> {
+    chrono::Duration::from_std(retry_after)
+        .ok()
+        .map(|wait| Utc::now() + wait)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use livrarr_domain::services::FetchResponse;
+    use livrarr_domain::settings::MetadataConfig;
+
+    use crate::live_config::LiveMetadataConfig;
+    use crate::test_support::{lock_breaker, RecordingHttpFetcher};
+
+    fn ol_key(raw: &str) -> OpenLibraryAuthorKey {
+        match AuthorRouteKey::parse(AuthorProvider::OpenLibrary, raw) {
+            Ok(AuthorRouteKey::OpenLibrary(key)) => key,
+            other => panic!("expected an OpenLibrary author key, got {other:?}"),
+        }
+    }
+
+    fn ok(body: &str) -> Result<FetchResponse, FetchError> {
+        Ok(FetchResponse {
+            status: 200,
+            headers: vec![],
+            body: body.as_bytes().to_vec(),
+        })
+    }
+
+    fn status(status: u16, headers: Vec<(String, String)>) -> Result<FetchResponse, FetchError> {
+        Ok(FetchResponse {
+            status,
+            headers,
+            body: vec![],
+        })
+    }
+
+    fn queued(responses: Vec<Result<FetchResponse, FetchError>>) -> RecordingHttpFetcher {
+        let fetcher = RecordingHttpFetcher::new();
+        for response in responses {
+            fetcher.push_response(response);
+        }
+        fetcher
+    }
+
+    fn metadata_config(hardcover_enabled: bool, token: Option<&str>) -> MetadataConfig {
+        MetadataConfig {
+            hardcover_enabled,
+            hardcover_api_token: token.map(str::to_string),
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: "https://api.audnex.us".to_string(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        }
+    }
+
+    fn gateway(
+        fetcher: RecordingHttpFetcher,
+        config: MetadataConfig,
+    ) -> AuthorProviderGatewayImpl<RecordingHttpFetcher> {
+        let http = livrarr_http::HttpClient::builder()
+            .user_agent("livrarr-author-gateway-test")
+            .build()
+            .expect("test HTTP client");
+        AuthorProviderGatewayImpl::new(
+            OpenLibraryClient::new(fetcher.clone()),
+            GoodreadsClient::new(fetcher.clone(), http, "https://www.goodreads.com"),
+            HardcoverClient::new(fetcher, LiveMetadataConfig::new(config)),
+        )
+    }
+
+    /// A fetcher that suspends once before answering, so two callers of the same
+    /// key are genuinely in flight together. Without the suspension the first
+    /// call would finish before the second was ever polled and the coalescing
+    /// this exists to prove would never be exercised.
+    #[derive(Clone)]
+    struct SuspendingFetcher {
+        inner: RecordingHttpFetcher,
+    }
+
+    impl HttpFetcher for SuspendingFetcher {
+        async fn fetch(
+            &self,
+            request: FetchRequest,
+        ) -> Result<FetchResponse, livrarr_domain::services::FetchError> {
+            tokio::task::yield_now().await;
+            self.inner.fetch(request).await
+        }
+
+        async fn fetch_ssrf_safe(
+            &self,
+            request: FetchRequest,
+        ) -> Result<FetchResponse, livrarr_domain::services::FetchError> {
+            tokio::task::yield_now().await;
+            self.inner.fetch_ssrf_safe(request).await
+        }
+    }
+
+    const WORK_WITHOUT_NAMES: &str = r#"{"authors":[{"author":{"key":"/authors/OL7001A"}}]}"#;
+    const AUTHOR_RECORD: &str = r#"{"name":"Hydrated Name"}"#;
+
+    /// A work record that credits a contributor by key alone is hydrated once,
+    /// and a second work crediting the same person is served from the cache.
+    #[tokio::test]
+    async fn hydration_fetches_one_author_key_once_across_works() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![
+            ok(WORK_WITHOUT_NAMES),
+            ok(AUTHOR_RECORD),
+            ok(WORK_WITHOUT_NAMES),
+        ]);
+        let client = OpenLibraryClient::new(fetcher.clone());
+
+        let first = client
+            .fetch_work_authors("OL7000W".to_string(), RequestPriority::Low)
+            .await
+            .expect("first work");
+        let second = client
+            .fetch_work_authors("OL7002W".to_string(), RequestPriority::Low)
+            .await
+            .expect("second work");
+
+        assert_eq!(first[0].name, "Hydrated Name");
+        assert_eq!(second[0].name, "Hydrated Name");
+        assert_eq!(
+            fetcher.call_count(),
+            3,
+            "two work records plus one hydration; the second work reuses the cached name"
+        );
+        let requests = fetcher.requests();
+        assert_eq!(
+            requests[1].url,
+            "https://openlibrary.org/authors/OL7001A.json"
+        );
+        assert_eq!(requests[1].rate_bucket, RateBucket::OpenLibrary);
+        assert_eq!(requests[1].priority, RequestPriority::Low);
+    }
+
+    /// Two callers wanting the same key at the same time make one request and
+    /// both receive the leader's answer.
+    #[tokio::test]
+    async fn concurrent_hydration_of_one_key_makes_one_request() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let inner = queued(vec![ok(AUTHOR_RECORD)]);
+        let fetcher = SuspendingFetcher {
+            inner: inner.clone(),
+        };
+        let hydrator = OpenLibraryAuthorHydrator::new();
+        let key = ol_key("OL7001A");
+
+        let (left, right) = tokio::join!(
+            hydrator.name_for_key(&fetcher, &key, RequestPriority::Low),
+            hydrator.name_for_key(&fetcher, &key, RequestPriority::Low),
+        );
+
+        assert_eq!(left.expect("leader"), "Hydrated Name");
+        assert_eq!(right.expect("joiner"), "Hydrated Name");
+        assert_eq!(
+            inner.call_count(),
+            1,
+            "the joiner must not issue its own request"
+        );
+    }
+
+    /// A failure is never remembered as an answer: the next pass asks again and
+    /// takes the real name.
+    #[tokio::test]
+    async fn a_failed_hydration_is_not_negatively_cached() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![status(503, vec![]), ok(AUTHOR_RECORD)]);
+        let hydrator = OpenLibraryAuthorHydrator::new();
+        let key = ol_key("OL7001A");
+
+        let failed = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await;
+        assert!(
+            matches!(failed, Err(ProviderFetchError::Retryable { .. })),
+            "a 503 is retryable, got {failed:?}"
+        );
+
+        let recovered = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await
+            .expect("retry after a transient failure");
+        assert_eq!(recovered, "Hydrated Name");
+        assert_eq!(fetcher.call_count(), 2);
+    }
+
+    /// An empty name is a failure, not a nameless contributor — a ref with no
+    /// name cannot be guarded.
+    #[tokio::test]
+    async fn an_empty_author_name_is_a_failure_and_is_not_cached() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(r#"{"name":"   "}"#), ok(AUTHOR_RECORD)]);
+        let hydrator = OpenLibraryAuthorHydrator::new();
+        let key = ol_key("OL7001A");
+
+        let empty = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await;
+        assert!(matches!(empty, Err(ProviderFetchError::Permanent(_))));
+
+        let named = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await
+            .expect("a later valid record");
+        assert_eq!(named, "Hydrated Name");
+        assert_eq!(fetcher.call_count(), 2);
+    }
+
+    /// A cached name stops being served once its TTL has passed.
+    #[tokio::test]
+    async fn a_cached_name_expires_and_is_fetched_again() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(AUTHOR_RECORD), ok(r#"{"name":"Renamed"}"#)]);
+        let hydrator = OpenLibraryAuthorHydrator::new();
+        let key = ol_key("OL7001A");
+
+        tokio::time::pause();
+        let first = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await
+            .expect("first hydration");
+        let cached = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await
+            .expect("cached hydration");
+        assert_eq!(first, "Hydrated Name");
+        assert_eq!(cached, "Hydrated Name");
+        assert_eq!(fetcher.call_count(), 1);
+
+        tokio::time::advance(OL_AUTHOR_NAME_TTL + Duration::from_secs(1)).await;
+        let refreshed = hydrator
+            .name_for_key(&fetcher, &key, RequestPriority::Low)
+            .await
+            .expect("hydration after expiry");
+        assert_eq!(refreshed, "Renamed");
+        assert_eq!(fetcher.call_count(), 2);
+    }
+
+    const SEARCH_RESPONSE: &str = r#"{"numFound":1,"docs":[{
+        "key":"OL7100A",
+        "name":"Ursula K. Le Guin",
+        "alternate_names":["Ursula K. Le Guin","Ursula Le Guin","","アーシュラ・K・ル・グイン"],
+        "top_work":"The Left Hand of Darkness",
+        "work_count":265
+    }]}"#;
+
+    /// Search evidence reaches review whole: aliases in response order, one per
+    /// spelling family, plus the headline work and catalogue size.
+    #[tokio::test]
+    async fn author_search_preserves_distinct_aliases_and_top_work() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(SEARCH_RESPONSE)]);
+
+        let candidates =
+            open_library_author_search(&fetcher, "Ursula K. Le Guin", 10, RequestPriority::Low)
+                .await
+                .expect("author search");
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert_eq!(candidate.route_key.as_str(), "OL7100A");
+        assert_eq!(candidate.name, "Ursula K. Le Guin");
+        assert_eq!(
+            candidate.alternate_names,
+            ["Ursula Le Guin", "アーシュラ・K・ル・グイン"],
+            "the primary name's own spelling and blanks contribute no alias"
+        );
+        assert_eq!(
+            candidate.top_work.as_deref(),
+            Some("The Left Hand of Darkness")
+        );
+        assert_eq!(candidate.work_count, Some(265));
+
+        let requests = fetcher.requests();
+        assert_eq!(requests[0].rate_bucket, RateBucket::OpenLibrary);
+        assert_eq!(requests[0].priority, RequestPriority::Low);
+        assert!(requests[0].url.contains("search/authors.json"));
+        assert!(requests[0].url.contains("limit=10"));
+    }
+
+    /// A page of documents none of which is readable is drift, not an author
+    /// nobody has heard of.
+    #[tokio::test]
+    async fn author_search_reports_unreadable_documents_rather_than_no_candidates() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(r#"{"docs":[{"nope":1},{"key":"not-a-key"}]}"#)]);
+
+        let outcome =
+            open_library_author_search(&fetcher, "Someone", 10, RequestPriority::Low).await;
+        assert!(
+            matches!(outcome, Err(ProviderFetchError::Permanent(_))),
+            "got {outcome:?}"
+        );
+    }
+
+    /// A genuinely empty result set is a successful empty answer.
+    #[tokio::test]
+    async fn author_search_returns_an_empty_result_set_as_success() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(r#"{"numFound":0,"docs":[]}"#)]);
+
+        let candidates =
+            open_library_author_search(&fetcher, "Nobody At All", 10, RequestPriority::Low)
+                .await
+                .expect("empty search is a success");
+        assert!(candidates.is_empty());
+    }
+
+    /// The catalog walk carries its own cursor forward, and a readable page
+    /// listing nothing ends it without ever looking like a failure.
+    #[tokio::test]
+    async fn catalog_paging_carries_the_cursor_and_ends_on_an_empty_page() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![
+            ok(
+                r#"{"links":{"next":"/authors/OL7100A/works.json?limit=100&offset=100"},
+                   "size":102,"entries":[{"title":"First"},{"title":"Second"}]}"#,
+            ),
+            ok(r#"{"links":{"self":"/authors/OL7100A/works.json"},"size":102,"entries":[]}"#),
+        ]);
+        let key = ol_key("OL7100A");
+
+        let first = open_library_catalog_page(&fetcher, &key, None, RequestPriority::Low)
+            .await
+            .expect("first page");
+        assert_eq!(first.titles, ["First", "Second"]);
+        assert_eq!(first.next_cursor.as_deref(), Some("2"));
+
+        let second = open_library_catalog_page(
+            &fetcher,
+            &key,
+            first.next_cursor.as_deref(),
+            RequestPriority::Low,
+        )
+        .await
+        .expect("empty page is a success");
+        assert!(second.titles.is_empty());
+        assert_eq!(second.next_cursor, None);
+
+        let requests = fetcher.requests();
+        assert!(requests[0].url.contains("offset=0"));
+        assert!(requests[1].url.contains("offset=2"));
+        assert!(requests
+            .iter()
+            .all(|request| request.rate_bucket == RateBucket::OpenLibrary
+                && request.priority == RequestPriority::Low));
+    }
+
+    /// A failed catalog read never becomes a catalog with nothing in it — that
+    /// would read as evidence against a candidate rather than an absence of it.
+    #[tokio::test]
+    async fn a_failed_catalog_read_is_never_an_empty_page() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let key = ol_key("OL7100A");
+
+        let unreadable = queued(vec![ok(r#"{"size":3}"#)]);
+        let drift = open_library_catalog_page(&unreadable, &key, None, RequestPriority::Low).await;
+        assert!(
+            matches!(drift, Err(ProviderFetchError::Permanent(_))),
+            "a response with no entries array is drift, got {drift:?}"
+        );
+
+        let rate_limited = queued(vec![status(
+            429,
+            vec![("Retry-After".to_string(), "120".to_string())],
+        )]);
+        let paused =
+            open_library_catalog_page(&rate_limited, &key, None, RequestPriority::Low).await;
+        match paused {
+            Err(ProviderFetchError::Retryable {
+                retry_not_before, ..
+            }) => {
+                let hint = retry_not_before.expect("Retry-After is preserved as an absolute time");
+                let waited = (hint - Utc::now()).num_seconds();
+                assert!(
+                    (110..=120).contains(&waited),
+                    "expected roughly 120s of wait, got {waited}s"
+                );
+            }
+            other => panic!("expected a retryable pause, got {other:?}"),
+        }
+    }
+
+    /// An HTTP-date `Retry-After` is honoured as well as a delay in seconds.
+    #[test]
+    fn retry_after_reads_both_documented_forms() {
+        let delay = retry_after_hint(&[("retry-after".to_string(), "45".to_string())])
+            .expect("delay seconds");
+        assert!((40..=45).contains(&(delay - Utc::now()).num_seconds()));
+
+        let dated = retry_after_hint(&[(
+            "Retry-After".to_string(),
+            "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+        )])
+        .expect("HTTP-date");
+        assert_eq!(dated.to_rfc3339(), "2015-10-21T07:28:00+00:00");
+
+        assert!(retry_after_hint(&[]).is_none());
+        assert!(
+            retry_after_hint(&[("Retry-After".to_string(), "soonish".to_string())]).is_none(),
+            "an unreadable header costs the hint, not the retry"
+        );
+    }
+
+    /// The gateway dispatches each provider to its own keyed adapter.
+    #[tokio::test]
+    async fn the_gateway_routes_each_provider_to_its_own_adapter() {
+        let _guard = lock_breaker(RateBucket::OpenLibrary).await;
+        let fetcher = queued(vec![ok(
+            r#"{"authors":[{"author":{"key":"/authors/OL7001A"},"name":"Named Inline"}]}"#,
+        )]);
+        let gateway = gateway(fetcher.clone(), metadata_config(false, None));
+
+        let refs = gateway
+            .fetch_work_authors(
+                AuthorProvider::OpenLibrary,
+                "OL7000W".to_string(),
+                RequestPriority::Low,
+            )
+            .await
+            .expect("OpenLibrary dispatch");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "Named Inline");
+        assert!(fetcher.requests()[0]
+            .url
+            .starts_with("https://openlibrary.org/works/"));
+    }
+
+    /// Hardcover with no token is a configuration answer, not a provider
+    /// failure, and it costs no request.
+    #[tokio::test]
+    async fn the_gateway_reports_a_tokenless_hardcover_as_not_configured() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = RecordingHttpFetcher::new();
+        let gateway = gateway(fetcher.clone(), metadata_config(true, None));
+
+        let outcome = gateway
+            .fetch_work_authors(
+                AuthorProvider::Hardcover,
+                "42".to_string(),
+                RequestPriority::Low,
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(AuthorProviderError::NotConfigured)),
+            "got {outcome:?}"
+        );
+        assert_eq!(fetcher.call_count(), 0);
+    }
+
+    /// A Hardcover response whose contributor association has moved is drift,
+    /// never a book nobody wrote.
+    #[tokio::test]
+    async fn the_gateway_reports_an_unreadable_hardcover_association_as_layout_drift() {
+        let _guard = lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = queued(vec![ok(
+            r#"{"data":{"editions":[{"contributions":[{"author":{"name":"No Id"}}]}]}}"#,
+        )]);
+        let gateway = gateway(fetcher, metadata_config(true, Some("token")));
+
+        let outcome = gateway
+            .fetch_work_authors(
+                AuthorProvider::Hardcover,
+                "42".to_string(),
+                RequestPriority::Low,
+            )
+            .await;
+        assert!(
+            matches!(outcome, Err(AuthorProviderError::LayoutDrift(_))),
+            "got {outcome:?}"
+        );
+    }
+
+    /// A local pause — an open breaker or a full queue — reaches the road as a
+    /// retry with the wait the queue itself reported.
+    #[test]
+    fn a_local_pause_maps_to_a_retry_with_its_own_deadline() {
+        let mapped = map_gateway_error(ProviderFetchError::CircuitOpen(Duration::from_secs(90)));
+        match mapped {
+            AuthorProviderError::Retryable {
+                retry_not_before, ..
+            } => {
+                let hint = retry_not_before.expect("a pause knows when it ends");
+                assert!((80..=90).contains(&(hint - Utc::now()).num_seconds()));
+            }
+            other => panic!("expected a retryable pause, got {other:?}"),
+        }
+
+        let queue_full = map_gateway_error(ProviderFetchError::QueueFull(Duration::from_secs(5)));
+        assert!(matches!(
+            queue_full,
+            AuthorProviderError::Retryable {
+                retry_not_before: Some(_),
+                ..
+            }
+        ));
+    }
 }
