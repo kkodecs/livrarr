@@ -1295,6 +1295,32 @@ impl AuthorService for InertAuthorService {
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError> {
         todo!("not exercised by door-gate")
     }
+    async fn rename(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _name: String,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!("not exercised by door-gate")
+    }
+    async fn select_name_variant(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _variant_id: i64,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!("not exercised by door-gate")
+    }
+    async fn set_monitoring(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _monitored: bool,
+        _monitor_new_items: Option<bool>,
+        _monitor_language: Option<String>,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!("not exercised by door-gate")
+    }
 }
 
 #[derive(Clone)]

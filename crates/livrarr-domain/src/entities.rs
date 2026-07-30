@@ -290,6 +290,9 @@ pub enum DbError {
     #[error("conflict: {message}")]
     Conflict { message: String },
 
+    #[error("author-link claim lost")]
+    ClaimLost,
+
     #[error("identity collision: {entity} \"{name}\" (id {id}) already holds this identity")]
     IdentityCollision {
         entity: &'static str,

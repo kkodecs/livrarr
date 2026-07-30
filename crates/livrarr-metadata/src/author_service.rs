@@ -395,7 +395,7 @@ where
         let cached = self.db.get_bibliography(author.id).await.ok().flatten();
 
         if cached.as_ref().is_none_or(|c| c.entries.is_empty()) {
-            let raw_entries = self.fetch_bibliography_entries(&author, user_id).await;
+            let raw_entries = self.fetch_bibliography_entries(user_id, &author).await?;
 
             if !raw_entries.is_empty() {
                 let cleaned = self
@@ -471,6 +471,35 @@ where
     > {
         self.lookup(query, limit).await
     }
+
+    async fn rename(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        name: String,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!()
+    }
+
+    async fn select_name_variant(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        variant_id: i64,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!()
+    }
+
+    async fn set_monitoring(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        monitored: bool,
+        monitor_new_items: Option<bool>,
+        monitor_language: Option<String>,
+    ) -> Result<Author, AuthorServiceError> {
+        todo!()
+    }
 }
 
 // Private helper methods
@@ -525,54 +554,12 @@ where
         Ok(ol_key)
     }
 
-    async fn fetch_bibliography_entries(
+    pub async fn fetch_bibliography_entries(
         &self,
-        author: &Author,
         user_id: UserId,
-    ) -> Vec<livrarr_db::BibliographyEntry> {
-        // "Author's language" for #112 classification: their own monitor
-        // setting if configured, else the install default — same resolution
-        // order as insight #53's dominant_language/suggested_language.
-        let target_language = match &author.monitor_language {
-            Some(lang) => lang.clone(),
-            None => self
-                .db
-                .get_default_language()
-                .await
-                .unwrap_or_else(|_| "en".to_string()),
-        };
-
-        // Try OL first
-        let ol_result = async {
-            let ol_key = match author.ol_key.as_deref() {
-                Some(k) => k.to_string(),
-                None => self.resolve_ol_key(user_id, author).await?,
-            };
-            self.fetch_ol_bibliography(&ol_key, &target_language).await
-        }
-        .await;
-
-        match ol_result {
-            Ok(entries) if !entries.is_empty() => return entries,
-            Ok(_) => {
-                tracing::info!(author = %author.name, "OL bibliography empty, trying GB");
-            }
-            Err(e) => {
-                tracing::warn!(author = %author.name, "OL bibliography failed ({e}), trying GB");
-            }
-        }
-
-        // Fallback to Google Books
-        match self
-            .fetch_gb_bibliography(&author.name, &target_language)
-            .await
-        {
-            Ok(entries) => entries,
-            Err(e) => {
-                tracing::warn!(author = %author.name, "GB bibliography also failed: {e}");
-                vec![]
-            }
-        }
+        author: &Author,
+    ) -> Result<Vec<livrarr_db::BibliographyEntry>, AuthorServiceError> {
+        todo!()
     }
 
     async fn fetch_ol_bibliography(

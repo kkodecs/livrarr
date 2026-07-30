@@ -3,6 +3,7 @@
 //! fetch-and-normalize pipe with no knowledge of enrichment policy, the work
 //! store, or merge logic.
 
+mod author_link;
 pub mod types;
 
 pub mod audible;
@@ -23,6 +24,7 @@ pub mod transport_cache;
 #[cfg(test)]
 mod test_support;
 
+pub use livrarr_domain::OpenLibraryAuthorCandidate;
 pub use types::{NormalizedWorkDetail, ProviderOutcome};
 
 pub use google_books::GoogleBooksClient;

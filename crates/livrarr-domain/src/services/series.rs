@@ -8,6 +8,8 @@ pub enum SeriesServiceError {
     Validation { field: String, message: String },
     #[error("Goodreads unavailable")]
     GoodreadsUnavailable,
+    #[error("missing active Goodreads author route")]
+    MissingGoodreadsRoute,
     #[error("database error: {0}")]
     Db(#[from] DbError),
 }

@@ -36,6 +36,7 @@ pub type LiveAuthorService = livrarr_metadata::author_service::AuthorServiceImpl
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
 >;
+pub use crate::services::author_linking_service::LiveAuthorLinkingService;
 pub type LiveSeriesService = livrarr_metadata::series_service::SeriesServiceImpl<SqliteDb>;
 pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::SeriesQueryServiceImpl<
     SqliteDb,
@@ -146,6 +147,7 @@ pub struct AppState {
 
     // --- Service layer (Phase 4) ---
     pub author_service: Arc<LiveAuthorService>,
+    pub author_link_service: Arc<LiveAuthorLinkingService>,
     pub series_service: Arc<LiveSeriesService>,
     pub series_query_service: Arc<LiveSeriesQueryService>,
     pub work_service: Arc<LiveWorkService>,
@@ -336,18 +338,18 @@ impl livrarr_handlers::accessors::TrustedOriginsRebuilder for TrustedOriginsRebu
 // =============================================================================
 
 use livrarr_handlers::context::{
-    HasAppConfigService, HasAuthService, HasAuthorMonitorWorkflow, HasAuthorService,
-    HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService, HasDataDir,
-    HasDiscoveryService, HasDownloadClientCredentialService, HasDownloadClientSettingsService,
-    HasEmailService, HasEnrichmentWorkflow, HasFileService, HasGrabService, HasHistoryService,
-    HasHmacKey, HasHttpClient, HasHttpFetcher, HasIdentityConflictService, HasIdentityResolver,
-    HasImportIoService, HasImportService, HasImportWorkflow, HasIndexerCredentialService,
-    HasIndexerSettingsService, HasListService, HasLiveConfig, HasLogSurface, HasManualImportScan,
-    HasManualImportService, HasMatchingService, HasNotificationService, HasPreaddCoverService,
-    HasProviderStats, HasQueueService, HasReadarrImportWorkflow, HasReleaseService,
-    HasRemotePathMappingService, HasRootFolderService, HasRssSync, HasRssSyncWorkflow,
-    HasSeriesQueryService, HasSeriesService, HasStartupTime, HasSystem, HasTagService,
-    HasTrustedOrigins, HasWorkService,
+    HasAppConfigService, HasAuthService, HasAuthorLinkService, HasAuthorMonitorWorkflow,
+    HasAuthorService, HasBookmarkService, HasChapterService, HasCoverCache, HasCoverService,
+    HasDataDir, HasDiscoveryService, HasDownloadClientCredentialService,
+    HasDownloadClientSettingsService, HasEmailService, HasEnrichmentWorkflow, HasFileService,
+    HasGrabService, HasHistoryService, HasHmacKey, HasHttpClient, HasHttpFetcher,
+    HasIdentityConflictService, HasIdentityResolver, HasImportIoService, HasImportService,
+    HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService, HasListService,
+    HasLiveConfig, HasLogSurface, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasNotificationService, HasPreaddCoverService, HasProviderStats, HasQueueService,
+    HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService, HasRootFolderService,
+    HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime,
+    HasSystem, HasTagService, HasTrustedOrigins, HasWorkService,
 };
 
 impl HasWorkService for AppState {
@@ -396,6 +398,13 @@ impl HasAuthorService for AppState {
     type AuthorSvc = LiveAuthorService;
     fn author_service(&self) -> &Self::AuthorSvc {
         &self.author_service
+    }
+}
+
+impl HasAuthorLinkService for AppState {
+    type AuthorLinkSvc = LiveAuthorLinkingService;
+    fn author_link_service(&self) -> &Self::AuthorLinkSvc {
+        &self.author_link_service
     }
 }
 

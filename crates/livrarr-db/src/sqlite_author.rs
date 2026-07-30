@@ -592,4 +592,18 @@ impl AuthorDb for SqliteDb {
         .map_err(map_db_err)?;
         rows.into_iter().map(row_to_author).collect()
     }
+
+    async fn list_author_monitor_targets(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<livrarr_domain::AuthorMonitorTarget>, DbError> {
+        todo!()
+    }
+
+    async fn rename_author_and_cascade(
+        &self,
+        request: crate::RenameAuthorDbRequest,
+    ) -> Result<Author, DbError> {
+        todo!()
+    }
 }

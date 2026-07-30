@@ -13,6 +13,7 @@ trait-variant = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 quick-xml = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }

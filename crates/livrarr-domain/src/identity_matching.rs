@@ -101,7 +101,7 @@ pub enum TitleVerdict {
 }
 
 /// Identity-grade comparison of two credited-author lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AuthorVerdict {
     /// At least one unambiguous full-name match. Extra credited names on
     /// either side are non-evidence and never subtract.

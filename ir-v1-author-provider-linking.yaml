@@ -1,0 +1,1304 @@
+metadata:
+  feature: author-provider-linking
+  stage: v1-structural
+  spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
+  version: 3
+
+system_architecture:
+  components:
+    - name: Author linking API and UI
+      description: Author list/detail editing, the Authors section of Review, route actions, and sweep progress.
+      type: React client plus Axum handlers
+    - name: Author linking road
+      description: One evidence gate and the three-tier, resumable route-acquisition workflow.
+      type: in-process application service
+    - name: Author provider gateway
+      description: Paced and cached keyed-work fetches plus OpenLibrary author search/catalog reads.
+      type: in-process provider adapter
+    - name: Author identity store
+      description: User-scoped routes, tombstones, name variants, review candidates, and per-author progress.
+      type: SQLite tables
+    - name: Author linking sweep
+      description: Recurring low-priority job that discovers missing tasks, compares settled-evidence fingerprints, and claims/advances a bounded number of persisted author tasks with leases and cursors.
+      type: Tokio background job
+    - name: Author name-variant observer
+      description: Record-only, infallible observer at enrichment completion arms; captures provider author names including Google Books, marks display ranking dirty, and never writes routes or renames.
+      type: in-process observer
+  connections:
+    - from: Author linking API and UI
+      to: Author linking road
+      protocol: authenticated JSON/HTTP followed by in-process service calls
+      description: Queries state and performs explicit user picks, removals, display choices, merges, and asynchronous re-resolution requests.
+    - from: Author linking sweep
+      to: Author linking road
+      protocol: in-process trait call
+      description: Claims due author rows; provider I/O never runs on an HTTP response path.
+    - from: Author linking road
+      to: Author identity store
+      protocol: sqlx/SQLite transactions
+      description: Persists every transition and cursor at author or provider-key granularity.
+    - from: Author linking road
+      to: Author provider gateway
+      protocol: in-process domain DTOs
+      description: Requests only keyed work records in Tier 1 and OpenLibrary author search/catalog pages in Tier 2.
+    - from: Author name-variant observer
+      to: Author identity store
+      protocol: infallible in-process DB trait call
+      description: Records names already present in provider outcomes; DB failures are warned and never change enrichment success.
+    - from: Author provider gateway
+      to: OpenLibrary
+      protocol: HTTPS through the shared outbound queue
+      description: Existing server user agent, OpenLibrary rate bucket, Low priority for all new road and sweep calls.
+    - from: Author provider gateway
+      to: Goodreads
+      protocol: HTTPS through the shared outbound queue
+      description: Keyed book-page fetch only for route acquisition; the name-based autocomplete is isolated to the read-only legacy metric.
+    - from: Author provider gateway
+      to: Hardcover
+      protocol: GraphQL HTTPS through the shared outbound queue
+      description: Keyed books_by_pk query including contributions.author.id/name; disabled when Hardcover is not configured.
+  deployment:
+    topology: Existing single Livrarr process, existing React bundle, and existing SQLite database; no new service.
+    notes: New flows survive restart from SQLite. Provider work remains bounded and Low priority. No new OpenLibrary user-agent identifier is introduced.
+
+languages:
+  - language: Rust
+    version: edition 2021
+    usage: Domain types, persistence, provider adapters, orchestration, HTTP handlers, job wiring, and tests.
+  - language: TypeScript
+    version: "6.0"
+    usage: Review, Authors, and author-detail UI plus typed API client surfaces.
+  - language: SQL
+    version: SQLite
+    usage: New numbered additive migrations and repository queries.
+
+frameworks:
+  - name: Axum
+    version: "0.8"
+    usage: Authenticated author-linking HTTP endpoints.
+  - name: React
+    version: "19.2"
+    usage: Review Authors section, badges/filters, route panel, rename/display picker, and merge UI.
+  - name: TanStack Query
+    version: "5.96"
+    usage: Server-state queries, invalidation, and progress polling.
+  - name: Tokio
+    version: "1"
+    usage: Recurring job, cancellation, bounded concurrency, and non-blocking provider calls.
+
+approved_libraries:
+  - name: chrono
+    version: "0.4"
+    usage: Route, tombstone, candidate, claim, and progress timestamps.
+  - name: serde
+    version: "1"
+    usage: Domain DTO, HTTP, provider payload, and persisted evidence serialization.
+  - name: sqlx
+    version: "0.8"
+    usage: SQLite migrations, claims, per-author transactions, and repository queries.
+  - name: trait-variant
+    version: "0.1"
+    usage: Send async service, workflow, gateway, and test-stub traits.
+  - name: reqwest
+    version: "0.12"
+    usage: Existing livrarr-http transport only; author linking does not construct an independent client.
+  - name: tokio-util
+    version: "0.7"
+    usage: Existing CancellationToken for the recurring worker.
+  - name: tracing
+    version: '0.1'
+    usage: Existing structured logging for worker, observer, and import diagnostics; never a control-flow mechanism.
+  - name: uuid
+    version: '1'
+    usage: Existing v4 identifier generation for sweep claim tokens.
+  - name: '@tanstack/react-query'
+    version: '5'
+    usage: Existing frontend query cache; Review and Authors mutations invalidate its keys.
+  - name: existing-dependencies-only
+    version: n/a
+    usage: No new library or crate dependency is proposed.
+
+modules:
+  - name: livrarr-domain
+    responsibility: Own canonical author-route vocabulary, author-link states and evidence DTOs, and compile-wall-safe service/workflow/gateway traits.
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-006, REQ-007, REQ-008, REQ-009]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: AuthorProvider
+          fields:
+            - { name: OpenLibrary, type: unit }
+            - { name: Goodreads, type: unit }
+            - { name: Hardcover, type: unit }
+        - kind: newtype
+          name: OpenLibraryAuthorKey
+          fields:
+            - { name: canonical, type: "private String; OL[0-9]+A without URL or /authors/ prefix" }
+        - kind: newtype
+          name: GoodreadsAuthorId
+          fields:
+            - { name: canonical, type: "private u64; positive decimal id" }
+        - kind: newtype
+          name: HardcoverAuthorId
+          fields:
+            - { name: canonical, type: "private u64; positive decimal id" }
+        - kind: enum
+          name: AuthorRouteKey
+          fields:
+            - { name: OpenLibrary, type: OpenLibraryAuthorKey }
+            - { name: Goodreads, type: GoodreadsAuthorId }
+            - { name: Hardcover, type: HardcoverAuthorId }
+        - kind: enum
+          name: AuthorRouteState
+          fields:
+            - { name: Active, type: unit }
+            - { name: Removed, type: unit }
+        - kind: enum
+          name: AuthorRouteProvenance
+          fields:
+            - { name: LegacyUnguarded, type: unit }
+            - { name: Tier1Inherited, type: unit }
+            - { name: ReadarrGuarded, type: unit }
+            - { name: UserPicked, type: unit }
+            - { name: MergeCoalesced, type: unit }
+        - kind: struct
+          name: AuthorRoute
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: key, type: AuthorRouteKey }
+            - { name: state, type: AuthorRouteState }
+            - { name: provenance, type: AuthorRouteProvenance }
+            - { name: evidence_work_id, type: "Option<WorkId>" }
+            - { name: created_at, type: "DateTime<Utc>" }
+            - { name: verified_at, type: "Option<DateTime<Utc>>" }
+            - { name: removed_at, type: "Option<DateTime<Utc>>" }
+        - kind: enum
+          name: AuthorNameSource
+          fields:
+            - { name: User, type: unit }
+            - { name: Goodreads, type: unit }
+            - { name: Hardcover, type: unit }
+            - { name: GoogleBooks, type: unit }
+            - { name: OpenLibrary, type: unit }
+            - { name: Readarr, type: unit }
+            - { name: Import, type: unit }
+            - { name: Legacy, type: unit }
+        - kind: struct
+          name: AuthorNameVariant
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: name, type: String }
+            - { name: source, type: AuthorNameSource }
+            - { name: source_route_id, type: "Option<i64>" }
+            - { name: open_library_role, type: "Option<OpenLibraryNameRole>" }
+            - { name: user_selected_at, type: "Option<DateTime<Utc>>" }
+            - { name: observed_at, type: "DateTime<Utc>" }
+        - kind: enum
+          name: AuthorCandidateCatalogState
+          fields:
+            - { name: Pending, type: unit }
+            - { name: Partial, type: unit }
+            - { name: Retrying, type: unit }
+            - { name: Complete, type: unit }
+            - { name: Unavailable, type: unit }
+        - kind: enum
+          name: OpenLibraryNameRole
+          fields:
+            - { name: Primary, type: unit }
+            - { name: Alias, type: unit }
+        - kind: struct
+          name: AuthorCandidateAlternateNameEvidence
+          fields:
+            - { name: name, type: String }
+            - { name: verdict, type: AuthorVerdict }
+        - kind: enum
+          name: AuthorLinkState
+          fields:
+            - { name: Linked, type: unit }
+            - { name: NeedsReview, type: unit }
+            - { name: Unlinked, type: unit }
+        - kind: enum
+          name: AuthorLinkProgressState
+          fields:
+            - { name: Queued, type: unit }
+            - { name: Running, type: unit }
+            - { name: ParkedNoSettledWork, type: unit }
+            - { name: ParkedNoEvidence, type: unit }
+            - { name: NeedsReview, type: unit }
+            - { name: Linked, type: unit }
+            - { name: RetryableFailure, type: unit }
+        - kind: enum
+          name: AuthorLinkCandidateReason
+          fields:
+            - { name: Tier2NameSearch, type: unit }
+            - { name: NameGuardFailed, type: unit }
+            - { name: ReadarrNameGuardFailed, type: unit }
+            - { name: Tombstoned, type: unit }
+            - { name: LegacyContradiction, type: unit }
+            - { name: OwnershipCollision, type: unit }
+            - { name: InvalidLegacyRoute, type: unit }
+        - kind: enum
+          name: AuthorRouteEvidenceSource
+          fields:
+            - { name: Tier1SettledWork, type: unit }
+            - { name: ReadarrImport, type: unit }
+        - kind: struct
+          name: AuthorRouteEvidence
+          fields:
+            - { name: key, type: AuthorRouteKey }
+            - { name: observed_name, type: String }
+            - { name: evidence_work_id, type: "Option<WorkId>" }
+            - { name: source, type: AuthorRouteEvidenceSource }
+        - kind: opaque
+          name: AgreedAuthorRouteEvidence
+          fields:
+            - { name: evidence, type: "private AuthorRouteEvidence" }
+            - { name: agree_proof, type: "private AuthorNameGuardAgree" }
+          construction: Only guard_author_route can construct this non-Deserialize capability; callers may read evidence through accessors but cannot assert Agree.
+        - kind: opaque
+          name: RejectedAuthorRouteEvidence
+          fields:
+            - { name: evidence, type: "private AuthorRouteEvidence" }
+            - { name: verdict, type: "private AuthorVerdict; Grey, Abstain, or Disagree only" }
+          construction: Only guard_author_route can construct this non-Deserialize value; read-only accessors expose evidence and the actual non-Agree verdict.
+        - kind: enum
+          name: AuthorRouteGuardResult
+          fields:
+            - { name: Agreed, type: AgreedAuthorRouteEvidence }
+            - { name: Rejected, type: RejectedAuthorRouteEvidence }
+        - kind: struct
+          name: ProviderAuthorRef
+          fields:
+            - { name: key, type: AuthorRouteKey }
+            - { name: name, type: String }
+            - { name: role, type: "Option<String>" }
+        - kind: enum
+          name: AuthorLinkTrigger
+          fields:
+            - { name: LegacyBackfill, type: unit }
+            - { name: AuthorCreated, type: unit }
+            - { name: AuthorAdopted, type: unit }
+            - { name: UserReResolve, type: unit }
+            - { name: EvidenceFingerprintChanged, type: unit }
+            - { name: DisplayNameDirty, type: unit }
+            - { name: RetryDue, type: unit }
+        - kind: enum
+          name: AuthorLinkCursor
+          fields:
+            - { name: Tier1, type: "{ key_attempt_id: i64 }" }
+            - { name: Tier2Search, type: unit }
+            - { name: Tier2Catalog, type: "{ candidate: OpenLibraryAuthorKey, page: Option<String> }" }
+        - kind: struct
+          name: AuthorEvidenceFingerprint
+          fields:
+            - { name: settled_work_count, type: u32 }
+            - { name: settled_provider_key_count, type: u32 }
+            - { name: content_hash, type: "String; fixed FNV-1a-128 over sorted (work_id,status,ol,gr,hc) tuples" }
+        - kind: struct
+          name: SettledAuthorWork
+          fields:
+            - { name: work_id, type: WorkId }
+            - { name: title, type: String }
+            - { name: identity_status, type: IdentityStatus }
+            - { name: ol_key, type: "Option<String>" }
+            - { name: gr_key, type: "Option<String>" }
+            - { name: hc_key, type: "Option<String>" }
+        - kind: struct
+          name: SettledWorkProviderKey
+          fields:
+            - { name: work_id, type: WorkId }
+            - { name: provider, type: AuthorProvider }
+            - { name: work_route, type: String }
+        - kind: enum
+          name: AuthorKeyAttemptState
+          fields:
+            - { name: Pending, type: unit }
+            - { name: Running, type: unit }
+            - { name: Succeeded, type: unit }
+            - { name: Retryable, type: unit }
+            - { name: SkippedNotConfigured, type: unit }
+            - { name: SkippedPermanent, type: unit }
+            - { name: ParkedLayoutDrift, type: unit }
+        - kind: enum
+          name: AuthorKeyAttemptOutcome
+          fields:
+            - { name: Succeeded, type: unit }
+            - { name: Retryable, type: "{ error: String, next_attempt_at: DateTime<Utc> }" }
+            - { name: SkippedNotConfigured, type: unit }
+            - { name: SkippedPermanent, type: "{ error: String }" }
+            - { name: ParkedLayoutDrift, type: "{ error: String }" }
+        - kind: struct
+          name: AuthorKeyAttempt
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: evidence_generation, type: i64 }
+            - { name: work_id, type: WorkId }
+            - { name: provider, type: AuthorProvider }
+            - { name: work_route, type: String }
+            - { name: state, type: AuthorKeyAttemptState }
+            - { name: claim_token, type: "Option<Uuid>" }
+            - { name: attempt_count, type: u32 }
+            - { name: next_attempt_at, type: "Option<DateTime<Utc>>" }
+            - { name: last_error, type: "Option<String>" }
+            - { name: updated_at, type: "DateTime<Utc>" }
+        - kind: struct
+          name: AuthorRoadInput
+          fields:
+            - { name: author, type: Author }
+            - { name: active_routes, type: "Vec<AuthorRoute>" }
+            - { name: settled_works, type: "Vec<SettledAuthorWork>" }
+            - { name: name_variants, type: "Vec<AuthorNameVariant>" }
+            - { name: evaluated_fingerprint, type: "Option<AuthorEvidenceFingerprint>" }
+            - { name: live_fingerprint, type: AuthorEvidenceFingerprint }
+            - { name: display_name_generation, type: i64 }
+            - { name: display_name_dirty, type: bool }
+        - kind: struct
+          name: AuthorLinkProgressUpdate
+          fields:
+            - { name: state, type: AuthorLinkProgressState }
+            - { name: tier, type: "Option<u8>" }
+            - { name: cursor, type: "Option<AuthorLinkCursor>" }
+            - { name: evaluated_fingerprint, type: AuthorEvidenceFingerprint }
+            - { name: evidence_generation, type: i64 }
+            - { name: next_attempt_at, type: "DateTime<Utc>" }
+            - { name: last_error, type: "Option<String>" }
+            - { name: display_name_generation, type: i64 }
+            - { name: display_name_dirty, type: bool }
+            - { name: would_have_linked_at_090, type: bool }
+        - kind: enum
+          name: AuthorLinkCandidateStatus
+          fields:
+            - { name: Pending, type: unit }
+            - { name: Dismissed, type: unit }
+            - { name: Picked, type: unit }
+            - { name: Superseded, type: unit }
+        - kind: struct
+          name: OpenLibraryCatalogPage
+          fields:
+            - { name: titles, type: "Vec<String>" }
+            - { name: next_cursor, type: "Option<String>" }
+        - kind: enum
+          name: AuthorProviderError
+          fields:
+            - { name: UnsupportedProvider, type: unit }
+            - { name: NotConfigured, type: unit }
+            - { name: Retryable, type: "{ error: String, retry_not_before: Option<DateTime<Utc>> }" }
+            - { name: Permanent, type: String }
+            - { name: LayoutDrift, type: String }
+        - kind: enum
+          name: AuthorLinkError
+          fields:
+            - { name: NotFound, type: unit }
+            - { name: RouteOwnedByOtherAuthor, type: AuthorId }
+            - { name: InvalidRoute, type: String }
+            - { name: ClaimLost, type: unit }
+            - { name: Database, type: String }
+            - { name: Provider, type: AuthorProviderError }
+        - kind: struct
+          name: AuthorSweepTickSummary
+          fields:
+            - { name: claimed, type: u32 }
+            - { name: evaluated, type: u32 }
+            - { name: unchanged_fingerprint, type: u32 }
+            - { name: failed, type: u32 }
+        - kind: struct
+          name: AuthorCompatibilityProjection
+          fields:
+            - { name: ol_key, type: "Option<String>" }
+            - { name: gr_key, type: "Option<String>" }
+            - { name: hc_key, type: "Option<String>" }
+        - kind: struct
+          name: AuthorMonitorTarget
+          fields:
+            - { name: author, type: Author }
+            - { name: ol_routes, type: "Vec<AuthorRoute>; active OL only, ordered user/validated/legacy then id" }
+        - kind: struct
+          name: ProviderAuthorNameObservation
+          fields:
+            - { name: source, type: AuthorNameSource }
+            - { name: name, type: String }
+        - kind: struct
+          name: AuthorLinkReview
+          fields:
+            - { name: author, type: Author }
+            - { name: link_state, type: AuthorLinkState }
+            - { name: routes, type: "Vec<AuthorRoute>" }
+            - { name: candidates, type: "Vec<AuthorLinkCandidate>" }
+        - kind: struct
+          name: AuthorSweepProgress
+          fields:
+            - { name: total, type: u64 }
+            - { name: completed, type: u64 }
+            - { name: queued, type: u64 }
+            - { name: running, type: u64 }
+            - { name: parked, type: u64 }
+            - { name: needs_review, type: u64 }
+            - { name: retryable_failures, type: u64 }
+            - { name: key_retryable, type: u64 }
+            - { name: key_skipped, type: u64 }
+            - { name: key_layout_drift, type: u64 }
+            - { name: would_have_linked_at_090, type: u64 }
+            - { name: oldest_due_at, type: "Option<DateTime<Utc>>" }
+      functions:
+        - name: guard_author_route
+          inputs:
+            - { name: current_display_names, type: "&[String]" }
+            - { name: provider_ref, type: ProviderAuthorRef }
+            - { name: evidence_work_id, type: "Option<WorkId>" }
+            - { name: source, type: AuthorRouteEvidenceSource }
+          output: "AuthorRouteGuardResult; sole constructor of AgreedAuthorRouteEvidence and sole place that calls canonical author_verdict"
+          errors: []
+        - name: "AuthorLinkService::list_review"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorLinkReview>, AuthorLinkError>"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkService::pick_candidate"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<AuthorRoute, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+        - name: "AuthorLinkService::attach_selected_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: key, type: AuthorRouteKey }
+          output: "Result<AuthorRoute, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+        - name: "AuthorLinkService::dismiss_candidate"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkService::remove_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkService::re_resolve"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorLinkProgress, AuthorLinkError>"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkService::progress"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<AuthorSweepProgress, AuthorLinkError>"
+          errors: [Database]
+        - name: "AuthorLinkWorkflow::enqueue"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: trigger, type: AuthorLinkTrigger }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkWorkflow::submit_evidence"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: evidence, type: AgreedAuthorRouteEvidence }
+          output: "Result<RouteWriteOutcome, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+        - name: "AuthorLinkWorkflow::record_readarr_rejection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: rejected, type: RejectedAuthorRouteEvidence }
+          output: "Result<AuthorLinkCandidate, AuthorLinkError>; accepts only source=ReadarrImport and never writes a route"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkWorkflow::run_due"
+          inputs:
+            - { name: batch_size, type: u32 }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<AuthorSweepTickSummary, AuthorLinkError>; Tier-1 provider errors are converted to durable key outcomes and do not escape or abort sibling authors"
+          errors: [Database]
+        - name: "AuthorProviderGateway::fetch_work_authors"
+          inputs:
+            - { name: provider, type: AuthorProvider }
+            - { name: work_route, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>"
+          errors: [UnsupportedProvider, NotConfigured, Retryable, Permanent, LayoutDrift]
+        - name: "AuthorProviderGateway::search_open_library_authors"
+          inputs:
+            - { name: query, type: String }
+            - { name: limit, type: u32 }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError>"
+          errors: [Retryable, Permanent]
+        - name: "AuthorProviderGateway::fetch_open_library_catalog_page"
+          inputs:
+            - { name: author_route, type: OpenLibraryAuthorKey }
+            - { name: cursor, type: "Option<String>" }
+            - { name: priority, type: RequestPriority }
+          output: "Result<OpenLibraryCatalogPage, AuthorProviderError>"
+          errors: [Retryable, Permanent]
+        - name: "AuthorRouteKey::parse"
+          inputs:
+            - { name: provider, type: AuthorProvider }
+            - { name: raw, type: "&str" }
+          output: "Result<AuthorRouteKey, AuthorLinkError>"
+          errors: [InvalidRoute]
+
+  - name: livrarr-db
+    responsibility: Own all SQL, additive migrations, atomic author-task claims, route/tombstone writes, review persistence, rename cascade, and merge coalescing.
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009]
+    dependencies: [livrarr-domain]
+    public_api:
+      types:
+        - kind: struct
+          name: AuthorLinkClaim
+          fields:
+            - { name: author_id, type: AuthorId }
+            - { name: user_id, type: UserId }
+            - { name: claim_token, type: Uuid }
+            - { name: lease_expires_at, type: "DateTime<Utc>" }
+            - { name: cursor, type: "Option<AuthorLinkCursor>" }
+            - { name: display_name_generation, type: i64 }
+        - kind: struct
+          name: GuardedRouteWrite
+          fields:
+            - { name: claim_token, type: "Option<Uuid>" }
+            - { name: author_id, type: AuthorId }
+            - { name: evidence, type: AgreedAuthorRouteEvidence }
+        - kind: struct
+          name: AuthorRouteBackfillReport
+          fields:
+            - { name: legacy_values, type: u64 }
+            - { name: canonical_routes, type: u64 }
+            - { name: missing_routes, type: u64 }
+            - { name: invalid_values, type: u64 }
+            - { name: missing_progress_rows, type: u64 }
+        - kind: struct
+          name: AuthorProviderCall
+          fields:
+            - { name: provider, type: AuthorProvider }
+            - { name: work_route, type: String }
+            - { name: priority, type: RequestPriority }
+        - kind: struct
+          name: RenameAuthorDbRequest
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: display_name, type: String }
+            - { name: variant_id, type: i64 }
+      functions:
+        - name: "AuthorLinkDb::ensure_enqueued"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: trigger, type: AuthorLinkTrigger }
+          output: "Result<(), DbError>"
+          errors: [NotFound, Constraint]
+        - name: "AuthorLinkDb::ensure_missing_progress_rows"
+          inputs:
+            - { name: limit, type: u32 }
+          output: "Result<u32, DbError>; bounded lazy discovery for any pre-existing author lacking progress"
+          errors: [Database]
+        - name: "AuthorLinkDb::claim_due"
+          inputs:
+            - { name: now, type: "DateTime<Utc>" }
+            - { name: lease_until, type: "DateTime<Utc>" }
+            - { name: limit, type: u32 }
+          output: "Result<Vec<AuthorLinkClaim>, DbError>; lease-free/expired rows qualify when next_attempt_at<=now OR display_name_dirty=1, including otherwise terminal states"
+          errors: [Database]
+        - name: "AuthorLinkDb::load_road_input"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+          output: "Result<AuthorRoadInput, DbError>"
+          errors: [NotFound, ClaimLost]
+        - name: "AuthorLinkDb::compute_evidence_fingerprint"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorEvidenceFingerprint, DbError>; sorted Confirmed/Provisional work tuples only"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkDb::prepare_key_attempts"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: evidence_generation, type: i64 }
+            - { name: keys, type: "Vec<SettledWorkProviderKey>" }
+          output: "Result<Vec<AuthorKeyAttempt>, DbError>; idempotently materialize one row per canonical key tuple, reclaim Running rows owned by an expired prior claim, and claim pending plus due-retryable rows in deterministic order"
+          errors: [ClaimLost, Constraint]
+        - name: "AuthorLinkDb::complete_key_attempt"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: key_attempt_id, type: i64 }
+            - { name: outcome, type: AuthorKeyAttemptOutcome }
+          output: "Result<(), DbError>; token-checked atomic outcome write; completion never rolls back route/candidate commits from this or sibling keys"
+          errors: [NotFound, ClaimLost, Constraint]
+        - name: "AuthorLinkDb::apply_guarded_route"
+          inputs:
+            - { name: write, type: GuardedRouteWrite }
+          output: "Result<RouteWriteOutcome, DbError>"
+          errors: [ClaimLost, Constraint]
+        - name: "AuthorLinkDb::record_candidates"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: candidates, type: "Vec<AuthorLinkCandidate>" }
+          output: "Result<(), DbError>"
+          errors: [ClaimLost, Constraint]
+        - name: "AuthorLinkDb::record_readarr_rejection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: rejected, type: RejectedAuthorRouteEvidence }
+          output: "Result<AuthorLinkCandidate, DbError>; no claim required; idempotently records the Readarr name variant and a current-generation ReadarrNameGuardFailed candidate"
+          errors: [NotFound, Constraint, Database]
+        - name: "AuthorLinkDb::advance_progress"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: update, type: AuthorLinkProgressUpdate }
+          output: "Result<(), DbError>; clearing display_name_dirty is compare-and-set against the claim's display_name_generation, so a concurrent observation remains dirty and immediately due"
+          errors: [ClaimLost]
+        - name: "AuthorLinkDb::pick_candidate_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<AuthorRoute, DbError>"
+          errors: [NotFound, Constraint]
+        - name: "AuthorLinkDb::attach_route_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: key, type: AuthorRouteKey }
+          output: "Result<AuthorRoute, DbError>; explicit user selection only; shares the private user-attach transaction with pick_candidate_as_user"
+          errors: [NotFound, Constraint]
+        - name: "AuthorLinkDb::dismiss_candidate_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<(), DbError>; atomically verify user/current generation/pending status, mark dismissed, and re-derive author progress without changing routes or tombstones"
+          errors: [NotFound, Constraint]
+        - name: "AuthorLinkDb::list_review"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorLinkReview>, DbError>; pending candidates from the current evidence generation only, grouped user-locally in stable author/candidate order"
+          errors: [Database]
+        - name: "AuthorLinkDb::sweep_progress"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<AuthorSweepProgress, DbError>; one user-scoped aggregate over persisted progress and current-generation key-attempt outcomes"
+          errors: [Database]
+        - name: "AuthorLinkDb::remove_route_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: "Result<(), DbError>"
+          errors: [NotFound]
+        - name: "AuthorLinkDb::list_active_routes"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: provider, type: "Option<AuthorProvider>" }
+          output: "Result<Vec<AuthorRoute>, DbError>; state=active only, canonical values, stable provenance-rank/id order"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkDb::has_active_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: provider, type: AuthorProvider }
+          output: "Result<bool, DbError>; EXISTS over active canonical routes"
+          errors: [Database]
+        - name: "AuthorLinkDb::compatibility_projection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorCompatibilityProjection, DbError>; one active route/provider by user-picked, validated, legacy, then lowest id"
+          errors: [NotFound, Database]
+        - name: "AuthorDb::list_author_monitor_targets"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorMonitorTarget>, DbError>; one row-group per monitored author with every active OL route; authors with none excluded"
+          errors: [Database]
+        - name: "AuthorNameVariantDb::record_observed_names"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: observations, type: "&[ProviderAuthorNameObservation]" }
+          output: "Result<u32, DbError>; when at least one distinct variant is inserted, atomically increment display_name_generation, set display_name_dirty=1, and pull next_attempt_at forward to now without disturbing a live lease"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkDb::ingest_legacy_routes"
+          inputs: []
+          output: "Result<AuthorRouteBackfillReport, DbError>; parse every nonempty scalar with AuthorRouteKey before canonical insert"
+          errors: [InvalidRoute, Database]
+        - name: "AuthorLinkDb::verify_cutover_ready"
+          inputs: []
+          output: "Result<AuthorRouteBackfillReport, DbError>; clean iff no missing/invalid route and no missing progress row"
+          errors: [Database]
+        - name: "AuthorDb::rename_author_and_cascade"
+          inputs:
+            - { name: request, type: RenameAuthorDbRequest }
+          output: "Result<Author, DbError>"
+          errors: [NotFound, Constraint]
+        - name: "AuthorDb::merge_authors"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: survivor_id, type: AuthorId }
+            - { name: loser_id, type: AuthorId }
+          output: "Result<AuthorMergeReport, DbError>"
+          errors: [NotFound, CrossUser, Constraint]
+
+  - name: livrarr-external-data
+    responsibility: Road-scoped keyed OL/GR/HC work-to-contributor fetchers; return canonical author refs without widening shared enrichment payloads or scanning unrelated entities.
+    requirements: [REQ-002, REQ-003, REQ-009]
+    dependencies: [livrarr-domain, livrarr-http]
+    public_api:
+      types:
+        - kind: struct
+          name: OpenLibraryAuthorCandidate
+          fields:
+            - { name: route_key, type: OpenLibraryAuthorKey }
+            - { name: name, type: String }
+            - { name: alternate_names, type: "Vec<String>" }
+            - { name: top_work, type: "Option<String>" }
+            - { name: work_count, type: "Option<u32>" }
+      functions:
+        - name: "OpenLibraryClient::fetch_work_authors"
+          inputs:
+            - { name: work_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [Retryable, Permanent]
+        - name: "GoodreadsClient::fetch_work_authors"
+          inputs:
+            - { name: book_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [Retryable, Permanent, LayoutDrift]
+        - name: "HardcoverClient::fetch_work_authors"
+          inputs:
+            - { name: book_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [NotConfigured, Retryable, Permanent, LayoutDrift]
+
+  - name: livrarr-enrichment
+    responsibility: At existing enrich_work provider-completion arms, infallibly record in-hand provider author names (including Google Books) and mark display ranking dirty; never capture contributor IDs, mutate routes/identity, rename, or alter merge success.
+    requirements: [REQ-002]
+    dependencies: [livrarr-domain, livrarr-db]
+    public_api:
+      types: []
+      functions:
+        - name: "AuthorNameVariantObserver::record_observed_author_names"
+          inputs:
+            - { name: db, type: "&(impl AuthorNameVariantDb + WorkDb)" }
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: observations, type: "&[ProviderAuthorNameObservation]; derived only from successful in-hand outcome fields" }
+          output: "() ; warn on DB failure, never propagate"
+          errors: []
+
+  - name: livrarr-metadata
+    responsibility: Implement the one author-linking core, rank/persist observed names, migrate every author consumer to routes, and wire metadata/list/work doors without writing work identity.
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data]
+    public_api:
+      types:
+        - kind: enum
+          name: AuthorNameRankModel
+          fields:
+            - { name: EnglishOrUndetermined, type: unit }
+            - { name: ForeignDominant, type: unit }
+        - kind: struct
+          name: AuthorLinkingServiceImpl
+          fields:
+            - { name: db, type: "D: AuthorLinkDb + AuthorDb + WorkDb" }
+            - { name: gateway, type: "G: AuthorProviderGateway" }
+      functions:
+        - name: author_name_rank_table
+          inputs:
+            - { name: model, type: AuthorNameRankModel }
+          output: "&'static [AuthorNameSource]"
+          errors: []
+        - name: choose_author_display_name
+          inputs:
+            - { name: variants, type: "&[AuthorNameVariant]" }
+            - { name: work_languages, type: "Iterator<Item=Option<&str>>" }
+          output: "Option<AuthorNameVariant>"
+          errors: []
+        - name: "AuthorService::rename"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: name, type: String }
+          output: "Result<Author, AuthorServiceError>"
+          errors: [NotFound, Database]
+        - name: "AuthorService::select_name_variant"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: variant_id, type: i64 }
+          output: "Result<Author, AuthorServiceError>"
+          errors: [NotFound, Database]
+        - name: "AuthorService::set_monitoring"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: monitored, type: bool }
+            - { name: monitor_new_items, type: "Option<bool>" }
+            - { name: monitor_language, type: "Option<String>" }
+          output: "Result<Author, AuthorServiceError>; when enabling, calls has_active_route(OpenLibrary), never inspects Author.ol_key, and if absent returns exactly AuthorServiceError::Validation { field: \"monitored\", message: \"cannot monitor author without OL linkage\" }"
+          errors: [NotFound, Validation, Database]
+        - name: "AuthorMonitorWorkflow::run_monitor"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<MonitorReport, MonitorError>; consumes list_author_monitor_targets, fetches every active OL route, unions per author by canonical OL work key before screening/add/notification, and counts each author/work once"
+          errors: [Database, Provider]
+        - name: "AuthorServiceImpl::fetch_bibliography_entries"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author, type: "&Author" }
+          output: "Result<Vec<BibliographyEntry>, AuthorServiceError>; fetch every active OL route, union by canonical entry ol_key (title/year fallback only when key absent), then use GB fallback only if the union is empty"
+          errors: [NotFound, Provider, Database]
+        - name: "SeriesQueryService::list_author_series"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: raw, type: bool }
+          output: "Result<AuthorSeriesListView, SeriesServiceError>; fetch/cache the union of every active GR route and deduplicate by canonical Goodreads series key before merging DB series"
+          errors: [NotFound, Provider, Database]
+        - name: "SeriesQueryService::refresh_author_series"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorSeriesListView, SeriesServiceError>; invalidate one author-union cache, refetch all active GR routes, and return MissingGoodreadsRoute only when the active set is empty"
+          errors: [NotFound, MissingGoodreadsRoute, Provider, Database]
+        - name: "AuthorResponseAssembler::route_view"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author, type: "&Author" }
+          output: "Result<(Vec<AuthorRoute>, AuthorLinkState, bool, AuthorCompatibilityProjection), AuthorServiceError>; compatibility keys and monitorable derive only from active routes"
+          errors: [Database]
+        - name: "AuthorLinkingServiceImpl::run_author"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+          output: "Result<AuthorLinkProgressUpdate, AuthorLinkError>; a dirty-name phase ranks/cascades locally and clears dirty only after commit; an otherwise unchanged fingerprint performs no provider I/O; Tier 1 persists each provider-key outcome and continues through siblings"
+          errors: [ClaimLost, Database]
+
+  - name: livrarr-handlers
+    responsibility: Validate/authenticate requests, call narrow author/linking traits, map results, and expose no provider or SQL logic.
+    requirements: [REQ-004, REQ-007, REQ-008, REQ-009]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-jobs]
+    public_api:
+      types:
+        - kind: struct
+          name: AuthorResponse
+          fields:
+            - { name: existing_fields, type: unchanged }
+            - { name: routes, type: "Vec<AuthorRouteResponse>" }
+            - { name: name_variants, type: "Vec<AuthorNameVariantResponse>" }
+            - { name: link_state, type: AuthorLinkState }
+            - { name: monitorable, type: bool }
+            - { name: ol_key, type: "Option<String> deprecated compatibility projection" }
+            - { name: gr_key, type: "Option<String> deprecated compatibility projection" }
+            - { name: hc_key, type: "Option<String> deprecated compatibility projection" }
+        - kind: struct
+          name: AuthorRouteResponse
+          fields:
+            - { name: id, type: i64 }
+            - { name: provider, type: AuthorProvider }
+            - { name: value, type: String }
+            - { name: state, type: AuthorRouteState }
+            - { name: provenance, type: AuthorRouteProvenance }
+            - { name: removed_at, type: "Option<DateTime<Utc>>" }
+        - kind: struct
+          name: AuthorNameVariantResponse
+          fields:
+            - { name: id, type: i64 }
+            - { name: name, type: String }
+            - { name: source, type: AuthorNameSource }
+            - { name: selected, type: bool }
+        - kind: struct
+          name: AuthorLinkReviewResponse
+          fields:
+            - { name: author, type: AuthorResponse }
+            - { name: candidates, type: "Vec<AuthorLinkCandidate>" }
+        - kind: struct
+          name: PickAuthorRouteRequest
+          fields:
+            - { name: candidate_id, type: i64 }
+        - kind: struct
+          name: RenameAuthorRequest
+          fields:
+            - { name: name, type: String }
+        - kind: struct
+          name: SelectAuthorNameRequest
+          fields:
+            - { name: variant_id, type: i64 }
+      functions:
+        - name: "GET /api/v1/author-link-review"
+          inputs:
+            - { name: auth, type: AuthContext }
+          output: "Json<Vec<AuthorLinkReviewResponse>>"
+          errors: [Unauthorized, Internal]
+        - name: "POST /api/v1/author-link-review/{candidate_id}/pick"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: candidate_id, type: i64 }
+          output: "Json<AuthorRouteResponse>"
+          errors: [Unauthorized, NotFound, Conflict, Internal]
+        - name: "POST /api/v1/author-link-review/{candidate_id}/dismiss"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: candidate_id, type: i64 }
+          output: StatusCode::NO_CONTENT
+          errors: [Unauthorized, NotFound, Internal]
+        - name: "DELETE /api/v1/author/{author_id}/route/{route_id}"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: StatusCode::NO_CONTENT
+          errors: [Unauthorized, NotFound, Internal]
+        - name: "POST /api/v1/author/{author_id}/resolve"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: author_id, type: AuthorId }
+          output: StatusCode::ACCEPTED
+          errors: [Unauthorized, NotFound, Internal]
+        - name: "PUT /api/v1/author/{author_id}/name"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: request, type: RenameAuthorRequest }
+          output: "Json<AuthorResponse>"
+          errors: [Unauthorized, NotFound, Validation, Internal]
+        - name: "PUT /api/v1/author/{author_id}/display-name"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: request, type: SelectAuthorNameRequest }
+          output: "Json<AuthorResponse>"
+          errors: [Unauthorized, NotFound, Internal]
+        - name: "GET /api/v1/author-link-sweep/progress"
+          inputs:
+            - { name: auth, type: AuthContext }
+          output: "Json<AuthorSweepProgress>"
+          errors: [Unauthorized, Internal]
+
+  - name: livrarr-server
+    responsibility: Compose concrete services/gateways, attach the Readarr guarded GR evidence, register handlers, and run the recurring bounded worker.
+    requirements: [REQ-005, REQ-006]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-external-data, livrarr-enrichment, livrarr-metadata, livrarr-jobs, livrarr-handlers]
+    public_api:
+      types:
+        - kind: struct
+          name: AppState
+          fields:
+            - { name: author_link_service, type: "Arc<LiveAuthorLinkingService>" }
+            - { name: existing_fields, type: unchanged }
+      functions:
+        - name: verify_author_link_cutover_before_serving
+          inputs:
+            - { name: db, type: "&SqliteDb" }
+          output: "Result<AuthorRouteBackfillReport, StartupError>; ingest canonical legacy routes, verify zero missing/invalid values and progress rows, abort startup on any mismatch"
+          errors: [StartupError]
+        - name: author_link_sweep_tick
+          inputs:
+            - { name: state, type: AppState }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<(), String>; registered/enabled only after cutover verification and all route consumers are live"
+          errors: [JobError]
+        - name: readarr_author_route_evidence
+          inputs:
+            - { name: rd_author, type: "&RdAuthor" }
+            - { name: pre_observation_associated_names, type: "&[String]" }
+          output: "Option<AuthorRouteGuardResult>; calls guard_author_route; None only for a missing/empty/invalid id or unusable name; Some preserves both Agreed and Rejected"
+          errors: []
+
+  - name: livrarr-behavioral
+    responsibility: Supply domain-trait stubs and exercise real router, real SqliteDb, real provider adapter seams, all creation doors, restart resume, concurrency, and tombstones.
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-external-data, livrarr-enrichment, livrarr-metadata, livrarr-jobs, livrarr-handlers]
+    public_api:
+      types:
+        - kind: struct
+          name: StubAuthorProviderGateway
+          fields:
+            - { name: keyed_results, type: "Map<(AuthorProvider,String), Vec<ProviderAuthorRef>>" }
+            - { name: ol_search_results, type: "Vec<OpenLibraryAuthorCandidate>" }
+            - { name: ol_catalog_pages, type: "Vec<OpenLibraryCatalogPage>" }
+            - { name: calls, type: "Vec<AuthorProviderCall>" }
+      functions: []
+
+  - name: frontend
+    responsibility: Add the Review Authors section, author badges/filter, route and provenance editor, display-name picker, rename cascade action, sweep progress, and merge door.
+    requirements: [REQ-007, REQ-008, REQ-009]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: AuthorLinkState
+          fields:
+            - { name: linked, type: string }
+            - { name: needs_review, type: string }
+            - { name: unlinked, type: string }
+        - kind: union
+          name: AuthorRouteProvenance
+          fields:
+            - { name: value, type: "'legacy_unguarded' | 'tier1_inherited' | 'readarr_guarded' | 'user_picked' | 'merge_coalesced'" }
+        - kind: interface
+          name: AuthorRoute
+          fields:
+            - { name: id, type: number }
+            - { name: provider, type: "'open_library' | 'goodreads' | 'hardcover'" }
+            - { name: value, type: string }
+            - { name: state, type: "'active' | 'removed'" }
+            - { name: provenance, type: AuthorRouteProvenance }
+            - { name: removedAt, type: "string | null" }
+        - kind: interface
+          name: AuthorLinkReview
+          fields:
+            - { name: author, type: AuthorResponse }
+            - { name: candidates, type: "AuthorLinkCandidate[]" }
+      functions:
+        - name: listAuthorLinkReview
+          inputs: []
+          output: "Promise<AuthorLinkReview[]>"
+          errors: [ApiError]
+        - name: pickAuthorLinkCandidate
+          inputs:
+            - { name: candidateId, type: number }
+          output: "Promise<AuthorRoute>"
+          errors: [ApiError]
+        - name: removeAuthorRoute
+          inputs:
+            - { name: authorId, type: number }
+            - { name: routeId, type: number }
+          output: Promise<void>
+          errors: [ApiError]
+        - name: reResolveAuthor
+          inputs:
+            - { name: authorId, type: number }
+          output: Promise<void>
+          errors: [ApiError]
+
+shared_types:
+  - kind: struct
+    name: AuthorLinkCandidate
+    fields:
+      - { name: id, type: i64 }
+      - { name: author_id, type: AuthorId }
+      - { name: key, type: AuthorRouteKey }
+      - { name: candidate_name, type: String }
+      - { name: reason, type: AuthorLinkCandidateReason }
+      - { name: name_verdict, type: AuthorVerdict }
+      - { name: primary_name_verdict, type: AuthorVerdict }
+      - { name: alternate_name_evidence, type: "Vec<AuthorCandidateAlternateNameEvidence>" }
+      - { name: top_work_preview, type: "Option<String>" }
+      - { name: catalog_evidence_state, type: AuthorCandidateCatalogState }
+      - { name: corroborated_title_count, type: u32 }
+      - { name: settled_work_count, type: u32 }
+      - { name: previously_removed, type: bool }
+      - { name: status, type: AuthorLinkCandidateStatus }
+      - { name: evidence_generation, type: i64 }
+      - { name: observed_at, type: "DateTime<Utc>" }
+  - kind: struct
+    name: AuthorLinkProgress
+    fields:
+      - { name: author_id, type: AuthorId }
+      - { name: user_id, type: UserId }
+      - { name: state, type: AuthorLinkProgressState }
+      - { name: tier, type: "Option<u8>" }
+      - { name: cursor, type: "Option<AuthorLinkCursor>" }
+      - { name: evaluated_fingerprint, type: "Option<AuthorEvidenceFingerprint>" }
+      - { name: evidence_generation, type: i64 }
+      - { name: display_name_generation, type: i64 }
+      - { name: display_name_dirty, type: bool }
+      - { name: attempt_count, type: u32 }
+      - { name: next_attempt_at, type: "DateTime<Utc>" }
+      - { name: lease_token, type: "Option<Uuid>" }
+      - { name: lease_expires_at, type: "Option<DateTime<Utc>>" }
+      - { name: last_error, type: "Option<String>" }
+      - { name: would_have_linked_at_090, type: bool }
+      - { name: updated_at, type: "DateTime<Utc>" }
+  - kind: enum
+    name: RouteWriteOutcome
+    fields:
+      - { name: Attached, type: AuthorRoute }
+      - { name: AlreadyActive, type: AuthorRoute }
+      - { name: LegacyProvenanceUpgraded, type: AuthorRoute }
+      - { name: ParkedTombstoned, type: AuthorLinkCandidate }
+      - { name: ParkedLegacyContradiction, type: AuthorLinkCandidate }
+      - { name: ParkedOwnershipCollision, type: AuthorLinkCandidate }
+      - { name: RejectedByNameGuard, type: AuthorLinkCandidate }
+
+domain_entities:
+  - Author
+  - Work
+  - IdentityStatus
+  - AuthorRoute
+
+amendments:
+  - date: 2026-07-28
+    change: Add AuthorRoute to the canonical entity spine in livrarr-domain.
+    reason: An author route is persisted, user-visible, provenance-bearing Author identity state with an active/removed lifecycle and tombstone invariant. F1 does not pre-generalize the concept; F2 decides whether work routes justify a later generic route amendment.
+  - date: 2026-07-29
+    change: "r4 design-stage amendments (A/B/C), PO-approved. A — Tier-2 candidate evidence: add AuthorCandidateCatalogState, OpenLibraryNameRole, AuthorCandidateAlternateNameEvidence; OpenLibraryAuthorCandidate gains alternate_names; AuthorLinkCandidate gains primary_name_verdict, alternate_name_evidence, top_work_preview, catalog_evidence_state; AuthorNameVariant gains open_library_role. B — rejected Readarr evidence: name the AuthorRouteGuardResult::Rejected payload as the opaque guard-constructed RejectedAuthorRouteEvidence, add AuthorLinkCandidateReason::ReadarrNameGuardFailed, add the claimless AuthorLinkWorkflow/AuthorLinkDb record_readarr_rejection pair, and change readarr_author_route_evidence to take a pre-observation name snapshot and return Option<AuthorRouteGuardResult>. C — retry timing: AuthorProviderError::Retryable carries a structured retry_not_before alongside its message."
+    reason: "The design stage's own P2/P3/P4 rulings (build/design-176/architect/DESIGN-ANSWERS.md) require values the r3 structures cannot represent; the draftsman escalated rather than repairing silently, and the architect chair ruled AMEND on all three (build/design-176/architect/AMENDMENT-RULINGS.md). No new canonical spine entity (all value objects/capabilities), no works-table or settle-road surface, F1/F2 boundary intact. r3 is preserved byte-identical at build/contest-arch-176/architect-1/ir-v1-author-provider-linking.yaml."
+  - date: 2026-07-29
+    change: "r5 design-review fold amendments. F-002: HardcoverClient::fetch_work_authors gains LayoutDrift to its error set. F-006: add AuthorLinkService::attach_selected_route and AuthorLinkDb::attach_route_as_user — the explicit user-sovereign route attach for a UI-selected key that is not a persisted review candidate; it shares one private user-attach transaction with pick_candidate_as_user, so there are two UI entry shapes but one user-sovereign persistence standard."
+    reason: "Design review r1 (xai) F-002 and F-006, both ruled ACCEPT by the architect chair (build/design-176/architect/REVIEW-RULINGS.md). F-002 is conformance to already-ratified contract FP-010, which requires Hardcover Tier-1 to degrade to a key-local NotConfigured skip or LayoutDrift park — the r4 error set could only report Permanent, losing the operator-visible re-resolvable park. F-006 replaces the disguised scalar ol_key write on the interactive add path with an explicit classified user operation, preserving REQ-004's exhaustive user-sovereign/keyed-evidence/road-guarded vocabulary. No new route type, provenance, table, entity, or handler-level SQL."
+
+dependency_graph:
+  - { source: livrarr-http, target: livrarr-domain }
+  - { source: livrarr-db, target: livrarr-domain }
+  - { source: livrarr-matching, target: livrarr-domain }
+  - { source: livrarr-external-data, target: livrarr-domain }
+  - { source: livrarr-external-data, target: livrarr-http }
+  - { source: livrarr-enrichment, target: livrarr-domain }
+  - { source: livrarr-enrichment, target: livrarr-db }
+  - { source: livrarr-metadata, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-http }
+  - { source: livrarr-metadata, target: livrarr-db }
+  - { source: livrarr-metadata, target: livrarr-matching }
+  - { source: livrarr-metadata, target: livrarr-external-data }
+  - { source: livrarr-jobs, target: livrarr-domain }
+  - { source: livrarr-handlers, target: livrarr-domain }
+  - { source: livrarr-handlers, target: livrarr-http }
+  - { source: livrarr-handlers, target: livrarr-jobs }
+  - { source: livrarr-server, target: livrarr-domain }
+  - { source: livrarr-server, target: livrarr-http }
+  - { source: livrarr-server, target: livrarr-db }
+  - { source: livrarr-server, target: livrarr-external-data }
+  - { source: livrarr-server, target: livrarr-enrichment }
+  - { source: livrarr-server, target: livrarr-metadata }
+  - { source: livrarr-server, target: livrarr-jobs }
+  - { source: livrarr-server, target: livrarr-handlers }
+  - { source: livrarr-behavioral, target: livrarr-domain }
+  - { source: livrarr-behavioral, target: livrarr-http }
+  - { source: livrarr-behavioral, target: livrarr-db }
+  - { source: livrarr-behavioral, target: livrarr-external-data }
+  - { source: livrarr-behavioral, target: livrarr-enrichment }
+  - { source: livrarr-behavioral, target: livrarr-metadata }
+  - { source: livrarr-behavioral, target: livrarr-jobs }
+  - { source: livrarr-behavioral, target: livrarr-handlers }
+
+data_flow:
+  sources:
+    - entity: AuthorRoute
+      origin: keyed provider work records
+      description: Tier 1 walks every OL/GR/HC key on Confirmed or Provisional works and accepts only associated contributors whose name reaches author_verdict Agree.
+    - entity: AuthorRoute
+      origin: user-input
+      description: Candidate picks and explicit tombstone re-picks are user-sovereign; a re-pick is the only operation that clears a tombstone.
+    - entity: AuthorRoute
+      origin: Readarr API
+      description: Readarr foreignAuthorId is normalized as a Goodreads author route and still passes the common author-name guard.
+    - entity: AuthorRoute
+      origin: migration
+      description: Existing authors.ol_key/gr_key values are copied as active legacy-unguarded routes without removing or changing the legacy columns.
+    - entity: AuthorNameVariant
+      origin: user-input
+      description: User entry, rename, and display selection are persisted as User variants.
+    - entity: AuthorNameVariant
+      origin: provider/import payload
+      description: The infallible enrichment observer records in-hand provider names including GB; road fetches and every import/creation door record their own associated names. Candidate names remain in review until selected.
+    - entity: AuthorLinkCandidate
+      origin: OpenLibrary author search and catalog
+      description: Tier 2 always parks; separate paced catalog pages provide Same-only title corroboration.
+    - entity: AuthorLinkProgress
+      origin: author creation, re-resolve, migration, fingerprint comparison, and recurring due-time
+      description: create_author atomically ensures a progress row; bounded missing-row discovery repairs prior omissions, a changed settled-evidence fingerprint starts a new evidence generation, and each generation durably materializes one attempt per settled provider key.
+  sinks:
+    - entity: AuthorRoute
+      destination: SQLite author_provider_routes
+      description: Active routes, provenance upgrades, and removed tombstones share one durable row.
+    - entity: AuthorNameVariant
+      destination: SQLite author_name_variants and authors.name
+      description: Variants are retained; the selected display is cascaded through the existing works.author_name/merge_generation mechanism.
+    - entity: AuthorLinkCandidate
+      destination: SQLite author_link_candidates and Review Authors UI
+      description: Unsure, tombstoned, ownership-collision, and legacy-contradiction evidence remains user-visible.
+    - entity: AuthorLinkProgress
+      destination: SQLite author_link_progress and progress API
+      description: Per-author cursor, lease, due time, evidence generation, error, and shadow-metric state plus author_link_key_attempts make the sweep resumable and honest under partial provider failure.
+    - entity: AuthorRoute
+      destination: Author monitor and series/bibliography consumers
+      description: Monitor and bibliography union all active OL routes; series unions all active GR routes; each consumer deduplicates by its provider object key and no consumer reads or falls back to legacy columns.
+  state_machines:
+    - entity: AuthorRoute
+      states: [absent, active_legacy, active_validated, removed]
+      transitions:
+        - { from: absent, to: active_legacy, trigger: numbered legacy ingestion migration }
+        - { from: absent, to: active_validated, trigger: Tier-1 Agree, guarded Readarr evidence, or explicit user pick }
+        - { from: active_legacy, to: active_validated, trigger: same route confirmed by Tier-1 evidence or explicit user pick }
+        - { from: active_legacy, to: removed, trigger: explicit user removal }
+        - { from: active_validated, to: removed, trigger: explicit user removal }
+        - { from: removed, to: active_validated, trigger: explicit user re-pick only }
+    - entity: AuthorLinkCandidate
+      states: [pending, dismissed, picked, superseded]
+      transitions:
+        - { from: pending, to: dismissed, trigger: explicit user dismiss }
+        - { from: pending, to: picked, trigger: explicit user pick }
+        - { from: pending, to: superseded, trigger: fresher evidence generation replaces the review set }
+        - { from: dismissed, to: pending, trigger: new evidence generation or explicit re-resolve }
+    - entity: AuthorLinkProgress
+      states: [queued, running, parked_no_settled_work, parked_no_evidence, needs_review, linked, retryable_failure]
+      transitions:
+        - { from: queued, to: running, trigger: lease-based worker claim }
+        - { from: running, to: linked, trigger: at least one active route and no outstanding contradiction }
+        - { from: running, to: needs_review, trigger: Tier-2 result, failed guard, tombstone, ownership collision, or legacy contradiction }
+        - { from: running, to: parked_no_settled_work, trigger: Tier 3 finds no Confirmed/Provisional work }
+        - { from: running, to: parked_no_evidence, trigger: settled work keys yield no agreeing contributor and Tier 2 yields no candidate }
+        - { from: running, to: retryable_failure, trigger: one or more provider-key retries remain after all currently runnable sibling keys have been attempted }
+        - { from: parked_no_settled_work, to: queued, trigger: recurring due-time after a work may have settled }
+        - { from: parked_no_evidence, to: queued, trigger: recurring due-time or explicit re-resolve }
+        - { from: needs_review, to: queued, trigger: explicit re-resolve or new work evidence }
+        - { from: retryable_failure, to: queued, trigger: persisted backoff expires }
+        - { from: linked, to: queued, trigger: settled-evidence fingerprint changed or display_name_dirty }
+        - { from: parked_no_settled_work, to: queued, trigger: settled-evidence fingerprint changed }
+    - entity: AuthorKeyAttempt
+      states: [pending, running, succeeded, retryable, skipped_not_configured, skipped_permanent, parked_layout_drift]
+      transitions:
+        - { from: pending, to: running, trigger: owning author lease reaches this key }
+        - { from: running, to: succeeded, trigger: provider response is processed and every contributor route/candidate commit completes }
+        - { from: running, to: retryable, trigger: AuthorProviderError::Retryable with persisted key-local backoff }
+        - { from: retryable, to: running, trigger: key-local next_attempt_at expires under a fresh author lease }
+        - { from: running, to: skipped_not_configured, trigger: AuthorProviderError::NotConfigured }
+        - { from: running, to: skipped_permanent, trigger: AuthorProviderError::Permanent }
+        - { from: running, to: parked_layout_drift, trigger: AuthorProviderError::LayoutDrift }
+        - { from: skipped_not_configured, to: pending, trigger: explicit re-resolve or a new evidence generation after configuration changes }
+        - { from: skipped_permanent, to: pending, trigger: explicit re-resolve or a new evidence generation }
+        - { from: parked_layout_drift, to: pending, trigger: explicit re-resolve or a new evidence generation after adapter repair }
+  invariants:
+    - Every automatic route acquisition enters AuthorLinkingCore and reaches apply_guarded_route only as an opaque AgreedAuthorRouteEvidence constructed by guard_author_route; the capability has no public constructor or Deserialize implementation. Grey, Abstain, Disagree, and caller-authored verdicts can never write a route.
+    - Tier 2 never writes a route. Catalog overlap changes ordering/evidence only, and only title_verdict Same increments the count.
+    - Tier 1 reads work identity but never calls work matching and never mutates work identity, CapturedIdentity, or IdentityStatus.
+    - All provider keys on every Confirmed/Provisional work are materialized and walked per evidence generation; Pending, NeedsReview, Conflict, and NotFound works contribute no Tier-1 evidence.
+    - Tier-1 provider errors are key-local. Retryable stores backoff and is revisited after later siblings; NotConfigured and Permanent are terminal skips for that generation; LayoutDrift is a visible key-local park. None rolls back an attached route/candidate or prevents later OL/GR/HC siblings from being processed.
+    - Tier 2 waits only for an outstanding retryable OpenLibrary key. Goodreads and Hardcover retries/skips/layout drift never block Tier 2, a completed OpenLibrary attach, or monitoring eligibility; author-level RetryableFailure is a scheduling summary and never hides active routes.
+    - After a Tier-1 pass, author progress is RetryableFailure when any current-generation key retry remains; otherwise it is NeedsReview for pending candidates, Linked for active routes, or proceeds through Tier 2/Tier 3 to a parked state. Terminal key skips and layout-drift diagnostics alone do not override that derivation.
+    - There is no GR name-search tier. The old GR book-autocomplete comparison is retained only as a post-park, read-only metric and cannot produce candidates or writes.
+    - Author routes are user-scoped, plural per provider, and monotonic under automation; no unique constraint assumes one OL route per person.
+    - Every route value is parsed to AuthorRouteKey before comparison or persistence; uniqueness, ownership, tombstone lookup/clear, migration, merge, review picks, Readarr, and compatibility projections operate on canonical values only.
+    - A removed route row is its own tombstone. Automatic evidence can only create a previously-removed candidate; only a user re-pick reactivates it.
+    - A different route found beside an active legacy-unguarded route of the same provider parks as a legacy contradiction; neither route is automatically removed or replaced.
+    - Linked means at least one active route of any provider. Monitorable means at least one active OpenLibrary route. NeedsReview takes badge precedence over Linked when a contradiction is pending.
+    - 'Author monitoring eligibility is enforced by the server against active OpenLibrary routes and preserves exactly AuthorServiceError::Validation { field: "monitored", message: "cannot monitor author without OL linkage" } for both unlinked and GR/HC-only authors.'
+    - The monitor DB surface returns one target per author with all active OL routes. The workflow unions every route feed by canonical OL work key before screening, notification, or add, so routes do not multiply report counts or actions.
+    - Bibliography unions active OL route results by canonical OL work key; series unions active GR results by canonical Goodreads series key. Compatibility scalar fields are deterministic projections only.
+    - Display ranking is User first, then GR/HC/GB/OL for English-or-undetermined and GB/HC/GR/OL for foreign-dominant; import/legacy names are fallback only. dominant_language ties or absence select English.
+    - Display-name changes update authors.name and works.author_name and increment works.merge_generation, but never write works.normalized_author.
+    - A newly observed distinct name atomically increments display_name_generation and makes the author immediately claimable through display_name_dirty even from a terminal progress state. A dirty-only claim performs the local rank/cascade first, makes no provider call, and does not increment evidence_generation or reset the Tier-1 cursor. It clears dirty only after the cascade commits and only if the generation still equals the claim snapshot; a concurrent observation stays dirty and due.
+    - create_author and its progress-row insert share one transaction; concurrent creation convergence leaves exactly one author and at least one durable task.
+    - A fixed deterministic fingerprint covers every sorted settled work id/status/provider-key tuple. Unchanged fingerprints skip provider I/O; changed fingerprints reset the road cursor/evidence generation and re-enter Tier 1.
+    - New HTTP re-resolution returns Accepted after enqueue; it never waits for OpenLibrary.
+    - New provider calls use the shared queue and existing user-agent profiles; background road calls use RequestPriority::Low.
+    - Legacy key columns remain physically present for additive rollback safety but are frozen after ingestion and are not authoritative for consumers or writes.
+    - Startup does not serve requests unless canonical backfill verification is clean. No post-cutover reader falls back to a legacy scalar, and the recurring worker is enabled only after verification and consumer cutover.
+    - Upgrade acceptance starts from a real migration-077 fixture and exercises monitor, gate, bibliography, series, projections, remove/re-pick, merge, and restart through real SQLite/router doors.
+    - No implementation outside livrarr-db contains SQL, and no handler contains link/matching/provider business logic.

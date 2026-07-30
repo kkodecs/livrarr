@@ -182,6 +182,9 @@ impl From<livrarr_domain::services::SeriesServiceError> for ApiError {
             SeriesServiceError::GoodreadsUnavailable => {
                 ApiError::BadGateway("Goodreads unavailable".into())
             }
+            SeriesServiceError::MissingGoodreadsRoute => {
+                ApiError::Unprocessable("missing active Goodreads author route".into())
+            }
             SeriesServiceError::Db(db_err) => ApiError::Db(db_err),
         }
     }
@@ -661,6 +664,7 @@ fn db_error_to_http(
         DbError::NotFound { .. } => (StatusCode::NOT_FOUND, "not_found", msg, None),
         DbError::Constraint { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::Conflict { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
+        DbError::ClaimLost => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::IdentityCollision { .. } => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::LastAdmin => (StatusCode::CONFLICT, "conflict", msg, None),
         DbError::DataCorruption { .. } => {

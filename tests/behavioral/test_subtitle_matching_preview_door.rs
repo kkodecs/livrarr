@@ -396,6 +396,9 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 llm_http_client.clone(),
             ),
         )),
+        author_link_service: Arc::new(
+            livrarr_server::services::author_linking_service::LiveAuthorLinkingService,
+        ),
         series_service: Arc::new(metadata::series_service::SeriesServiceImpl::new(db.clone())),
         series_query_service: Arc::new(
             metadata::series_query_service::SeriesQueryServiceImpl::new(

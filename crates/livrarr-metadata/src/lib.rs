@@ -11,6 +11,7 @@ pub use livrarr_domain::{
 use std::path::PathBuf;
 use std::time::Duration;
 
+pub mod author_linking;
 pub mod author_service;
 pub mod convergence_service;
 pub mod cover;

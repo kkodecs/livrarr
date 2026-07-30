@@ -14,6 +14,7 @@ use livrarr_domain::{
 };
 use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 
+pub mod author_name_variant_observer;
 pub mod cover_rank;
 pub mod cover_resolution;
 mod merge_engine;
@@ -22,6 +23,7 @@ pub mod provider_queue;
 #[cfg(test)]
 mod provider_queue_tracer_tests;
 
+pub use author_name_variant_observer::AuthorNameVariantObserver;
 pub use merge_engine::{
     build_apply_request, DefaultMergeEngine, MergeEngine, MergeError, MergeInput, MergeOutput,
     PriorityModel,

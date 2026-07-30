@@ -302,6 +302,9 @@ async fn main() {
                 llm_http_client.clone(),
             ),
         )),
+        author_link_service: Arc::new(
+            livrarr_server::services::author_linking_service::LiveAuthorLinkingService,
+        ),
         series_service: Arc::new(livrarr_metadata::series_service::SeriesServiceImpl::new(
             svc_db.clone(),
         )),

@@ -8,6 +8,7 @@
 //! `livrarr_db::CreateWorkDbRequest`, ...) are unchanged.
 
 mod author;
+mod author_link;
 mod bibliography;
 mod bookmarks;
 mod chapters;
@@ -42,6 +43,7 @@ mod user;
 mod work;
 
 pub use author::*;
+pub use author_link::*;
 pub use bibliography::*;
 pub use bookmarks::*;
 pub use chapters::*;

@@ -53,7 +53,7 @@ tracing = "0.1"
 unicode-normalization = "0.1"
 url = "2"
 urlencoding = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Internal crates

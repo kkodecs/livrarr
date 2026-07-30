@@ -20,3 +20,4 @@ libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }

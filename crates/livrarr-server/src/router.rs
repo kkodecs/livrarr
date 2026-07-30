@@ -342,6 +342,39 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/author/{id}/bibliography/refresh",
             post(livrarr_handlers::author::refresh_bibliography::<AppState>),
         )
+        // Author-provider linking
+        .route(
+            "/author-link-review",
+            get(livrarr_handlers::author_link::list_author_link_review::<AppState>),
+        )
+        .route(
+            "/author-link-review/{candidate_id}/pick",
+            post(livrarr_handlers::author_link::pick_author_link_candidate::<AppState>),
+        )
+        .route(
+            "/author-link-review/{candidate_id}/dismiss",
+            post(livrarr_handlers::author_link::dismiss_author_link_candidate::<AppState>),
+        )
+        .route(
+            "/author/{author_id}/route/{route_id}",
+            delete(livrarr_handlers::author_link::remove_author_route::<AppState>),
+        )
+        .route(
+            "/author/{author_id}/resolve",
+            post(livrarr_handlers::author_link::re_resolve_author::<AppState>),
+        )
+        .route(
+            "/author/{author_id}/name",
+            put(livrarr_handlers::author_link::rename_author::<AppState>),
+        )
+        .route(
+            "/author/{author_id}/display-name",
+            put(livrarr_handlers::author_link::select_author_name::<AppState>),
+        )
+        .route(
+            "/author-link-sweep/progress",
+            get(livrarr_handlers::author_link::author_link_sweep_progress::<AppState>),
+        )
         // Series
         .route(
             "/series",
@@ -923,6 +956,9 @@ mod tests {
                     llm_http_client.clone(),
                 ),
             )),
+            author_link_service: Arc::new(
+                crate::services::author_linking_service::LiveAuthorLinkingService,
+            ),
             series_service: Arc::new(m::series_service::SeriesServiceImpl::new(db.clone())),
             series_query_service: Arc::new(m::series_query_service::SeriesQueryServiceImpl::new(
                 db.clone(),

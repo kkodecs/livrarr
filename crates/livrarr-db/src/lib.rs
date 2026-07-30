@@ -27,6 +27,7 @@ pub use api::*;
 pub mod pool;
 pub mod sqlite;
 mod sqlite_author;
+mod sqlite_author_link;
 mod sqlite_bibliography;
 mod sqlite_bookmarks;
 mod sqlite_chapters;

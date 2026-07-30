@@ -1,3 +1,4 @@
+pub mod author_link;
 mod enrichment_types;
 mod entities;
 pub mod history_events;
@@ -19,6 +20,7 @@ pub mod title_cleanup;
 pub mod torznab;
 mod util;
 
+pub use author_link::*;
 pub use enrichment_types::*;
 pub use entities::*;
 pub use infra_config::*;

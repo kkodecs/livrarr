@@ -1,0 +1,328 @@
+metadata:
+  feature: author-provider-linking
+  spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
+  ir_ref: ir-v1-author-provider-linking.yaml
+  version: 3
+
+module_dependency:
+  - id: DEP-001
+    source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-server
+    rationale: Preserve the canonical compile wall. Author handlers bind narrow domain HasAuthorService/HasAuthorLinkService capabilities and contain validation/result mapping only.
+  - id: DEP-002
+    source: livrarr-domain
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-handlers
+      - livrarr-server
+    rationale: AuthorRoute, provider-specific canonical key types, and all author-linking traits/DTOs remain foundation types.
+  - id: DEP-003
+    source: livrarr-external-data
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-handlers
+      - livrarr-server
+    rationale: Provider parsing and transport are substrate. They return contributor evidence and never know persistence or route policy.
+  - id: DEP-004
+    source: "livrarr-metadata::author_linking"
+    forbidden_targets:
+      - livrarr-identity
+      - livrarr-materialize
+      - livrarr-tagwrite
+      - livrarr-download
+      - livrarr-library
+    rationale: The F1 author road reads settled Work state but does not invoke the work identity/settle road, materialization, tagging, download, or file pipelines.
+  - id: DEP-005
+    source: livrarr-jobs
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-external-data
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-handlers
+      - livrarr-server
+    rationale: livrarr-jobs stays a domain-only compile-wall-safe trait crate; the concrete recurring tick remains in the server composition root.
+  - id: DEP-006
+    source: livrarr-enrichment
+    forbidden_targets:
+      - livrarr-identity
+      - livrarr-metadata
+      - livrarr-handlers
+      - livrarr-server
+    rationale: Enrichment's named observer may record provider author-name variants through a DB trait, but cannot capture contributor IDs, write routes, rename authors, or depend back on metadata orchestration.
+
+forbidden_pattern:
+  - id: FP-001
+    pattern: "structural: author monitor eligibility or monitor feed selected by a Goodreads or Hardcover route"
+    description: A GR/HC route must never unlock monitoring; only an active OpenLibrary route is monitorable.
+    severity: P0
+    rationale: ST-001 and REQ-007. The server-side gate and query are authoritative; frontend disabling is not a substitute.
+  - id: FP-002
+    pattern: "structural: monitor eligibility enforced only in frontend code"
+    description: Enabling author monitoring must be rejected server-side when no active OL route exists.
+    severity: P0
+    rationale: ST-001 explicitly forbids frontend-only gating claims.
+  - id: FP-003
+    pattern: "structural: a second direct implementation of OpenLibrary author-name search outside the AuthorProviderGateway"
+    description: Reuse the shipped paced OL name-search plumbing; do not create a parallel author search client.
+    severity: P1
+    rationale: ST-002. Tier 2 changes policy and evidence persistence, not the existence of name-search transport.
+  - id: FP-004
+    pattern: "structural: an author resolve, remove, edit, review, or sweep HTTP handler awaits an OpenLibrary provider response"
+    description: New user actions enqueue and return; the recurring worker owns OL latency.
+    severity: P0
+    rationale: ST-003. Full-library OL work is hours-scale and no new user flow may synchronously wait on it.
+  - id: FP-005
+    pattern: "structural: RequestPriority::Interactive or RequestPriority::Normal on a new author-road or author-sweep provider call"
+    description: Every new unattended author provider call must be Low priority on the shared queue.
+    severity: P1
+    rationale: ST-003 and REQ-006.
+  - id: FP-006
+    pattern: 'RateBucket::OpenLibrary(?s:.){0,240}UserAgentProfile::Custom|UserAgentProfile::Custom(?s:.){0,240}RateBucket::OpenLibrary'
+    description: Do not introduce a new OpenLibrary user-agent string.
+    severity: P0
+    rationale: ST-003. All OL calls use the existing Server profile and contact-bearing identifier.
+  - id: FP-007
+    pattern: "structural: GoogleBooks, Audible, or Audnexus produces an AuthorProvider route value"
+    description: Those providers supply author names only and cannot create author routes.
+    severity: P0
+    rationale: ST-004.
+  - id: FP-008
+    pattern: "structural: a route write treats NormalizedWorkDetail.author_name as an author identifier or assumes contributor IDs were already captured"
+    description: Automatic routes require an associated ProviderAuthorRef added by F1 and the common name guard.
+    severity: P0
+    rationale: ST-004.
+  - id: FP-009
+    pattern: "structural: Goodreads author ID extraction scans arbitrary Apollo legacyId fields instead of following Book.primaryContributorEdge/secondaryContributorEdges or the legacy author href"
+    description: Only contributor entities associated with the selected Book may become GR route evidence.
+    severity: P0
+    rationale: ST-004. Reviewer/user entities in the same Apollo state also carry legacyId.
+  - id: FP-010
+    pattern: "structural: Hardcover Tier-1 support without a contract test for books_by_pk.contributions.author.id/name"
+    description: Hardcover route acquisition must remain pinned to the live-probed GraphQL shape and degrade to a key-local NotConfigured skip or LayoutDrift park when unavailable.
+    severity: P1
+    rationale: ST-004b. The design-stage probe passed; the contract test preserves that established shape rather than assuming it indefinitely.
+  - id: FP-011
+    pattern: 'UNIQUE\s*\(\s*author_id\s*,\s*provider\s*\)'
+    description: Do not enforce one route per provider for one person.
+    severity: P0
+    rationale: ST-005. A person may have multiple OL keys; route identity is (author, provider, route_value).
+  - id: FP-012
+    pattern: "structural: author deduplication or person inequality decided by ol_key/gr_key/hc_key equality or inequality alone"
+    description: Provider key inequality is not person inequality.
+    severity: P0
+    rationale: ST-005.
+  - id: FP-013
+    pattern: "structural: Goodreads name search or book autocomplete used as Tier 1, Tier 2, or Tier 3 route evidence"
+    description: The linking road has no GR name-search tier.
+    severity: P0
+    rationale: ST-006. The sole allowed name-based GR comparison is the isolated post-park would-have-linked-at-0.90 metric, which is read-only.
+  - id: FP-014
+    pattern: "structural: author_similarity result reaches AuthorLinkDb::apply_guarded_route, AuthorLinkWorkflow::submit_evidence, or any legacy key write"
+    description: No production author route write may depend on the old >=0.90 comparator.
+    severity: P0
+    rationale: REQ-004 and AC-005. This kills the predicate at every site, not merely the four known callers.
+  - id: FP-015
+    pattern: "structural: the first OpenLibrary author search result writes or upgrades a route without an explicit user pick"
+    description: Bare-name first-hit adoption and all Tier-2 auto-linking are forbidden.
+    severity: P0
+    rationale: REQ-003, REQ-004, AC-002, and AC-004.
+  - id: FP-016
+    pattern: 'UPDATE\s+works(?s:.){0,500}normalized_author|normalized_author\s*=(?s:.){0,300}(rename_author|display_name|name_variant)'
+    description: Author rename/display selection must never rewrite normalized_author.
+    severity: P0
+    rationale: ST-007 and REQ-008. The proven cascade changes works.author_name and merge_generation only.
+  - id: FP-017
+    pattern: "structural: a new author-rename implementation that does not call the shared rename/display cascade used by merge semantics"
+    description: Do not create a second rename mechanism or omit the tag-resync generation bump.
+    severity: P1
+    rationale: ST-007 forbids treating the cascade as novel plumbing.
+  - id: FP-018
+    pattern: 'INSERT\s+INTO\s+authors'
+    description: Author inserts are permitted only in livrarr-db::sqlite_author and numbered migrations; no door owns author creation SQL.
+    severity: P0
+    rationale: ST-008 and the no-SQL-outside-db rule. Concurrency must converge through the single create gate.
+  - id: FP-019
+    pattern: "structural: create_author commits without atomically ensuring author_link_progress for the returned winner row"
+    description: Every creation race outcome must be linked or durably enqueued.
+    severity: P0
+    rationale: ST-008, REQ-005, and AC-001/AC-011.
+  - id: FP-020
+    pattern: 'NoOpBibliographyTrigger'
+    description: The no-op trigger may appear only under cfg(test); no production construction or field type may survive.
+    severity: P0
+    rationale: REQ-005 and AC-001.
+  - id: FP-021
+    pattern: "structural: INSERT, UPDATE, or DELETE of author_provider_routes outside livrarr-db::sqlite_author_link and its numbered migrations"
+    description: All route state changes pass one repository and its classified guarded/user methods.
+    severity: P0
+    rationale: REQ-001 and REQ-004. This is the mechanical enforcement point for the writer inventory.
+  - id: FP-022
+    pattern: "structural: an automatic caller invokes remove_route_as_user, pick_candidate_as_user, or clears removed_at"
+    description: Automation cannot remove a route or clear a tombstone.
+    severity: P0
+    rationale: REQ-001 and AC-010.
+  - id: FP-023
+    pattern: 'ON\s+CONFLICT(?s:.){0,600}(removed_at\s*=\s*NULL|state\s*=\s*[''"]active[''"])'
+    description: Generic upsert must not reactivate a tombstoned route; only the explicit user-pick transaction may do so.
+    severity: P0
+    rationale: REQ-001 and AC-010.
+  - id: FP-024
+    pattern: "structural: author-linking code calls complete_anchors, merge_missing_anchors, set_identity_confirmed, settle_identity, or writes Work IdentityStatus"
+    description: The F1 author road consumes work identity and never manufactures or mutates it.
+    severity: P0
+    rationale: F1 boundary and REQ-003.
+  - id: FP-025
+    pattern: "structural: livrarr-identity or livrarr-enrichment writes author_provider_routes"
+    description: No settle-road inline inheritance or enrichment-owned identity write is allowed in F1.
+    severity: P0
+    rationale: F1 boundary and the canonical identity/enrichment separation.
+  - id: FP-026
+    pattern: 'ALTER\s+TABLE\s+works|CREATE\s+(UNIQUE\s+)?INDEX(?s:.){0,300}\s+ON\s+works'
+    description: F1 migrations may not change the works schema or uniqueness model.
+    severity: P0
+    rationale: Additive F1 boundary. The authorized rename cascade is data mutation through existing columns, not a schema change.
+  - id: FP-027
+    pattern: "structural: Tier-2 title corroboration increments for TitleVerdict::Grey or any veto/disagreement"
+    description: Only title_verdict Same contributes catalog evidence.
+    severity: P0
+    rationale: REQ-003 and AC-004.
+  - id: FP-028
+    pattern: "structural: a Pending, NeedsReview, Conflict, or NotFound work supplies Tier-1 author evidence"
+    description: Tier 1 accepts only Confirmed and Provisional works.
+    severity: P0
+    rationale: REQ-003 and AC-003/AC-012.
+  - id: FP-029
+    pattern: "structural: Tier 1 stops after the first provider key or first settled work"
+    description: Every OL/GR/HC key on every settled work must be walked.
+    severity: P0
+    rationale: REQ-003 and AC-003.
+  - id: FP-030
+    pattern: "structural: a different agreeing route automatically replaces or removes an active legacy-unguarded route of the same provider"
+    description: Legacy contradictions park with both values visible.
+    severity: P0
+    rationale: REQ-009 and AC-014.
+  - id: FP-031
+    pattern: "structural: new production code writes authors.ol_key, authors.gr_key, or authors.hc_key after the legacy-ingestion migration"
+    description: Legacy columns are frozen compatibility input; active route rows are authoritative.
+    severity: P0
+    rationale: REQ-001 and REQ-009. This removes the bypass family rather than dual-writing two authorities.
+  - id: FP-032
+    pattern: 'updateAuthor\s*\((?s:.){0,400}(olKey|grKey|hcKey)'
+    description: Frontend route fixes and series picks use the dedicated author-route endpoints, not generic author updates.
+    severity: P1
+    rationale: REQ-004 and REQ-008. User-sovereign writes still pass the classified route service.
+  - id: FP-033
+    pattern: "structural: Author link-state equals monitorability or requires an OpenLibrary route"
+    description: Linked is any active provider route; monitorable is active OL specifically.
+    severity: P0
+    rationale: REQ-007 and ST-001.
+  - id: FP-034
+    pattern: "structural: author sweep holds one database transaction open across provider I/O or processes the library as one transaction"
+    description: Claims, network calls, and per-key/per-author commits are separated.
+    severity: P0
+    rationale: REQ-006 resumability and ST-003 pacing.
+  - id: FP-035
+    pattern: "structural: a provider/import/user author name is discarded after being associated with an author"
+    description: Every distinct associated observed name is retained with source; user choice is represented as a User variant.
+    severity: P1
+    rationale: REQ-002.
+  - id: FP-036
+    pattern: "structural: after cutover, a production monitor, monitoring gate, bibliography, series, or API compatibility projection reads authors.ol_key, authors.gr_key, or authors.hc_key, including as a fallback when no active route exists"
+    description: The five changed consumer surfaces read active routes only; frozen columns are limited to legacy ingestion, verification, forensic diagnostics, and old-binary rollback residue.
+    severity: P0
+    rationale: REQ-001/REQ-009 and the reader census. A fallback would silently restore mixed authority.
+  - id: FP-037
+    pattern: "structural: a raw String route value reaches route uniqueness, ownership, tombstone lookup/clear, migration insertion, merge folding, review pick, Readarr attach, or compatibility projection without AuthorRouteKey::parse"
+    description: Persist and compare provider-specific canonical author route values only.
+    severity: P0
+    rationale: A textual alias must not bypass a tombstone, create a duplicate route, or break a consumer.
+  - id: FP-038
+    pattern: "structural: list_author_monitor_targets emits one target per OL route, or AuthorMonitorWorkflow performs add/notification before deduplicating all active-route feeds by canonical OL work key"
+    description: Plural OL routes expand coverage, never author counts or actions.
+    severity: P0
+    rationale: The existing monitor is singular; the F1 cutover must define plural behavior rather than fan out the old loop.
+  - id: FP-039
+    pattern: "structural: bibliography or author-series fetch chooses only one active provider route when multiple active OL or GR routes exist"
+    description: Bibliography and series union all applicable routes and deduplicate by canonical provider object identity.
+    severity: P1
+    rationale: The route ledger is plural at the consumer boundary, not merely in storage.
+  - id: FP-040
+    pattern: "structural: NormalizedWorkDetail, ProviderOutcome<NormalizedWorkDetail>, or the shared enrichment cache gains ProviderAuthorRef or author_refs for F1"
+    description: Contributor capture is road-scoped through keyed gateway DTOs.
+    severity: P0
+    rationale: F1 must not turn every work-enrichment path into an author-route capture path.
+  - id: FP-041
+    pattern: "structural: AuthorNameVariantObserver writes an author route, mutates work identity, renames an author, or propagates an observation DB error into enrichment success/failure"
+    description: The enrichment name observer is record-only and infallible.
+    severity: P0
+    rationale: REQ-002's GB seat is additive and cannot become an identity decision seat.
+  - id: FP-042
+    pattern: "structural: livrarr-server begins accepting requests when verify_author_link_cutover_before_serving reports a missing, invalid, noncanonical, or unqueued legacy author"
+    description: Canonical backfill verification is a startup serving gate.
+    severity: P0
+    rationale: A partial cutover would make migrated authors silently disappear from route consumers.
+  - id: FP-043
+    pattern: "structural: author-link F1 release acceptance without an upgrade test starting from a real migration-077 SQLite fixture and exercising monitor selection, monitor gate, bibliography, series, compatibility projections, remove/re-pick, merge, and restart"
+    description: The correlated cutover is tested through real doors and real SQLite.
+    severity: P0
+    rationale: Mock-only tests cannot establish that old scalar-only databases survive the authority switch.
+  - id: FP-044
+    pattern: "structural: the recurring author-link worker is registered or enabled before canonical backfill verification succeeds and every changed consumer is wired to routes"
+    description: Worker enablement is the final rollout action.
+    severity: P0
+    rationale: New route writes must never race an incomplete consumer cutover.
+  - id: FP-045
+    pattern: "structural: an unchanged settled-evidence fingerprint replays provider I/O, or a changed fingerprint resumes from the prior route/catalog cursor without resetting evidence generation"
+    description: Fingerprints invalidate work; leases and cursors still provide crash recovery within one evidence generation.
+    severity: P1
+    rationale: The graft suppresses unchanged reprocessing without weakening resumability or missing changed evidence.
+  - id: FP-046
+    pattern: "structural: a Tier-1 NotConfigured, LayoutDrift, Retryable, or Permanent provider-key result stops later sibling keys, rolls back an already committed sibling route/candidate, or is represented only by the author-level cursor/error"
+    description: Persist one outcome per provider key and evidence generation. Retryable advances through siblings and retries at key-local backoff; NotConfigured and Permanent skip the generation; LayoutDrift parks only that key. Only outstanding OL retries may defer Tier 2.
+    severity: P0
+    rationale: A single optional provider failure must not stall or erase successful OL/GR/HC evidence, and restart must preserve the exact unfinished key set.
+  - id: FP-047
+    pattern: "structural: candidate dismissal, author-link review listing, or sweep-progress aggregation executes SQL outside livrarr-db or reconstructs persisted state in a handler"
+    description: AuthorLinkDb exposes dismiss_candidate_as_user, list_review, and sweep_progress as user-scoped repository doors; dismissal verifies current generation and cannot alter a route or tombstone.
+    severity: P1
+    rationale: Every promised domain operation needs an implementable DB seam and the compile wall forbids handler SQL.
+  - id: FP-048
+    pattern: "structural: the shared AuthorLinkProgress DTO omits evidence_generation or a review/progress mutation compares candidates without the current generation"
+    description: The domain DTO and every review-state transition carry the persisted evidence generation explicitly.
+    severity: P1
+    rationale: Clients and repository operations must not confuse superseded evidence with the current run.
+  - id: FP-049
+    pattern: 'structural: monitor enable with no active OpenLibrary route returns anything other than AuthorServiceError::Validation { field: "monitored", message: "cannot monitor author without OL linkage" }'
+    description: The route-ledger gate preserves the exact live validation variant, field, and message for unlinked and GR/HC-only authors.
+    severity: P0
+    rationale: Consumer cutover changes the authority queried, not an established API error contract.
+  - id: FP-050
+    pattern: "structural: a newly inserted author name variant sets display_name_dirty without making the progress row immediately claimable, or a dirty-only claim calls a provider, changes evidence_generation/cursor, or clears dirty before the rename cascade commits or without a display-name-generation compare-and-set"
+    description: Observation atomically increments its generation, sets dirty, and pulls due time forward; the worker's local dirty phase is retry-safe, provider-free, and clears the flag only after successful ranking/cascade when no concurrent observation landed.
+    severity: P1
+    rationale: A dirty bit without due/claim semantics can strand display convergence indefinitely.
+  - id: FP-051
+    pattern: "structural: apply_guarded_route accepts raw AuthorRouteEvidence, caller-supplied AuthorVerdict, or an AgreedAuthorRouteEvidence type with a public constructor or Deserialize implementation"
+    description: Only guard_author_route can mint the opaque Agree capability accepted by GuardedRouteWrite; rejected verdicts can reach candidate persistence but never the route repository door.
+    severity: P0
+    rationale: The one-standard rule must be enforced by the type boundary, not by trusting every present and future caller to assert Agree honestly.

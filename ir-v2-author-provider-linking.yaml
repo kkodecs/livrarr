@@ -1,0 +1,2051 @@
+metadata:
+  feature: author-provider-linking
+  stage: v2-operational
+  spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
+  ir_v1_ref: ir-v1-author-provider-linking.yaml
+
+doors:
+  - door: "Add-box work/author path"
+    surface_kind: handler
+    road_entry: "AuthorLinkService::attach_selected_route or guard_author_route plus AuthorLinkWorkflow::enqueue"
+    wiring: "POST work add -> WorkService::add_fast -> shared author create/adopt gate -> an explicitly selected author route uses AuthorLinkService::attach_selected_route; a provider author ref inherited from the selected keyed work uses guard_author_route; AuthorLinkWorkflow::enqueue remains durable in either case"
+    traced: "crates/livrarr-handlers/src/work.rs:171"
+  - door: "Standalone add-author path"
+    surface_kind: handler
+    road_entry: "AuthorLinkService::attach_selected_route plus AuthorLinkWorkflow::enqueue"
+    wiring: "POST author add -> AuthorService::add -> shared author create/adopt gate -> an explicit lookup selection uses AuthorLinkService::attach_selected_route after the durable gate; with no selected route, enqueue only"
+    traced: "crates/livrarr-handlers/src/author.rs:60"
+  - door: "Manual import"
+    surface_kind: handler
+    road_entry: "AuthorLinkService::attach_selected_route or guard_author_route plus AuthorLinkWorkflow::enqueue"
+    wiring: "manual-import handler -> find_or_create_work -> WorkService::add -> shared author create/adopt gate -> an explicitly selected author route uses AuthorLinkService::attach_selected_route; a provider author ref inferred from the mapped/keyed work uses guard_author_route; AuthorLinkWorkflow::enqueue remains durable in either case"
+    traced: "crates/livrarr-handlers/src/manual_import.rs:844"
+  - door: "List import confirm"
+    surface_kind: workflow
+    road_entry: "AuthorLinkWorkflow::enqueue"
+    wiring: "ListService::confirm -> WorkService::add -> shared author create/adopt gate -> real author-link enqueue trigger; no author-route choice exists at this door, and any later work-key inheritance is keyed evidence through guard_author_route"
+    traced: "crates/livrarr-metadata/src/list_service.rs:280"
+  - door: "Series-monitor roster work creation"
+    surface_kind: workflow
+    road_entry: "AuthorLinkWorkflow::enqueue"
+    wiring: "run_series_monitor_worker -> seed_series_monitor -> WorkService::add -> shared author gate -> ensure/re-arm author task; no author-route choice exists at this door, and any later work-key inheritance is keyed evidence through guard_author_route"
+    traced: "crates/livrarr-metadata/src/series_query_service/service.rs:1001"
+  - door: "Readarr import author resolution"
+    surface_kind: workflow
+    road_entry: "guard_author_route then Agreed -> AuthorLinkWorkflow::submit_evidence or Rejected -> AuthorLinkWorkflow::record_readarr_rejection; AuthorLinkWorkflow::enqueue independently"
+    wiring: "process_authors_batch -> shared create/adopt gate -> snapshot associated names before recording the Readarr observation -> treat the same-record foreignAuthorId/name assertion as keyed evidence, not a user pick -> parse GR key -> common guard -> Agreed route core or Rejected claimless failed-guard candidate -> independent durable enqueue"
+    traced: "crates/livrarr-server/src/readarr_import_workflow.rs:1616"
+  - door: "Review Authors list"
+    surface_kind: handler
+    road_entry: "AuthorLinkService::list_review"
+    wiring: "GET author-link-review -> authenticated narrow service -> persisted current-generation review rows"
+    traced: "GET /api/v1/author-link-review"
+  - door: "Review Authors candidate pick"
+    surface_kind: ui-action
+    road_entry: "AuthorLinkDb::pick_candidate_as_user"
+    wiring: "Review Authors pick -> POST candidate pick -> user-sovereign route transaction -> query invalidation"
+    traced: "POST /api/v1/author-link-review/{candidate_id}/pick"
+  - door: "Review Authors candidate dismiss"
+    surface_kind: ui-action
+    road_entry: "AuthorLinkDb::dismiss_candidate_as_user"
+    wiring: "Review Authors dismiss -> POST candidate dismiss -> current-generation dismissal transaction -> progress re-derivation"
+    traced: "POST /api/v1/author-link-review/{candidate_id}/dismiss"
+  - door: "Author rename"
+    surface_kind: ui-action
+    road_entry: "AuthorDb::rename_author_and_cascade"
+    wiring: "author-detail rename -> PUT author name -> AuthorService::rename -> shared display cascade"
+    traced: "PUT /api/v1/author/{author_id}/name"
+  - door: "Author stored-name variant pick"
+    surface_kind: ui-action
+    road_entry: "AuthorDb::rename_author_and_cascade"
+    wiring: "author-detail display pick -> PUT display-name -> select User variant -> shared display cascade"
+    traced: "PUT /api/v1/author/{author_id}/display-name"
+  - door: "Author route removal"
+    surface_kind: ui-action
+    road_entry: "AuthorLinkDb::remove_route_as_user"
+    wiring: "author-detail route remove -> DELETE route -> user-scoped tombstone transaction -> enqueue re-derivation"
+    traced: "DELETE /api/v1/author/{author_id}/route/{route_id}"
+  - door: "Author re-resolution"
+    surface_kind: ui-action
+    road_entry: "AuthorLinkWorkflow::enqueue"
+    wiring: "author-detail re-resolve -> POST resolve -> enqueue UserReResolve -> return 202 without provider wait"
+    traced: "POST /api/v1/author/{author_id}/resolve"
+  - door: "Author merge UI"
+    surface_kind: ui-action
+    road_entry: "AuthorDb::merge_authors"
+    wiring: "author-detail merge action -> existing POST merge handler -> AuthorService::merge -> one DB merge transaction"
+    traced: "crates/livrarr-handlers/src/author.rs:274"
+  - door: "Monitor-enable gate"
+    surface_kind: ui-action
+    road_entry: "AuthorLinkDb::has_active_route"
+    wiring: "author-detail monitored toggle -> author update handler -> server-side active-OL existence check -> unchanged validation result"
+    traced: "crates/livrarr-metadata/src/author_service.rs:208"
+  - door: "Recurring author-link sweep"
+    surface_kind: job
+    road_entry: "AuthorLinkWorkflow::run_due"
+    wiring: "JobRunner interval registration after cutover verification -> author_link_sweep_tick -> bounded durable claims -> run_due"
+    traced: "author_link_sweep_tick"
+  - door: "Author-link sweep progress"
+    surface_kind: handler
+    road_entry: "AuthorLinkService::progress"
+    wiring: "GET sweep progress -> authenticated narrow service -> persisted user aggregate"
+    traced: "GET /api/v1/author-link-sweep/progress"
+  - door: "Enrichment-completion author-name observation"
+    surface_kind: workflow
+    road_entry: "AuthorNameVariantObserver::record_observed_author_names"
+    wiring: "cached-reuse, deferred-background, and normal-merge completion paths -> map names from each successful in-hand NormalizedWorkDetail before its return -> infallible observer -> dirty author task"
+    traced: "crates/livrarr-enrichment/src/lib.rs:730"
+    completion_traces:
+      - "cached reuse result: crates/livrarr-enrichment/src/lib.rs:625"
+      - "deferred background return: crates/livrarr-enrichment/src/lib.rs:707"
+      - "normal merge return: crates/livrarr-enrichment/src/lib.rs:863"
+  - door: "Work evidence change wake-up"
+    surface_kind: database-trigger
+    road_entry: "AuthorLinkTrigger::EvidenceFingerprintChanged"
+    wiring: "work identity/status/key DB commit -> migration 078 trigger -> invalidate stale author claim -> EvidenceFingerprintChanged -> due task"
+    traced: "crates/livrarr-db/src/sqlite_work_identity.rs:157"
+
+author_route_writer_inventory:
+  - site: "Interactive work add/adopt author OL key"
+    source: "crates/livrarr-metadata/src/work_service.rs:2837-2908"
+    classification: "current legacy-scalar writer; selected-work key is keyed evidence, while a separately explicit UI route requires the user-sovereign door"
+    post_f1_fate: "Delete CreateAuthorDbRequest/UpdateAuthorDbRequest route fields; use the atomic shared create/adopt gate, send an explicit UI-selected author route through AuthorLinkService::attach_selected_route, and send inherited keyed-work evidence only through guard_author_route."
+    ac005_assertion: "Mechanical scan rejects ol_key/gr_key/hc_key in generic author create/update requests; real add-path tests prove explicit selection uses the user attach service and keyed-work evidence cannot reach a route without AgreedAuthorRouteEvidence."
+  - site: "Standalone interactive author add OL key"
+    source: "crates/livrarr-metadata/src/author_service.rs:77-184"
+    classification: "current explicit UI selection routed through a legacy scalar writer; user-sovereign after F1"
+    post_f1_fate: "Delete scalar request writes, converge author creation through the atomic shared gate, then pass an explicit lookup selection to AuthorLinkService::attach_selected_route; with no selection, retain enqueue only."
+    ac005_assertion: "Mechanical scan rejects route fields in AddAuthorRequest/CreateAuthorDbRequest; router tests prove an explicit route uses only the classified user operation and a no-key add performs no attach."
+  - site: "Author merge scalar key coalescing"
+    source: "crates/livrarr-db/src/sqlite_author.rs:316-326"
+    classification: "current legacy maintenance writer; F1 route-row merge is a user-sovereign merge consequence"
+    post_f1_fate: "Freeze scalar columns and replace COALESCE scalar writes with AuthorDb::merge_authors route-row move/coalescing, preserving tombstones and strongest provenance."
+    ac005_assertion: "Mechanical scan rejects ol_key/gr_key/hc_key assignments in merge_authors_tx; real merge tests pin route union, provenance rank, tombstone precedence, and unchanged frozen scalars."
+  - site: "Series promotion Goodreads pick"
+    source: "frontend/src/components/SeriesPromoteModals.tsx:85"
+    classification: "current user-sovereign Goodreads pick sent through the generic author update mutation"
+    post_f1_fate: "Delete the generic grKey author update and call AuthorLinkService::attach_selected_route through the dedicated classified user endpoint."
+    ac005_assertion: "Frontend mechanical scan rejects grKey/olKey/hcKey in updateAuthor calls; rendered picker test asserts the dedicated user endpoint and no provider call."
+  - site: "Author-detail Goodreads pick"
+    source: "frontend/src/pages/author-detail/AuthorDetailPage.tsx:1010"
+    classification: "current user-sovereign Goodreads pick sent through the generic author update mutation"
+    post_f1_fate: "Delete the generic grKey author update; use candidate pick when a persisted candidate exists and AuthorLinkService::attach_selected_route through the dedicated classified user endpoint otherwise."
+    ac005_assertion: "Frontend mechanical scan rejects grKey/olKey/hcKey in updateAuthor calls; rendered author picker tests assert only a classified user mutation is invoked."
+  - site: "Readarr batch author import"
+    source: "crates/livrarr-server/src/readarr_import_workflow.rs:1616-1719"
+    classification: "current writer omission: foreign_author_id is not consumed; F1 Goodreads id/name pair is road-guarded keyed evidence"
+    post_f1_fate: "After the atomic create/adopt gate, snapshot associated names, parse foreignAuthorId, call guard_author_route, submit only Agreed evidence, persist Rejected evidence for review, and enqueue independently."
+    ac005_assertion: "Real Readarr batch tests cover Agreed/Rejected/unusable ids, snapshot-before-observe, independent enqueue, and byte-identical route state for every non-Agree result."
+  - site: "Review candidate user pick"
+    source: "crates/livrarr-db/src/sqlite_author.rs:452-548 (current generic scalar route path; dedicated AuthorLinkDb source verified absent before F1)"
+    classification: "user-sovereign"
+    post_f1_fate: "AuthorLinkDb::pick_candidate_as_user remains the candidate-pick entry and delegates canonical ownership/attach/reactivation to the same private attach_route_as_user_tx used by direct selected-route attachment; it writes UserPicked provenance and never writes a legacy scalar."
+    ac005_assertion: "Repository/router tests pin both user entry shapes, user scope, current generation for candidate picks, canonical ownership, exact tombstone reactivation, UserPicked provenance, and zero provider/scalar writes; compile walls exclude automatic callers."
+  - site: "Guarded Tier-1 contributor attach"
+    source: "crates/livrarr-handlers/src/work.rs:305-326 (current automatic writer predecessor; AuthorLinkDb/apply_guarded_route source verified absent before F1)"
+    classification: "road-guarded keyed evidence"
+    post_f1_fate: "Replace the predecessor with guard_author_route -> opaque AgreedAuthorRouteEvidence -> AuthorLinkDb::apply_guarded_route; Rejected evidence parks and cannot route."
+    ac005_assertion: "Compile-wall test proves automatic code cannot construct agreed evidence or call user mutations; real Tier-1 tests assert every Agree attaches independently and every non-Agree leaves scalars/routes unchanged."
+  - site: "Legacy scalar route ingestion"
+    source: "crates/livrarr-db/src/sqlite_author.rs:31-38; crates/livrarr-db/src/sqlite_author.rs:417-427"
+    classification: "legacy-only keyed evidence with LegacyUnguarded provenance"
+    post_f1_fate: "Migration 079 stages every nonempty scalar; startup ingestion canonicalizes into route rows idempotently, then all scalar columns are frozen and route-only consumers are enabled."
+    ac005_assertion: "Migration-077 fixture tests pin idempotent ingestion, invalid-value reporting, provenance upgrade/contradiction, complete route coverage, and no post-cutover scalar mutation."
+  - site: "Work-add Goodreads similarity guesser"
+    source: "crates/livrarr-handlers/src/work.rs:305-326"
+    classification: "forbidden unkeyed automatic guesser"
+    post_f1_fate: "Delete."
+    ac005_assertion: "Mechanical scan rejects production author_similarity results flowing to updateAuthor, submit_evidence, apply_guarded_route, or any scalar route field."
+  - site: "Standalone author-add Goodreads similarity guesser"
+    source: "crates/livrarr-handlers/src/author.rs:118-139"
+    classification: "forbidden unkeyed automatic guesser"
+    post_f1_fate: "Delete."
+    ac005_assertion: "Mechanical scan rejects the >=0.90 mutation block and any replacement that mints guarded evidence from a name-only guess."
+  - site: "Series resolve Goodreads similarity guesser"
+    source: "crates/livrarr-handlers/src/series.rs:118-139"
+    classification: "forbidden unkeyed automatic guesser"
+    post_f1_fate: "Delete the auto-link side effect; candidate discovery may remain read-only."
+    ac005_assertion: "Mechanical scan rejects handler-level route writes and rendered/API tests prove search results remain candidates until explicit selection."
+  - site: "Series service silent Goodreads resolver"
+    source: "crates/livrarr-metadata/src/series_query_service/service.rs:228-259"
+    classification: "forbidden unkeyed automatic guesser"
+    post_f1_fate: "Delete; list/refresh return MissingGoodreadsRoute or the explicit picker state when no active route exists."
+    ac005_assertion: "Mechanical scan rejects silently_resolve_author_key and author_similarity in production route consumers; service tests prove no-route paths perform no scalar write."
+  - site: "Bibliography first-hit OpenLibrary resolver"
+    source: "crates/livrarr-metadata/src/author_service.rs:483-526"
+    classification: "forbidden unkeyed automatic guesser"
+    post_f1_fate: "Delete; bibliography reads the plural active OpenLibrary route union and then uses the existing Google Books fallback."
+    ac005_assertion: "Mechanical scan rejects resolve_ol_key and first-hit scalar updates; bibliography tests prove only active routes are consumed."
+
+modules:
+  - name: livrarr-domain
+    responsibility: "Define the operational guard, canonical route parsing, and compile-wall-safe service, workflow, and gateway behavior."
+    dependencies: []
+    module_invariants:
+      - "Only guard_author_route constructs AgreedAuthorRouteEvidence or RejectedAuthorRouteEvidence; neither capability is deserializable or exposes a public constructor."
+      - "Tier 2 never constructs AgreedAuthorRouteEvidence and never reaches an automatic route write."
+      - "UnsupportedProvider is key-local and terminal for one evidence generation; it never escapes to abort siblings."
+    capability_survey:
+      - capability: "Canonical author-name verdict"
+        existing_source: "crates/livrarr-domain/src/identity_matching.rs:296"
+        reuse_decision: reuse
+        rationale: "The exact author_verdict signature and Agree/Grey/Disagree/Abstain authority already exist."
+      - capability: "Provider queue priority and HTTP traits"
+        existing_source: "crates/livrarr-domain/src/services/http.rs:14-132; crates/livrarr-domain/src/enrichment_types.rs:214-219"
+        reuse_decision: reuse
+        rationale: "All new background provider calls use the existing RequestPriority::Low and shared transport contracts."
+      - capability: "Canonical provider-specific author routes"
+        existing_source: none
+        reuse_decision: rewrite
+        rationale: "New private OL/GR/HC key newtypes and AuthorRouteKey parsing close raw-string identity bypasses."
+    notes:
+      - "AuthorLinkService, AuthorLinkWorkflow, and AuthorProviderGateway entries are compile-wall-safe trait contracts declared here; their call annotations constrain concrete metadata/external-data implementations and do not add livrarr-domain dependencies."
+    # BRIEF-DRIFT: signature-grounding.md sections 2-3 label author_verdict/title_verdict
+    # as livrarr-matching, but the cited source and direct symbol reads place both in livrarr-domain.
+    public_api:
+      functions:
+        - name: guard_author_route
+          inputs:
+            - { name: current_display_names, type: "&[String]" }
+            - { name: provider_ref, type: ProviderAuthorRef }
+            - { name: evidence_work_id, type: "Option<WorkId>" }
+            - { name: source, type: AuthorRouteEvidenceSource }
+          output: "AuthorRouteGuardResult; sole constructor of AgreedAuthorRouteEvidence and sole place that calls canonical author_verdict"
+          errors: []
+          pseudocode:
+            - "Build AuthorRouteEvidence from the canonical provider_ref key, trimmed observed name, evidence_work_id, and source."
+            - "Evaluate author_verdict with a one-name provider side and the full current associated-name snapshot."
+            - "If the verdict is Agree, construct the private non-deserializable AgreedAuthorRouteEvidence and return Agreed."
+            - "Otherwise construct the private non-deserializable RejectedAuthorRouteEvidence from the unchanged evidence and actual Grey, Abstain, or Disagree verdict, then return Rejected."
+          call_annotations:
+            - { call: "String::trim", type: STDLIB, target: "Rust str::trim" }
+            - { call: "author_verdict", type: EXISTING, target: "livrarr_domain::identity_matching::author_verdict(&[String], &[String]) -> AuthorVerdict" }
+            - { call: "AgreedAuthorRouteEvidence/RejectedAuthorRouteEvidence private constructors", type: NEW, target: "guard-only constructors for the amended opaque capability types" }
+          postconditions:
+            - "Agreed is returned if and only if canonical author_verdict returned Agree."
+          forbidden_behaviors:
+            - "Never accept a caller-supplied verdict or mint the capability for Tier-2 catalog evidence."
+          tdd_directives:
+            - "Call the real guard with Agree, Grey, Abstain, and Disagree names; prove only Agree can be passed to the concrete guarded DB writer at compile time."
+
+        - name: "AuthorLinkService::list_review"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorLinkReview>, AuthorLinkError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Load current-generation pending author review rows for user_id."
+            - "Return rows in stable author then candidate order; map repository failure to AuthorLinkError::Database."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_review", type: NEW, target: "AuthorLinkDb::list_review(UserId) -> Result<Vec<AuthorLinkReview>, DbError>" }
+          postconditions:
+            - "No other user's author, route, or candidate is returned."
+          tdd_directives:
+            - "Drive the real GET review router against an in-memory SqliteDb containing two users and superseded generations; assert only the authenticated user's current pending rows appear."
+
+        - name: "AuthorLinkService::pick_candidate"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<AuthorRoute, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+          pseudocode:
+            - "Execute the user-sovereign candidate-pick transaction for user_id and candidate_id."
+            - "Return the attached or reactivated canonical route."
+            - "Map ownership collision distinctly and map other repository failures without provider I/O."
+          call_annotations:
+            - { call: "AuthorLinkDb::pick_candidate_as_user", type: NEW, target: "AuthorLinkDb::pick_candidate_as_user(UserId, i64) -> Result<AuthorRoute, DbError>" }
+          forbidden_behaviors:
+            - "Never call a provider or route through the automatic guarded-evidence door."
+          tdd_directives:
+            - "POST through the real router with a real SqliteDb; pin normal pick, tombstone re-pick, stale generation, cross-user denial, and ownership collision."
+
+        - name: "AuthorLinkService::attach_selected_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: key, type: AuthorRouteKey }
+          output: "Result<AuthorRoute, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+          pseudocode:
+            - "Accept only an authenticated add-flow's explicitly selected, already canonical AuthorRouteKey after the raw UI value has passed handler parsing."
+            - "Call attach_route_as_user for user_id, the converged author_id returned by the already-committed shared create/adopt gate, and key."
+            - "Return the inserted, existing, or explicitly reactivated UserPicked route; map ownership collision distinctly and map other repository failures to Database."
+            - "Leave the independently committed progress row due whether attachment succeeds or fails, so the add flow never orphans the author."
+          call_annotations:
+            - { call: "AuthorLinkDb::attach_route_as_user", type: NEW, target: "AuthorLinkDb::attach_route_as_user(UserId, AuthorId, AuthorRouteKey) -> Result<AuthorRoute, DbError>" }
+          postconditions:
+            - "A successful return records an explicit user-sovereign selection and never claims that the selected key was provider proof."
+            - "The converged author and its durable enqueue precede this independently retryable route operation."
+          forbidden_behaviors:
+            - "Never call a provider, guard_author_route, apply_guarded_route, a generic scalar update, or accept a key inherited only from a selected work."
+          tdd_directives:
+            - "Drive the real add-box, standalone add-author, and manual-import routers over real SQLite for selected-route create, exact-name adoption, and unambiguous adoption; assert the gate returns the converged author first, the route is UserPicked, and one durable task survives a forced attach failure."
+            - "Drive exact tombstone re-pick, cross-user route ownership, and idempotent repeat selection; assert the shared user-attach semantics and zero provider/scalar writes."
+            - "Submit malformed raw OL/GR/HC route values through each real router and assert rejection occurs before the repository seam; submit no selected route and assert enqueue occurs with zero attach calls."
+            - "Compile-prove the automatic author-link workflow/gateway capability set cannot invoke attach_selected_route."
+
+        - name: "AuthorLinkService::dismiss_candidate"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Execute the user-scoped current-generation candidate dismissal."
+            - "Return success only after progress is atomically re-derived."
+          call_annotations:
+            - { call: "AuthorLinkDb::dismiss_candidate_as_user", type: NEW, target: "AuthorLinkDb::dismiss_candidate_as_user(UserId, i64) -> Result<(), DbError>" }
+          postconditions:
+            - "Routes and tombstones are unchanged."
+          tdd_directives:
+            - "POST through the real dismiss router; prove current pending dismissal succeeds, stale/cross-user ids fail, and the candidate can reappear after explicit re-resolve."
+
+        - name: "AuthorLinkService::remove_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Mark the selected user-owned active route removed through the classified user transaction."
+            - "Enqueue the author for local progress re-derivation without clearing the tombstone."
+          call_annotations:
+            - { call: "AuthorLinkDb::remove_route_as_user", type: NEW, target: "AuthorLinkDb::remove_route_as_user(UserId, AuthorId, i64) -> Result<(), DbError>" }
+            - { call: "AuthorLinkWorkflow::enqueue", type: NEW, target: "AuthorLinkWorkflow::enqueue(UserId, AuthorId, UserReResolve) -> Result<(), AuthorLinkError>" }
+          postconditions:
+            - "The removed row remains as the permanent automatic-readd tombstone."
+          tdd_directives:
+            - "DELETE through the real router and real SqliteDb, rerun the real worker with identical evidence, and assert a previously-removed candidate appears while the route remains removed."
+
+        - name: "AuthorLinkService::re_resolve"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorLinkProgress, AuthorLinkError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Enqueue the author with UserReResolve, superseding review eligibility without waiting for provider work."
+            - "Load and return the durable progress row."
+          call_annotations:
+            - { call: "AuthorLinkWorkflow::enqueue", type: NEW, target: "AuthorLinkWorkflow::enqueue(UserId, AuthorId, UserReResolve) -> Result<(), AuthorLinkError>" }
+            - { call: "AuthorLinkDb::load_progress", type: NEW, target: "internal AuthorLinkDb progress-row read required by the service result" }
+          forbidden_behaviors:
+            - "Never await OpenLibrary or any other provider before returning."
+          tdd_directives:
+            - "POST through the real resolve route; assert 202 is returned before a blocking adapter seam is released and the durable row is immediately due."
+
+        - name: "AuthorLinkService::progress"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<AuthorSweepProgress, AuthorLinkError>"
+          errors: [Database]
+          pseudocode:
+            - "Load the user-scoped aggregate over persisted author progress and current-generation key attempts."
+            - "Return author-state counts, key outcome counts, the legacy 0.90 shadow count, and oldest due time."
+          call_annotations:
+            - { call: "AuthorLinkDb::sweep_progress", type: NEW, target: "AuthorLinkDb::sweep_progress(UserId) -> Result<AuthorSweepProgress, DbError>" }
+          tdd_directives:
+            - "GET through the real progress router over an in-memory SqliteDb containing mixed current and superseded generations; pin every aggregate field and user isolation."
+
+        - name: "AuthorLinkWorkflow::enqueue"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: trigger, type: AuthorLinkTrigger }
+          output: "Result<(), AuthorLinkError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Idempotently ensure the user's author progress row exists."
+            - "Make the row due according to trigger without stealing or clearing a live lease."
+            - "For UserReResolve, reopen eligible dismissed evidence and re-arm terminal key outcomes as allowed by the state machine."
+          call_annotations:
+            - { call: "AuthorLinkDb::ensure_enqueued", type: NEW, target: "AuthorLinkDb::ensure_enqueued(UserId, AuthorId, AuthorLinkTrigger) -> Result<(), DbError>" }
+          invariants:
+            - "Repeated enqueue calls converge on one durable author task."
+          tdd_directives:
+            - "Drive add-box, manual import, list import, series monitor, and Readarr creation through their real entry paths and assert each returned/converged author has one due progress row."
+
+        - name: "AuthorLinkWorkflow::submit_evidence"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: evidence, type: AgreedAuthorRouteEvidence }
+          output: "Result<RouteWriteOutcome, AuthorLinkError>"
+          errors: [NotFound, RouteOwnedByOtherAuthor, Database]
+          pseudocode:
+            - "Wrap the opaque agreed evidence with author_id and no claim token."
+            - "Apply it through the one automatic route repository door."
+            - "Return the classified attach, already-active, provenance-upgrade, tombstone, contradiction, or ownership outcome."
+          call_annotations:
+            - { call: "AuthorLinkDb::apply_guarded_route", type: NEW, target: "AuthorLinkDb::apply_guarded_route(GuardedRouteWrite) -> Result<RouteWriteOutcome, DbError>" }
+          forbidden_behaviors:
+            - "Never accept raw AuthorRouteEvidence, a verdict value, or a Tier-2 candidate."
+          tdd_directives:
+            - "Compile-test that raw/rejected evidence cannot call submit_evidence, then exercise the real SqliteDb for idempotent attach, legacy upgrade, tombstone, contradiction, and ownership outcomes."
+
+        - name: "AuthorLinkWorkflow::record_readarr_rejection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: rejected, type: RejectedAuthorRouteEvidence }
+          output: "Result<AuthorLinkCandidate, AuthorLinkError>; accepts only source=ReadarrImport and never writes a route"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Pass the opaque rejected Readarr evidence to the claimless repository operation for the user-owned author."
+            - "Return the idempotently recorded current-generation ReadarrNameGuardFailed candidate."
+            - "Map repository scope or persistence failures without calling the guarded route writer."
+          call_annotations:
+            - { call: "AuthorLinkDb::record_readarr_rejection", type: NEW, target: "AuthorLinkDb::record_readarr_rejection(UserId, AuthorId, RejectedAuthorRouteEvidence) -> Result<AuthorLinkCandidate, DbError>" }
+          postconditions:
+            - "The Readarr name and actual non-Agree verdict are reviewable, and no route or tombstone state changes."
+          forbidden_behaviors:
+            - "Never accept AgreedAuthorRouteEvidence, raw evidence, a caller-supplied verdict, or an AuthorLinkClaim."
+          tdd_directives:
+            - "Drive the real Readarr import branch for Grey, Abstain, and Disagree; assert one idempotent ReadarrNameGuardFailed candidate and retained Readarr name, and compile-prove Agreed evidence cannot enter this operation."
+
+        - name: "AuthorLinkWorkflow::run_due"
+          inputs:
+            - { name: batch_size, type: u32 }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<AuthorSweepTickSummary, AuthorLinkError>; Tier-1 provider errors are converted to durable key outcomes and do not escape or abort sibling authors"
+          errors: [Database]
+          pseudocode:
+            - "Boundedly create missing progress rows before claiming work."
+            - "Claim at most batch_size due or dirty authors with configured leases."
+            - "For each claim until cancellation, invoke the concrete run_author operation outside every DB transaction."
+            - "Count ClaimLost or database failures per author, continue later claimed authors, and return the tick summary."
+            - "Require run_author to convert every classified provider failure, including UnsupportedProvider, into a durable key-local outcome."
+          call_annotations:
+            - { call: "AuthorLinkDb::ensure_missing_progress_rows", type: NEW, target: "AuthorLinkDb::ensure_missing_progress_rows(u32) -> Result<u32, DbError>" }
+            - { call: "AuthorLinkDb::claim_due", type: NEW, target: "AuthorLinkDb::claim_due(DateTime<Utc>, DateTime<Utc>, u32) -> Result<Vec<AuthorLinkClaim>, DbError>" }
+            - { call: "AuthorLinkingServiceImpl::run_author", type: NEW, target: "AuthorLinkingServiceImpl::run_author(AuthorLinkClaim) -> Result<AuthorLinkProgressUpdate, AuthorLinkError>" }
+            - { call: "CancellationToken::is_cancelled", type: LIBRARY, library: "tokio-util", target: "tokio-util" }
+          invariants:
+            - "No DB transaction remains open across run_author provider I/O."
+          tdd_directives:
+            - "Run the real workflow with real in-memory SqliteDb claims and a controllable real gateway adapter seam; interrupt mid-batch, restart, and prove completed siblings are not rolled back or replayed."
+
+        - name: "AuthorProviderGateway::fetch_work_authors"
+          inputs:
+            - { name: provider, type: AuthorProvider }
+            - { name: work_route, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>"
+          errors: [UnsupportedProvider, NotConfigured, Retryable, Permanent, LayoutDrift]
+          pseudocode:
+            - "Require RequestPriority::Low for author-road callers."
+            - "Dispatch OpenLibrary, Goodreads, or Hardcover to its keyed work-author adapter."
+            - "Return every contributor ref associated with the selected work; do not select a winning author here."
+            - "Map an unsupported provider to UnsupportedProvider."
+            - "At each adapter boundary, parse either Retry-After form at response-receipt time into an absolute UTC retry_not_before; preserve it in AuthorProviderError::Retryable { error, retry_not_before }, using None plus a diagnostic for an absent or invalid header."
+          call_annotations:
+            - { call: "OpenLibraryClient::fetch_work_authors", type: NEW, target: "OpenLibraryClient::fetch_work_authors(String, RequestPriority)" }
+            - { call: "GoodreadsClient::fetch_work_authors", type: NEW, target: "GoodreadsClient::fetch_work_authors(String, RequestPriority)" }
+            - { call: "HardcoverClient::fetch_work_authors", type: NEW, target: "HardcoverClient::fetch_work_authors(String, RequestPriority)" }
+          preconditions:
+            domain_state:
+              - "priority is RequestPriority::Low for the background road."
+          forbidden_behaviors:
+            - "Never scan unrelated Goodreads Contributor entities or widen NormalizedWorkDetail."
+          decisions:
+            - { key: "retry_hint_seam", value: "typed absolute UTC lower bound in AuthorProviderError::Retryable.retry_not_before", rationale: "The amended enum carries provider timing across all gateway methods without an error-string parsing protocol; invalid or absent Retry-After remains Retryable with None and a diagnostic." }
+          tdd_directives:
+            - "Drive each concrete adapter seam with multi-contributor fixtures plus unsupported/not-configured/retryable/permanent/layout-drift responses and both Retry-After forms; assert absolute UTC hint preservation, invalid-header None plus diagnostics, every returned ref remains unselected, and priority is Low."
+
+        - name: "AuthorProviderGateway::search_open_library_authors"
+          inputs:
+            - { name: query, type: String }
+            - { name: limit, type: u32 }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError>"
+          errors: [Retryable, Permanent]
+          pseudocode:
+            - "Use the refactored single OpenLibrary author-search adapter shared with the existing interactive lookup plumbing."
+            - "Send the request through the shared OpenLibrary queue and existing server identity at the supplied priority."
+            - "Parse canonical route key, primary name, canonical-distinct alternate names, top_work, and work_count."
+            - "On a retryable response, preserve the adapter's absolute UTC retry_not_before in AuthorProviderError::Retryable; absent or invalid Retry-After yields None plus a diagnostic, not Permanent."
+            - "Return bounded candidates without constructing route evidence or writing state."
+          call_annotations:
+            - { call: "OpenLibraryAuthorSearchAdapter::search", type: NEW, target: "shared internal adapter extracted from existing AuthorService::lookup(&str, u32), returning Vec<OpenLibraryAuthorCandidate> with alternate_names" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(OpenLibrary, &str)" }
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+          preconditions:
+            domain_state:
+              - "Background road calls supply RequestPriority::Low."
+          decisions:
+            - { key: "alternate_names_representation", value: "populate OpenLibraryAuthorCandidate.alternate_names with stable response order after canonical-distinct deduplication against the primary and prior aliases", rationale: "The amended search DTO carries aliases; canonical deduplication prevents one spelling family from producing duplicate verdict rows." }
+          tdd_directives:
+            - "Exercise the shared paced adapter with a real HTTP adapter seam and a search fixture containing duplicate/canonical-distinct aliases, top_work, and work_count plus valid/invalid Retry-After responses; assert stable alias population, typed absolute retry hint preservation, one request implementation serves both lookup surfaces, and no candidate writes a route."
+
+        - name: "AuthorProviderGateway::fetch_open_library_catalog_page"
+          inputs:
+            - { name: author_route, type: OpenLibraryAuthorKey }
+            - { name: cursor, type: "Option<String>" }
+            - { name: priority, type: RequestPriority }
+          output: "Result<OpenLibraryCatalogPage, AuthorProviderError>"
+          errors: [Retryable, Permanent]
+          pseudocode:
+            - "Build the canonical OpenLibrary author works request for author_route and cursor."
+            - "Fetch through the shared OpenLibrary queue with existing server identity and Low priority."
+            - "Return titles and the next cursor; distinguish retryable and permanent failures from a successful empty page."
+            - "For retryable responses, preserve the parsed absolute UTC retry_not_before in AuthorProviderError::Retryable; an absent or invalid header remains Retryable with None plus a diagnostic."
+          call_annotations:
+            - { call: "HttpFetcher::fetch", type: EXISTING, target: "HttpFetcher::fetch(&self, FetchRequest) -> Result<FetchResponse, FetchError>; crates/livrarr-domain/src/services/http.rs:132" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey canonical accessor validation before request construction" }
+          forbidden_behaviors:
+            - "Never convert a failed fetch into an empty catalog or computed zero corroboration."
+          tdd_directives:
+            - "Use the real OpenLibrary adapter seam with paginated, empty, retryable (valid/invalid Retry-After), and permanent fixtures; assert Low priority, absolute retry hint preservation, cursor continuity, and distinct empty-versus-failure outcomes."
+
+        - name: "AuthorRouteKey::parse"
+          inputs:
+            - { name: provider, type: AuthorProvider }
+            - { name: raw, type: "&str" }
+          output: "Result<AuthorRouteKey, AuthorLinkError>"
+          errors: [InvalidRoute]
+          pseudocode:
+            - "Trim raw and reject empty input."
+            - "For OpenLibrary, accept only the canonical OL<digits>A form or a known OpenLibrary URL or /authors/ prefix that reduces to that form."
+            - "For Goodreads and Hardcover, parse a positive u64 decimal and canonicalize without leading zeros."
+            - "Reject malformed, overflowed, zero, or provider-mismatched input."
+          call_annotations:
+            - { call: "str::trim", type: STDLIB, target: "Rust str::trim" }
+            - { call: "str::strip_prefix", type: STDLIB, target: "Rust str::strip_prefix" }
+            - { call: "str::parse::<u64>", type: STDLIB, target: "Rust FromStr for u64" }
+          postconditions:
+            - "Equal provider aliases produce one canonical AuthorRouteKey value."
+          tdd_directives:
+            - "Run parser table tests for canonical values, accepted OL aliases, leading-zero numeric ids, empty/zero/overflow/malformed input, and cross-provider forms; round-trip every success through the real SQLite route uniqueness path."
+
+  - name: livrarr-db
+    responsibility: "Implement additive migrations and every atomic author-link route, tombstone, review, name, progress, claim, rename, and merge operation."
+    dependencies: [livrarr-domain]
+    module_invariants:
+      - "All author-provider route SQL lives in livrarr-db::sqlite_author_link or its numbered migrations."
+      - "No route uniqueness rule assumes one route per provider; the tuple is author plus provider plus canonical value."
+      - "Provider I/O never occurs inside a DB transaction."
+      - "Current evidence generation and claim token guard every mutable worker transition."
+      - "Only AuthorLinkDb::pick_candidate_as_user and AuthorLinkDb::attach_route_as_user can reach the private attach_route_as_user_tx helper; automatic workflow/gateway capabilities expose neither public user method."
+      - "Migration 078's author_link_work_evidence_changed trigger is the write-layer producer for EvidenceFingerprintChanged: a null-safe change to works.identity_status/ol_key/gr_key/hc_key atomically queues the associated existing author-link progress row, makes it due now, and deliberately invalidates its claim while preserving fingerprint, evidence generation, and cursor."
+    capability_survey:
+      - capability: "Concurrency-safe author create gate"
+        existing_source: "crates/livrarr-db/src/sqlite_author.rs:405-450"
+        reuse_decision: wrap
+        rationale: "Keep the named ON CONFLICT convergence and extend the same transaction to ensure the winner's progress row and initial name variant."
+      - capability: "One author merge transaction"
+        existing_source: "crates/livrarr-db/src/sqlite_author.rs:86-375"
+        reuse_decision: wrap
+        rationale: "Extend the proven repoint-before-delete transaction to fold routes, tombstones, variants, candidates, and progress while retaining the exact three-field AuthorMergeReport."
+      - capability: "Display-name cascade"
+        existing_source: "crates/livrarr-db/src/sqlite_author.rs:86-356"
+        reuse_decision: wrap
+        rationale: "Reuse the shipped authors.name plus works.author_name rewrite and merge_generation bump; never touch normalized_author."
+      - capability: "Resumable due-time sweep storage"
+        existing_source: "crates/livrarr-db/src/sqlite_work.rs:1393; crates/livrarr-db/migrations/065_works_next_convergence_at.sql"
+        reuse_decision: rewrite
+        rationale: "Reuse the due-time pattern but add the ratified token lease and generation-scoped per-key ledger required for partial failures."
+      - capability: "Author-link schema and legacy ingestion"
+        existing_source: "crates/livrarr-db/migrations/077_authors_normalized_name.sql"
+        reuse_decision: rewrite
+        rationale: "Allocate new migrations 078 and 079 after the verified head; migration 078 also owns the first SQLite trigger in the codebase, and no applied migration is edited."
+    notes:
+      - "Migration 078_author_provider_linking_tables.sql adds routes, name variants (including nullable open_library_role), candidates (including primary_name_verdict, top_work_preview, and catalog_evidence_state), author_link_candidate_alternate_name_evidence, progress, key attempts, staging, supporting indexes, and the author_link_work_evidence_changed trigger; no works schema change."
+      - "The trigger is exactly AFTER UPDATE OF identity_status, ol_key, gr_key, hc_key ON works with a WHEN disjunction of OLD.column IS NOT NEW.column for all four columns, so SQLite's IS NOT comparison is null-safe and a same-value update is a no-op."
+      - "The association is the existing works.author_id foreign key: the trigger joins NEW.author_id to author_link_progress.author_id (scoped to the work's user_id), which is the same join compute_evidence_fingerprint uses to load an author's settled-work tuples. It is never a name match — implementers must not substitute one."
+      - "When the changed work's author has an F1 progress row, the trigger updates that row in the same work-write transaction to state Queued, next_attempt_at no later than the transaction's current time, and semantic trigger EvidenceFingerprintChanged; it clears claim_token and lease_until even for a live claim, but leaves evaluated_fingerprint, evidence_generation, and cursor byte-for-byte intact. The stale worker's next token-checked mutation returns ClaimLost."
+      - "The trigger performs only local SQL row updates: it does not insert a missing progress row, perform provider I/O, reopen dismissed evidence, reset attempts, or unconditionally re-walk authors. The atomic shared author create/adopt gate guarantees progress existence for F1-created authors."
+      - "author_link_candidate_alternate_name_evidence stores candidate_id, ordinal, name, canonical_name, and verdict with uniqueness on (candidate_id, canonical_name)."
+      - "Every AuthorNameVariant writer supplies open_library_role explicitly: a picked OL search primary/alias uses Primary/Alias; Tier-1, enrichment, Readarr, import, legacy, and User observations use null because their payload does not establish an OL search role. Merge retains Primary over Alias over null for the same canonical OL name."
+      - "Non-Tier2 candidates use primary_name_verdict=name_verdict, empty alternate_name_evidence, top_work_preview=None, catalog_evidence_state=Pending, and corroborated_title_count=0 as not-run fields; Review omits catalog-count presentation for those reasons, so Pending is never shown as a scheduled catalog read."
+      - "Migration 079_author_provider_linking_legacy_stage.sql stages every nonempty legacy scalar and every author name, using the exact zero-padded sequence after 077."
+      - "CreateAuthorDbRequest and generic update requests lose route fields at the cutover; legacy scalar columns remain physically present and frozen."
+    decisions:
+      - key: "first_sqlite_trigger_precedent"
+        value: "Migration 078 introduces author_link_work_evidence_changed; a verified CREATE TRIGGER search over crates/livrarr-db/migrations returned zero through all 77 existing migrations."
+        rationale: "Livrarr repeatedly suffers when one value reaches one writer path but not every writer path. A single null-safe database trigger moves fingerprint wake-up completeness to the write layer, where every identity/status/key mutation commits, instead of requiring every present and future writer to remember a notification."
+      - key: "fingerprint_wakeup_claim_policy"
+        value: "EvidenceFingerprintChanged deliberately clears a live claim token and lease without resetting evaluated fingerprint, evidence_generation, or cursor."
+        rationale: "A worker holding the pre-change snapshot must lose authority before any route/candidate/key-attempt/progress mutation; retained road state lets the replacement claim compare the live fingerprint and restart only when evidence actually differs."
+    migration_tdd_directives:
+      - "Upgrade a real migration-077 SQLite fixture through migration 078, create an F1 author/progress/work graph, and update identity_status plus each of ol_key/gr_key/hc_key from null-to-value, value-to-different-value, and value-to-null; assert one atomic Queued/due-now EvidenceFingerprintChanged wake-up per statement."
+      - "Update all four watched columns to their existing values and update unrelated work columns; assert progress, token, lease, fingerprint, evidence_generation, cursor, and due time are byte-identical."
+      - "Hold a live author claim, change watched evidence, and assert the trigger clears only token/lease while retaining evaluated fingerprint/evidence_generation/cursor; every stale route, candidate, key-attempt, and progress mutation must return ClaimLost."
+      - "Update evidence for a pre-F1 author with no progress row and assert the trigger performs no insert; then pass the author through the shared create/adopt gate and assert the invariant is repaired without a provider call."
+    internal_operations:
+      - name: "shared_author_create_or_adopt_gate"
+        inputs:
+          - { name: request, type: "CreateAuthorGateRequest containing user_id, name, sort_name, import_id, initial_name_source, and trigger but no provider route fields" }
+        output: "Result<(Author, bool), DbError>; the bool is true only for the transaction that inserted the author"
+        errors: [Constraint, Database]
+        pseudocode:
+          - "Canonicalize request.name before opening provider-independent write work; reject an unusable canonical identity."
+          - "Begin one SQLite transaction shared by every interactive, list, series, manual-import, and Readarr author create/adopt path."
+          - "INSERT the author with ON CONFLICT(user_id, normalized_name) DO NOTHING, then select the winning user-owned row on the same transaction connection."
+          - "Upsert the winner's initial AuthorNameVariant from request.name and request.initial_name_source with open_library_role null."
+          - "Insert the winner's author-link progress row as Queued and due now when absent; when present, make it no later than now under request.trigger without replacing the row or stealing a live lease."
+          - "Commit only after author, initial name variant, and progress state all exist; return the winner and whether this transaction inserted it before any caller invokes an independently retryable selected-route operation."
+        call_annotations:
+          - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+          - { call: "SqlitePool::begin", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+        invariants:
+          - "No committed F1 author exists without exactly one progress row and at least its initial name variant."
+          - "Converged creation-race losers return the same winning author id and report created=false."
+        postconditions:
+          - "The returned author is durably enqueued even when a later attach_selected_route call fails."
+        forbidden_behaviors:
+          - "Never accept ol_key, gr_key, hc_key, raw route evidence, or perform provider I/O."
+        tdd_directives:
+          - "Run five concurrent real SqliteDb gate calls for the same user/canonical name, matching ST-008 import width; assert all succeed with one author id, exactly one created=true, one progress row immediately due, and one canonical initial-name row."
+          - "Inject a real SQLite failure after the author insert but before progress/name completion and assert the transaction rolls back every row; repeat from the same request and assert clean success."
+          - "Adopt an existing author with missing progress/name state through the gate and assert both are repaired atomically; race the repair and assert no duplicates."
+          - "Return created, exact-name-adopted, and unambiguously-adopted winners to each add flow, force the subsequent selected-route attach to fail, and assert the author/name/progress transaction remains committed and due."
+
+      - name: "attach_route_as_user_tx"
+        inputs:
+          - { name: tx, type: "&mut SqliteConnection" }
+          - { name: user_id, type: UserId }
+          - { name: author_id, type: AuthorId }
+          - { name: key, type: AuthorRouteKey }
+        output: "Result<AuthorRoute, DbError>; transaction-internal canonical user attach/reactivation shared by the two public user entry shapes"
+        errors: [NotFound, Constraint]
+        pseudocode:
+          - "Verify author_id belongs to user_id on the caller's transaction connection."
+          - "Revalidate key.provider/key.value through AuthorRouteKey::parse so only the canonical tuple reaches SQL."
+          - "Load any route row for the same user/provider/canonical value, including removed rows; if it belongs to another author, return the ownership Constraint without mutation."
+          - "When this author's exact row is Active, idempotently retain it and promote provenance to UserPicked when necessary."
+          - "When this author's exact row is Removed, explicitly reactivate that tombstone, clear removed_at/removed_by_user_id, and set provenance UserPicked."
+          - "When no row exists, insert one Active route with UserPicked provenance."
+          - "Return the resulting route on the caller's transaction; do not resolve candidates, re-derive progress, or commit because each public caller owns those surrounding steps."
+        call_annotations:
+          - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+          - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+        invariants:
+          - "This is the sole private user-attach transaction helper allowed to clear an exact route tombstone."
+          - "Equal canonical tuples share identical ownership, idempotency, provenance, and tombstone behavior for direct selection and review-candidate selection."
+        forbidden_behaviors:
+          - "Never accept raw strings, call a provider, invoke guard_author_route/apply_guarded_route, clear another author's tombstone, mutate a candidate, or write a legacy scalar."
+        tdd_directives:
+          - "Call both public user methods against the same real SQLite route fixtures and assert byte-equivalent new attach, active repeat, provenance promotion, exact tombstone reactivation, and other-author ownership outcomes."
+          - "Use two users with the same canonical key and assert user scoping permits independent routes; use two authors in one user and assert the second cannot steal the tuple."
+          - "Compile-prove no automatic repository capability exposes this helper or either public user method, and mechanically scan the helper for provider and legacy-scalar calls."
+    public_api:
+      functions:
+        - name: "AuthorLinkDb::ensure_enqueued"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: trigger, type: AuthorLinkTrigger }
+          output: "Result<(), DbError>"
+          errors: [NotFound, Constraint]
+          pseudocode:
+            - "Begin a short transaction and verify author_id belongs to user_id."
+            - "Insert a queued progress row when absent."
+            - "When present, make next_attempt_at no later than now and apply trigger-specific generation/reopen rules without replacing the row."
+            - "Do not alter a non-expired lease token or erase its cursor."
+            - "Commit."
+          call_annotations:
+            - { call: "SqlitePool::begin", type: LIBRARY, library: "sqlx", target: "sqlx" }
+            - { call: "Utc::now", type: LIBRARY, library: "chrono", target: "chrono" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "Exactly one progress row exists and is eventually claimable."
+          tdd_directives:
+            - "Use a real in-memory SqliteDb to race repeated enqueue triggers against a live lease; assert one row, no lease theft, and trigger-correct due/generation behavior."
+
+        - name: "AuthorLinkDb::ensure_missing_progress_rows"
+          inputs:
+            - { name: limit, type: u32 }
+          output: "Result<u32, DbError>; bounded lazy discovery for any pre-existing author lacking progress"
+          errors: [Database]
+          pseudocode:
+            - "Select at most limit authors lacking progress in stable author-id order."
+            - "Insert queued progress and the current author-name variant with open_library_role null using ON CONFLICT DO NOTHING."
+            - "Return the number of progress rows inserted."
+          call_annotations:
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "No author is duplicated and a bounded invocation never scans into provider work."
+          tdd_directives:
+            - "Start from a real migration-077 fixture with more authors than limit; call repeatedly and assert bounded counts, stable completion, and one progress row per author."
+
+        - name: "AuthorLinkDb::claim_due"
+          inputs:
+            - { name: now, type: "DateTime<Utc>" }
+            - { name: lease_until, type: "DateTime<Utc>" }
+            - { name: limit, type: u32 }
+          output: "Result<Vec<AuthorLinkClaim>, DbError>; lease-free/expired rows qualify when next_attempt_at<=now OR display_name_dirty=1, including otherwise terminal states"
+          errors: [Database]
+          pseudocode:
+            - "Atomically select at most limit rows whose lease is absent or expired and whose due time has arrived or dirty flag is set."
+            - "Assign a fresh claim token and lease_until to each selected row in stable due-time then author-id order."
+            - "Snapshot cursor and display_name_generation into each returned claim."
+            - "Return only rows updated by this transaction."
+          call_annotations:
+            - { call: "Uuid::new_v4", type: LIBRARY, library: "uuid", target: "uuid" }
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          invariants:
+            - "Two concurrent claimers cannot own the same live author lease."
+          tdd_directives:
+            - "Run two real SqliteDb claimers concurrently over due, future, dirty-terminal, live-lease, expired-lease, and trigger-woken rows; assert disjoint tokens, exact eligibility, and EvidenceFingerprintChanged rows are immediately claimable."
+
+        - name: "AuthorLinkDb::load_road_input"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+          output: "Result<AuthorRoadInput, DbError>"
+          errors: [NotFound, ClaimLost]
+          pseudocode:
+            - "Verify claim token still owns the author's non-expired lease."
+            - "Load the author, active routes, all stored name variants, evaluated fingerprint, display generation/dirty state, and works whose status may contribute."
+            - "Filter settled_works to Confirmed and Provisional only and compute the live fingerprint from that snapshot."
+            - "Return one coherent road input."
+          call_annotations:
+            - { call: "AuthorLinkDb::compute_evidence_fingerprint", type: NEW, target: "AuthorLinkDb::compute_evidence_fingerprint(UserId, AuthorId)" }
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          forbidden_behaviors:
+            - "Never include Pending, NeedsReview, Conflict, or NotFound works as Tier-1 evidence."
+          tdd_directives:
+            - "Populate every IdentityStatus in a real SqliteDb, claim the author, and assert only Confirmed/Provisional works enter settled_works while routes/names/generations are coherent; mutate qualifying work evidence after claim and assert the stale load returns ClaimLost."
+
+        - name: "AuthorLinkDb::compute_evidence_fingerprint"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorEvidenceFingerprint, DbError>; sorted Confirmed/Provisional work tuples only"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Load work id, identity status, and current OL/GR/HC work keys for the user's author."
+            - "Keep only Confirmed and Provisional rows and canonicalize every present work key."
+            - "Sort tuples by work id, status, provider, and canonical key."
+            - "Compute settled work count, provider-key count, and fixed FNV-1a-128 content hash over an unambiguous length-delimited encoding."
+          call_annotations:
+            - { call: "Vec::sort_by", type: STDLIB, target: "Rust Vec stable deterministic sort" }
+            - { call: "FNV-1a-128", type: NEW, target: "fixed local deterministic fingerprint implementation specified by IR v1" }
+          decisions:
+            - { key: "fingerprint_encoding", value: "length-delimited UTF-8 fields with explicit status/provider tags", rationale: "IR v1 fixes the hash and tuple contents but not byte framing; length prefixes prevent concatenation ambiguity." }
+          tdd_directives:
+            - "Use real SQLite rows to pin order independence, equal-count key replacement detection, status transition detection, and exclusion of all unsettled statuses with golden hash vectors."
+
+        - name: "AuthorLinkDb::prepare_key_attempts"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: evidence_generation, type: i64 }
+            - { name: keys, type: "Vec<SettledWorkProviderKey>" }
+          output: "Result<Vec<AuthorKeyAttempt>, DbError>; idempotently materialize one row per canonical key tuple, reclaim Running rows owned by an expired prior claim, and claim pending plus due-retryable rows in deterministic order"
+          errors: [ClaimLost, Constraint]
+          pseudocode:
+            - "Verify claim ownership and current evidence_generation."
+            - "Canonicalize and deduplicate keys by work id, provider, and route."
+            - "Insert missing generation-scoped attempt rows as Pending without replacing existing outcomes."
+            - "Reclaim Running attempts whose stored token no longer owns a live author lease."
+            - "Select Pending and due Retryable attempts in work-id, provider, route order and mark them Running with this claim token."
+            - "Return the claimed attempts."
+          call_annotations:
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+            - { call: "Vec::sort_by", type: STDLIB, target: "Rust Vec deterministic sort" }
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          invariants:
+            - "One row exists per canonical tuple and evidence generation; old-generation rows remain audit-only."
+          tdd_directives:
+            - "Against a real SqliteDb, repeat preparation, replace a claim after lease expiry, and mix pending/not-due/due/terminal rows; assert deterministic, nonduplicating claims. Mutate work identity/status after claim and assert preparation returns ClaimLost without inserting or claiming an attempt."
+
+        - name: "AuthorLinkDb::complete_key_attempt"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: key_attempt_id, type: i64 }
+            - { name: outcome, type: AuthorKeyAttemptOutcome }
+          output: "Result<(), DbError>; token-checked atomic outcome write; completion never rolls back route/candidate commits from this or sibling keys"
+          errors: [NotFound, ClaimLost, Constraint]
+          pseudocode:
+            - "Verify the attempt is Running under claim.claim_token and current generation."
+            - "Map outcome to its terminal or retryable state, next_attempt_at, error, diagnostic code, and incremented attempt_count."
+            - "For UnsupportedProvider, store SkippedPermanent with diagnostic code unsupported_provider and operator-visible error text."
+            - "For Retryable, preserve the caller's computed next_attempt_at and never terminalize by attempt count alone."
+            - "Commit only the attempt row."
+          call_annotations:
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "Sibling routes, candidates, and attempt rows are unchanged."
+          decisions:
+            - { key: "unsupported_provider_storage", value: "SkippedPermanent plus diagnostic code unsupported_provider", rationale: "P4 permits the permanent-skip storage class but requires a distinct operator-visible code and generation-local terminal behavior." }
+          tdd_directives:
+            - "Use real SQLite to pin every outcome mapping, stale token rejection, UnsupportedProvider diagnostic, retry attempt-count non-exhaustion, and independence from precommitted sibling routes. After a migration-078 evidence update invalidates the claim, assert completion returns ClaimLost and the Running attempt remains reclaimable."
+
+        - name: "AuthorLinkDb::apply_guarded_route"
+          inputs:
+            - { name: write, type: GuardedRouteWrite }
+          output: "Result<RouteWriteOutcome, DbError>"
+          errors: [ClaimLost, Constraint]
+          pseudocode:
+            - "Begin a transaction and, when claim_token is present, verify it owns the current author lease."
+            - "Read the canonical evidence only through AgreedAuthorRouteEvidence accessors."
+            - "Verify the author/user scope and check active ownership of the same canonical key."
+            - "If another author owns it, persist an OwnershipCollision candidate with non-Tier2 not-run evidence defaults and return ParkedOwnershipCollision."
+            - "If this author's exact row is removed, leave it removed, persist a Tombstoned candidate with non-Tier2 not-run evidence defaults, and return ParkedTombstoned."
+            - "If the exact row is active, upgrade LegacyUnguarded provenance when the new evidence is guarded, record its associated observed name with open_library_role null, and return AlreadyActive or LegacyProvenanceUpgraded."
+            - "If a different active LegacyUnguarded route exists for the provider, leave both route states unchanged, persist a LegacyContradiction candidate with non-Tier2 not-run evidence defaults, and return ParkedLegacyContradiction."
+            - "Otherwise insert the active canonical route with Tier1Inherited or ReadarrGuarded provenance and record its associated observed name with open_library_role null."
+            - "Commit and return Attached."
+          call_annotations:
+            - { call: "AgreedAuthorRouteEvidence accessors", type: NEW, target: "private read-only accessors on the opaque capability" }
+            - { call: "insert_associated_name_variant", type: NEW, target: "transaction-internal helper taking (UserId, AuthorId, AuthorNameSource, &str, Option<route_id>, Option<OpenLibraryNameRole>) without requiring a WorkId" }
+            - { call: "non_tier2_candidate_defaults", type: NEW, target: "internal constructor setting primary_name_verdict=name_verdict, empty aliases, no preview, Pending/not-run state, and zero count" }
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          forbidden_behaviors:
+            - "Never clear removed_at, replace another route, downgrade provenance, accept raw evidence, or write a legacy scalar."
+          tdd_directives:
+            - "Use the concrete writer and real SqliteDb for new attach, idempotency, legacy upgrade, differing-legacy contradiction, tombstone, ownership collision, claim loss, and concurrent identical evidence. Mutate work identity/status after claim and assert the guarded write returns ClaimLost with routes, candidates, tombstones, and scalars byte-identical."
+
+        - name: "AuthorLinkDb::record_candidates"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: candidates, type: "Vec<AuthorLinkCandidate>" }
+          output: "Result<(), DbError>"
+          errors: [ClaimLost, Constraint]
+          pseudocode:
+            - "Verify claim token and current evidence generation."
+            - "Canonicalize every candidate key and upsert only within the current generation."
+            - "Persist route key, candidate primary name, summary name_verdict, primary_name_verdict, top_work_preview, catalog_evidence_state, Same-only per-settled-work count, denominator, reason, prior-removal state, and observation time."
+            - "Replace the candidate's child evidence rows with stable-ordinal AuthorCandidateAlternateNameEvidence entries, canonicalizing names and enforcing one row per (candidate_id, canonical_name)."
+            - "Preserve a zero observed count numerically when honest, but never convert Pending, Partial, Retrying, or Unavailable into Complete and never serialize a provider failure as computed zero evidence."
+            - "For reasons other than Tier2NameSearch, require the non-Tier2 not-run defaults and do not interpret Pending as queued catalog work."
+            - "Supersede older-generation pending candidates without deleting audit history."
+          call_annotations:
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          decisions:
+            - { key: "candidate_evidence_storage", value: "candidate scalar columns plus ordered alternate-name-evidence child rows unique on (candidate_id, canonical_name)", rationale: "The amended AuthorLinkCandidate is restart-safe: scalar preview/state/primary verdict remain on the candidate and every canonical-distinct alias verdict is hydrated from its child row." }
+            - { key: "non_tier2_candidate_catalog_fields", value: "primary verdict mirrors summary; aliases empty; preview None; catalog state Pending/not-run; count zero; catalog UI omitted by reason", rationale: "The amended fields are total on AuthorLinkCandidate but catalog evidence applies only to Tier2NameSearch. These truthful defaults avoid inventing an N/A enum while preventing zero from masquerading as failed catalog evidence." }
+          tdd_directives:
+            - "With a real SqliteDb, persist repeated/current/older-generation candidates and all catalog states; assert canonical idempotency, scalar round-trip, ordered alias-verdict child hydration and uniqueness, failure never becoming zero/Complete, supersession, and claim loss. Invalidate a live claim through the migration-078 trigger and assert no candidate or child evidence row is written."
+
+        - name: "AuthorLinkDb::record_readarr_rejection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: rejected, type: RejectedAuthorRouteEvidence }
+          output: "Result<AuthorLinkCandidate, DbError>; no claim required; idempotently records the Readarr name variant and a current-generation ReadarrNameGuardFailed candidate"
+          errors: [NotFound, Constraint, Database]
+          pseudocode:
+            - "Begin a short transaction and verify author_id belongs to user_id."
+            - "Read the opaque rejected evidence and verdict through accessors; require source ReadarrImport and a canonical Goodreads key."
+            - "Read the author's current evidence_generation without acquiring or requiring a worker claim."
+            - "Upsert the observed name as an AuthorNameSource::Readarr variant with open_library_role null and upsert the canonical current-generation candidate with reason ReadarrNameGuardFailed, the actual non-Agree verdict in both summary and primary_name_verdict, and the non-Tier2 not-run evidence defaults."
+            - "Commit and return the candidate; repeated imports converge on the same candidate/name evidence."
+          call_annotations:
+            - { call: "RejectedAuthorRouteEvidence accessors", type: NEW, target: "private read-only accessors exposing AuthorRouteEvidence and Grey/Abstain/Disagree verdict" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(Goodreads, &str)" }
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+            - { call: "non_tier2_candidate_defaults", type: NEW, target: "internal constructor setting empty aliases, no preview, Pending/not-run state, and zero count around the actual rejected verdict" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "No route row, legacy scalar, tombstone, or worker lease is changed."
+          forbidden_behaviors:
+            - "Never accept AgreedAuthorRouteEvidence, clear a tombstone, call apply_guarded_route, or let a non-Readarr source use the claimless seam."
+          tdd_directives:
+            - "Use real SQLite through the Readarr workflow for every non-Agree verdict, repeats, cross-user scope, non-Readarr rejection, and tombstoned keys; assert idempotent Readarr name/candidate persistence and byte-identical route/tombstone rows."
+
+        - name: "AuthorLinkDb::advance_progress"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: update, type: AuthorLinkProgressUpdate }
+          output: "Result<(), DbError>; clearing display_name_dirty is compare-and-set against the claim's display_name_generation, so a concurrent observation remains dirty and immediately due"
+          errors: [ClaimLost]
+          pseudocode:
+            - "Verify claim token and evidence generation."
+            - "Persist state, tier, cursor, evaluated fingerprint, next due time, error, and shadow metric."
+            - "Clear display_name_dirty only when stored display_name_generation equals the generation snapshotted in claim and the display cascade already committed."
+            - "If a concurrent observation advanced the generation, retain dirty and keep next_attempt_at no later than now."
+            - "Release this claim lease and commit."
+          call_annotations:
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          invariants:
+            - "A concurrent name observation cannot be lost or delayed by stale worker completion."
+          tdd_directives:
+            - "Race a real observer insertion between claim and advance in an in-memory SqliteDb; assert dirty remains immediately due, while an uncontended committed cascade clears it. Separately mutate work identity/status under a live claim and assert advance returns ClaimLost without overwriting retained fingerprint/generation/cursor."
+
+        - name: "AuthorLinkDb::pick_candidate_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<AuthorRoute, DbError>"
+          errors: [NotFound, Constraint]
+          pseudocode:
+            - "Begin a transaction and load the user-owned Pending candidate from the author's current evidence generation."
+            - "Parse its provider/value to a canonical route key."
+            - "Delegate canonical ownership, idempotent attach, and exact tombstone reactivation to attach_route_as_user_tx on this transaction."
+            - "Mark the candidate Picked, supersede competing current-generation candidates as appropriate, and record the OpenLibrary primary as a provider-sourced variant with open_library_role Primary plus every canonical-distinct alias with role Alias."
+            - "Re-derive progress and commit."
+          call_annotations:
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+            - { call: "attach_route_as_user_tx", type: NEW, target: "private attach_route_as_user_tx(&mut SqliteConnection, UserId, AuthorId, AuthorRouteKey) -> Result<AuthorRoute, DbError>" }
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "Only the shared private attach_route_as_user_tx helper clears the exact route tombstone; this candidate entry adds candidate resolution/name retention around that helper."
+          decisions:
+            - { key: "picked_alias_retention", value: "persist candidate_name as OpenLibrary/Primary and alternate_name_evidence names as OpenLibrary/Alias in stable order", rationale: "The amended candidate carries the complete picked name set and AuthorNameVariant carries its OL role; explicit display selection still promotes a User variant." }
+          tdd_directives:
+            - "Pick through the real HTTP route and SqliteDb; pin shared-helper new attach, explicit tombstone reactivation, stale generation, ownership conflict, canonical-distinct primary/alias retention with exact roles, explicit display choice promotion to User, and no provider/scalar calls."
+
+        - name: "AuthorLinkDb::attach_route_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: key, type: AuthorRouteKey }
+          output: "Result<AuthorRoute, DbError>; explicit user selection only; shares the private user-attach transaction with pick_candidate_as_user"
+          errors: [NotFound, Constraint]
+          pseudocode:
+            - "Begin a short transaction for the authenticated direct-selection entry."
+            - "Call attach_route_as_user_tx with user_id, author_id, and the typed canonical key."
+            - "Re-derive author progress from the returned active route while preserving the independently durable enqueue created by the add gate."
+            - "Commit and return the attached, existing, or explicitly reactivated UserPicked route."
+          call_annotations:
+            - { call: "SqlitePool::begin", type: LIBRARY, library: "sqlx", target: "sqlx" }
+            - { call: "attach_route_as_user_tx", type: NEW, target: "private attach_route_as_user_tx(&mut SqliteConnection, UserId, AuthorId, AuthorRouteKey) -> Result<AuthorRoute, DbError>" }
+            - { call: "rederive_author_link_progress_tx", type: NEW, target: "transaction-internal author progress derivation from active routes, current candidates, and key attempts" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "Only the exact selected canonical tuple is Active with UserPicked provenance; another author's tuple and every legacy scalar are unchanged."
+          forbidden_behaviors:
+            - "Never expose this method to automatic callers, call a provider, require or mint guarded evidence, resolve a review candidate, or write ol_key/gr_key/hc_key."
+          decisions:
+            - { key: "two_user_entry_shapes_one_attach_standard", value: "attach_route_as_user and pick_candidate_as_user both delegate route mutation to attach_route_as_user_tx; candidate pick alone adds current-generation candidate resolution and OL primary/alias retention", rationale: "Direct add-flow selections and persisted review picks have different UI state but identical user-sovereign ownership, provenance, idempotency, and tombstone authority." }
+          tdd_directives:
+            - "Call through the real selected-route add service and real SqliteDb for a newly created author, exact-name adoption, and unambiguous adoption; assert one canonical UserPicked route, derived progress, durable enqueue, and frozen legacy scalars."
+            - "Pin active idempotency, exact tombstone reactivation, same-user other-author ownership Constraint, cross-user isolation, and concurrent identical selection through the shared helper."
+            - "Force repository failure after the already-committed add gate and assert author/name/progress remain committed; retry attachment and assert convergence."
+            - "Compile-prove automatic workflow/gateway capability sets cannot call attach_route_as_user, while the narrow AuthorLinkService can."
+
+        - name: "AuthorLinkDb::dismiss_candidate_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: candidate_id, type: i64 }
+          output: "Result<(), DbError>; atomically verify user/current generation/pending status, mark dismissed, and re-derive author progress without changing routes or tombstones"
+          errors: [NotFound, Constraint]
+          pseudocode:
+            - "Begin a transaction and load the user-owned current-generation Pending candidate."
+            - "Mark it Dismissed with a resolution timestamp."
+            - "Re-derive progress from remaining pending candidates, active routes, and current key outcomes."
+            - "Commit without modifying any route row."
+          call_annotations:
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Dismiss via the real router with real SQLite and compare all route/tombstone rows before and after; assert stale, picked, dismissed, and cross-user ids fail."
+
+        - name: "AuthorLinkDb::list_review"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorLinkReview>, DbError>; pending candidates from the current evidence generation only, grouped user-locally in stable author/candidate order"
+          errors: [Database]
+          pseudocode:
+            - "Query user-owned authors joined to only Pending candidates whose generation equals current progress generation."
+            - "Load full route state needed for provenance and prior-removal labels, then hydrate each candidate's ordered alternate-name evidence."
+            - "Derive badge precedence as NeedsReview, else Linked, else Unlinked."
+            - "Group by author and sort candidates by observed Same count descending, then catalog-state rank Complete, Partial, Retrying, Pending, Unavailable at equal N, then summary name-verdict strength and canonical route value; incomplete counts retain their honest labels."
+            - "Present Complete counts as final N; present Partial or Retrying with N greater than zero as at least N; when a failed/retrying read has observed zero, show the state as count unknown rather than 0; present Unavailable as unavailable, never zero."
+            - "For every non-Tier2NameSearch reason, omit catalog-count/status presentation entirely; serialize primary/alias evidence fields but do not describe their Pending default as loading."
+          call_annotations:
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+            - { call: "Vec::sort_by", type: STDLIB, target: "Rust Vec deterministic sort" }
+          decisions:
+            - { key: "incomplete_candidate_order", value: "observed N descending, then Complete, Partial, Retrying, Pending, Unavailable at equal N", rationale: "P2 requires honest states but leaves a total order unstated; this preserves observed evidence strength, puts final evidence before unfinished evidence at a tie, and never treats failure as zero." }
+          tdd_directives:
+            - "Query a real SqliteDb through the real handler with mixed badge states, generations, alias verdicts, complete/partial/retrying/unavailable evidence including zero observed before failure, and ties; assert full hydration, final/at-least/unknown/unavailable labels, stable order, and user isolation."
+
+        - name: "AuthorLinkDb::sweep_progress"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<AuthorSweepProgress, DbError>; one user-scoped aggregate over persisted progress and current-generation key-attempt outcomes"
+          errors: [Database]
+          pseudocode:
+            - "Aggregate total, completed, queued, running, parked, needs-review, and retryable author rows for user_id."
+            - "Join only current-generation attempts to count retryable, terminal skipped, and layout-drift keys."
+            - "Count would_have_linked_at_090 once per author and compute oldest due time."
+            - "Return zeroes for an empty user without scanning another user's data."
+          call_annotations:
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Populate all states and old/current attempt generations in real SQLite, call through GET progress, and pin exact counters, oldest due, empty user, and cross-user isolation."
+
+        - name: "AuthorLinkDb::remove_route_as_user"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: "Result<(), DbError>"
+          errors: [NotFound]
+          pseudocode:
+            - "Begin a transaction and select the active route scoped to user_id and author_id."
+            - "Set state Removed, removed_at now, and removed_by_user_id; retain canonical key, provenance, and history."
+            - "Re-derive author progress and commit."
+          call_annotations:
+            - { call: "Utc::now", type: LIBRARY, library: "chrono", target: "chrono" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          forbidden_behaviors:
+            - "Never delete the row or expose this operation to automatic callers."
+          tdd_directives:
+            - "DELETE through the real router; assert the row becomes a tombstone, repeat removal is NotFound/idempotently non-destructive, and automation cannot call this trait through its capability set."
+
+        - name: "AuthorLinkDb::list_active_routes"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: provider, type: "Option<AuthorProvider>" }
+          output: "Result<Vec<AuthorRoute>, DbError>; state=active only, canonical values, stable provenance-rank/id order"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Verify the author belongs to user_id."
+            - "Select active canonical routes, optionally restricted to provider."
+            - "Order UserPicked first, then Tier1Inherited/ReadarrGuarded, then MergeCoalesced, then LegacyUnguarded, with route id as final tie-breaker."
+          call_annotations:
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Insert plural providers, plural OL routes, all provenances, removed rows, and another user's rows in real SQLite; assert filter and stable rank/id ordering."
+
+        - name: "AuthorLinkDb::has_active_route"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: provider, type: AuthorProvider }
+          output: "Result<bool, DbError>; EXISTS over active canonical routes"
+          errors: [Database]
+          pseudocode:
+            - "Run a user-, author-, provider-, and Active-scoped EXISTS query."
+            - "Return the boolean without consulting legacy scalar columns."
+          call_annotations:
+            - { call: "sqlx::query_scalar", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Use real SQLite to pin active OL true, removed OL false, GR-only OL false, legacy scalar without route false, and cross-user false."
+
+        - name: "AuthorLinkDb::compatibility_projection"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorCompatibilityProjection, DbError>; one active route/provider by user-picked, validated, legacy, then lowest id"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Load active routes in stable provenance-rank/id order."
+            - "Choose the first OpenLibrary, Goodreads, and Hardcover canonical value independently."
+            - "Return null for a provider with no active route and never read its legacy scalar."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_active_routes", type: NEW, target: "AuthorLinkDb::list_active_routes(UserId, AuthorId, None)" }
+          forbidden_behaviors:
+            - "Never use projection fields as mutation inputs or assume they are the full route set."
+          tdd_directives:
+            - "Assemble an API response through the real router with plural routes and stale scalar columns; assert deterministic projections come only from active route rows."
+
+        - name: "AuthorDb::list_author_monitor_targets"
+          inputs:
+            - { name: user_id, type: UserId }
+          output: "Result<Vec<AuthorMonitorTarget>, DbError>; one row-group per monitored author with every active OL route; authors with none excluded"
+          errors: [Database]
+          pseudocode:
+            - "Select user-owned monitored authors joined to active OpenLibrary routes."
+            - "Group all ordered OL routes under one AuthorMonitorTarget per author."
+            - "Exclude monitored authors whose only routes are GR/HC or removed OL routes."
+            - "Return targets in stable author-id order."
+          call_annotations:
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Use real SQLite with two active OL routes, duplicates across authors, removed OL, GR-only, and another user; assert one target per author and every eligible route."
+
+        - name: "AuthorNameVariantDb::record_observed_names"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: observations, type: "&[ProviderAuthorNameObservation]" }
+          output: "Result<u32, DbError>; when at least one distinct variant is inserted, atomically increment display_name_generation, set display_name_dirty=1, and pull next_attempt_at forward to now without disturbing a live lease"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Resolve work_id to its user-owned author and reject an unattached/cross-user work."
+            - "Canonicalize each nonempty observed name and insert distinct author/source/name variants with open_library_role null without replacing existing rows; the observation DTO does not assert OL search primary/alias role."
+            - "If no row is inserted, return zero without touching scheduling."
+            - "If at least one row is inserted, increment display_name_generation once for the transaction, set dirty, and move next_attempt_at to no later than now while preserving any lease."
+            - "Commit and return the number of inserted variants."
+          call_annotations:
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+            - { call: "Utc::now", type: LIBRARY, library: "chrono", target: "chrono" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          tdd_directives:
+            - "Call the concrete DB method with real work/author rows; pin duplicate/no-op, multi-insert one-generation bump, terminal-row immediate due, live-lease preservation, and concurrent observations."
+
+        - name: "AuthorLinkDb::ingest_legacy_routes"
+          inputs: []
+          output: "Result<AuthorRouteBackfillReport, DbError>; parse every nonempty scalar with AuthorRouteKey before canonical insert"
+          errors: [InvalidRoute, Database]
+          pseudocode:
+            - "Read bounded Pending rows from author_route_legacy_staging."
+            - "Parse every raw value through AuthorRouteKey::parse for its declared provider."
+            - "On success, insert or confirm an active LegacyUnguarded canonical route, add the Legacy name variant with open_library_role null, ensure progress, and mark staging Ingested."
+            - "On invalid input, mark staging Invalid with diagnostic and count it without fabricating a route."
+            - "Return cumulative legacy, canonical, missing, invalid, and missing-progress counts."
+          call_annotations:
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+            - { call: "sqlx::query", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          forbidden_behaviors:
+            - "Never use INSERT OR REPLACE, edit an applied migration, or erase a conflicting legacy value."
+          tdd_directives:
+            - "Upgrade a real migration-077 fixture containing valid aliases, malformed values, duplicates, missing names, and collisions; assert canonical provenance/reporting and repeat-run idempotency."
+
+        - name: "AuthorLinkDb::verify_cutover_ready"
+          inputs: []
+          output: "Result<AuthorRouteBackfillReport, DbError>; clean iff no missing/invalid route and no missing progress row"
+          errors: [Database]
+          pseudocode:
+            - "Count every nonempty legacy scalar and require a matching canonical active LegacyUnguarded-or-upgraded route."
+            - "Require every staging row to be Ingested and every author to have progress."
+            - "Return the report; the caller treats any missing route, invalid value, pending staging row, or missing progress as startup failure."
+          call_annotations:
+            - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          postconditions:
+            - "A clean report proves all post-cutover readers may use route rows without fallback."
+          tdd_directives:
+            - "Run verification on real pre-F1 fixtures with each single defect and on a clean rerun; assert fail-closed report fields and no request-serving startup on defects."
+
+        - name: "AuthorDb::rename_author_and_cascade"
+          inputs:
+            - { name: request, type: RenameAuthorDbRequest }
+          output: "Result<Author, DbError>"
+          errors: [NotFound, Constraint]
+          pseudocode:
+            - "Begin the shared author transaction and verify the selected variant and author belong to request.user_id."
+            - "Promote exactly one User variant with open_library_role null, creating one when rename supplied a new display string."
+            - "Update authors.name and its canonical identity key."
+            - "Rewrite works.author_name for the author and increment each affected work merge_generation."
+            - "Do not change works.normalized_author."
+            - "Commit and return the updated author."
+          call_annotations:
+            - { call: "canonical_author_key", type: EXISTING, target: "livrarr_domain::identity_matching::canonical_author_key(&str) -> String" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          forbidden_behaviors:
+            - "Never write normalized_author or create a second cascade mechanism."
+          tdd_directives:
+            - "Rename and select a variant through real HTTP handlers and real SQLite; assert author/name variants/works.author_name/merge_generation change, normalized_author is byte-identical, and tag convergence sees the bump."
+
+        - name: "AuthorDb::merge_authors"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: survivor_id, type: AuthorId }
+            - { name: loser_id, type: AuthorId }
+          output: "Result<AuthorMergeReport, DbError>"
+          errors: [NotFound, CrossUser, Constraint]
+          pseudocode:
+            - "Begin the existing merge_authors_tx transaction and validate distinct same-user authors."
+            - "Execute the existing works/series/cache/monitor-field repoint and fold sequence, preserving its exact three-field report."
+            - "Union loser name variants into survivor with canonical/source deduplication; for duplicate OpenLibrary variants retain role Primary over Alias over null."
+            - "Move or coalesce loser route tuples under survivor; when survivor has the exact tombstone and loser has it active, keep the tombstone; when both are active, keep the stronger provenance and oldest identity row."
+            - "Convert conflicting current candidates/progress into survivor-scoped review state, supersede loser state, and ensure one survivor progress row remains due."
+            - "Delete the loser only after dependent rows are folded, commit, and return the original report shape."
+          call_annotations:
+            - { call: "merge_authors_tx", type: EXISTING, target: "merge_authors_tx(&mut SqliteConnection, UserId, AuthorId, AuthorId) -> Result<AuthorMergeReport, DbError>; crates/livrarr-db/src/sqlite_author.rs:86-356" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse before route coalescing" }
+            - { call: "Transaction::commit", type: LIBRARY, library: "sqlx", target: "sqlx" }
+          invariants:
+            - "Merge is monotonic for routes and monitoring; survivor tombstones are never silently cleared."
+          tdd_directives:
+            - "POST through the existing real merge router over a migration-077-upgraded SqliteDb; pin route/name/progress/candidate folds, survivor tombstone precedence, works/series behavior, cross-user rejection, and the exact three-field report."
+
+  - name: livrarr-external-data
+    responsibility: "Fetch road-scoped keyed work contributors for OL/GR/HC without carrying route policy or widening shared enrichment payloads."
+    dependencies: [livrarr-domain, livrarr-http]
+    module_invariants:
+      - "Only contributors associated with the selected work become ProviderAuthorRef values."
+      - "All author-road requests use the shared outbound queue and RequestPriority::Low."
+      - "Adapters report unreadable layout separately from a successfully parsed empty contributor set."
+      - "OpenLibrary work-author hydration canonical-deduplicates author keys before lookup; positive names use one bounded TTL cache and same-key singleflight, while misses remain governed by the shared OL one-second bucket with at most two hydration requests in flight."
+    capability_survey:
+      - capability: "OpenLibrary paced transport"
+        existing_source: "crates/livrarr-domain/src/services/http.rs:132; existing OpenLibrary RateBucket"
+        reuse_decision: wrap
+        rationale: "Reuse shared transport, queue bucket, server identity, and response limits for work and author hydration; add only a positive bounded TTL cache and same-key coalescing above that pacing authority."
+      - capability: "Goodreads Apollo detail parser"
+        existing_source: "crates/livrarr-external-data/src/goodreads/parsers.rs:622-755"
+        reuse_decision: wrap
+        rationale: "Extend parse_detail_next_data to follow only the selected Book's primary/secondary contributor edges; preserve warn-and-None layout-drift behavior."
+      - capability: "Hardcover GraphQL transport"
+        existing_source: "crates/livrarr-external-data/src/hardcover.rs:67-140"
+        reuse_decision: wrap
+        rationale: "Reuse hc_post and pin the verified books_by_pk.contributions.author.id/name shape with a contract fixture."
+    internal_operations:
+      - name: "OpenLibraryAuthorHydrator::name_for_key"
+        inputs:
+          - { name: author_key, type: OpenLibraryAuthorKey }
+          - { name: priority, type: RequestPriority }
+        output: "Result<String, ProviderFetchError>; one validated nonempty author name"
+        errors: [Retryable, Permanent]
+        pseudocode:
+          - "Require the caller's already-canonical OpenLibrary author key and RequestPriority::Low."
+          - "Under a short mutex, return a positive cache entry when its configured TTL has not expired; evict expired entries and maintain the configured bounded capacity in deterministic least-recently-used order."
+          - "If the same key already has an in-flight hydration, join that singleflight and return the leader's cloned result without acquiring another queue permit or issuing another request."
+          - "Otherwise register this caller as the key's leader, then outside the cache mutex acquire the existing shared OpenLibrary rate bucket and a hydration semaphore. The bucket permits no more than one request start per second and the semaphore permits at most two hydration requests in flight."
+          - "Fetch the keyed author record through HttpFetcher at Low priority and validate both the response shape and a trimmed nonempty author name."
+          - "On success, publish the name to all same-key waiters and insert only that positive value with the configured TTL; enforce the configured capacity before releasing the flight."
+          - "On transport failure, malformed payload, or empty name, publish the typed error to waiters, remove the flight, and do not create a negative cache entry."
+        call_annotations:
+          - { call: "HttpFetcher::fetch", type: EXISTING, target: "HttpFetcher::fetch(&self, FetchRequest) -> Result<FetchResponse, FetchError>; crates/livrarr-domain/src/services/http.rs:132" }
+          - { call: "OpenLibraryRateBucket::acquire", type: EXISTING, target: "existing shared OpenLibrary one-second rate bucket" }
+          - { call: "tokio::sync::Mutex", type: LIBRARY, library: "tokio", target: "tokio" }
+          - { call: "tokio::sync::Semaphore", type: LIBRARY, library: "tokio", target: "tokio" }
+          - { call: "tokio::time::Instant", type: LIBRARY, library: "tokio", target: "tokio" }
+          - { call: "HashMap::entry", type: STDLIB, target: "Rust std::collections::HashMap" }
+        invariants:
+          - "At most one HTTP hydration is active for one canonical key, even across concurrent work lookups."
+          - "The cache stores only validated positive names; failures, empty names, and malformed payloads are always eligible for a later real retry."
+          - "Successful sibling names remain cached when a later sibling fails, but no caller receives a partial contributor vector."
+        decisions:
+          - { key: "ol_hydration_cache", value: "deployment-configured positive TTL and bounded capacity with same-key singleflight; no negative cache", rationale: "Repeated contributor keys stop producing N+1 traffic without turning a transient or malformed response into durable absence." }
+          - { key: "ol_hydration_pacing", value: "existing shared OL one-second bucket plus max two hydration requests in flight; no new lane", rationale: "The shared OpenLibrary queue remains the sole pacing authority while a small concurrency cap bounds slow in-flight requests." }
+        tdd_directives:
+          - "Use the real hydrator/HttpFetcher seam for repeated keys within one work, the same key across works, and concurrent same-key calls; assert exactly one hydration request, identical results, Low priority, and the shared one-second bucket."
+          - "Advance controlled time past TTL and fill beyond configured capacity; assert expiry and deterministic eviction each cause exactly one new paced request."
+          - "Make a later sibling fail after earlier siblings succeed, retry the work, and assert no partial vector escaped, completed names came from cache, and only the failed key was requested again."
+          - "Return retryable, permanent, malformed, and empty-name responses; assert none are negatively cached and a later valid response performs a new request and succeeds."
+    public_api:
+      functions:
+        - name: "OpenLibraryClient::fetch_work_authors"
+          inputs:
+            - { name: work_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [Retryable, Permanent]
+          pseudocode:
+            - "Parse work_key as a canonical OpenLibrary work route and reject malformed input."
+            - "Fetch the keyed work record through the shared OpenLibrary queue at priority."
+            - "Extract every authors[].author.key associated with that work, parse each through AuthorRouteKey::parse, and canonical-deduplicate keys while retaining first-seen contributor order."
+            - "Hydrate each distinct key through OpenLibraryAuthorHydrator::name_for_key; its positive TTL cache, same-key singleflight, shared one-second OL bucket, and maximum-two in-flight semaphore apply across works."
+            - "If one hydration fails, return its typed error without a partial contributor vector; keep already completed positive sibling names cached so the retry requests only incomplete keys."
+            - "Return one canonical ProviderAuthorRef per distinct associated author key in first-seen order."
+            - "Return retryable/permanent transport errors distinctly, preserving any adapter-parsed absolute UTC Retry-After lower bound for the gateway mapping; a valid record with no contributors returns an empty vector."
+          call_annotations:
+            - { call: "HttpFetcher::fetch", type: EXISTING, target: "HttpFetcher::fetch(&self, FetchRequest) -> Result<FetchResponse, FetchError>; crates/livrarr-domain/src/services/http.rs:132" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(OpenLibrary, &str)" }
+            - { call: "OpenLibraryAuthorHydrator::name_for_key", type: NEW, target: "shared paced/cacheable internal OL author-name adapter" }
+          preconditions:
+            domain_state:
+              - "priority is RequestPriority::Low for author linking."
+          tdd_directives:
+            - "Exercise the real OL adapter seam with a multi-author work plus duplicate keys, repeated keys across works, concurrent same-key requests, TTL expiry, capacity eviction, malformed keys, empty authors/names, valid/invalid Retry-After retryable transport, and permanent response; assert canonical first-seen refs, exact HTTP call counts, no negative cache, no partial vector, cached successful siblings on retry, shared one-second pacing, maximum two in flight, typed retry timing, and Low priority."
+
+        - name: "GoodreadsClient::fetch_work_authors"
+          inputs:
+            - { name: book_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [Retryable, Permanent, LayoutDrift]
+          pseudocode:
+            - "Fetch the selected Goodreads book page through the shared Goodreads queue at priority."
+            - "Parse __NEXT_DATA__ and locate the selected Book entity for book_key."
+            - "Follow only that Book's primaryContributorEdge and secondaryContributorEdges to referenced Contributor entities."
+            - "For legacy layout only, accept numeric /author/show/<id> links attached to that book."
+            - "Parse each referenced id through AuthorRouteKey::parse and return its associated name and role."
+            - "If the selected-book association shape is unreadable, return LayoutDrift rather than an empty success."
+            - "On retryable transport, preserve any adapter-parsed absolute UTC Retry-After lower bound for the gateway mapping."
+          call_annotations:
+            - { call: "HttpFetcher::fetch", type: EXISTING, target: "HttpFetcher::fetch(&self, FetchRequest) -> Result<FetchResponse, FetchError>; crates/livrarr-domain/src/services/http.rs:132" }
+            - { call: "parse_detail_next_data", type: EXISTING, target: "parse_detail_next_data(&str) -> Option<GoodreadsDetailResult>; crates/livrarr-external-data/src/goodreads/parsers.rs:622" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(Goodreads, &str)" }
+          forbidden_behaviors:
+            - "Never scan arbitrary Contributor or legacyId entries outside the selected Book's edges."
+          tdd_directives:
+            - "Run the real parser/adapter seam against the captured current fixture containing unrelated legacyId carriers, a legacy href fixture, multiple contributors, missing edges, malformed JSON, and transport errors with valid/invalid Retry-After; assert typed retry timing is preserved."
+
+        - name: "HardcoverClient::fetch_work_authors"
+          inputs:
+            - { name: book_key, type: String }
+            - { name: priority, type: RequestPriority }
+          output: "Result<Vec<ProviderAuthorRef>, ProviderFetchError>"
+          errors: [NotConfigured, Retryable, Permanent, LayoutDrift]
+          pseudocode:
+            - "If Hardcover is disabled or lacks a token, return NotConfigured without a request."
+            - "Parse book_key as the books_by_pk integer id."
+            - "Call hc_post with the verified contributions.author.id/name query at priority."
+            - "Map retryable transport failures with their typed Retry-After lower bound; map non-retryable GraphQL/response failures that preserve a readable contract boundary to Permanent."
+            - "If books_by_pk, contributions, or any contribution's author.id/name association is unreadable or has the wrong shape, return LayoutDrift rather than Permanent, NotConfigured, or an empty success."
+            - "Treat a readable books_by_pk object with an empty contributions array as a valid empty contributor set."
+            - "Parse every returned author id through AuthorRouteKey::parse and return all associated names."
+            - "On retryable transport, preserve any adapter-parsed absolute UTC Retry-After lower bound for the gateway mapping."
+          call_annotations:
+            - { call: "hc_post", type: EXISTING, target: "hc_post<F: HttpFetcher>(&F, Value, &str, RequestPriority) -> Result<Value, HardcoverError>; crates/livrarr-external-data/src/hardcover.rs:67-140" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(Hardcover, &str)" }
+            - { call: "str::parse::<u64>", type: STDLIB, target: "Rust FromStr for u64" }
+          tdd_directives:
+            - "Use the real Hardcover adapter seam with the pinned live-probed books_by_pk.contributions.author.id/name fixture and multiple contributions; assert every associated canonical ref and Low priority."
+            - "Disable Hardcover and separately omit its token; assert NotConfigured with zero HTTP requests. Then supply enabled config with missing/wrong-type books_by_pk, contributions, author, author.id, and author.name shapes; assert each is LayoutDrift, never NotConfigured, Permanent, or empty success."
+            - "Return a readable empty contributions array and assert an empty success; return GraphQL errors and assert Permanent; return valid/invalid Retry-After transport failures and assert Retryable with exact typed timing."
+
+  - name: livrarr-enrichment
+    responsibility: "Observe successful in-hand provider author names at enrichment completion and schedule local display convergence without affecting enrichment success."
+    dependencies: [livrarr-domain, livrarr-db]
+    module_invariants:
+      - "The observer records names only: no contributor ids, routes, identity mutations, rename, or provider work."
+      - "Observation failure is warning-only and never changes EnrichmentResult."
+    capability_survey:
+      - capability: "Existing provider-completion outcome arms"
+        existing_source: "crates/livrarr-enrichment/src/lib.rs:625; crates/livrarr-enrichment/src/lib.rs:707; crates/livrarr-enrichment/src/lib.rs:730; crates/livrarr-enrichment/src/lib.rs:863"
+        reuse_decision: wrap
+        rationale: "The real enrich_work source has three terminal completion paths: cached reuse constructs its result at 625, deferred background returns at 707 while scatter outcomes remain in hand, and the normal path reconstructs ProviderOutcome::Success(in_mem) at 730 before returning at 863. Observe successful payload names before each applicable return."
+      - capability: "Infallible observer pattern"
+        existing_source: "none"
+        reuse_decision: rewrite
+        rationale: "Add one narrow wrapper over AuthorNameVariantDb that swallows DB failure after warning."
+    notes:
+      - "Cached candidate reuse observes names from its consumed cached NormalizedWorkDetail values before the result constructed at crates/livrarr-enrichment/src/lib.rs:625 is returned."
+      - "The deferred-background early return at crates/livrarr-enrichment/src/lib.rs:707 still has scatter_result.outcomes in hand; observe names from its Success payloads before returning, but record nothing for NotFound, NotConfigured, WillRetry, PermanentFailure, or Conflict outcomes."
+      - "The normal merge path observes each ProviderOutcome::Success(in_mem) at crates/livrarr-enrichment/src/lib.rs:730, including an injected Readarr NormalizedWorkDetail, before the result at line 863; reconstructed cached JSON is not a second observation of the same outcome."
+      - "A completion path with no successful payload or no nonempty author name calls no observer write. All three paths return their original EnrichmentResult even when observation persistence fails."
+    public_api:
+      functions:
+        - name: "AuthorNameVariantObserver::record_observed_author_names"
+          inputs:
+            - { name: db, type: "&(impl AuthorNameVariantDb + WorkDb)" }
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: observations, type: "&[ProviderAuthorNameObservation]; derived only from successful in-hand outcome fields" }
+          output: "() ; warn on DB failure, never propagate"
+          errors: []
+          pseudocode:
+            - "Filter observations to nonempty names already present in successful provider outcome fields and retain their true source, including GoogleBooks."
+            - "If the filtered set is empty, return."
+            - "Call record_observed_names for the work's associated author."
+            - "On DB failure, emit a warning with work_id and return normally."
+          call_annotations:
+            - { call: "str::trim", type: STDLIB, target: "Rust str::trim" }
+            - { call: "AuthorNameVariantDb::record_observed_names", type: NEW, target: "AuthorNameVariantDb::record_observed_names(UserId, WorkId, &[ProviderAuthorNameObservation])" }
+            - { call: "tracing::warn", type: LIBRARY, library: "tracing", target: "tracing" }
+          forbidden_behaviors:
+            - "Never read provider ids from shared payloads, write routes, call rename, or return an error."
+          tdd_directives:
+            - "Drive the real cached-reuse result at line 625, deferred-background return at line 707, and normal merge success/return at lines 730/863 with successful GR/HC/GB/OL and injected Readarr payload names over an in-memory SqliteDb; assert exact variants, no duplicate observation, and dirty scheduling."
+            - "Drive every non-success outcome and a success payload with no usable author name through each applicable path; assert zero observer writes."
+            - "Force observer DB failure independently on cached, deferred, and normal completion; assert warning-only behavior and byte-equivalent EnrichmentResult values."
+
+  - name: livrarr-metadata
+    responsibility: "Run the one author-linking road, rank and cascade names, cut every consumer to active routes, and isolate the legacy shadow metric."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data]
+    module_invariants:
+      - "Tier 1 attaches every agreeing contributor independently and persists every key outcome before moving to siblings."
+      - "Tier 2 always parks and never invokes guard_author_route or apply_guarded_route."
+      - "Only an outstanding retryable OpenLibrary key defers Tier 2; GR/HC failures do not."
+      - "Dirty-name work runs before provider work and clears dirty only after a committed cascade using generation compare-and-set."
+      - "No consumer reads or falls back to authors.ol_key, authors.gr_key, or authors.hc_key."
+    capability_survey:
+      - capability: "Dominant-language rule"
+        existing_source: "crates/livrarr-domain/src/seed.rs:255"
+        reuse_decision: reuse
+        rationale: "The existing unique-maximum rule selects the English model on tie or absence and never consults monitor_language."
+      - capability: "OpenLibrary author lookup transport"
+        existing_source: "crates/livrarr-metadata/src/author_service.rs:287-344"
+        reuse_decision: wrap
+        rationale: "Extract one shared adapter so interactive lookup and background Tier 2 share transport while background calls use Low priority and richer fields."
+      - capability: "Author monitor workflow"
+        existing_source: "crates/livrarr-metadata/src/author_monitor_workflow.rs"
+        reuse_decision: rewrite
+        rationale: "Retain its screening/add/notification road but replace singular scalar selection with grouped plural OL route unions."
+      - capability: "Legacy 0.90 comparator"
+        existing_source: "crates/livrarr-matching/src/m4_scoring.rs:145-150"
+        reuse_decision: wrap
+        rationale: "Retain only inside legacy_guess_metric after a real park, with no route/candidate handle, for the required shadow counter."
+    notes:
+      - "DELETE crates/livrarr-metadata/src/author_service.rs:483-526 resolve_ol_key and its first-hit bibliography call; bibliography uses active route union then existing GB fallback."
+      - "DELETE crates/livrarr-metadata/src/series_query_service/service.rs:228-260 silently_resolve_author_key and every author_similarity route mutation."
+      - "No production author_similarity result may reach AuthorLinkWorkflow::submit_evidence, AuthorLinkDb::apply_guarded_route, or a scalar update."
+      - "AuthorService::add and every shared work/import add path first await shared_author_create_or_adopt_gate and receive the converged Author after its author/name/progress transaction commits. Only then may an explicit UI selection call AuthorLinkService::attach_selected_route; a failure from that independent operation leaves the author durably enqueued."
+      - "An author route explicitly selected in Add-box, standalone add-author, or manual import is user-sovereign. A provider author ref inherited or inferred from a selected/mapped keyed work is keyed evidence and must pass guard_author_route; list/series doors enqueue only, and the Readarr same-record id/name assertion remains guarded keyed evidence."
+    public_api:
+      functions:
+        - name: author_name_rank_table
+          inputs:
+            - { name: model, type: AuthorNameRankModel }
+          output: "&'static [AuthorNameSource]"
+          errors: []
+          pseudocode:
+            - "For EnglishOrUndetermined return User, Goodreads, Hardcover, GoogleBooks, OpenLibrary, Readarr, Import, Legacy."
+            - "For ForeignDominant return User, GoogleBooks, Hardcover, Goodreads, OpenLibrary, Readarr, Import, Legacy."
+          call_annotations: []
+          decisions:
+            - { key: "readarr_rank", value: "after OL and before generic Import/Legacy", rationale: "IR v1 defines Readarr as a source but no rank; its same-record name/id assertion is associated evidence yet not an independent provider fetch, so it remains fallback." }
+          tdd_directives:
+            - "Table-test both exact arrays and prove User is first and Import/Legacy are fallback in both models."
+
+        - name: choose_author_display_name
+          inputs:
+            - { name: variants, type: "&[AuthorNameVariant]" }
+            - { name: work_languages, type: "Iterator<Item=Option<&str>>" }
+          output: "Option<AuthorNameVariant>"
+          errors: []
+          pseudocode:
+            - "Return None when no nonempty variant exists."
+            - "Compute dominant_language from work_languages; choose ForeignDominant only for a unique non-English maximum, otherwise EnglishOrUndetermined."
+            - "Load the corresponding author_name_rank_table."
+            - "Choose an explicitly user-selected variant first."
+            - "Otherwise choose the earliest-observed variant from the highest-ranked source, with variant id as stable tie-breaker."
+            - "Within OpenLibrary at the same source rank, prefer open_library_role Primary over Alias, then apply earliest-observed and lowest-id tie-breakers; variants with no OL role remain after the marked primary and aliases."
+          call_annotations:
+            - { call: "seed::dominant_language", type: EXISTING, target: "livrarr_domain::seed::dominant_language(IntoIterator<Option<&str>>) -> Option<String>" }
+            - { call: "author_name_rank_table", type: NEW, target: "author_name_rank_table(AuthorNameRankModel)" }
+            - { call: "Iterator::min_by_key", type: STDLIB, target: "Rust Iterator ordering" }
+          decisions:
+            - { key: "same_source_tie", value: "earliest observed_at then lowest id", rationale: "Stable selection avoids display oscillation when equal-rank observations arrive in different batches." }
+            - { key: "ol_primary_alias_rank", value: "OpenLibraryNameRole::Primary before Alias before unmarked OL variants, then observed_at/id", rationale: "The amended nullable role makes the primary-over-alias rule durable while retaining deterministic behavior for legacy unmarked OL names." }
+          tdd_directives:
+            - "Use persisted variants from a real SqliteDb and real work-language rows to pin user choice, both rank tables, tie/no-language English fallback, Readarr fallback, Primary-before-Alias-before-unmarked OL ordering, and stable within-role ties."
+
+        - name: "AuthorService::rename"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: name, type: String }
+          output: "Result<Author, AuthorServiceError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Trim name and reject empty input with a name validation error."
+            - "Create or reuse a User name variant with open_library_role null for the author."
+            - "Call the shared rename_author_and_cascade transaction with that variant."
+            - "Return the updated author."
+          call_annotations:
+            - { call: "str::trim", type: STDLIB, target: "Rust str::trim" }
+            - { call: "AuthorNameVariantDb::ensure_user_variant", type: NEW, target: "internal DB helper creating/selecting the User variant" }
+            - { call: "AuthorDb::rename_author_and_cascade", type: NEW, target: "AuthorDb::rename_author_and_cascade(RenameAuthorDbRequest)" }
+          forbidden_behaviors:
+            - "Never call generic update_author for a display change or write normalized_author."
+          tdd_directives:
+            - "PUT through the real router and real SQLite; pin validation, user isolation, variant retention, cascade fields, merge_generation bump, and normalized_author immutability."
+
+        - name: "AuthorService::select_name_variant"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: variant_id, type: i64 }
+          output: "Result<Author, AuthorServiceError>"
+          errors: [NotFound, Database]
+          pseudocode:
+            - "Load the selected variant scoped to user_id and author_id."
+            - "Promote its text as the sole User-selected variant."
+            - "Call the shared rename_author_and_cascade transaction."
+            - "Return the updated author."
+          call_annotations:
+            - { call: "AuthorNameVariantDb::get_variant", type: NEW, target: "internal user/author-scoped variant read" }
+            - { call: "AuthorDb::rename_author_and_cascade", type: NEW, target: "AuthorDb::rename_author_and_cascade(RenameAuthorDbRequest)" }
+          tdd_directives:
+            - "PUT through the real display-name route with real SQLite; assert same-author selection cascades and cross-user/cross-author ids fail without mutation."
+
+        - name: "AuthorService::set_monitoring"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: monitored, type: bool }
+            - { name: monitor_new_items, type: "Option<bool>" }
+            - { name: monitor_language, type: "Option<String>" }
+          output: "Result<Author, AuthorServiceError>; when enabling, calls has_active_route(OpenLibrary), never inspects Author.ol_key, and if absent returns exactly AuthorServiceError::Validation { field: \"monitored\", message: \"cannot monitor author without OL linkage\" }"
+          errors: [NotFound, Validation, Database]
+          pseudocode:
+            - "When monitored is true, query has_active_route for OpenLibrary."
+            - "If false, return exactly the established monitored-field validation variant and message."
+            - "Apply monitoring flags and normalized monitor language through the existing author update transaction."
+            - "When disabling, do not require a route and do not remove any route."
+          call_annotations:
+            - { call: "AuthorLinkDb::has_active_route", type: NEW, target: "AuthorLinkDb::has_active_route(UserId, AuthorId, OpenLibrary)" }
+            - { call: "normalize_language", type: EXISTING, target: "livrarr_domain::normalize_language(&str) -> String; crates/livrarr-domain/src/lib.rs:991" }
+            - { call: "AuthorDb::update_author", type: EXISTING, target: "AuthorDb::update_author(&self, UserId, AuthorId, UpdateAuthorDbRequest) -> Result<Author, DbError>; crates/livrarr-db/src/api/author.rs:23-32" }
+          forbidden_behaviors:
+            - "Never inspect Author.ol_key or allow a GR/HC-only route to unlock monitoring."
+          tdd_directives:
+            - "Toggle through the real author router with real SQLite for active OL, removed OL, GR-only, HC-only, unlinked, and disable paths; pin the exact validation field/message."
+
+        - name: "AuthorMonitorWorkflow::run_monitor"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<MonitorReport, MonitorError>; consumes list_author_monitor_targets, fetches every active OL route, unions per author by canonical OL work key before screening/add/notification, and counts each author/work once"
+          errors: [Database, Provider]
+          pseudocode:
+            - "Load one monitor target per monitored author with all active OL routes."
+            - "For each author until cancellation, fetch every route feed in stable route order and retain successful siblings when one route fails."
+            - "Union entries by canonical OL work key; only when a key is absent use normalized title/year fallback identity."
+            - "Choose the lowest-ranked source route as seed provenance for a duplicate."
+            - "Only after the full union, run existing quality screening, add, and notification logic once per author/work."
+            - "Count the author once and surface per-route failures without erasing successful results."
+          call_annotations:
+            - { call: "AuthorDb::list_author_monitor_targets", type: NEW, target: "AuthorDb::list_author_monitor_targets(UserId)" }
+            - { call: "HttpFetcher::fetch", type: EXISTING, target: "HttpFetcher::fetch(&self, FetchRequest) -> Result<FetchResponse, FetchError>; crates/livrarr-domain/src/services/http.rs:132" }
+            - { call: "CancellationToken::is_cancelled", type: LIBRARY, library: "tokio-util", target: "tokio-util" }
+            - { call: "HashMap::entry", type: STDLIB, target: "Rust HashMap union" }
+          invariants:
+            - "Plural routes expand coverage but never multiply actions or report counts."
+          tdd_directives:
+            - "Run the real monitor workflow with real SQLite grouped targets and a real OL adapter seam returning overlaps and one failed route; assert union-before-action, stable seed route, single counts, and sibling success."
+
+        - name: "AuthorServiceImpl::fetch_bibliography_entries"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author, type: "&Author" }
+          output: "Result<Vec<BibliographyEntry>, AuthorServiceError>; fetch every active OL route, union by canonical entry ol_key (title/year fallback only when key absent), then use GB fallback only if the union is empty"
+          errors: [NotFound, Provider, Database]
+          pseudocode:
+            - "Load all active OpenLibrary routes for the user-owned author."
+            - "Fetch each OL bibliography and union entries by canonical OL work key, using normalized title/year only for entries without a key."
+            - "Retain successful route results when another route fails and surface diagnostics."
+            - "If the completed OL union is nonempty, return it."
+            - "If no active OL route exists or every successful route yields an empty union, execute the existing Google Books fallback."
+            - "Never call resolve_ol_key or read Author.ol_key."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_active_routes", type: NEW, target: "AuthorLinkDb::list_active_routes(UserId, AuthorId, Some(OpenLibrary))" }
+            - { call: "fetch_ol_bibliography", type: EXISTING, target: "AuthorServiceImpl::fetch_ol_bibliography(&self, &str, &str) -> Result<Vec<BibliographyEntry>, AuthorServiceError>; crates/livrarr-metadata/src/author_service.rs:578-655" }
+            - { call: "fetch_gb_bibliography", type: EXISTING, target: "AuthorServiceImpl::fetch_gb_bibliography(&self, &str, &str) -> Result<Vec<BibliographyEntry>, AuthorServiceError>; crates/livrarr-metadata/src/author_service.rs:768-844" }
+            - { call: "HashMap::entry", type: STDLIB, target: "Rust HashMap union" }
+          forbidden_behaviors:
+            - "Never perform a name search, first-hit adoption, or legacy-scalar fallback."
+          tdd_directives:
+            - "Call the real bibliography handler with real SQLite plural routes and a real adapter seam; pin OL union/dedup, partial failure, empty-union GB fallback, and stale scalar non-use."
+
+        - name: "SeriesQueryService::list_author_series"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: raw, type: bool }
+          output: "Result<AuthorSeriesListView, SeriesServiceError>; fetch/cache the union of every active GR route and deduplicate by canonical Goodreads series key before merging DB series"
+          errors: [NotFound, Provider, Database]
+          pseudocode:
+            - "Load every active Goodreads route for the user-owned author."
+            - "If the set is empty, return the typed missing-route/fix-flow state without guessing."
+            - "Fetch or read cached series for every route, retaining successful siblings on per-route failure."
+            - "Union by canonical Goodreads series key and then merge the union with DB series state."
+            - "Apply raw/display shaping only after deduplication."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_active_routes", type: NEW, target: "AuthorLinkDb::list_active_routes(UserId, AuthorId, Some(Goodreads))" }
+            - { call: "fetch_author_series_pages", type: EXISTING, target: "fetch_author_series_pages<F: HttpFetcher>(&F, &str, Option<&CancellationToken>) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError>; crates/livrarr-metadata/src/series_query_service/gr_fetch.rs:147-204" }
+            - { call: "HashMap::entry", type: STDLIB, target: "Rust HashMap union" }
+          forbidden_behaviors:
+            - "Never call silently_resolve_author_key, author_similarity, or Author.gr_key."
+          tdd_directives:
+            - "Drive the real series handler with real SQLite plural GR routes and adapter fixtures containing duplicate series; assert one union cache/result, partial-failure isolation, and empty-route fix state."
+
+        - name: "SeriesQueryService::refresh_author_series"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorSeriesListView, SeriesServiceError>; invalidate one author-union cache, refetch all active GR routes, and return MissingGoodreadsRoute only when the active set is empty"
+          errors: [NotFound, MissingGoodreadsRoute, Provider, Database]
+          pseudocode:
+            - "Load all active Goodreads routes."
+            - "If empty, return MissingGoodreadsRoute without a name search."
+            - "Invalidate the single author-level union cache."
+            - "Refetch every route feed, union by canonical Goodreads series key, persist one union cache, and return the merged view."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_active_routes", type: NEW, target: "AuthorLinkDb::list_active_routes(UserId, AuthorId, Some(Goodreads))" }
+            - { call: "SeriesCacheDb::delete_series_cache", type: EXISTING, target: "SeriesCacheDb::delete_series_cache(&self, i64) -> Result<(), DbError>; crates/livrarr-db/src/api/series_cache.rs:39" }
+            - { call: "fetch_author_series_pages", type: EXISTING, target: "fetch_author_series_pages<F: HttpFetcher>(&F, &str, Option<&CancellationToken>) -> Result<Vec<SeriesCacheEntry>, SeriesServiceError>; crates/livrarr-metadata/src/series_query_service/gr_fetch.rs:147-204" }
+          tdd_directives:
+            - "Refresh through the real handler and real SQLite cache with plural routes; assert one invalidation, all feeds fetched, deduped cache, and MissingGoodreadsRoute only for an empty active set."
+
+        - name: "AuthorResponseAssembler::route_view"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author, type: "&Author" }
+          output: "Result<(Vec<AuthorRoute>, AuthorLinkState, bool, AuthorCompatibilityProjection), AuthorServiceError>; compatibility keys and monitorable derive only from active routes"
+          errors: [Database]
+          pseudocode:
+            - "Load the author's active and removed route rows needed by the route panel."
+            - "Load pending current-generation candidates to determine NeedsReview precedence."
+            - "Derive link_state as NeedsReview when pending evidence exists, else Linked when any route is active, else Unlinked."
+            - "Derive monitorable from an active OpenLibrary route."
+            - "Build compatibility projection from active routes only and return all values."
+          call_annotations:
+            - { call: "AuthorLinkDb::list_routes_for_view", type: NEW, target: "internal user-scoped full route-history query" }
+            - { call: "AuthorLinkDb::list_review", type: NEW, target: "AuthorLinkDb current-generation review read" }
+            - { call: "AuthorLinkDb::has_active_route", type: NEW, target: "AuthorLinkDb::has_active_route(UserId, AuthorId, OpenLibrary)" }
+            - { call: "AuthorLinkDb::compatibility_projection", type: NEW, target: "AuthorLinkDb::compatibility_projection(UserId, AuthorId)" }
+          tdd_directives:
+            - "GET author through the real router with active/removed routes and candidates; pin badge precedence, GR-only linked/non-monitorable, OL monitorable, and stale scalar exclusion."
+
+        - name: "AuthorLinkingServiceImpl::run_author"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+          output: "Result<AuthorLinkProgressUpdate, AuthorLinkError>; a dirty-name phase ranks/cascades locally and clears dirty only after commit; an otherwise unchanged fingerprint performs no provider I/O; Tier 1 persists each provider-key outcome and continues through siblings"
+          errors: [ClaimLost, Database]
+          pseudocode:
+            - "Load AuthorRoadInput under claim and fail immediately on lost claim."
+            - "If display_name_dirty, choose the display variant from current variants and work languages; when it differs, commit rename_author_and_cascade before any dirty clear."
+            - "After the local phase, retain dirty in the eventual update unless stored display_name_generation still equals the claim snapshot."
+            - "If the live settled-evidence fingerprint equals the evaluated fingerprint and no current-generation key retry is due, perform no provider call; advance only local/due scheduling state."
+            - "If the fingerprint changed, increment evidence_generation, supersede older candidates, reset the road cursor, and materialize every canonical OL/GR/HC key on every Confirmed/Provisional work."
+            - "If there are no settled works, skip all providers, run the isolated read-only legacy 0.90 shadow metric, and prepare ParkedNoSettledWork with a configured future due time."
+            - "Prepare deterministic Pending and due-Retryable key attempts for the current generation."
+            - "For each attempt, call fetch_work_authors with Low priority outside a transaction."
+            - "For every returned contributor ref, call guard_author_route against the current associated-name snapshot."
+            - "For every Agreed result, independently call apply_guarded_route with this claim; continue through all contributors so every Agree attaches."
+            - "For every Rejected result, build a NameGuardFailed candidate with the actual verdict mirrored into primary_name_verdict, empty aliases, no preview, Pending/not-run catalog state, and zero count; persist it and never route it."
+            - "Only after all contributor effects commit, complete the key attempt as Succeeded."
+            - "Map NotConfigured to SkippedNotConfigured, Permanent to SkippedPermanent, LayoutDrift to ParkedLayoutDrift, and UnsupportedProvider to SkippedPermanent with diagnostic unsupported_provider; emit the operator error and continue siblings."
+            - "For any Tier-1 or Tier-2 AuthorProviderError::Retryable { error, retry_not_before }, use the relevant persisted key-attempt or author-progress attempt_count and compute base = max(now + capped_backoff(attempt_count), retry_not_before ?? now), then next_attempt_at = base + deterministic per-author/key jitter; capped_backoff and jitter durations come only from deployment configuration, and attempt count alone never terminalizes."
+            - "Complete each failed key attempt independently and continue all later siblings."
+            - "After runnable Tier 1 keys, if no active OL route and no outstanding retryable OL key, run Tier 2 even when GR/HC retries or terminal failures remain."
+            - "Tier 2 searches OL in the background at Low priority; evaluate the primary into primary_name_verdict and each canonical-distinct alternate into AuthorCandidateAlternateNameEvidence, then set name_verdict by strongest result in Agree, Grey, Abstain, Disagree order."
+            - "Copy top_work into top_work_preview as a labeled preview and fetch-priority hint; it never increments corroboration."
+            - "Fetch candidate catalogs in priority order with resumable cursors; count each local settled work id at most once when any catalog title returns TitleVerdict::Same."
+            - "Start catalog_evidence_state as Pending; after a nonterminal successful page use Partial, on a retryable search/catalog fetch use Retrying while retaining cursor and observed N and scheduling the author with the common retry formula, on feed exhaustion or every distinct settled work matching use Complete, and on permanent catalog failure use Unavailable."
+            - "For Partial or Retrying with observed matches, present at least N; when failure occurs before any match, present retrying/unavailable with an unknown count rather than zero. Never map a failed catalog read to Complete or computed zero."
+            - "Persist every Tier-2 result as a candidate; do not call guard_author_route, submit_evidence, or apply_guarded_route."
+            - "After the real road parks, run legacy_guess_metric as a read-only boolean with no route or candidate handle."
+            - "Derive final progress: any current-generation retry yields RetryableFailure with earliest key due; otherwise pending candidates yield NeedsReview; otherwise any active route yields Linked; otherwise settled work yields ParkedNoEvidence; no settled work remains ParkedNoSettledWork."
+            - "Advance progress with evaluated fingerprint, generation, cursor, diagnostic, shadow metric, and dirty compare-and-set semantics; return the same update."
+          call_annotations:
+            - { call: "AuthorLinkDb::load_road_input", type: NEW, target: "AuthorLinkDb::load_road_input(AuthorLinkClaim)" }
+            - { call: "choose_author_display_name", type: NEW, target: "choose_author_display_name(&[AuthorNameVariant], work languages)" }
+            - { call: "AuthorDb::rename_author_and_cascade", type: NEW, target: "AuthorDb::rename_author_and_cascade(RenameAuthorDbRequest)" }
+            - { call: "AuthorLinkDb::prepare_key_attempts", type: NEW, target: "AuthorLinkDb::prepare_key_attempts(AuthorLinkClaim, i64, Vec<SettledWorkProviderKey>)" }
+            - { call: "AuthorProviderGateway::fetch_work_authors", type: NEW, target: "AuthorProviderGateway::fetch_work_authors(AuthorProvider, String, Low) -> Result<Vec<ProviderAuthorRef>, AuthorProviderError>, including structured Retryable.retry_not_before" }
+            - { call: "guard_author_route", type: NEW, target: "guard_author_route(&[String], ProviderAuthorRef, Option<WorkId>, Tier1SettledWork) -> AuthorRouteGuardResult with opaque Agreed/Rejected payloads" }
+            - { call: "AuthorLinkDb::apply_guarded_route", type: NEW, target: "AuthorLinkDb::apply_guarded_route(GuardedRouteWrite)" }
+            - { call: "AuthorLinkDb::record_candidates", type: NEW, target: "AuthorLinkDb::record_candidates(AuthorLinkClaim, Vec<AuthorLinkCandidate>)" }
+            - { call: "AuthorLinkDb::complete_key_attempt", type: NEW, target: "AuthorLinkDb::complete_key_attempt(AuthorLinkClaim, i64, AuthorKeyAttemptOutcome)" }
+            - { call: "AuthorProviderGateway::search_open_library_authors", type: NEW, target: "AuthorProviderGateway::search_open_library_authors(String, u32, Low) -> Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError>, including alternate_names" }
+            - { call: "author_verdict", type: EXISTING, target: "livrarr_domain::identity_matching::author_verdict(&[String], &[String]) -> AuthorVerdict" }
+            - { call: "AuthorProviderGateway::fetch_open_library_catalog_page", type: NEW, target: "AuthorProviderGateway::fetch_open_library_catalog_page(OpenLibraryAuthorKey, Option<String>, Low)" }
+            - { call: "title_verdict", type: EXISTING, target: "livrarr_domain::identity_matching::title_verdict(&ParsedTitle, &ParsedTitle) -> TitleVerdict" }
+            - { call: "legacy_guess_metric", type: NEW, target: "isolated read-only wrapper over livrarr_matching::author_similarity" }
+            - { call: "AuthorLinkDb::advance_progress", type: NEW, target: "AuthorLinkDb::advance_progress(AuthorLinkClaim, AuthorLinkProgressUpdate)" }
+            - { call: "FNV-1a-64 jitter", type: NEW, target: "local deterministic jitter over user/author/generation/work/provider/route" }
+          invariants:
+            - "Every provider key and every agreeing contributor is processed; no first-success stop exists."
+            - "A failed key never rolls back committed sibling effects or aborts the author batch."
+            - "Tier 2 cannot mint evidence capability and cannot write a route."
+          forbidden_behaviors:
+            - "Never call work matching/settle identity, hold a DB transaction over provider I/O, use Normal/Interactive priority, or read/write legacy scalar author keys."
+          decisions:
+            - { key: "tier2_fetch_priority", value: "top_work Same-preview first, then summary name verdict, then canonical route key", rationale: "P2 allows top_work as a fetch-priority hint but not evidence; stable secondary keys make restart order deterministic." }
+            - { key: "retry_jitter", value: "FNV-1a-64 author/key tuple mapped into the deployment-configured jitter window and added after max(now + capped_backoff(attempt_count), retry_not_before ?? now)", rationale: "Deterministic per-author/key jitter prevents synchronized retries while remaining restart-stable; all durations remain deployment configuration." }
+            - { key: "retry_after_transport", value: "destructure AuthorProviderError::Retryable.retry_not_before and apply max(now + capped_backoff(attempt_count), retry_not_before ?? now) before jitter", rationale: "The amended typed hint is an absolute provider lower bound; attempt count remains scheduling input and never a terminality rule." }
+            - { key: "tier2_evidence_representation", value: "populate primary_name_verdict, ordered alternate_name_evidence, top_work_preview, catalog_evidence_state, and observed Same-only count on every parked candidate", rationale: "The amended DTO preserves the full evidence protocol across persistence/restart without permitting Tier-2 route writes." }
+          tdd_directives:
+            - "Drive the concrete service with real in-memory SqliteDb and real adapter seams: all work statuses/keys, multi-contributor attach-each, all verdicts, every provider error including UnsupportedProvider, sibling continuation, exact Retry-After/backoff/jitter precedence and non-exhaustion, restart/claim loss, unchanged/replaced fingerprints, dirty CAS race, Tier-3 re-entry, OL-only Tier-2 deferral, park-always, every catalog state and at-least/unknown presentation, top_work no-count, primary/alias verdict summary, tombstones, legacy contradiction, ownership collision, and shadow metric isolation."
+            - "Start ParkedNoSettledWork, commit a work transition to Confirmed through real SQLite, claim the trigger-woken row, and assert run_author detects the changed fingerprint and executes exactly the newly eligible keyed calls."
+            - "Start Linked, add one new canonical OL, GR, and HC work key through real SQLite, and assert each trigger wake is resumable and the replacement run processes every new provider key without replaying terminal sibling attempts."
+            - "Perform a same-value update of every watched column and an update of unrelated work metadata; assert the trigger does not wake progress and provider call count remains zero."
+            - "Wake an author by changing evidence on an unsettled work excluded from the fingerprint; assert the redundant wake is claimed, the fingerprint-unchanged fast path issues zero provider calls, and only scheduling state advances."
+            - "Mutate watched work evidence after run_author loads a live claim but before each token-checked route/candidate/key-attempt/progress write; assert ClaimLost, no stale effect, replacement claim ownership, and eventual processing of the new fingerprint."
+
+  - name: livrarr-handlers
+    responsibility: "Authenticate and validate author-link HTTP requests, call only narrow domain services, and map typed results without SQL/provider policy."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-jobs]
+    module_invariants:
+      - "No handler waits on author provider I/O or calls livrarr-db/livrarr-metadata directly."
+      - "Every user mutation derives user_id from AuthContext and ignores body-supplied ownership."
+    capability_survey:
+      - capability: "Review handler precedent"
+        existing_source: "crates/livrarr-handlers/src/identity_review.rs:55-208"
+        reuse_decision: wrap
+        rationale: "Reuse authenticated list/resolve/dismiss DTO and error-mapping shape while binding the narrow AuthorLinkService."
+      - capability: "Existing author merge handler"
+        existing_source: "crates/livrarr-handlers/src/author.rs:274-287"
+        reuse_decision: reuse
+        rationale: "The server-side merge door already calls AuthorService::merge and remains the UI target."
+      - capability: "Existing author update handler"
+        existing_source: "crates/livrarr-handlers/src/author.rs:195-240"
+        reuse_decision: rewrite
+        rationale: "Keep monitor field validation but remove generic grKey mutation; new route and name actions use dedicated endpoints."
+    notes:
+      - "DELETE crates/livrarr-handlers/src/work.rs:306 author_similarity >= 0.90 route mutation."
+      - "DELETE crates/livrarr-handlers/src/author.rs:119 author_similarity >= 0.90 route mutation."
+      - "DELETE crates/livrarr-handlers/src/series.rs:119 author_similarity >= 0.90 route mutation."
+      - "Remove olKey/grKey/hcKey mutation fields from generic author update DTOs; dedicated classified routes own all route changes."
+      - "At Add-box, standalone add-author, and manual-import explicit-selection branches, parse the raw provider/value through AuthorRouteKey::parse before invoking AuthorLinkService::attach_selected_route with AuthContext.user.id and the converged author id; malformed input never reaches the repository."
+    public_api:
+      functions:
+        - name: "GET /api/v1/author-link-review"
+          inputs:
+            - { name: auth, type: AuthContext }
+          output: "Json<Vec<AuthorLinkReviewResponse>>"
+          errors: [Unauthorized, Internal]
+          pseudocode:
+            - "Require authentication and call list_review with auth.user.id."
+            - "Map every domain review row through the compile-wall-safe narrow author-view capability and candidate DTO mapping, including primary/alias verdict evidence, top-work preview, catalog state, and ReadarrNameGuardFailed reason."
+            - "Return JSON; map database/service failure to Internal."
+          call_annotations:
+            - { call: "AuthorLinkService::list_review", type: NEW, target: "AuthorLinkService::list_review(UserId)" }
+            - { call: "AuthorViewService::route_view", type: NEW, target: "livrarr_domain::services::AuthorViewService narrow trait method" }
+          tdd_directives:
+            - "GET through the real Axum router backed by real in-memory SqliteDb; pin auth rejection, user isolation, route provenance, all amended candidate evidence fields/states, readarr_name_guard_failed serialization, non-Tier2 catalog omission, and badge mapping."
+
+        - name: "POST /api/v1/author-link-review/{candidate_id}/pick"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: candidate_id, type: i64 }
+          output: "Json<AuthorRouteResponse>"
+          errors: [Unauthorized, NotFound, Conflict, Internal]
+          pseudocode:
+            - "Require authentication and parse candidate_id from the path."
+            - "Call pick_candidate with auth.user.id."
+            - "Map NotFound, ownership/stale conflict, and database failure to the documented HTTP results."
+            - "Return the canonical route DTO."
+          call_annotations:
+            - { call: "AuthorLinkService::pick_candidate", type: NEW, target: "AuthorLinkService::pick_candidate(UserId, i64)" }
+          tdd_directives:
+            - "POST through the real router/SqliteDb for success, tombstone re-pick, stale candidate, cross-user id, ownership conflict, and internal failure; assert no provider adapter call."
+
+        - name: "POST /api/v1/author-link-review/{candidate_id}/dismiss"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: candidate_id, type: i64 }
+          output: StatusCode::NO_CONTENT
+          errors: [Unauthorized, NotFound, Internal]
+          pseudocode:
+            - "Require authentication and parse candidate_id."
+            - "Call dismiss_candidate with auth.user.id."
+            - "Return 204 only after the transaction succeeds; map typed errors."
+          call_annotations:
+            - { call: "AuthorLinkService::dismiss_candidate", type: NEW, target: "AuthorLinkService::dismiss_candidate(UserId, i64)" }
+          tdd_directives:
+            - "POST through the real router/SqliteDb for current, stale, already-resolved, and cross-user candidates; assert routes and tombstones remain byte-for-byte unchanged."
+
+        - name: "DELETE /api/v1/author/{author_id}/route/{route_id}"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: author_id, type: AuthorId }
+            - { name: route_id, type: i64 }
+          output: StatusCode::NO_CONTENT
+          errors: [Unauthorized, NotFound, Internal]
+          pseudocode:
+            - "Require authentication and parse author_id and route_id."
+            - "Call remove_route with auth.user.id."
+            - "Return 204 after the tombstone and enqueue commits; map typed errors."
+          call_annotations:
+            - { call: "AuthorLinkService::remove_route", type: NEW, target: "AuthorLinkService::remove_route(UserId, AuthorId, i64)" }
+          tdd_directives:
+            - "DELETE through the real router/SqliteDb for owned active, removed, wrong-author, and cross-user routes; assert a durable tombstone and due task."
+
+        - name: "POST /api/v1/author/{author_id}/resolve"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: author_id, type: AuthorId }
+          output: StatusCode::ACCEPTED
+          errors: [Unauthorized, NotFound, Internal]
+          pseudocode:
+            - "Require authentication and parse author_id."
+            - "Call re_resolve to persist UserReResolve."
+            - "Return 202 immediately after enqueue and never poll or await a provider."
+          call_annotations:
+            - { call: "AuthorLinkService::re_resolve", type: NEW, target: "AuthorLinkService::re_resolve(UserId, AuthorId)" }
+          forbidden_behaviors:
+            - "Never wait for OpenLibrary or return a final linking result."
+          tdd_directives:
+            - "POST through the real router while the real adapter seam is deliberately blocked; assert 202 and due progress arrive before the adapter is released."
+
+        - name: "PUT /api/v1/author/{author_id}/name"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: request, type: RenameAuthorRequest }
+          output: "Json<AuthorResponse>"
+          errors: [Unauthorized, NotFound, Validation, Internal]
+          pseudocode:
+            - "Require authentication, parse author_id, and validate a nonempty name payload."
+            - "Call AuthorService::rename with auth.user.id."
+            - "Call the narrow author-view capability and return the full route/name/link-state response."
+          call_annotations:
+            - { call: "AuthorService::rename", type: NEW, target: "AuthorService::rename(UserId, AuthorId, String)" }
+            - { call: "AuthorViewService::route_view", type: NEW, target: "livrarr_domain::services::AuthorViewService narrow trait method" }
+          tdd_directives:
+            - "PUT through the real router/SqliteDb for success, empty input, collision, not-found, and cross-user author; assert the full response reflects variants/routes and the DB cascade."
+
+        - name: "PUT /api/v1/author/{author_id}/display-name"
+          inputs:
+            - { name: auth, type: AuthContext }
+            - { name: request, type: SelectAuthorNameRequest }
+          output: "Json<AuthorResponse>"
+          errors: [Unauthorized, NotFound, Internal]
+          pseudocode:
+            - "Require authentication and parse author_id and variant_id."
+            - "Call select_name_variant with auth.user.id."
+            - "Call the narrow author-view capability and return the full route/name/link-state response."
+          call_annotations:
+            - { call: "AuthorService::select_name_variant", type: NEW, target: "AuthorService::select_name_variant(UserId, AuthorId, i64)" }
+            - { call: "AuthorViewService::route_view", type: NEW, target: "livrarr_domain::services::AuthorViewService narrow trait method" }
+          tdd_directives:
+            - "PUT through the real router/SqliteDb for owned variant, wrong author, cross-user variant, and missing variant; assert only the owned choice cascades."
+
+        - name: "GET /api/v1/author-link-sweep/progress"
+          inputs:
+            - { name: auth, type: AuthContext }
+          output: "Json<AuthorSweepProgress>"
+          errors: [Unauthorized, Internal]
+          pseudocode:
+            - "Require authentication and call progress with auth.user.id."
+            - "Return the persisted aggregate JSON without estimating from job memory."
+          call_annotations:
+            - { call: "AuthorLinkService::progress", type: NEW, target: "AuthorLinkService::progress(UserId)" }
+          tdd_directives:
+            - "GET through the real router/SqliteDb with mixed author/key states for two users; pin every serialized counter and auth isolation."
+
+  - name: livrarr-server
+    responsibility: "Compose the live service/gateway, gate startup, apply Readarr guarded evidence, register routes, and run the recurring bounded job."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-external-data, livrarr-enrichment, livrarr-metadata, livrarr-jobs, livrarr-handlers]
+    module_invariants:
+      - "No request is served and no author-link worker is registered until legacy cutover verification is clean and route consumers are live."
+      - "Readarr route attach and progress enqueue are independent, idempotent transactions after the converged author id is known."
+    capability_survey:
+      - capability: "Readarr parsed author identity"
+        existing_source: "crates/livrarr-server/src/readarr_client.rs:220-233"
+        reuse_decision: reuse
+        rationale: "RdAuthor already carries author_name and foreign_author_id together; the latter is a Goodreads author id."
+      - capability: "Readarr concurrency-safe batch author gate"
+        existing_source: "crates/livrarr-server/src/readarr_import_workflow.rs:1616-1720"
+        reuse_decision: wrap
+        rationale: "Keep batch snapshot/adopt/create convergence, add pre-observation name snapshot, name retention, independent enqueue, and common guarded evidence."
+      - capability: "Recurring job runner"
+        existing_source: "crates/livrarr-server/src/jobs/mod.rs:82-143"
+        reuse_decision: wrap
+        rationale: "Register the new configured interval tick only after the serving gate and all route consumers are installed."
+      - capability: "Production list trigger wiring"
+        existing_source: "crates/livrarr-server/src/main.rs:373; crates/livrarr-server/src/state.rs:76"
+        reuse_decision: rewrite
+        rationale: "Replace both production NoOpBibliographyTrigger type/construction sites with the real author-link enqueue trigger; test-only no-ops may remain."
+    # BRIEF-DRIFT: the capability survey's direct source check is correct: there are
+    # two production NoOpBibliographyTrigger wiring sites, not four; router/test matches are test-only.
+    notes:
+      - "Readarr import exact order: resolve/create via shared gate; snapshot all associated names before recording the Readarr observation; parse id and build ProviderAuthorRef; common guard; Agreed through submit_evidence; Rejected through record_readarr_rejection; None only for unusable input; enqueue independently regardless of guard outcome."
+    public_api:
+      functions:
+        - name: verify_author_link_cutover_before_serving
+          inputs:
+            - { name: db, type: "&SqliteDb" }
+          output: "Result<AuthorRouteBackfillReport, StartupError>; ingest canonical legacy routes, verify zero missing/invalid values and progress rows, abort startup on any mismatch"
+          errors: [StartupError]
+          pseudocode:
+            - "Run idempotent legacy route ingestion to exhaustion before binding the request listener."
+            - "Call verify_cutover_ready."
+            - "If missing_routes, invalid_values, or missing_progress_rows is nonzero, return StartupError with the report and do not start handlers/jobs."
+            - "Otherwise return the clean report and mark author-link consumer cutover eligible."
+          call_annotations:
+            - { call: "AuthorLinkDb::ingest_legacy_routes", type: NEW, target: "AuthorLinkDb::ingest_legacy_routes()" }
+            - { call: "AuthorLinkDb::verify_cutover_ready", type: NEW, target: "AuthorLinkDb::verify_cutover_ready()" }
+          postconditions:
+            - "A successful return proves route-only consumers have complete canonical backing."
+          tdd_directives:
+            - "Boot the real server startup path from clean and defective migration-077 SQLite fixtures; assert listener/job registration occurs only for the clean report."
+
+        - name: author_link_sweep_tick
+          inputs:
+            - { name: state, type: AppState }
+            - { name: cancel, type: CancellationToken }
+          output: "Result<(), String>; registered/enabled only after cutover verification and all route consumers are live"
+          errors: [JobError]
+          pseudocode:
+            - "Return without work when deployment config disables the sweep."
+            - "Read configured batch size, lease duration, retry durations, jitter window, and recurrence interval."
+            - "Call run_due with the configured batch and cancellation token."
+            - "Log the persisted tick summary/error; allow the JobRunner cadence to schedule the next tick."
+          call_annotations:
+            - { call: "AuthorLinkWorkflow::run_due", type: NEW, target: "AuthorLinkWorkflow::run_due(u32, CancellationToken)" }
+            - { call: "tracing::info", type: LIBRARY, library: "tracing", target: "tracing" }
+            - { call: "tracing::warn", type: LIBRARY, library: "tracing", target: "tracing" }
+          preconditions:
+            domain_state:
+              - "verify_author_link_cutover_before_serving succeeded and all route consumers are active."
+          forbidden_behaviors:
+            - "Never register before cutover, use a hardcoded retry duration, or run one library-sized transaction."
+          tdd_directives:
+            - "Start the real JobRunner/server state against real SQLite with enabled/disabled config and cancellation; assert configured batch/interval, post-gate registration, resumable rows, and no pre-gate tick."
+
+        - name: readarr_author_route_evidence
+          inputs:
+            - { name: rd_author, type: "&RdAuthor" }
+            - { name: pre_observation_associated_names, type: "&[String]" }
+          output: "Option<AuthorRouteGuardResult>; calls guard_author_route; None only for a missing/empty/invalid id or unusable name; Some preserves both Agreed and Rejected"
+          errors: []
+          pseudocode:
+            - "Trim foreign_author_id; return None when missing or empty."
+            - "Parse it through AuthorRouteKey::parse for Goodreads; return None and emit an invalid-id diagnostic when malformed, zero, or overflowed."
+            - "Trim rd_author.author_name; return None when no usable name exists."
+            - "Build ProviderAuthorRef with the parsed Goodreads key, Readarr name, and no role."
+            - "Call guard_author_route with pre_observation_associated_names, no evidence work id, and source ReadarrImport."
+            - "Return Some with the unchanged Agreed or Rejected guard result; never construct either capability locally."
+            - "At the import door, send Agreed to submit_evidence and Rejected to record_readarr_rejection; record the Readarr observation only after the snapshot, and enqueue independently for every outcome including None."
+          call_annotations:
+            - { call: "str::trim", type: STDLIB, target: "Rust str::trim" }
+            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(Goodreads, &str)" }
+            - { call: "guard_author_route", type: NEW, target: "guard_author_route(&[String], ProviderAuthorRef, None, ReadarrImport)" }
+            - { call: "tracing::warn", type: LIBRARY, library: "tracing", target: "tracing" }
+          forbidden_behaviors:
+            - "Never add the Readarr observation before snapshotting adopted-author names, fetch Goodreads confirmation, write a scalar key, or bypass the common route core."
+          decisions:
+            - { key: "readarr_guard_seam", value: "snapshot-before-observe with Option<AuthorRouteGuardResult>; Agreed -> submit_evidence, Rejected -> record_readarr_rejection, None -> retain name/enqueue only", rationale: "The amended signature prevents Readarr self-proof and preserves every computed non-Agree verdict through the opaque claimless persistence seam without widening route-write authority." }
+          tdd_directives:
+            - "Drive the real Readarr batch helper and real SqliteDb for created/adopted authors, snapshot-before-observe self-proof prevention, valid/empty/malformed/overflow ids, Agreed/Rejected/None splits, all non-Agree verdicts, idempotent failed candidates, concurrent repeats, tombstone, ownership, and independent enqueue/route/rejection transactions."
+
+  - name: livrarr-behavioral
+    responsibility: "Provide real-entry behavioral coverage with real routers, real in-memory SqliteDb, and controllable concrete provider adapter seams."
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-external-data, livrarr-enrichment, livrarr-metadata, livrarr-jobs, livrarr-handlers]
+    capability_survey:
+      - capability: "Real router/SqliteDb behavioral harness"
+        existing_source: "tests/behavioral"
+        reuse_decision: wrap
+        rationale: "Extend existing integration helpers; state must arise through migrations, handlers, and service calls rather than injected rows except fixture construction."
+      - capability: "Provider adapter recording seam"
+        existing_source: "existing HttpFetcher and provider fixtures"
+        reuse_decision: wrap
+        rationale: "Use the real adapter code over deterministic responses and record calls/priority; do not inject road state."
+    test_matrix:
+      - "AC-001 through the production list-service composition proves no production NoOpBibliographyTrigger and one durable task per created/converged author."
+      - "AC-002/004 prove every Tier-2 result parks, primary/alias verdicts and preview/state round-trip, Partial/Retrying render at least N when observed, catalog failures never render zero, top_work never counts, and only explicit pick attaches."
+      - "AC-003/012/013 run every settled-key and multi-contributor path, including attach-each and zero-Agree park."
+      - "AC-005 treats author_route_writer_inventory as an executable manifest: every row's ac005_assertion must pass, every listed current file:line must either be deleted or exhibit its stated classified post-F1 fate, and a fresh production scan must find no unlisted author-route writer."
+      - "AC-006 interrupts/restarts real claimed work and verifies persisted progress plus would-have-linked count."
+      - "AC-007 through real router/UI API paths pins review pick/dismiss, badges, OL monitorability, and unchanged GR/HC-only rejection."
+      - "AC-008/009 pin name source orders, dominant-language tie fallback, user choice, cascade, generation bump, and normalized_author immutability."
+      - "AC-010 pins tombstone honor and sole explicit re-pick clearing."
+      - "AC-011 drives the real Readarr import branch with a pre-observation name snapshot, Agreed attach, Rejected claimless candidate recording, unusable-id None, and durable enqueue on every branch."
+      - "AC-014 upgrades a real legacy fixture and exercises provenance upgrade versus contradiction with no monitor regression."
+      - "Structured Retryable fixtures cover OL/GR/HC, both Retry-After forms, invalid/absent headers, exact max(backoff, provider lower bound) precedence, deterministic author/key jitter, and attempt-count non-terminality."
+    public_api:
+      functions: []
+
+  - name: frontend
+    responsibility: "Expose author review, badges/filter, route provenance/editing, name selection/rename, merge, monitorability, and persisted sweep progress through typed API calls."
+    dependencies: []
+    module_invariants:
+      - "Frontend monitor disabling is advisory only; the server gate remains authoritative."
+      - "Mutation controls use dedicated endpoints and never send olKey/grKey/hcKey through updateAuthor."
+    capability_survey:
+      - capability: "Review page"
+        existing_source: "frontend/src/pages/review/ReviewPage.tsx"
+        reuse_decision: wrap
+        rationale: "Add an independently queried Authors section beside existing work review so either section can fail/retry independently."
+      - capability: "Authors list"
+        existing_source: "frontend/src/pages/authors/AuthorsPage.tsx:37-131"
+        reuse_decision: wrap
+        rationale: "Add link-state badge/filter and monitorability explanation without changing existing views."
+      - capability: "Author detail"
+        existing_source: "frontend/src/pages/author-detail/AuthorDetailPage.tsx:62-354"
+        reuse_decision: wrap
+        rationale: "Add name/route/provenance/re-resolve/merge/sweep panels and keep the existing monitoring toggle."
+      - capability: "Typed API transport"
+        existing_source: "frontend/src/api/index.ts; frontend/src/api/client.ts"
+        reuse_decision: reuse
+        rationale: "All new calls use existing apiFetch, TanStack Query mutations, and targeted invalidation."
+    notes:
+      - "Add internal typed calls for dismiss candidate, rename, select display name, merge author, and progress even though IR v1 exposes only the four public API functions below."
+      - "DELETE route mutation through updateAuthor grKey; Authors/Series fixes use candidate pick or dedicated route endpoints."
+      - "After pick/remove/re-resolve/rename/display/merge, invalidate author detail/list, author review, sweep progress, and affected monitor/series queries."
+    public_api:
+      functions:
+        - name: listAuthorLinkReview
+          inputs: []
+          output: "Promise<AuthorLinkReview[]>"
+          errors: [ApiError]
+          pseudocode:
+            - "Issue GET /api/v1/author-link-review through apiFetch."
+            - "Return typed AuthorLinkReview rows; render primary and alias verdicts plus top_work_preview, show Complete as final N, Partial/Retrying with observed matches as at least N, and failed zero-observation reads as retrying/unavailable with count unknown rather than 0."
+          call_annotations:
+            - { call: "apiFetch", type: EXISTING, target: "apiFetch<T>(path: string, options?: RequestInit) -> Promise<T>; frontend/src/api/client.ts:138-157" }
+          tdd_directives:
+            - "Render ReviewPage against the real test router/API boundary with independent work/author query success and failure; assert evidence labels, stable rows, and no client-side state reconstruction."
+
+        - name: pickAuthorLinkCandidate
+          inputs:
+            - { name: candidateId, type: number }
+          output: "Promise<AuthorRoute>"
+          errors: [ApiError]
+          pseudocode:
+            - "Issue POST to the candidate pick endpoint through apiFetch."
+            - "Return the canonical AuthorRoute and invalidate every affected author/review/progress/monitor query."
+          call_annotations:
+            - { call: "apiFetch", type: EXISTING, target: "apiFetch<T>(path: string, options?: RequestInit) -> Promise<T>; frontend/src/api/client.ts:138-157" }
+            - { call: "QueryClient::invalidateQueries", type: LIBRARY, library: "@tanstack/react-query", target: "@tanstack/react-query" }
+          tdd_directives:
+            - "Click pick in the rendered Review Authors section against the real test router/API boundary; assert route/provenance UI, OL monitorability, retained Primary/Alias variants, and complete invalidation."
+
+        - name: removeAuthorRoute
+          inputs:
+            - { name: authorId, type: number }
+            - { name: routeId, type: number }
+          output: Promise<void>
+          errors: [ApiError]
+          pseudocode:
+            - "Issue DELETE to the dedicated author route endpoint through apiFetch."
+            - "Invalidate author detail/list, review, progress, monitor, bibliography, and series queries after success."
+          call_annotations:
+            - { call: "apiFetch", type: EXISTING, target: "apiFetch<T>(path: string, options?: RequestInit) -> Promise<T>; frontend/src/api/client.ts:138-157" }
+            - { call: "QueryClient::invalidateQueries", type: LIBRARY, library: "@tanstack/react-query", target: "@tanstack/react-query" }
+          forbidden_behaviors:
+            - "Never send a null scalar key through updateAuthor."
+          tdd_directives:
+            - "Remove from the rendered route panel against the real test router/API boundary; assert tombstone/provenance display, monitorability update, and complete invalidation."
+
+        - name: reResolveAuthor
+          inputs:
+            - { name: authorId, type: number }
+          output: Promise<void>
+          errors: [ApiError]
+          pseudocode:
+            - "Issue POST to the author resolve endpoint through apiFetch."
+            - "Treat 202 as queued, show persisted sweep state, and invalidate author/review/progress queries."
+            - "Do not hold the UI mutation open for provider completion."
+          call_annotations:
+            - { call: "apiFetch", type: EXISTING, target: "apiFetch<T>(path: string, options?: RequestInit) -> Promise<T>; frontend/src/api/client.ts:138-157" }
+            - { call: "QueryClient::invalidateQueries", type: LIBRARY, library: "@tanstack/react-query", target: "@tanstack/react-query" }
+          tdd_directives:
+            - "Click re-resolve against a test router whose provider seam remains blocked; assert immediate queued UI from 202 and later progress polling without a synchronous provider wait."
+
+migration_steps:
+  - "After verified head 077, add unused canonical route/domain/observer types and migration 078 with candidate scalar columns primary_name_verdict/top_work_preview/catalog_evidence_state, nullable author_name_variants.open_library_role, author_link_candidate_alternate_name_evidence(candidate_id, ordinal, name, canonical_name, verdict) unique on (candidate_id, canonical_name), and the first-codebase author_link_work_evidence_changed SQLite trigger; add legacy staging migration 079; do not edit migration 077."
+  - "Implement the one-transaction shared author create/adopt gate, the private attach_route_as_user_tx helper plus both public user entry shapes, and real SqliteDb route, name, candidate, progress, attempt, evidence-trigger ClaimLost, merge, and cutover verification tests."
+  - "Implement the road and provider adapters behind the cutover gate, including all partial-failure and restart tests."
+  - "In one cutover change, ingest/verify legacy routes, switch all consumers to route queries, delete resolve_ol_key and every production >=0.90 route writer, replace both production NoOpBibliographyTrigger sites, and remove generic route fields."
+  - "Run real migration-077 upgrade acceptance through monitor selection/gate, bibliography, series, projection, remove/re-pick, merge, and restart."
+  - "Wire explicit Add-box/standalone/manual-import selections through attach_selected_route, Readarr guarded evidence, and the Review/Authors/detail UI."
+  - "Register the recurring author-link worker last, with all duration constants from deployment configuration and deterministic initial staggering."
+
+requirement_coverage:
+  REQ-001:
+    - "AuthorLinkDb::apply_guarded_route"
+    - "AuthorLinkDb::remove_route_as_user"
+    - "AuthorLinkDb::pick_candidate_as_user"
+    - "AuthorLinkDb::attach_route_as_user"
+  REQ-002:
+    - "AuthorNameVariantDb::record_observed_names"
+    - "choose_author_display_name"
+    - "AuthorNameVariantObserver::record_observed_author_names"
+  REQ-003:
+    - "AuthorLinkingServiceImpl::run_author"
+    - "guard_author_route"
+    - "AuthorProviderGateway::fetch_work_authors"
+    - "Work evidence change wake-up"
+    - "OpenLibraryAuthorHydrator::name_for_key"
+  REQ-004:
+    - "AuthorLinkWorkflow::submit_evidence"
+    - "AuthorLinkDb::apply_guarded_route"
+    - "AuthorLinkingServiceImpl::run_author"
+    - "author_route_writer_inventory"
+    - "AuthorLinkService::attach_selected_route"
+    - "AuthorLinkDb::attach_route_as_user"
+  REQ-005:
+    - "AuthorLinkWorkflow::enqueue"
+    - "AuthorLinkWorkflow::record_readarr_rejection"
+    - "readarr_author_route_evidence"
+    - "AuthorLinkDb::ensure_enqueued"
+    - "AuthorLinkDb::record_readarr_rejection"
+    - "shared_author_create_or_adopt_gate"
+  REQ-006:
+    - "AuthorLinkWorkflow::run_due"
+    - "AuthorLinkDb::claim_due"
+    - "author_link_sweep_tick"
+  REQ-007:
+    - "AuthorLinkService::list_review"
+    - "AuthorService::set_monitoring"
+    - "GET /api/v1/author-link-review"
+  REQ-008:
+    - "AuthorService::rename"
+    - "AuthorService::select_name_variant"
+    - "AuthorLinkService::remove_route"
+    - "AuthorDb::merge_authors"
+  REQ-009:
+    - "AuthorLinkDb::ingest_legacy_routes"
+    - "AuthorLinkDb::verify_cutover_ready"
+    - "AuthorResponseAssembler::route_view"

@@ -1,10 +1,10 @@
 use livrarr_domain::services::{
-    AppConfigService, AuthorMonitorWorkflow, AuthorService, BookmarkService, ChapterService,
-    CoverService, DiscoveryService, DownloadClientCredentialService, DownloadClientSettingsService,
-    EmailService, EnrichmentWorkflow, FileService, GrabService, HistoryService,
-    IdentityConflictService, IdentityResolver, ImportIoService, ImportService, ImportWorkflow,
-    IndexerCredentialService, IndexerSettingsService, ListService, ManualImportService,
-    MatchingService, NotificationService, ProviderStatsService, QueueService,
+    AppConfigService, AuthorLinkService, AuthorMonitorWorkflow, AuthorService, BookmarkService,
+    ChapterService, CoverService, DiscoveryService, DownloadClientCredentialService,
+    DownloadClientSettingsService, EmailService, EnrichmentWorkflow, FileService, GrabService,
+    HistoryService, IdentityConflictService, IdentityResolver, ImportIoService, ImportService,
+    ImportWorkflow, IndexerCredentialService, IndexerSettingsService, ListService,
+    ManualImportService, MatchingService, NotificationService, ProviderStatsService, QueueService,
     ReadarrImportWorkflow, ReleaseService, RemotePathMappingService, RootFolderService,
     RssSyncWorkflow, SeriesQueryService, SeriesService, TagService, WorkIdentityRepository,
     WorkService,
@@ -61,6 +61,11 @@ pub trait HasCrossFormatService: Clone + Send + Sync + 'static {
 pub trait HasAuthorService: Clone + Send + Sync + 'static {
     type AuthorSvc: AuthorService + Send + Sync + 'static;
     fn author_service(&self) -> &Self::AuthorSvc;
+}
+
+pub trait HasAuthorLinkService: Clone + Send + Sync + 'static {
+    type AuthorLinkSvc: AuthorLinkService + Send + Sync + 'static;
+    fn author_link_service(&self) -> &Self::AuthorLinkSvc;
 }
 
 pub trait HasSeriesService: Clone + Send + Sync + 'static {
@@ -298,6 +303,7 @@ pub trait AppContext:
     + HasBookmarkService
     + HasCrossFormatService
     + HasAuthorService
+    + HasAuthorLinkService
     + HasSeriesService
     + HasSeriesQueryService
     + HasGrabService
@@ -351,6 +357,7 @@ impl<T> AppContext for T where
         + HasBookmarkService
         + HasCrossFormatService
         + HasAuthorService
+        + HasAuthorLinkService
         + HasSeriesService
         + HasSeriesQueryService
         + HasGrabService

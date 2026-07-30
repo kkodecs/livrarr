@@ -121,6 +121,13 @@ impl<T> ProviderOutcome<T> {
 /// other opaque failure.
 #[derive(Debug, Clone)]
 pub enum ProviderFetchError {
+    NotConfigured,
+    Retryable {
+        error: String,
+        retry_not_before: Option<DateTime<Utc>>,
+    },
+    Permanent(String),
+    LayoutDrift(String),
     CircuitOpen(std::time::Duration),
     /// The resource is genuinely absent upstream (HTTP 404/410) — a no-match,
     /// never a transient failure. Callers may fall through to weaker tiers.
@@ -146,6 +153,10 @@ pub enum ProviderFetchError {
 impl std::fmt::Display for ProviderFetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::NotConfigured
+            | Self::Retryable { .. }
+            | Self::Permanent(_)
+            | Self::LayoutDrift(_) => todo!(),
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
             Self::NotFound => write!(f, "not found"),
             Self::RateLimited => write!(f, "rate limited"),

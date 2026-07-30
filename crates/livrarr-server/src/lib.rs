@@ -157,6 +157,7 @@ impl From<crate::readarr_import_service::ReadarrImportError> for ApiError {
 pub mod api_secondary_impl;
 pub mod auth_crypto;
 pub mod auth_service;
+pub mod author_link;
 pub mod call_sink;
 pub mod chapter_extractor;
 pub mod config;

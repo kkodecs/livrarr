@@ -153,4 +153,27 @@ pub trait AuthorService: Send + Sync {
         term: &str,
         limit: u32,
     ) -> Result<Vec<AuthorLookupResult>, AuthorServiceError>;
+
+    async fn rename(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        name: String,
+    ) -> Result<Author, AuthorServiceError>;
+
+    async fn select_name_variant(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        variant_id: i64,
+    ) -> Result<Author, AuthorServiceError>;
+
+    async fn set_monitoring(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        monitored: bool,
+        monitor_new_items: Option<bool>,
+        monitor_language: Option<String>,
+    ) -> Result<Author, AuthorServiceError>;
 }

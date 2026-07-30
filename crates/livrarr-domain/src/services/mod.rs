@@ -1,5 +1,6 @@
 mod app_config;
 mod author;
+mod author_link;
 mod bookmark;
 mod chapter;
 mod common;
@@ -45,6 +46,7 @@ mod work_identity;
 
 pub use app_config::*;
 pub use author::*;
+pub use author_link::*;
 pub use bookmark::*;
 pub use chapter::*;
 pub use common::*;

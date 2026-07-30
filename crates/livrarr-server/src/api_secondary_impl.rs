@@ -21,6 +21,9 @@ fn db_err(e: DbError) -> ApiError {
         DbError::Constraint { message } | DbError::Conflict { message } => {
             ApiError::Conflict { reason: message }
         }
+        DbError::ClaimLost => ApiError::Conflict {
+            reason: "author-link claim lost".to_string(),
+        },
         DbError::LastAdmin => ApiError::Conflict {
             reason: "cannot remove the last remaining admin".to_string(),
         },
@@ -742,6 +745,11 @@ fn author_to_response(a: &Author) -> AuthorResponse {
         sort_name: a.sort_name.clone(),
         ol_key: a.ol_key.clone(),
         gr_key: a.gr_key.clone(),
+        hc_key: a.hc_key.clone(),
+        routes: Vec::new(),
+        name_variants: Vec::new(),
+        link_state: livrarr_domain::AuthorLinkState::Unlinked,
+        monitorable: false,
         monitored: a.monitored,
         monitor_new_items: a.monitor_new_items,
         monitor_language: a.monitor_language.clone(),

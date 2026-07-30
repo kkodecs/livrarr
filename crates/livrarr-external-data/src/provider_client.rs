@@ -493,6 +493,10 @@ fn audnexus_error_outcome(
     retry_backoff_secs: i64,
 ) -> ProviderOutcome<NormalizedWorkDetail> {
     match err {
+        crate::types::ProviderFetchError::NotConfigured
+        | crate::types::ProviderFetchError::Retryable { .. }
+        | crate::types::ProviderFetchError::Permanent(_)
+        | crate::types::ProviderFetchError::LayoutDrift(_) => todo!(),
         crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
             circuit_open_outcome(*retry_after)
         }
@@ -883,6 +887,10 @@ fn ol_error_outcome(
     retry_backoff_secs: i64,
 ) -> ProviderOutcome<NormalizedWorkDetail> {
     match err {
+        crate::types::ProviderFetchError::NotConfigured
+        | crate::types::ProviderFetchError::Retryable { .. }
+        | crate::types::ProviderFetchError::Permanent(_)
+        | crate::types::ProviderFetchError::LayoutDrift(_) => todo!(),
         crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
             circuit_open_outcome(*retry_after)
         }

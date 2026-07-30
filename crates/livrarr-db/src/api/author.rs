@@ -1,6 +1,7 @@
 //! Author data access: `AuthorDb` trait + request types.
 
-use crate::{Author, AuthorId, DbError, UserId};
+use crate::{Author, AuthorId, DbError, RenameAuthorDbRequest, UserId};
+use livrarr_domain::AuthorMonitorTarget;
 
 /// Author data access.
 ///
@@ -59,6 +60,16 @@ pub trait AuthorDb: Send + Sync {
     ///
     /// Satisfies: AUTHOR-002
     async fn list_monitored_authors(&self, user_id: UserId) -> Result<Vec<Author>, DbError>;
+
+    async fn list_author_monitor_targets(
+        &self,
+        user_id: UserId,
+    ) -> Result<Vec<AuthorMonitorTarget>, DbError>;
+
+    async fn rename_author_and_cascade(
+        &self,
+        request: RenameAuthorDbRequest,
+    ) -> Result<Author, DbError>;
 }
 
 pub struct CreateAuthorDbRequest {

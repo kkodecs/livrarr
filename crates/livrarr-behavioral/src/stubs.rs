@@ -1,9 +1,15 @@
+use chrono::{DateTime, Utc};
+use livrarr_db::{
+    AuthorLinkClaim, AuthorLinkDb, AuthorNameVariantDb, AuthorProviderCall,
+    AuthorRouteBackfillReport, DbError, GuardedRouteWrite,
+};
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 // =============================================================================
 // TagwriteChapterExtractor — the real extraction delegate for import tests
@@ -485,6 +491,359 @@ pub struct StubRssSyncWorkflow;
 impl RssSyncWorkflow for StubRssSyncWorkflow {
     async fn run_sync(&self) -> Result<RssSyncReport, RssSyncError> {
         Ok(RssSyncReport::empty())
+    }
+}
+
+// =============================================================================
+// Author-provider linking stubs
+// =============================================================================
+
+pub struct StubAuthorProviderGateway {
+    pub keyed_results: HashMap<(AuthorProvider, String), Vec<ProviderAuthorRef>>,
+    pub ol_search_results: Vec<OpenLibraryAuthorCandidate>,
+    pub ol_catalog_pages: Vec<OpenLibraryCatalogPage>,
+    pub calls: Mutex<Vec<AuthorProviderCall>>,
+}
+
+impl StubAuthorProviderGateway {
+    pub fn calls(&self) -> Vec<AuthorProviderCall> {
+        self.calls
+            .lock()
+            .expect("author-provider call log mutex poisoned")
+            .clone()
+    }
+
+    fn record_call(&self, provider: AuthorProvider, work_route: String, priority: RequestPriority) {
+        self.calls
+            .lock()
+            .expect("author-provider call log mutex poisoned")
+            .push(AuthorProviderCall {
+                provider,
+                work_route,
+                priority,
+            });
+    }
+}
+
+impl AuthorProviderGateway for StubAuthorProviderGateway {
+    async fn fetch_work_authors(
+        &self,
+        provider: AuthorProvider,
+        work_route: String,
+        priority: RequestPriority,
+    ) -> Result<Vec<ProviderAuthorRef>, AuthorProviderError> {
+        self.record_call(provider, work_route.clone(), priority);
+        Ok(self
+            .keyed_results
+            .get(&(provider, work_route))
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn search_open_library_authors(
+        &self,
+        query: String,
+        limit: u32,
+        priority: RequestPriority,
+    ) -> Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError> {
+        self.record_call(
+            AuthorProvider::OpenLibrary,
+            format!("ol_search:{query}:limit={limit}"),
+            priority,
+        );
+        Ok(self.ol_search_results.clone())
+    }
+
+    async fn fetch_open_library_catalog_page(
+        &self,
+        author_route: OpenLibraryAuthorKey,
+        cursor: Option<String>,
+        priority: RequestPriority,
+    ) -> Result<OpenLibraryCatalogPage, AuthorProviderError> {
+        self.record_call(
+            AuthorProvider::OpenLibrary,
+            format!("ol_catalog:{author_route:?}:cursor={cursor:?}"),
+            priority,
+        );
+
+        let page = match cursor.as_deref() {
+            None => self.ol_catalog_pages.first(),
+            Some(requested_cursor) => self
+                .ol_catalog_pages
+                .windows(2)
+                .find(|pages| pages[0].next_cursor.as_deref() == Some(requested_cursor))
+                .map(|pages| &pages[1]),
+        };
+
+        page.cloned().ok_or(AuthorProviderError::NotConfigured)
+    }
+}
+
+pub struct StubAuthorLinkService;
+
+impl AuthorLinkService for StubAuthorLinkService {
+    async fn list_review(&self, user_id: UserId) -> Result<Vec<AuthorLinkReview>, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn pick_candidate(
+        &self,
+        user_id: UserId,
+        candidate_id: i64,
+    ) -> Result<AuthorRoute, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn attach_selected_route(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        key: AuthorRouteKey,
+    ) -> Result<AuthorRoute, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn dismiss_candidate(
+        &self,
+        user_id: UserId,
+        candidate_id: i64,
+    ) -> Result<(), AuthorLinkError> {
+        todo!()
+    }
+
+    async fn remove_route(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        route_id: i64,
+    ) -> Result<(), AuthorLinkError> {
+        todo!()
+    }
+
+    async fn re_resolve(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<AuthorLinkProgress, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn progress(&self, user_id: UserId) -> Result<AuthorSweepProgress, AuthorLinkError> {
+        todo!()
+    }
+}
+
+pub struct StubAuthorLinkWorkflow;
+
+impl AuthorLinkWorkflow for StubAuthorLinkWorkflow {
+    async fn enqueue(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        trigger: AuthorLinkTrigger,
+    ) -> Result<(), AuthorLinkError> {
+        todo!()
+    }
+
+    async fn submit_evidence(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        evidence: AgreedAuthorRouteEvidence,
+    ) -> Result<RouteWriteOutcome, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn record_readarr_rejection(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        rejected: RejectedAuthorRouteEvidence,
+    ) -> Result<AuthorLinkCandidate, AuthorLinkError> {
+        todo!()
+    }
+
+    async fn run_due(
+        &self,
+        batch_size: u32,
+        cancel: CancellationToken,
+    ) -> Result<AuthorSweepTickSummary, AuthorLinkError> {
+        todo!()
+    }
+}
+
+pub struct StubAuthorLinkDb;
+
+impl AuthorLinkDb for StubAuthorLinkDb {
+    async fn ensure_enqueued(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        trigger: AuthorLinkTrigger,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn ensure_missing_progress_rows(&self, limit: u32) -> Result<u32, DbError> {
+        todo!()
+    }
+
+    async fn claim_due(
+        &self,
+        now: DateTime<Utc>,
+        lease_until: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<AuthorLinkClaim>, DbError> {
+        todo!()
+    }
+
+    async fn load_road_input(&self, claim: AuthorLinkClaim) -> Result<AuthorRoadInput, DbError> {
+        todo!()
+    }
+
+    async fn compute_evidence_fingerprint(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<AuthorEvidenceFingerprint, DbError> {
+        todo!()
+    }
+
+    async fn prepare_key_attempts(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+        keys: Vec<SettledWorkProviderKey>,
+    ) -> Result<Vec<AuthorKeyAttempt>, DbError> {
+        todo!()
+    }
+
+    async fn complete_key_attempt(
+        &self,
+        claim: AuthorLinkClaim,
+        key_attempt_id: i64,
+        outcome: AuthorKeyAttemptOutcome,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn apply_guarded_route(
+        &self,
+        write: GuardedRouteWrite,
+    ) -> Result<RouteWriteOutcome, DbError> {
+        todo!()
+    }
+
+    async fn record_candidates(
+        &self,
+        claim: AuthorLinkClaim,
+        candidates: Vec<AuthorLinkCandidate>,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn record_readarr_rejection(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        rejected: RejectedAuthorRouteEvidence,
+    ) -> Result<AuthorLinkCandidate, DbError> {
+        todo!()
+    }
+
+    async fn advance_progress(
+        &self,
+        claim: AuthorLinkClaim,
+        update: AuthorLinkProgressUpdate,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn pick_candidate_as_user(
+        &self,
+        user_id: UserId,
+        candidate_id: i64,
+    ) -> Result<AuthorRoute, DbError> {
+        todo!()
+    }
+
+    async fn attach_route_as_user(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        key: AuthorRouteKey,
+    ) -> Result<AuthorRoute, DbError> {
+        todo!()
+    }
+
+    async fn dismiss_candidate_as_user(
+        &self,
+        user_id: UserId,
+        candidate_id: i64,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn list_review(&self, user_id: UserId) -> Result<Vec<AuthorLinkReview>, DbError> {
+        todo!()
+    }
+
+    async fn sweep_progress(&self, user_id: UserId) -> Result<AuthorSweepProgress, DbError> {
+        todo!()
+    }
+
+    async fn remove_route_as_user(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        route_id: i64,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn list_active_routes(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        provider: Option<AuthorProvider>,
+    ) -> Result<Vec<AuthorRoute>, DbError> {
+        todo!()
+    }
+
+    async fn has_active_route(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+        provider: AuthorProvider,
+    ) -> Result<bool, DbError> {
+        todo!()
+    }
+
+    async fn compatibility_projection(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<AuthorCompatibilityProjection, DbError> {
+        todo!()
+    }
+
+    async fn ingest_legacy_routes(&self) -> Result<AuthorRouteBackfillReport, DbError> {
+        todo!()
+    }
+
+    async fn verify_cutover_ready(&self) -> Result<AuthorRouteBackfillReport, DbError> {
+        todo!()
+    }
+}
+
+impl AuthorNameVariantDb for StubAuthorLinkDb {
+    async fn record_observed_names(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        observations: &[ProviderAuthorNameObservation],
+    ) -> Result<u32, DbError> {
+        todo!()
     }
 }
 

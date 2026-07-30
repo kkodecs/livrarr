@@ -1,6 +1,7 @@
 pub mod accessors;
 pub mod auth;
 pub mod author;
+pub mod author_link;
 pub mod bookmark;
 pub mod chapter;
 pub mod config;

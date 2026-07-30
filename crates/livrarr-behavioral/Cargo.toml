@@ -16,7 +16,9 @@ identity_edit_red = []
 livrarr-domain = { workspace = true }
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-tagwrite = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
@@ -162,6 +164,30 @@ path = "../../tests/behavioral/test_status_two_state_split.rs"
 [[test]]
 name = "test_door_gate"
 path = "../../tests/behavioral/test_door_gate.rs"
+
+# --- Author-provider linking Stage 4b red behavioral suite ---
+
+[[test]]
+name = "test_author_link_domain"
+path = "../../tests/behavioral/test_author_link_domain.rs"
+
+[[test]]
+name = "test_author_link_db"
+path = "../../tests/behavioral/test_author_link_db.rs"
+
+[[test]]
+name = "test_author_link_road"
+path = "../../tests/behavioral/test_author_link_road.rs"
+
+[[test]]
+name = "test_author_link_doors"
+path = "../../tests/behavioral/test_author_link_doors.rs"
+
+[[test]]
+name = "test_author_link_consumers"
+path = "../../tests/behavioral/test_author_link_consumers.rs"
+
+# --- End author-provider linking Stage 4b red behavioral suite ---
 
 # --- English work lifecycle behavioral test skeletons ---
 
