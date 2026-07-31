@@ -754,6 +754,125 @@ async fn ac006_ac007_real_router_drives_async_reresolve_door() {
     assert_eq!(progress.2, 1, "re-resolve must be immediately due");
 }
 
+/// A second account, so a door can be called by someone who owns nothing.
+async fn seed_other_user(harness: &RouteHarness, username: &str) -> i64 {
+    harness
+        .db
+        .create_user(CreateUserDbRequest {
+            username: username.to_string(),
+            password_hash: "unused-password-hash".to_string(),
+            role: UserRole::Admin,
+            api_key_hash: format!("unused-api-key-hash-{username}"),
+        })
+        .await
+        .expect("production user writer")
+        .id
+}
+
+/// One author belonging to a stated owner rather than to the authenticated
+/// caller.
+async fn seed_author_owned_by(harness: &RouteHarness, owner_id: i64, label: &str) -> i64 {
+    let (author, created) = harness
+        .db
+        .create_author(CreateAuthorDbRequest {
+            user_id: owner_id,
+            name: format!("{label} Author"),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("production door author writer");
+    assert!(created);
+    author.id
+}
+
+/// Every column the re-resolve writer is able to move, read exactly as stored.
+async fn progress_snapshot(
+    db: &SqliteDb,
+    author_id: i64,
+) -> (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+) {
+    sqlx::query_as(
+        "SELECT state, trigger, next_attempt_at, claim_token, lease_until, \
+                evaluated_fingerprint, updated_at \
+           FROM author_link_progress WHERE author_id = ?",
+    )
+    .bind(author_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("author progress snapshot")
+}
+
+/// Door: Author re-resolution via the production router, cross-user negative.
+/// U9R-F01: the re-resolve writer's progress upsert conflicts on `author_id`
+/// alone, so without an ownership gate a foreign caller voids the owner's live
+/// lease and requeues their author — and only afterwards does the user-scoped
+/// progress read report NotFound. The landed mutation, not the status code, is
+/// the defect.
+#[tokio::test]
+async fn re_resolve_refuses_another_users_author_and_leaves_its_progress_untouched() {
+    let harness = build_route_harness().await;
+    let owner_id = seed_other_user(&harness, "author-link-door-owner").await;
+    let author_id = seed_author_owned_by(&harness, owner_id, "Foreign Re Resolve").await;
+    assert_ne!(
+        owner_id, harness.user_id,
+        "the authenticated caller must not be the owner"
+    );
+
+    // The owner's author is queued and then claimed by a worker, so the row
+    // carries exactly the live lease a foreign call is able to void.
+    harness
+        .db
+        .ensure_enqueued(owner_id, author_id, AuthorLinkTrigger::AuthorCreated)
+        .await
+        .expect("production enqueue writer");
+    let now = Utc::now();
+    let claim = harness
+        .db
+        .claim_due(now, now + chrono::Duration::minutes(5), 10)
+        .await
+        .expect("production claim writer")
+        .into_iter()
+        .find(|claim| claim.author_id == author_id)
+        .expect("the owner's author must be claimable");
+    assert_eq!(claim.user_id, owner_id);
+
+    let before = progress_snapshot(&harness.db, author_id).await;
+    assert!(
+        before.3.is_some() && before.4.is_some(),
+        "the owner must hold a live claim token and lease"
+    );
+
+    let response = request(
+        &harness,
+        Method::POST,
+        &format!("/api/v1/author/{author_id}/resolve"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a foreign author is not this caller's to re-resolve"
+    );
+
+    assert_eq!(
+        progress_snapshot(&harness.db, author_id).await,
+        before,
+        "a refused re-resolve must leave the owner's whole progress row byte-identical"
+    );
+}
+
 /// Door: Author rename via the production router.
 /// AC-008 / AC-009: display-name cascade remains a classified user action.
 #[tokio::test]

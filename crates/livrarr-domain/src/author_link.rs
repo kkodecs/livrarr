@@ -582,6 +582,19 @@ pub struct AuthorKeyAttempt {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One key attempt of an evidence generation that is still owed another run.
+///
+/// The road cannot see these in its own tally: `prepare_key_attempts` hands back
+/// only attempts this claim now holds, so a retry scheduled for later is absent
+/// from every pass until it comes due. Its provider says whether the question a
+/// name search would ask is already about to be answered properly, and its
+/// deadline is when the author is next worth looking at.
+#[derive(Debug, Clone, Serialize)]
+pub struct OutstandingKeyRetry {
+    pub provider: AuthorProvider,
+    pub next_attempt_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthorRoadInput {
     pub author: Author,

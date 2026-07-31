@@ -24,8 +24,8 @@ use livrarr_domain::{
     AuthorLinkReview, AuthorLinkState, AuthorLinkTrigger, AuthorNameSource, AuthorNameVariant,
     AuthorProvider, AuthorRoadInput, AuthorRoute, AuthorRouteEvidenceSource, AuthorRouteKey,
     AuthorRouteProvenance, AuthorRouteState, AuthorSweepProgress, OpenLibraryNameRole,
-    ProviderAuthorNameObservation, RejectedAuthorRouteEvidence, RouteWriteOutcome,
-    SettledAuthorWork, SettledWorkProviderKey, UserId, WorkId,
+    OutstandingKeyRetry, ProviderAuthorNameObservation, RejectedAuthorRouteEvidence,
+    RouteWriteOutcome, SettledAuthorWork, SettledWorkProviderKey, UserId, WorkId,
 };
 use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
@@ -1310,12 +1310,80 @@ impl AuthorLinkDb for SqliteDb {
         Ok(total.max(0) as u64)
     }
 
+    async fn generation_outstanding_retries(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<Vec<OutstandingKeyRetry>, DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        verify_claim_tx(&mut tx, &claim).await?;
+
+        // Retryable rows carrying a deadline are the whole population that will
+        // run again: `prepare_key_attempts` takes every pending and running row
+        // of this generation under the caller's own claim before the road walks
+        // them, so none can still be waiting once the walk is done, and neither
+        // state records a time the author would be due at.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT provider, next_attempt_at FROM author_link_key_attempts \
+              WHERE user_id = ? AND author_id = ? AND evidence_generation = ? \
+                AND state = 'retryable' AND next_attempt_at IS NOT NULL \
+              ORDER BY next_attempt_at, id",
+        )
+        .bind(claim.user_id)
+        .bind(claim.author_id)
+        .bind(evidence_generation)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        rows.into_iter()
+            .map(|(provider, next_attempt_at)| {
+                Ok(OutstandingKeyRetry {
+                    provider: parse_provider(&provider)?,
+                    next_attempt_at: parse_dt(&next_attempt_at)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn generation_pending_candidate_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u32, DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        verify_claim_tx(&mut tx, &claim).await?;
+
+        // The same population the review page shows: pending, of this
+        // generation, and not silenced by a dismissal the user has not revoked.
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM author_link_candidates \
+              WHERE user_id = ? AND author_id = ? AND evidence_generation = ? \
+                AND status = 'pending' AND revoked_at IS NULL",
+        )
+        .bind(claim.user_id)
+        .bind(claim.author_id)
+        .bind(evidence_generation)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(total.max(0) as u32)
+    }
+
     async fn revoke_dismissals_and_replay(
         &self,
         user_id: UserId,
         author_id: AuthorId,
     ) -> Result<(), DbError> {
         let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        // Ownership first, exactly as `ensure_enqueued` does it: the progress
+        // upsert below conflicts on `author_id` alone, so a caller who does not
+        // own this author would otherwise void its owner's live lease and
+        // requeue their work before any user-scoped read could refuse.
+        require_author_owned_tx(&mut tx, user_id, author_id).await?;
 
         // Revoked, never deleted: the user's decision and the moment it stopped
         // binding both stay on the record.

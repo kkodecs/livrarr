@@ -1777,7 +1777,7 @@ async fn migration_081_requeues_only_affected_authors_and_the_rewalk_drops_the_j
     );
     assert!(
         service
-            .run_author(claim_author(&db, harmed_author, Utc::now() + Duration::hours(60)).await)
+            .run_author(claim_author(&db, harmed_author, Utc::now() + Duration::hours(169)).await)
             .await
             .is_ok(),
         "the author stays runnable after the re-walk"

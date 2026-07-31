@@ -761,6 +761,22 @@ impl AuthorLinkDb for StubAuthorLinkDb {
         todo!()
     }
 
+    async fn generation_outstanding_retries(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<Vec<livrarr_domain::OutstandingKeyRetry>, DbError> {
+        todo!()
+    }
+
+    async fn generation_pending_candidate_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u32, DbError> {
+        todo!()
+    }
+
     async fn revoke_dismissals_and_replay(
         &self,
         user_id: UserId,

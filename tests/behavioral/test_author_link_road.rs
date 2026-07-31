@@ -940,3 +940,630 @@ async fn harness_gateway_seam_catalog_preserves_cursor_and_empty_success() {
         .all(|call| call.provider == AuthorProvider::OpenLibrary
             && call.priority == RequestPriority::Low));
 }
+
+// ===========================================================================
+// U9R-F02 / F03 / F04 — durable state across passes
+//
+// Every pin below runs the same author through more than one claimed pass,
+// which is the seam the single-pass suite never crossed: what an earlier pass
+// wrote is durable, and `prepare_key_attempts` deliberately never hands a
+// terminal or not-yet-due attempt back, so a later pass's in-memory tally is
+// empty by design and cannot be the whole truth about the author.
+// ===========================================================================
+
+use livrarr_domain::AuthorProviderError;
+
+/// A gateway whose keyed answer may be a provider failure, so a pass can leave
+/// the durable retry a real provider outage leaves. Identical to
+/// `StubAuthorProviderGateway` in every other respect.
+struct ScriptedAuthorProviderGateway {
+    keyed_results:
+        HashMap<(AuthorProvider, String), Result<Vec<ProviderAuthorRef>, AuthorProviderError>>,
+    ol_search_results: Vec<OpenLibraryAuthorCandidate>,
+    ol_catalog_pages: Vec<OpenLibraryCatalogPage>,
+    calls: Mutex<Vec<livrarr_db::AuthorProviderCall>>,
+}
+
+impl ScriptedAuthorProviderGateway {
+    fn new() -> Self {
+        Self {
+            keyed_results: HashMap::new(),
+            ol_search_results: vec![],
+            ol_catalog_pages: vec![],
+            calls: Mutex::new(vec![]),
+        }
+    }
+
+    fn with_keyed(
+        mut self,
+        provider: AuthorProvider,
+        work_route: &str,
+        result: Result<Vec<ProviderAuthorRef>, AuthorProviderError>,
+    ) -> Self {
+        self.keyed_results
+            .insert((provider, work_route.to_string()), result);
+        self
+    }
+
+    fn with_name_search(
+        mut self,
+        candidates: Vec<OpenLibraryAuthorCandidate>,
+        pages: Vec<OpenLibraryCatalogPage>,
+    ) -> Self {
+        self.ol_search_results = candidates;
+        self.ol_catalog_pages = pages;
+        self
+    }
+
+    fn calls(&self) -> Vec<livrarr_db::AuthorProviderCall> {
+        self.calls
+            .lock()
+            .expect("scripted call log mutex poisoned")
+            .clone()
+    }
+
+    fn record_call(&self, provider: AuthorProvider, work_route: String, priority: RequestPriority) {
+        self.calls
+            .lock()
+            .expect("scripted call log mutex poisoned")
+            .push(livrarr_db::AuthorProviderCall {
+                provider,
+                work_route,
+                priority,
+            });
+    }
+}
+
+impl AuthorProviderGateway for ScriptedAuthorProviderGateway {
+    async fn fetch_work_authors(
+        &self,
+        provider: AuthorProvider,
+        work_route: String,
+        priority: RequestPriority,
+    ) -> Result<Vec<ProviderAuthorRef>, AuthorProviderError> {
+        self.record_call(provider, work_route.clone(), priority);
+        self.keyed_results
+            .get(&(provider, work_route))
+            .cloned()
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+
+    async fn search_open_library_authors(
+        &self,
+        query: String,
+        limit: u32,
+        priority: RequestPriority,
+    ) -> Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError> {
+        self.record_call(
+            AuthorProvider::OpenLibrary,
+            format!("ol_search:{query}:limit={limit}"),
+            priority,
+        );
+        Ok(self.ol_search_results.clone())
+    }
+
+    async fn fetch_open_library_catalog_page(
+        &self,
+        author_route: OpenLibraryAuthorKey,
+        cursor: Option<String>,
+        priority: RequestPriority,
+    ) -> Result<OpenLibraryCatalogPage, AuthorProviderError> {
+        self.record_call(
+            AuthorProvider::OpenLibrary,
+            format!("ol_catalog:{author_route:?}:cursor={cursor:?}"),
+            priority,
+        );
+        let page = match cursor.as_deref() {
+            None => self.ol_catalog_pages.first(),
+            Some(requested) => self
+                .ol_catalog_pages
+                .windows(2)
+                .find(|pages| pages[0].next_cursor.as_deref() == Some(requested))
+                .map(|pages| &pages[1]),
+        };
+        page.cloned().ok_or(AuthorProviderError::NotConfigured)
+    }
+}
+
+fn scripted_service(
+    db: &SqliteDb,
+    gateway: ScriptedAuthorProviderGateway,
+) -> AuthorLinkingServiceImpl<SqliteDb, ScriptedAuthorProviderGateway> {
+    AuthorLinkingServiceImpl {
+        db: db.clone(),
+        gateway,
+    }
+}
+
+/// One contributor a provider credits as this book's author.
+fn asserted_author(route: &str, name: &str) -> ProviderAuthorRef {
+    ProviderAuthorRef {
+        key: AuthorRouteKey::OpenLibrary(ol_key(route)),
+        name: name.to_string(),
+        credit: ProviderCredit::AssertedAuthor,
+    }
+}
+
+/// Record one observed spelling of the author's name through the production
+/// writer. This is what makes an author immediately due without touching the
+/// settled evidence its fingerprint is taken over.
+async fn observe_author_name(db: &SqliteDb, user_id: i64, author_id: i64, name: &str) {
+    use livrarr_db::AuthorNameVariantDb;
+    db.record_author_observed_names(
+        user_id,
+        author_id,
+        &[livrarr_domain::ProviderAuthorNameObservation {
+            source: livrarr_domain::AuthorNameSource::OpenLibrary,
+            name: name.to_string(),
+        }],
+    )
+    .await
+    .expect("production author-name observation writer");
+}
+
+async fn progress_row(db: &SqliteDb, author_id: i64) -> (String, Option<i64>, String, i64) {
+    sqlx::query_as(
+        "SELECT state, tier, next_attempt_at, evidence_generation \
+           FROM author_link_progress WHERE author_id = ?",
+    )
+    .bind(author_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("durable progress row")
+}
+
+async fn key_attempt_row(
+    db: &SqliteDb,
+    author_id: i64,
+) -> (i64, i64, String, String, Option<String>) {
+    sqlx::query_as(
+        "SELECT id, work_id, work_route, state, next_attempt_at \
+           FROM author_link_key_attempts WHERE author_id = ?",
+    )
+    .bind(author_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("durable key attempt row")
+}
+
+async fn candidate_census(db: &SqliteDb, author_id: i64) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM author_link_candidates WHERE author_id = ?")
+        .bind(author_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("candidate census")
+}
+
+/// Door: Recurring author-link sweep -> a linked author's scheduled recheck.
+/// U9R-F02: every key attempt of a linked author is terminal, so its scheduled
+/// recheck runs no key and its tally is empty by design. Deriving the final
+/// state from that tally alone demotes `Linked` to `ParkedNoEvidence` and pulls
+/// the next look from the linked week to the parked day — which `sweep_progress`
+/// then reports as a parked author, every linked author in the library, forever.
+#[tokio::test]
+async fn a_linked_authors_unchanged_recheck_stays_linked_and_calls_no_provider() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (author_id, claim) = settled_author_claim(
+        &db,
+        user_id,
+        "linked-recheck",
+        "Linked Recheck Work",
+        "Linked Recheck Author",
+    )
+    .await;
+
+    let linking = scripted_service(
+        &db,
+        ScriptedAuthorProviderGateway::new().with_keyed(
+            AuthorProvider::OpenLibrary,
+            "OL9001W",
+            Ok(vec![asserted_author("OL9601A", "Linked Recheck Author")]),
+        ),
+    );
+    let linked = linking.run_author(claim).await.expect("linking pass");
+    assert!(
+        matches!(linked.state, AuthorLinkProgressState::Linked),
+        "the first pass must link the author: {:?}",
+        linked.state
+    );
+
+    // The author comes back at its own linked recheck, with nothing about the
+    // evidence changed.
+    let recheck_claim =
+        claim_author_at(&db, author_id, Utc::now() + chrono::Duration::hours(169)).await;
+    let horizon = Utc::now();
+    let quiet = scripted_service(&db, ScriptedAuthorProviderGateway::new());
+    let update = quiet.run_author(recheck_claim).await.expect("recheck pass");
+
+    assert!(
+        quiet.gateway.calls().is_empty(),
+        "an unchanged recheck of a linked author must ask no provider anything: {:?}",
+        quiet.gateway.calls()
+    );
+    assert!(
+        matches!(update.state, AuthorLinkProgressState::Linked),
+        "the durable route still says linked: {:?}",
+        update.state
+    );
+    assert!(
+        update.next_attempt_at >= horizon + chrono::Duration::hours(167),
+        "a linked author is looked at again on the linked interval, not the parked one"
+    );
+    assert_eq!(
+        progress_row(&db, author_id).await.0,
+        "linked",
+        "the visible sweep state must still be linked"
+    );
+}
+
+/// The author's next claim taken at a stated instant, so a test can step past a
+/// lease or a recheck window it cannot wait for.
+async fn claim_author_at(
+    db: &SqliteDb,
+    author_id: i64,
+    at: chrono::DateTime<Utc>,
+) -> livrarr_db::AuthorLinkClaim {
+    db.claim_due(at, at + chrono::Duration::minutes(5), 10)
+        .await
+        .expect("production claim writer")
+        .into_iter()
+        .find(|claim| claim.author_id == author_id)
+        .expect("the author must be claimable")
+}
+
+/// Door: Recurring author-link sweep -> display-name convergence while a key
+/// retry is pending.
+/// U9R-F02: a name observation makes the author due immediately, well before a
+/// scheduled key retry. That pass runs no key — the retry is not due — so a
+/// tally-only derivation overwrites the retry's state and its deadline with a
+/// parked state a day out, delaying the provider's recovery by almost 24 hours.
+#[tokio::test]
+async fn a_scheduled_key_retry_survives_a_dirty_name_only_pass() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (author_id, claim) = settled_author_claim(
+        &db,
+        user_id,
+        "retry-survives",
+        "Retry Survives Work",
+        "Retry Survives Author",
+    )
+    .await;
+
+    let failing = scripted_service(
+        &db,
+        ScriptedAuthorProviderGateway::new().with_keyed(
+            AuthorProvider::OpenLibrary,
+            "OL9001W",
+            Err(AuthorProviderError::Retryable {
+                error: "OpenLibrary HTTP 503".to_string(),
+                retry_not_before: None,
+            }),
+        ),
+    );
+    let failed = failing.run_author(claim).await.expect("failing pass");
+    assert!(
+        matches!(failed.state, AuthorLinkProgressState::RetryableFailure),
+        "the first pass must schedule a key retry: {:?}",
+        failed.state
+    );
+    let (_, _, _, attempt_state, retry_deadline) = key_attempt_row(&db, author_id).await;
+    assert_eq!(attempt_state, "retryable");
+    let retry_deadline = retry_deadline.expect("a retryable attempt carries its deadline");
+
+    // A name observation makes the author due now — long before the retry is.
+    observe_author_name(&db, user_id, author_id, "R. S. Author").await;
+    let dirty_claim = claim_author_at(&db, author_id, Utc::now()).await;
+    let quiet = scripted_service(&db, ScriptedAuthorProviderGateway::new());
+    let update = quiet
+        .run_author(dirty_claim)
+        .await
+        .expect("dirty-name-only pass");
+
+    assert!(
+        quiet.gateway.calls().is_empty(),
+        "the retry is not due, so this pass calls no provider"
+    );
+    assert!(
+        matches!(update.state, AuthorLinkProgressState::RetryableFailure),
+        "a local name pass must not retire a scheduled provider retry: {:?}",
+        update.state
+    );
+    let (state, _, next_attempt_at, _) = progress_row(&db, author_id).await;
+    assert_eq!(state, "retryable_failure");
+    assert_eq!(
+        next_attempt_at, retry_deadline,
+        "the author stays due at the retry's own deadline, not a fresh parked day"
+    );
+}
+
+/// Door: Recurring author-link sweep -> a review-holding author's recheck.
+/// U9R-F02: a pending question is durable, so an unchanged recheck that writes
+/// no new candidate must not report the author as holding no evidence — the
+/// review page still has a card the user has not answered.
+#[tokio::test]
+async fn a_pending_review_card_survives_an_unchanged_recheck() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (author_id, claim) = settled_author_claim(
+        &db,
+        user_id,
+        "review-survives",
+        "Review Survives Work",
+        "Review Survives Author",
+    )
+    .await;
+
+    let parking = scripted_service(
+        &db,
+        ScriptedAuthorProviderGateway::new().with_keyed(
+            AuthorProvider::OpenLibrary,
+            "OL9001W",
+            Ok(vec![asserted_author("OL9602A", "Someone Else Entirely")]),
+        ),
+    );
+    let parked = parking.run_author(claim).await.expect("parking pass");
+    assert!(
+        matches!(parked.state, AuthorLinkProgressState::NeedsReview),
+        "the first pass must park a question: {:?}",
+        parked.state
+    );
+
+    let recheck_claim =
+        claim_author_at(&db, author_id, Utc::now() + chrono::Duration::hours(25)).await;
+    let quiet = scripted_service(&db, ScriptedAuthorProviderGateway::new());
+    let update = quiet.run_author(recheck_claim).await.expect("recheck pass");
+
+    assert!(
+        matches!(update.state, AuthorLinkProgressState::NeedsReview),
+        "an unanswered question still needs review: {:?}",
+        update.state
+    );
+    assert_eq!(progress_row(&db, author_id).await.0, "needs_review");
+    assert_eq!(
+        candidate_census(&db, author_id).await,
+        1,
+        "the recheck must not duplicate the card either"
+    );
+}
+
+/// Door: Recurring author-link sweep -> Tier-2 entry after an interrupted pass.
+/// U9R-F03: each key completion commits on its own, so a process that stops
+/// between the last completion and the Tier-2 gate leaves a generation whose
+/// keys are all terminal and whose durable authorial count is zero. Gating
+/// Tier 2 on this pass's in-memory attempts means that owed name search is never
+/// run again — the fingerprint is unchanged, so no later pass ever has an
+/// attempt to show. The durable state, not the pass, has to answer.
+#[tokio::test]
+async fn tier_two_still_runs_after_a_pass_stops_between_the_last_key_and_the_gate() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let (author_id, claim) = settled_author_claim(
+        &db,
+        user_id,
+        "tier-two-resume",
+        "Tier Two Resume Work",
+        "Tier Two Resume Author",
+    )
+    .await;
+
+    // Pass 1: the OpenLibrary key is retryable, which correctly defers Tier 2 —
+    // a key that is about to answer properly beats a name search.
+    let failing = scripted_service(
+        &db,
+        ScriptedAuthorProviderGateway::new().with_keyed(
+            AuthorProvider::OpenLibrary,
+            "OL9001W",
+            Err(AuthorProviderError::Retryable {
+                error: "OpenLibrary HTTP 503".to_string(),
+                retry_not_before: None,
+            }),
+        ),
+    );
+    let deferred = failing.run_author(claim).await.expect("deferred pass");
+    assert_eq!(deferred.tier, Some(1), "Tier 2 must not have run yet");
+
+    // The retry then completes with no authorial credit and the process stops
+    // before the Tier-2 gate. Both writes below are the production ones the road
+    // itself calls, in the order it calls them; only the gate never runs.
+    let generation = progress_row(&db, author_id).await.3;
+    let (attempt_id, work_id, work_route, _, _) = key_attempt_row(&db, author_id).await;
+
+    // The retry is five minutes out and `prepare_key_attempts` reads the wall
+    // clock itself, so a test cannot hand it a later instant the way it hands
+    // one to `claim_due`. Moving the stored deadline back is this test stepping
+    // time forward; every write that follows is a production one.
+    sqlx::query(
+        "UPDATE author_link_key_attempts \
+            SET next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute') \
+          WHERE id = ?",
+    )
+    .bind(attempt_id)
+    .execute(db.pool())
+    .await
+    .expect("step the retry window forward");
+
+    let resume_claim =
+        claim_author_at(&db, author_id, Utc::now() + chrono::Duration::hours(1)).await;
+    let reclaimed = db
+        .prepare_key_attempts(
+            resume_claim.clone(),
+            generation,
+            vec![livrarr_domain::SettledWorkProviderKey {
+                work_id,
+                provider: AuthorProvider::OpenLibrary,
+                work_route: work_route.clone(),
+            }],
+        )
+        .await
+        .expect("production key-attempt writer");
+    assert_eq!(reclaimed.len(), 1, "the due retry must be reclaimable");
+    db.complete_key_attempt(
+        resume_claim,
+        attempt_id,
+        livrarr_domain::AuthorKeyAttemptOutcome::Succeeded,
+        0,
+    )
+    .await
+    .expect("production key-completion writer");
+
+    // A later sweep picks the author up with the same evidence. Tier 2 is still
+    // owed and nothing in this pass can prove it.
+    let resumed_claim =
+        claim_author_at(&db, author_id, Utc::now() + chrono::Duration::hours(2)).await;
+    let searching = scripted_service(
+        &db,
+        ScriptedAuthorProviderGateway::new().with_name_search(
+            vec![OpenLibraryAuthorCandidate {
+                route_key: ol_key("OL9701A"),
+                name: "Tier Two Resume Author".to_string(),
+                alternate_names: vec![],
+                top_work: Some("Tier Two Resume Work".to_string()),
+                work_count: Some(4),
+            }],
+            vec![OpenLibraryCatalogPage {
+                titles: vec!["Tier Two Resume Work".to_string()],
+                next_cursor: None,
+            }],
+        ),
+    );
+    let update = searching
+        .run_author(resumed_claim)
+        .await
+        .expect("resumed pass");
+
+    assert_eq!(
+        update.tier,
+        Some(2),
+        "the owed name search must run on resume"
+    );
+    let searches = searching
+        .gateway
+        .calls()
+        .into_iter()
+        .filter(|call| call.work_route.starts_with("ol_search:"))
+        .count();
+    assert_eq!(
+        searches, 1,
+        "Tier 2 runs once, not zero times and not twice"
+    );
+    assert_eq!(
+        candidate_census(&db, author_id).await,
+        1,
+        "its outcome is persisted as a review card"
+    );
+
+    // And it is not owed twice: the next unchanged recheck asks nothing.
+    let quiet_claim =
+        claim_author_at(&db, author_id, Utc::now() + chrono::Duration::hours(25)).await;
+    let quiet = scripted_service(&db, ScriptedAuthorProviderGateway::new());
+    quiet.run_author(quiet_claim).await.expect("quiet recheck");
+    assert!(
+        quiet.gateway.calls().is_empty(),
+        "a completed Tier 2 must not replay on an unchanged recheck: {:?}",
+        quiet.gateway.calls()
+    );
+    assert_eq!(candidate_census(&db, author_id).await, 1);
+}
+
+/// Door: Recurring author-link sweep -> `run_due`'s operator metric.
+/// U9R-F04: `unchanged_fingerprint` is meant to say how many claimed authors
+/// re-read evidence they had already evaluated. Counted off a boolean that means
+/// two different things on two branches, it reports the exact opposite for a
+/// Tier-3 author: the first pass — which evaluated brand-new evidence — is
+/// counted, and the genuinely unchanged second pass is not.
+#[tokio::test]
+async fn unchanged_fingerprint_counts_the_re_read_pass_and_not_the_first_one() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    let author = author_service(db.clone())
+        .add(
+            user_id,
+            AddAuthorRequest {
+                name: "Metric Author".to_string(),
+                sort_name: None,
+                ol_key: None,
+                monitored: false,
+            },
+        )
+        .await
+        .expect("real standalone author door");
+    let author_id = author.author().id;
+
+    let service = AuthorLinkingServiceImpl {
+        db: db.clone(),
+        gateway: empty_gateway(),
+    };
+    let first = service
+        .run_due(10, CancellationToken::new())
+        .await
+        .expect("first tick");
+    assert_eq!(first.evaluated, 1);
+    assert_eq!(
+        first.unchanged_fingerprint, 0,
+        "the first evaluation of an author's evidence is not a re-read"
+    );
+
+    // The author comes back with its evidence untouched.
+    observe_author_name(&db, user_id, author_id, "M. Author").await;
+    let second = service
+        .run_due(10, CancellationToken::new())
+        .await
+        .expect("second tick");
+    assert_eq!(second.evaluated, 1);
+    assert_eq!(
+        second.unchanged_fingerprint, 1,
+        "the pass that re-read the same evidence is the one the metric counts"
+    );
+}
+
+/// Door: Recurring author-link sweep -> `run_due`'s operator metric.
+/// U9R-F04: on the settled branch the same boolean tracked whether any key ran,
+/// so an author whose evidence genuinely changed was still reported as unchanged
+/// whenever its works carried no provider key to walk.
+#[tokio::test]
+async fn changed_evidence_without_a_usable_provider_key_is_not_counted_as_unchanged() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+    work_service(db.clone(), "keyless")
+        .add(
+            user_id,
+            seed_add_box(
+                seed_input("Keyless Work", "Keyless Author", None),
+                IdentityState::Confirmed {
+                    anchors: CapturedIdentity {
+                        ol_key: None,
+                        gr_key: None,
+                        hc_key: None,
+                        isbn_13: None,
+                        asin: None,
+                        title: "Keyless Work".to_string(),
+                        author_name: "Keyless Author".to_string(),
+                        language: Some("en".to_string()),
+                    },
+                    method: IdentityMethod::UserSelected,
+                    score: None,
+                },
+                None,
+                false,
+            ),
+        )
+        .await
+        .expect("production settled-work writer");
+
+    let service = AuthorLinkingServiceImpl {
+        db: db.clone(),
+        gateway: empty_gateway(),
+    };
+    let tick = service
+        .run_due(10, CancellationToken::new())
+        .await
+        .expect("first tick");
+    assert_eq!(tick.evaluated, 1);
+    assert_eq!(
+        tick.unchanged_fingerprint, 0,
+        "evidence this sweep had never evaluated is not a re-read, whether or not \
+         it carried a key worth walking"
+    );
+}

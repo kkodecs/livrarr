@@ -194,8 +194,6 @@ struct RoadTally {
     active_routes: u32,
     /// An OpenLibrary route is now active, so Tier 2 has nothing to add.
     open_library_route: bool,
-    /// Review evidence this pass persisted.
-    pending_candidates: bool,
     /// An OpenLibrary key is still owed a retry — the one failure class that
     /// defers Tier 2, because searching by name would answer a question the
     /// key was about to answer properly.
@@ -229,7 +227,9 @@ impl RoadTally {
             | RouteWriteOutcome::ParkedLegacyContradiction(candidate)
             | RouteWriteOutcome::ParkedOwnershipCollision(candidate)
             | RouteWriteOutcome::RejectedByNameGuard(candidate) => {
-                self.pending_candidates = true;
+                // The parked question itself is already durable — the guarded
+                // writer persisted it in the same transaction — so only the name
+                // the retired comparator reads is worth carrying here.
                 self.parked_names.push(candidate.candidate_name.clone());
             }
         }
@@ -265,9 +265,14 @@ where
             .map(|(update, _)| update)
     }
 
-    /// [`Self::run_author`] plus whether this pass was an unchanged-evidence
-    /// skip: the settled evidence is the same as last time and nothing was
-    /// runnable, so no provider was called and only scheduling state moved.
+    /// [`Self::run_author`] plus whether this pass re-read evidence it had
+    /// already evaluated: the settled fingerprint matched the stored one, so no
+    /// new generation opened and no terminal key attempt was replayed.
+    ///
+    /// One meaning on every branch. The sweep counts this as
+    /// `unchanged_fingerprint`, and a branch that answered a different question
+    /// — "did any key run?" — would make the operator's number say the opposite
+    /// of its name for a whole class of author.
     async fn run_author_tracked(
         &self,
         claim: AuthorLinkClaim,
@@ -355,12 +360,31 @@ where
                 .await?;
         }
 
-        let mut tier = (!attempts.is_empty()).then_some(1u8);
+        // A pass that ran no key did not change what tier this generation
+        // reached, so the durable answer stands rather than being overwritten
+        // with "none". A changed fingerprint opens a fresh generation, which has
+        // reached no tier at all until something runs in it.
+        let mut tier = if !attempts.is_empty() {
+            Some(1u8)
+        } else if evidence_changed {
+            None
+        } else {
+            progress.tier
+        };
         let has_open_library_route = tally.open_library_route
             || input
                 .active_routes
                 .iter()
                 .any(|route| route.key.provider() == AuthorProvider::OpenLibrary);
+
+        // What this generation still owes, read from the record rather than from
+        // this pass. A retry scheduled for later is never handed back by
+        // `prepare_key_attempts`, so the tally alone cannot see it.
+        let outstanding_retries = self
+            .db
+            .generation_outstanding_retries(claim.clone(), generation)
+            .await
+            .map_err(link_error)?;
 
         // Every authorial observation this generation has durably recorded, not
         // just this pass's. A terminal key attempt is never handed back by
@@ -373,27 +397,56 @@ where
             .await
             .map_err(link_error)?;
 
+        // Whether this generation already asked its name-search question, taken
+        // from the progress row rather than from this pass. Each key completion
+        // commits on its own, so a pass that stops between the last one and this
+        // gate leaves a generation whose keys are all terminal — and no later
+        // pass would ever have an attempt to show that Tier 2 is still owed. A
+        // changed fingerprint opens a new generation and re-arms Tier 2 as
+        // before.
+        let tier2_already_ran = !evidence_changed && progress.tier == Some(2);
+        let open_library_retry_outstanding = tally.open_library_retry
+            || outstanding_retries
+                .iter()
+                .any(|retry| retry.provider == AuthorProvider::OpenLibrary);
+
         // Tier 2 exists for authors whose keys said nothing about their author.
         // A key that credited someone as an author — to attach, to review, or to
         // leave tombstoned — has already produced the better evidence, and an
         // outstanding OpenLibrary retry is about to. A key that credited only a
         // translator answered a different question, so it does not close this
         // one.
-        let run_tier2 = !attempts.is_empty()
+        let run_tier2 = !tier2_already_ran
             && generation_authorial_credits == 0
             && !has_open_library_route
-            && !tally.open_library_retry;
+            && !open_library_retry_outstanding;
         if run_tier2 {
             tier = Some(2);
             self.run_name_search(&claim, &input, generation, &display_names, now, &mut tally)
                 .await?;
         }
 
-        let state = if tally.earliest_retry.is_some() {
+        // Read after Tier 2, because Tier 2 is one of the writers.
+        let pending_candidates = self
+            .db
+            .generation_pending_candidate_count(claim.clone(), generation)
+            .await
+            .map_err(link_error)?;
+
+        // The state is what the record says about this author now, not what this
+        // pass happened to touch: a pass that ran no key has an empty tally by
+        // design, and reading only that turns every linked, reviewing or
+        // retrying author into one holding no evidence at all.
+        let earliest_retry = outstanding_retries
+            .iter()
+            .map(|retry| retry.next_attempt_at)
+            .chain(tally.earliest_retry)
+            .min();
+        let state = if earliest_retry.is_some() {
             AuthorLinkProgressState::RetryableFailure
-        } else if tally.pending_candidates {
+        } else if pending_candidates > 0 {
             AuthorLinkProgressState::NeedsReview
-        } else if tally.active_routes > 0 {
+        } else if tally.active_routes > 0 || !input.active_routes.is_empty() {
             AuthorLinkProgressState::Linked
         } else {
             AuthorLinkProgressState::ParkedNoEvidence
@@ -408,7 +461,7 @@ where
                 AuthorLinkProgressState::NeedsReview | AuthorLinkProgressState::ParkedNoEvidence
             ) && legacy_guess_metric(&input.author.name, &tally.parked_names);
 
-        let next_attempt_at = match (state, tally.earliest_retry) {
+        let next_attempt_at = match (state, earliest_retry) {
             (AuthorLinkProgressState::RetryableFailure, Some(at)) => at,
             (AuthorLinkProgressState::Linked, _) => now + Duration::hours(LINKED_RECHECK_HOURS),
             _ => now + Duration::hours(PARK_RECHECK_HOURS),
@@ -430,7 +483,7 @@ where
             .advance_progress(claim, update.clone())
             .await
             .map_err(link_error)?;
-        Ok((update, !attempts.is_empty()))
+        Ok((update, !evidence_changed))
     }
 
     /// One provider key on one settled work: fetch its contributors, guard each
@@ -586,7 +639,6 @@ where
                 .record_candidates(claim.clone(), rejected)
                 .await
                 .map_err(link_error)?;
-            tally.pending_candidates = true;
         }
 
         self.db
@@ -740,7 +792,6 @@ where
                 .record_candidates(claim.clone(), candidates)
                 .await
                 .map_err(link_error)?;
-            tally.pending_candidates = true;
         }
         Ok(())
     }
@@ -1327,9 +1378,9 @@ where
             }
             let author_id = claim.author_id;
             match self.run_author_tracked(claim).await {
-                Ok((_, provider_work)) => {
+                Ok((_, unchanged_fingerprint)) => {
                     summary.evaluated += 1;
-                    if !provider_work {
+                    if unchanged_fingerprint {
                         summary.unchanged_fingerprint += 1;
                     }
                 }

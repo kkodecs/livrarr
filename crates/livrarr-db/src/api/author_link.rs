@@ -7,7 +7,7 @@ use livrarr_domain::{
     AuthorId, AuthorKeyAttempt, AuthorKeyAttemptOutcome, AuthorLinkCandidate, AuthorLinkCursor,
     AuthorLinkProgress, AuthorLinkProgressUpdate, AuthorLinkReview, AuthorLinkTrigger,
     AuthorNameSource, AuthorNameVariant, AuthorProvider, AuthorRoadInput, AuthorRoute,
-    AuthorRouteKey, AuthorSweepProgress, ProviderAuthorNameObservation,
+    AuthorRouteKey, AuthorSweepProgress, OutstandingKeyRetry, ProviderAuthorNameObservation,
     RejectedAuthorRouteEvidence, RequestPriority, RouteWriteOutcome, SettledWorkProviderKey,
     UserId, WorkId,
 };
@@ -164,6 +164,30 @@ pub trait AuthorLinkDb: Send + Sync {
         claim: AuthorLinkClaim,
         evidence_generation: i64,
     ) -> Result<u64, DbError>;
+
+    /// Every key attempt in one evidence generation that is still owed a run.
+    ///
+    /// A retry scheduled for later is deliberately withheld by
+    /// `prepare_key_attempts`, so a pass that runs no key has an empty tally and
+    /// would otherwise conclude the author has nothing outstanding — retiring a
+    /// live retry's state and pulling its deadline forward to a parked day.
+    async fn generation_outstanding_retries(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<Vec<OutstandingKeyRetry>, DbError>;
+
+    /// How many questions of one evidence generation are still waiting on the
+    /// user.
+    ///
+    /// The same reason: a question an earlier pass parked is durable and still
+    /// on the review page, so a later pass that writes no candidate must not
+    /// report the author as holding no evidence.
+    async fn generation_pending_candidate_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u32, DbError>;
 
     /// Un-suppress every question this author's dismissals are silencing, and
     /// make the author replay — in one transaction.
