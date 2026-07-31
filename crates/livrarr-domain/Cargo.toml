@@ -17,4 +17,5 @@ uuid = { workspace = true }
 quick-xml = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }
+unicode-script = { workspace = true }
 urlencoding = { workspace = true }

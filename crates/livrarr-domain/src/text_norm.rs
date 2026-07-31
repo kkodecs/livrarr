@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use unicode_normalization::UnicodeNormalization;
+use unicode_script::{Script, UnicodeScript};
 
 use crate::title_cleanup::clean_title;
 
@@ -111,6 +112,28 @@ pub(crate) fn strip_combining_marks(s: &str) -> String {
     s.nfkd()
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .collect()
+}
+
+/// Whether a name carries a letter belonging to a writing system other than
+/// Latin.
+///
+/// The decision is the Unicode **Script** property, never a Unicode block: the
+/// blocks disagree with the scripts (`U+AB65 GREEK LETTER SMALL CAPITAL OMEGA`
+/// sits inside the Latin Extended-E block yet has Script=Greek), and a block
+/// table would call that letter Latin.
+///
+/// Only script-bearing letters count. Digits, spaces, punctuation and combining
+/// marks are not `is_alphabetic` and are ignored; `Common` and `Inherited`
+/// alphabetics carry no script evidence and are ignored too. A name with no
+/// script-bearing letter at all is therefore Latin — nothing in it says another
+/// writing system's record exists.
+pub(crate) fn contains_non_latin_letters(name: &str) -> bool {
+    name.chars().filter(|c| c.is_alphabetic()).any(|c| {
+        !matches!(
+            c.script(),
+            Script::Latin | Script::Common | Script::Inherited
+        )
+    })
 }
 
 #[cfg(test)]
@@ -303,5 +326,98 @@ mod tests {
         assert!(!tokens.is_empty());
         // Should contain CJK bigrams and Latin-CJK boundary bigrams
         assert!(tokens.contains("村上"));
+    }
+
+    // --- U9 D9-2 / INV-U9-9: the script carve-out's classifier ---
+    //
+    // The classifier decides whether an unlabelled credit whose name disagrees
+    // is dropped silently or kept as a review card. Every row below is a live
+    // shape from the review queue's own script split, plus the one regression
+    // that killed the block-table design.
+
+    /// The pin the block allowlist failed. `U+AB65 GREEK LETTER SMALL CAPITAL
+    /// OMEGA` sits inside the Latin Extended-E block `U+AB30–U+AB6F` and is
+    /// alphabetic, so a block table calls it Latin and silently drops the card.
+    /// Its Script property is Greek. Blocks are never the test (INV-U9-9).
+    #[test]
+    fn a_greek_letter_inside_a_latin_block_is_non_latin() {
+        assert!(contains_non_latin_letters("\u{AB65}"));
+        assert!(contains_non_latin_letters("Name \u{AB65}"));
+    }
+
+    /// The 25 cards the carve-out exists to keep: the author's own name written
+    /// in another writing system.
+    #[test]
+    fn every_non_latin_writing_system_is_non_latin() {
+        for name in [
+            "Уолтер Айзексон",    // Cyrillic
+            "월터 아이작슨",      // Hangul
+            "沃尔特·艾萨克森",    // Han
+            "ピアース・ブラウン", // Katakana
+            "ج.ك. رولينج",        // Arabic
+            "Τιτίνα Σπερελάκη",   // Greek
+        ] {
+            assert!(
+                contains_non_latin_letters(name),
+                "{name:?} must be kept as a card"
+            );
+        }
+    }
+
+    /// The named accepted loss: extended-Latin romanizations are Latin, so they
+    /// are dropped along with the translators they sit beside.
+    #[test]
+    fn extended_latin_names_are_latin() {
+        for name in [
+            "Walter Isaacson",
+            "Džo Aberkrombijs",
+            "Jean-François Ménard",
+            "Cristina Macía Orio",
+            "Dana Krejčová",
+        ] {
+            assert!(
+                !contains_non_latin_letters(name),
+                "{name:?} must be classified Latin"
+            );
+        }
+    }
+
+    /// Normalization form is not script evidence. A decomposed `é` is a Latin
+    /// `e` plus a combining mark that is not alphabetic at all, so both spellings
+    /// classify the same way — the classifier and the matcher never disagree
+    /// about what they were handed.
+    #[test]
+    fn precomposed_and_decomposed_accents_agree() {
+        assert!(!contains_non_latin_letters("Ménard"));
+        assert!(!contains_non_latin_letters("Me\u{0301}nard"));
+    }
+
+    /// A Common-script alphabetic carries no evidence that another writing
+    /// system's record exists, so it is ignored rather than counted.
+    #[test]
+    fn common_script_letters_are_ignored() {
+        assert!(!contains_non_latin_letters("Name \u{A788}"));
+        assert!(!contains_non_latin_letters("\u{A788}"));
+    }
+
+    /// One non-Latin letter anywhere is script evidence; the rest of the name
+    /// being Latin does not dilute it.
+    #[test]
+    fn a_mixed_script_name_is_non_latin() {
+        assert!(contains_non_latin_letters("Джеймс S. A. Корі"));
+        assert!(contains_non_latin_letters("James S. A. Корі"));
+    }
+
+    /// Digits, spaces and punctuation are not alphabetic, so a name made only of
+    /// them carries zero script-bearing characters. Nothing in it says another
+    /// writing system's record exists, so it is Latin and drops.
+    #[test]
+    fn a_name_with_no_script_bearing_letters_is_latin() {
+        for name in ["12345", "---", "", "   ", "·・"] {
+            assert!(
+                !contains_non_latin_letters(name),
+                "{name:?} carries no script evidence"
+            );
+        }
     }
 }

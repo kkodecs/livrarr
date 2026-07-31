@@ -357,10 +357,32 @@ impl NonAuthorialProviderRef {
         &self.observed_name
     }
 
-    /// The label exactly as the certifying gateway read it. `None` means the
-    /// gateway certified nothing at all — the fail-closed case.
+    /// The label exactly as the certifying gateway read it.
     pub fn role(&self) -> Option<&str> {
         self.role.as_deref()
+    }
+}
+
+/// An unlabelled credit whose name did not agree, dropped rather than asked
+/// about.
+///
+/// Structurally the same as [`RejectedAuthorRouteEvidence`] and deliberately a
+/// **distinct type**: the duplication is the statement that this evidence must
+/// never reach a candidate writer. It carries the verdict so the road can say
+/// what it dropped without re-running the matcher.
+#[derive(Debug, Clone)]
+pub struct DroppedAuthorCreditEvidence {
+    evidence: AuthorRouteEvidence,
+    verdict: AuthorVerdict,
+}
+
+impl DroppedAuthorCreditEvidence {
+    pub fn evidence(&self) -> &AuthorRouteEvidence {
+        &self.evidence
+    }
+
+    pub fn verdict(&self) -> AuthorVerdict {
+        self.verdict
     }
 }
 
@@ -369,43 +391,46 @@ pub enum AuthorRouteGuardResult {
     Agreed(AgreedAuthorRouteEvidence),
     Rejected(RejectedAuthorRouteEvidence),
     NonAuthorial(NonAuthorialProviderRef),
+    /// An unlabelled credit, a name that did not agree, and a name written in
+    /// Latin script. Counted as an authorial observation, written nowhere.
+    UnlabeledMismatchDropped(DroppedAuthorCreditEvidence),
 }
-
-/// The one label that means "this provider credited this person as an author".
-///
-/// Gateways normalize their own shape knowledge into this exact value; nothing
-/// else is an author claim. Keeping it in one place is what lets a gateway
-/// certify and the guard decide without the two agreeing by coincidence.
-pub const CERTIFIED_AUTHOR_ROLE: &str = "author";
 
 /// The one standard of proof for an automatic author-route write.
 ///
-/// Two questions, in order. First: did this provider credit this person as an
-/// **author** of the book? Only [`CERTIFIED_AUTHOR_ROLE`] says yes — every
-/// other label, and the absence of a label, is [`AuthorRouteGuardResult::NonAuthorial`]
-/// and never reaches a verdict. That ordering is what makes the boundary
-/// fail-closed: a gateway that forgets to certify produces a visible
-/// non-authorial credit, never a silent author.
+/// Three questions, in order. First: what did the provider actually say about
+/// this credit? A [`ProviderCredit::Labeled`] credit names something other than
+/// authorship, so it is [`AuthorRouteGuardResult::NonAuthorial`] and never
+/// reaches a verdict.
 ///
-/// Then, for an author credit only: the canonical
+/// Then, for an authorship credit: the canonical
 /// [`crate::identity_matching::author_verdict`] authority compares the
 /// provider's name for one author identifier against the author's full current
 /// associated-name snapshot. `Agree` is the only verdict that mints
-/// [`AgreedAuthorRouteEvidence`]; `Grey`, `Abstain`, and `Disagree` are retained
-/// as review evidence with the verdict that produced them.
+/// [`AgreedAuthorRouteEvidence`].
+///
+/// Then, for a *non-agreeing* [`ProviderCredit::UnlabeledAuthorSlot`] only: the
+/// offered name's writing system. An unlabelled credit is a placement, not an
+/// assertion, so a Latin-script mismatch is dropped outright; a non-Latin one is
+/// kept as review evidence, because it may be the same author's name in another
+/// writing system. An asserted credit is never script-tested — it cards on every
+/// non-agreeing verdict, exactly as U8 shipped it.
 pub fn guard_author_route(
     current_display_names: &[String],
     provider_ref: ProviderAuthorRef,
     evidence_work_id: Option<WorkId>,
     source: AuthorRouteEvidenceSource,
 ) -> AuthorRouteGuardResult {
-    if provider_ref.role.as_deref() != Some(CERTIFIED_AUTHOR_ROLE) {
-        return AuthorRouteGuardResult::NonAuthorial(NonAuthorialProviderRef {
-            key: provider_ref.key,
-            observed_name: provider_ref.name.trim().to_string(),
-            role: provider_ref.role,
-        });
-    }
+    let credit = match provider_ref.credit {
+        ProviderCredit::Labeled(label) => {
+            return AuthorRouteGuardResult::NonAuthorial(NonAuthorialProviderRef {
+                key: provider_ref.key,
+                observed_name: provider_ref.name.trim().to_string(),
+                role: Some(label),
+            })
+        }
+        authorial => authorial,
+    };
     let evidence = AuthorRouteEvidence {
         key: provider_ref.key,
         observed_name: provider_ref.name.trim().to_string(),
@@ -413,28 +438,53 @@ pub fn guard_author_route(
         source,
     };
     let provider_side = [evidence.observed_name.clone()];
-    match crate::identity_matching::author_verdict(&provider_side, current_display_names) {
-        AuthorVerdict::Agree => AuthorRouteGuardResult::Agreed(AgreedAuthorRouteEvidence {
+    let verdict = crate::identity_matching::author_verdict(&provider_side, current_display_names);
+    if verdict == AuthorVerdict::Agree {
+        return AuthorRouteGuardResult::Agreed(AgreedAuthorRouteEvidence {
             evidence,
             agree_proof: AuthorNameGuardAgree,
-        }),
-        verdict => {
-            AuthorRouteGuardResult::Rejected(RejectedAuthorRouteEvidence { evidence, verdict })
-        }
+        });
     }
+    // The classifier reads the raw provider name, before any canonicalization,
+    // so the script decision and the matcher never disagree about what they were
+    // handed.
+    if matches!(credit, ProviderCredit::UnlabeledAuthorSlot)
+        && !crate::text_norm::contains_non_latin_letters(&provider_ref.name)
+    {
+        return AuthorRouteGuardResult::UnlabeledMismatchDropped(DroppedAuthorCreditEvidence {
+            evidence,
+            verdict,
+        });
+    }
+    AuthorRouteGuardResult::Rejected(RejectedAuthorRouteEvidence { evidence, verdict })
+}
+
+/// What a provider actually said about one credit.
+///
+/// Absence is not representable: a gateway that cannot read a credit's shape
+/// must drop the entry rather than construct a ref, which is what makes the
+/// boundary fail-closed by type rather than by convention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ProviderCredit {
+    /// The provider named this credit an authorship credit.
+    AssertedAuthor,
+    /// The person sits in the provider's author container, unlabelled.
+    /// Membership is a placement, not a claim.
+    UnlabeledAuthorSlot,
+    /// The provider named a credit that is not authorship. Verbatim.
+    Labeled(String),
 }
 
 /// One person a provider credited on one book.
 ///
-/// `role` is a **certified** value, not a raw provider string: the gateway that
-/// read the response is the only place that knows which of its shapes means
-/// "author", and it writes [`CERTIFIED_AUTHOR_ROLE`] when it saw one. Any other
-/// label travels verbatim so an operator can read what was actually said.
+/// `credit` is a **certified** value, not a raw provider string: the gateway
+/// that read the response is the only place that knows which of its shapes means
+/// authorship, and which of them means the field said nothing at all.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderAuthorRef {
     pub key: AuthorRouteKey,
     pub name: String,
-    pub role: Option<String>,
+    pub credit: ProviderCredit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -649,6 +699,10 @@ pub struct AuthorLinkCandidate {
     /// That work's title, hydrated only by the review read that joins it. A
     /// scalar read leaves it absent rather than showing a stale title.
     pub evidence_work_title: Option<String>,
+    /// When a dismissal stopped suppressing this question. A dismissed row is
+    /// revoked, never deleted: the user's decision and its resolution time stay
+    /// on the record, and only this stamp says the answer no longer binds.
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -5,6 +5,7 @@ use livrarr_db::{
     AuthorDb, AuthorLinkDb, AuthorNameVariantDb, CreateAuthorGateRequest, CreateImportDbRequest,
     ImportDb, LibraryItemDb, RootFolderDb, UpdateWorkUserFieldsDbRequest, WorkDb,
 };
+use livrarr_domain::identity_matching::dedupe_associated_names;
 use livrarr_domain::{
     AgreedAuthorRouteEvidence, Author, AuthorId, AuthorLinkCandidate, AuthorLinkTrigger, DbError,
     Import, LibraryItem, LibraryItemId, RejectedAuthorRouteEvidence, RootFolder, RootFolderId,
@@ -262,12 +263,8 @@ where
         let variants = self.db.list_name_variants(user_id, author_id).await?;
         let mut names = Vec::with_capacity(variants.len() + 1);
         names.push(author.name);
-        for variant in variants {
-            if !names.contains(&variant.name) {
-                names.push(variant.name);
-            }
-        }
-        Ok(names)
+        names.extend(variants.into_iter().map(|variant| variant.name));
+        Ok(dedupe_associated_names(&names))
     }
 
     async fn submit_author_route_evidence(

@@ -11,7 +11,7 @@ use livrarr_db::{sqlite::SqliteDb, AuthorLinkDb, AuthorRouteBackfillReport};
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
     guard_author_route, AuthorProvider, AuthorRouteEvidenceSource, AuthorRouteGuardResult,
-    AuthorRouteKey, ProviderAuthorRef, CERTIFIED_AUTHOR_ROLE,
+    AuthorRouteKey, ProviderAuthorRef, ProviderCredit,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -165,10 +165,10 @@ pub fn readarr_author_route_evidence(
             key,
             name: name.to_string(),
             // A Readarr *author* record asserting its own Goodreads author id
-            // is an author claim by what the record is. That is this door's own
-            // shape knowledge, certified here exactly as each provider gateway
-            // certifies its own.
-            role: Some(CERTIFIED_AUTHOR_ROLE.to_string()),
+            // is an author claim by what the record is — an assertion, not a
+            // placement. That is this door's own shape knowledge, certified here
+            // exactly as each provider gateway certifies its own.
+            credit: ProviderCredit::AssertedAuthor,
         },
         None,
         AuthorRouteEvidenceSource::ReadarrImport,

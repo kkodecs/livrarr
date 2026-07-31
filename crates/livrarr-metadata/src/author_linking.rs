@@ -6,7 +6,7 @@ use livrarr_db::{
     WorkDb,
 };
 use livrarr_domain::identity_matching::{
-    author_verdict, parse_title, title_verdict, AuthorVerdict,
+    author_verdict, dedupe_associated_names, parse_title, title_verdict, AuthorVerdict,
 };
 use livrarr_domain::seed::dominant_language;
 use livrarr_domain::services::{
@@ -185,6 +185,11 @@ struct RoadTally {
     /// an author. Never a route, a candidate or a name — only a number an
     /// operator can read.
     non_authorial_filtered: u32,
+    /// Unlabelled credits dropped because their Latin-script name did not agree.
+    /// Counted separately from `non_authorial_filtered`, whose population must
+    /// keep meaning exactly what it meant to an operator before this gate: a
+    /// credit the provider labelled as something other than authorship.
+    unlabeled_mismatch_dropped: u32,
     /// Routes this pass left active (attached, already active, or upgraded).
     active_routes: u32,
     /// An OpenLibrary route is now active, so Tier 2 has nothing to add.
@@ -357,6 +362,17 @@ where
                 .iter()
                 .any(|route| route.key.provider() == AuthorProvider::OpenLibrary);
 
+        // Every authorial observation this generation has durably recorded, not
+        // just this pass's. A terminal key attempt is never handed back by
+        // `prepare_key_attempts`, so what an earlier pass learned is absent from
+        // the in-memory tally and Tier 2 would open on a question already
+        // answered.
+        let generation_authorial_credits = self
+            .db
+            .generation_authorial_credit_count(claim.clone(), generation)
+            .await
+            .map_err(link_error)?;
+
         // Tier 2 exists for authors whose keys said nothing about their author.
         // A key that credited someone as an author — to attach, to review, or to
         // leave tombstoned — has already produced the better evidence, and an
@@ -364,7 +380,7 @@ where
         // translator answered a different question, so it does not close this
         // one.
         let run_tier2 = !attempts.is_empty()
-            && tally.authorial_contributors_seen == 0
+            && generation_authorial_credits == 0
             && !has_open_library_route
             && !tally.open_library_retry;
         if run_tier2 {
@@ -445,8 +461,9 @@ where
             Ok(refs) => refs,
             Err(error) => {
                 let outcome = self.classify_key_failure(attempt, error, now, tally);
+                // A key that failed observed no authorial credit.
                 self.db
-                    .complete_key_attempt(claim.clone(), attempt.id, outcome)
+                    .complete_key_attempt(claim.clone(), attempt.id, outcome, 0)
                     .await
                     .map_err(link_error)?;
                 return Ok(());
@@ -455,6 +472,7 @@ where
 
         let mut rejected = Vec::new();
         let mut filtered_here = 0u32;
+        let mut dropped_here = 0u32;
         let mut authorial_here = 0u32;
         for provider_ref in refs {
             tally.contributors_seen += 1;
@@ -494,6 +512,25 @@ where
                         .map_err(link_error)?;
                     tally.record_route_write(&written, provider);
                 }
+                // An unlabelled credit whose Latin-script name did not agree.
+                // Membership in a provider's author container is a placement,
+                // not a claim, so a name disagreement is not a question worth
+                // asking — but the key did observe an authorial slot, which is
+                // what keeps Tier 2 shut.
+                AuthorRouteGuardResult::UnlabeledMismatchDropped(dropped) => {
+                    tally.authorial_contributors_seen += 1;
+                    authorial_here += 1;
+                    dropped_here += 1;
+                    tally.unlabeled_mismatch_dropped += 1;
+                    let evidence = dropped.evidence();
+                    tracing::debug!(
+                        provider = ?provider,
+                        route = %evidence.key.value(),
+                        name = %evidence.observed_name,
+                        verdict = ?dropped.verdict(),
+                        "author link: unlabelled credit dropped on a Latin name mismatch"
+                    );
+                }
                 AuthorRouteGuardResult::Rejected(rejection) => {
                     tally.authorial_contributors_seen += 1;
                     authorial_here += 1;
@@ -524,18 +561,22 @@ where
                         evidence_work_id: evidence.evidence_work_id,
                         // Read-side only: `list_review` joins the title.
                         evidence_work_title: None,
+                        // Write-side only: a revocation is a user action on a
+                        // dismissal, never something a fresh question carries.
+                        revoked_at: None,
                     });
                 }
             }
         }
 
-        if filtered_here > 0 {
+        if filtered_here > 0 || dropped_here > 0 {
             tracing::debug!(
                 provider = ?attempt.provider,
                 work_route = %attempt.work_route,
                 contributors_seen = authorial_here + filtered_here,
                 authorial_contributors_seen = authorial_here,
                 non_authorial_filtered = filtered_here,
+                unlabeled_mismatch_dropped = dropped_here,
                 "author link: key attempt filtered non-authorial credits"
             );
         }
@@ -553,6 +594,7 @@ where
                 claim.clone(),
                 attempt.id,
                 AuthorKeyAttemptOutcome::Succeeded,
+                authorial_here,
             )
             .await
             .map_err(link_error)?;
@@ -944,6 +986,7 @@ impl Tier2Candidate {
             // there is no book to name on the card.
             evidence_work_id: None,
             evidence_work_title: None,
+            revoked_at: None,
         }
     }
 }
@@ -969,23 +1012,15 @@ fn same_fingerprint(a: &AuthorEvidenceFingerprint, b: &AuthorEvidenceFingerprint
 /// Every name currently associated with this author — the snapshot the name
 /// guard compares a provider's contributor against.
 fn associated_names(input: &AuthorRoadInput) -> Vec<String> {
-    let mut names = Vec::with_capacity(input.name_variants.len() + 1);
-    let mut seen = HashSet::new();
-    for name in std::iter::once(input.author.name.clone()).chain(
-        input
-            .name_variants
-            .iter()
-            .map(|variant| variant.name.clone()),
-    ) {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if seen.insert(trimmed.to_lowercase()) {
-            names.push(trimmed.to_string());
-        }
-    }
-    names
+    let names: Vec<String> = std::iter::once(input.author.name.clone())
+        .chain(
+            input
+                .name_variants
+                .iter()
+                .map(|variant| variant.name.clone()),
+        )
+        .collect();
+    dedupe_associated_names(&names)
 }
 
 /// Every canonical provider key on every settled work — the full Tier-1 work
@@ -1185,13 +1220,18 @@ where
 
     /// Ask for the author to be looked at again. Returns as soon as the durable
     /// task is due — no provider is awaited on a user's request.
+    ///
+    /// This is the one door that un-suppresses questions the user dismissed:
+    /// asking for the author to be looked at again is a statement that the old
+    /// answers no longer bind. Removing a single route is not, so `remove_route`
+    /// keeps the plain enqueue.
     async fn re_resolve(
         &self,
         user_id: UserId,
         author_id: AuthorId,
     ) -> Result<AuthorLinkProgress, AuthorLinkError> {
         self.db
-            .ensure_enqueued(user_id, author_id, AuthorLinkTrigger::UserReResolve)
+            .revoke_dismissals_and_replay(user_id, author_id)
             .await
             .map_err(link_error)?;
         self.db

@@ -23,7 +23,7 @@ use livrarr_domain::{
     AuthorLinkProgressState, AuthorLinkProgressUpdate, AuthorLinkTrigger, AuthorNameSource,
     AuthorProvider, AuthorRouteEvidenceSource, AuthorRouteGuardResult, AuthorRouteKey,
     AuthorRouteProvenance, DbError, IdentityStatus, ProviderAuthorNameObservation,
-    ProviderAuthorRef, RouteWriteOutcome, SettledWorkProviderKey,
+    ProviderAuthorRef, ProviderCredit, RouteWriteOutcome, SettledWorkProviderKey,
 };
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -121,6 +121,7 @@ fn candidate(author_id: i64, raw: &str, generation: i64) -> AuthorLinkCandidate 
         observed_at: Utc::now(),
         evidence_work_id: None,
         evidence_work_title: None,
+        revoked_at: None,
     }
 }
 
@@ -149,7 +150,7 @@ fn agreed_evidence(raw: &str) -> livrarr_domain::AgreedAuthorRouteEvidence {
         ProviderAuthorRef {
             key: route(AuthorProvider::OpenLibrary, raw),
             name: "Octavia E Butler".to_string(),
-            role: Some("author".to_string()),
+            credit: ProviderCredit::AssertedAuthor,
         },
         Some(1),
         AuthorRouteEvidenceSource::Tier1SettledWork,
@@ -457,6 +458,7 @@ async fn ac006_ac012_migration_078_live_claim_race_returns_exact_claim_lost_ever
                 error: "stale worker".to_string(),
                 next_attempt_at: Utc::now() + Duration::minutes(1),
             },
+            0,
         )
         .await,
     );
@@ -808,6 +810,7 @@ async fn ac003_ac006_key_attempts_are_idempotent_resumable_and_key_local() {
             error: "429".to_string(),
             next_attempt_at: Utc::now() + Duration::minutes(2),
         },
+        0,
     )
     .await
     .expect("persist retryable outcome");
@@ -961,7 +964,7 @@ async fn ac004_ac011_readarr_rejection_is_idempotent_and_route_free() {
         ProviderAuthorRef {
             key: route(AuthorProvider::Goodreads, "991"),
             name: "Jane Smith".to_string(),
-            role: Some("author".to_string()),
+            credit: ProviderCredit::AssertedAuthor,
         },
         None,
         AuthorRouteEvidenceSource::ReadarrImport,

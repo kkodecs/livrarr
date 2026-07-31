@@ -28,7 +28,7 @@ use livrarr_domain::services::{
 use livrarr_domain::{
     AuthorLinkCandidateReason, AuthorLinkProgressState, AuthorLinkTrigger, AuthorProvider,
     AuthorRouteKey, OpenLibraryAuthorCandidate, OpenLibraryAuthorKey, OpenLibraryCatalogPage,
-    ProviderAuthorRef, RequestPriority,
+    ProviderAuthorRef, ProviderCredit, RequestPriority,
 };
 use livrarr_external_data::live_config::LiveMetadataConfig;
 use livrarr_external_data::{GoodreadsClient, HardcoverClient, OpenLibraryClient};
@@ -548,12 +548,12 @@ async fn ac003_ac013_tier1_run_author_attaches_each_agree_and_never_attaches_gre
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9501A")),
                     name: "Tier One Author".to_string(),
-                    role: Some("author".to_string()),
+                    credit: ProviderCredit::AssertedAuthor,
                 },
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9502A")),
                     name: "Unrelated Contributor".to_string(),
-                    role: Some("author".to_string()),
+                    credit: ProviderCredit::AssertedAuthor,
                 },
             ],
         )]),
@@ -612,12 +612,12 @@ async fn ac003_ac013_tier1_run_author_attaches_each_agree_and_never_attaches_gre
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9511A")),
                     name: "Both Agree Author".to_string(),
-                    role: Some("author".to_string()),
+                    credit: ProviderCredit::AssertedAuthor,
                 },
                 ProviderAuthorRef {
                     key: AuthorRouteKey::OpenLibrary(ol_key("OL9512A")),
                     name: "Both Agree Author".to_string(),
-                    role: Some("author".to_string()),
+                    credit: ProviderCredit::AssertedAuthor,
                 },
             ],
         )]),
@@ -692,7 +692,7 @@ async fn ac003_ac010_tier1_run_author_honors_tombstone_and_parks_review() {
             vec![ProviderAuthorRef {
                 key: tombstoned_key.clone(),
                 name: "Tombstone Author".to_string(),
-                role: Some("author".to_string()),
+                credit: ProviderCredit::AssertedAuthor,
             }],
         )]),
         ol_search_results: vec![],
@@ -819,7 +819,7 @@ async fn harness_gateway_seam_serves_configured_keyed_results_and_defaults_empty
     let configured_ref = ProviderAuthorRef {
         key: AuthorRouteKey::OpenLibrary(configured_ol_key("OL9399A")),
         name: "Configured Contributor".to_string(),
-        role: Some("author".to_string()),
+        credit: ProviderCredit::AssertedAuthor,
     };
     let gateway = StubAuthorProviderGateway {
         keyed_results: HashMap::from([(

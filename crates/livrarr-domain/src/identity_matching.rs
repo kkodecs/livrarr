@@ -14,6 +14,7 @@
 //! a true subtitle — the safest class: it can only demote, never veto, never
 //! silently pass.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -651,6 +652,32 @@ pub fn canonical_author_key(author: &str) -> String {
             tokens.join(" ")
         })
         .unwrap_or_default()
+}
+
+/// One author's own names, with canonically identical spellings collapsed.
+///
+/// Two spellings of the same person that reduce to the same
+/// [`canonical_author_key`] are one name, not two, and leaving both in the
+/// snapshot makes an exact provider match look ambiguous to `author_verdict` —
+/// which is correct when comparing lists of *different* people and wrong when
+/// one side is one person's own alias list.
+///
+/// The first spelling of each key survives, so the order is deterministic:
+/// author name first, then stored variant order. Empty and blank names are
+/// dropped.
+pub fn dedupe_associated_names(names: &[String]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut deduped = Vec::with_capacity(names.len());
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(canonical_author_key(trimmed)) {
+            deduped.push(trimmed.to_string());
+        }
+    }
+    deduped
 }
 
 // --- title parsing internals ---

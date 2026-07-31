@@ -22,8 +22,8 @@ use livrarr_domain::services::{
 };
 use livrarr_domain::{
     AuthorProvider, AuthorProviderError, AuthorRouteKey, OpenLibraryAuthorCandidate,
-    OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, RequestPriority,
-    CERTIFIED_AUTHOR_ROLE,
+    OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, ProviderCredit,
+    RequestPriority,
 };
 use lru::LruCache;
 use tokio::sync::{broadcast, Semaphore};
@@ -90,12 +90,11 @@ fn aggregate_credits(refs: Vec<ProviderAuthorRef>) -> Vec<ProviderAuthorRef> {
                 slot.insert(candidate);
             }
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                let held_is_authorial = slot.get().role.as_deref() == Some(CERTIFIED_AUTHOR_ROLE);
-                let offer_is_authorial = candidate.role.as_deref() == Some(CERTIFIED_AUTHOR_ROLE);
-                if offer_is_authorial && !held_is_authorial {
-                    // The authorial occurrence is the one worth keeping, and it
-                    // brings the name the provider used when crediting the
-                    // person as an author.
+                if credit_strength(&candidate.credit) > credit_strength(&slot.get().credit) {
+                    // The stronger occurrence is the one worth keeping, whole:
+                    // it brings the name the provider used when it made that
+                    // credit, so the guard never sees the narrator's spelling of
+                    // a person under the author's credit.
                     slot.insert(candidate);
                 }
             }
@@ -105,6 +104,20 @@ fn aggregate_credits(refs: Vec<ProviderAuthorRef>) -> Vec<ProviderAuthorRef> {
         .into_iter()
         .filter_map(|route| by_route.remove(&route))
         .collect()
+}
+
+/// How strongly one credit places this person in the book's authorship.
+///
+/// An assertion outranks a placement, and a placement outranks a credit the
+/// provider named as something else — so an unlabelled occurrence on one edition
+/// still beats a "Narrated by" occurrence on another, exactly as U8's two-way
+/// predicate did, while an asserted occurrence now outranks both.
+fn credit_strength(credit: &ProviderCredit) -> u8 {
+    match credit {
+        ProviderCredit::AssertedAuthor => 2,
+        ProviderCredit::UnlabeledAuthorSlot => 1,
+        ProviderCredit::Labeled(_) => 0,
+    }
 }
 
 /// What one adapter's per-entry reads add up to.
@@ -198,6 +211,20 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
                 continue;
             };
 
+            // Classified before the name is read: an entry whose credit this
+            // reader cannot classify is dropped, and hydrating a name for it
+            // would spend an OpenLibrary request — and risk a hydration
+            // failure — on a credit that never reaches the guard.
+            let Some(credit) = open_library_certified_credit(entry) else {
+                tracing::warn!(
+                    work_key = %key,
+                    author_key = %author_key.as_str(),
+                    "OpenLibrary contributor type is present but unreadable — entry dropped"
+                );
+                read.role_dropped += 1;
+                continue;
+            };
+
             let name = match entry
                 .get("name")
                 .and_then(|value| value.as_str())
@@ -211,7 +238,7 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
             read.refs.push(ProviderAuthorRef {
                 key: route,
                 name,
-                role: Some(open_library_certified_role(entry)),
+                credit,
             });
         }
 
@@ -252,23 +279,34 @@ impl<F: HttpFetcher> OpenLibraryClient<F> {
     }
 }
 
-/// What one entry of an OpenLibrary work's `authors[]` credits this person as.
+/// What one entry of an OpenLibrary work's `authors[]` credits this person as,
+/// or `None` when the entry carries a type this reader cannot read.
 ///
 /// OpenLibrary spells an ordinary author credit as the structural type
-/// `/type/author_role`; other role types name a different credit and travel
-/// under their own stripped label. An entry with no type at all is still a
-/// member of the work's **author list**, which is the credit the container
-/// itself makes.
-fn open_library_certified_role(entry: &serde_json::Value) -> String {
-    match entry
+/// `/type/author_role` — boilerplate structure, not an editorial claim about the
+/// person — and an entry with no type at all is still a member of the work's
+/// author list. Both are placements in the author container, never assertions.
+/// Other role types name a different credit and travel under their own stripped
+/// label.
+///
+/// The distinction that decides a drop is **presence**, not value: a record with
+/// no type field is container membership, while a record carrying a type field
+/// this reader cannot read — null, non-string, blank, or a bare `/type/` — is a
+/// shape that moved, and widening it into the author container is exactly the
+/// silent failure the gate exists to prevent.
+fn open_library_certified_credit(entry: &serde_json::Value) -> Option<ProviderCredit> {
+    if entry.get("type").is_none() {
+        return Some(ProviderCredit::UnlabeledAuthorSlot);
+    }
+    let label = entry
         .pointer("/type/key")
         .and_then(|value| value.as_str())
         .map(|raw| raw.trim().trim_start_matches("/type/"))
-        .filter(|label| !label.is_empty())
-    {
-        None | Some("author_role") => CERTIFIED_AUTHOR_ROLE.to_string(),
-        Some(label) => label.to_string(),
-    }
+        .filter(|label| !label.is_empty())?;
+    Some(match label {
+        "author_role" => ProviderCredit::UnlabeledAuthorSlot,
+        other => ProviderCredit::Labeled(other.to_string()),
+    })
 }
 
 /// One paced OpenLibrary GET for any author-road request, through the shared
@@ -609,15 +647,16 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         let mut contributors = ContributorRead::new();
         for contributor in read.contributors {
             contributors.raw_entries += 1;
-            // The JSON-LD fallback reads the book's `author` field, so every
-            // entry in it is an author credit by the field's own meaning. An
+            // The JSON-LD fallback reads a plain `author` container with no role
+            // field anywhere in it — a placement, structurally identical to
+            // OpenLibrary's `authors[]`, never a statement about the person. An
             // Apollo edge instead names its credit, and an edge that names none
             // has told us nothing we may act on.
-            let role = if from_author_field {
-                Some(CERTIFIED_AUTHOR_ROLE.to_string())
+            let credit = if from_author_field {
+                ProviderCredit::UnlabeledAuthorSlot
             } else {
                 match contributor.role.as_deref() {
-                    Some(label) => Some(goodreads_certified_role(label)),
+                    Some(label) => goodreads_certified_credit(label),
                     None => {
                         tracing::warn!(
                             book_key = %key,
@@ -633,7 +672,7 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
                 Ok(route) => contributors.refs.push(ProviderAuthorRef {
                     key: route,
                     name: contributor.name,
-                    role,
+                    credit,
                 }),
                 Err(_) => tracing::warn!(
                     book_key = %key,
@@ -797,7 +836,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                             "Hardcover author id {id} is not a canonical author id"
                         ))
                     })?;
-                let Some(role) = hardcover_certified_role(contribution) else {
+                let Some(credit) = hardcover_certified_credit(contribution) else {
                     tracing::warn!(
                         book_id,
                         author_id = id,
@@ -809,7 +848,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                 read.refs.push(ProviderAuthorRef {
                     key: route,
                     name: name.to_string(),
-                    role: Some(role),
+                    credit,
                 });
             }
         }
@@ -821,29 +860,32 @@ impl<F: HttpFetcher> HardcoverClient<F> {
 /// What one Hardcover contribution credits this person as, or `None` when the
 /// field cannot be read at all.
 ///
-/// Hardcover leaves `contribution` empty for the people who wrote the book and
-/// names every other credit in free text. A field that is *absent*, or present
-/// in a shape this reader does not know, is not the same as an empty one: it is
-/// a shape that moved, and guessing it into an author credit is exactly the
-/// silent failure the role gate exists to prevent.
-fn hardcover_certified_role(contribution: &serde_json::Value) -> Option<String> {
+/// Hardcover marks authorship by an empty field rather than a label: it names
+/// every other credit in free text and leaves the people who wrote the book as
+/// the residue, so a present-and-null `contribution` is a placement, never an
+/// assertion. A field that is *absent*, or present in a shape this reader does
+/// not know, is not the same as an empty one: it is a shape that moved, and
+/// guessing it into an author credit is exactly the silent failure this gate
+/// exists to prevent.
+fn hardcover_certified_credit(contribution: &serde_json::Value) -> Option<ProviderCredit> {
     match contribution.get("contribution") {
-        Some(serde_json::Value::Null) => Some(CERTIFIED_AUTHOR_ROLE.to_string()),
-        Some(serde_json::Value::String(label)) => Some(label.clone()),
+        Some(serde_json::Value::Null) => Some(ProviderCredit::UnlabeledAuthorSlot),
+        Some(serde_json::Value::String(label)) => Some(ProviderCredit::Labeled(label.clone())),
         _ => None,
     }
 }
 
 /// What one Goodreads contributor edge credits this person as.
 ///
-/// The site spells an author credit two ways — plain "Author" on a primary
-/// edge, "Goodreads Author" when the person has a claimed profile — and both
-/// mean the same thing. Every other credit travels verbatim.
-fn goodreads_certified_role(label: &str) -> String {
+/// Goodreads is the only provider that *asserts* a role. It spells an author
+/// credit two ways — plain "Author" on a primary edge, "Goodreads Author" when
+/// the person has a claimed profile — and both mean the same thing. Every other
+/// credit travels verbatim.
+fn goodreads_certified_credit(label: &str) -> ProviderCredit {
     if label.eq_ignore_ascii_case("author") || label.eq_ignore_ascii_case("goodreads author") {
-        return CERTIFIED_AUTHOR_ROLE.to_string();
+        return ProviderCredit::AssertedAuthor;
     }
-    label.to_string()
+    ProviderCredit::Labeled(label.to_string())
 }
 
 /// Hardcover failures: a pause stays a pause, and a readable-but-refused
@@ -1751,10 +1793,11 @@ mod tests {
         )
     }
 
-    /// Hardcover says "author" by sending the contribution field with no value.
-    /// A named contribution is a different credit and keeps its own label.
+    /// Hardcover leaves an authorship credit unlabelled — the contribution
+    /// field arrives with no value. A named contribution is a different credit
+    /// and keeps its own label.
     #[tokio::test]
-    async fn hardcover_certifies_a_null_contribution_as_author_and_a_label_verbatim() {
+    async fn hardcover_certifies_a_null_contribution_as_an_unlabeled_slot_and_a_label_verbatim() {
         let _guard = lock_breaker(RateBucket::Hardcover).await;
         let fetcher = queued(vec![ok(r#"{"data":{"editions":[{"contributions":[
                 {"contribution":null,"author":{"id":41,"name":"The Author"}},
@@ -1768,9 +1811,12 @@ mod tests {
 
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].name, "The Author");
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::UnlabeledAuthorSlot);
         assert_eq!(refs[1].name, "The Narrator");
-        assert_eq!(refs[1].role.as_deref(), Some("Narrated by"));
+        assert_eq!(
+            refs[1].credit,
+            ProviderCredit::Labeled("Narrated by".to_string())
+        );
     }
 
     /// A contribution field that is absent, or present in a shape this reader
@@ -1792,7 +1838,7 @@ mod tests {
 
         assert_eq!(refs.len(), 1, "only the readable credit survives");
         assert_eq!(refs[0].name, "The Author");
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::UnlabeledAuthorSlot);
     }
 
     /// Every entry unreadable is the shape moving, not a book nobody wrote.
@@ -1845,7 +1891,7 @@ mod tests {
             .await
             .expect("narrator credit first");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::UnlabeledAuthorSlot);
 
         let author_first = queued(vec![ok(r#"{"data":{"editions":[
                 {"contributions":[{"contribution":null,"author":{"id":41,"name":"Both Credits"}}]},
@@ -1856,7 +1902,7 @@ mod tests {
             .await
             .expect("author credit first");
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::UnlabeledAuthorSlot);
     }
 
     /// The order the provider credited people in is the order they come back
@@ -1878,12 +1924,12 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].name, "Only Narrator");
         assert_eq!(
-            refs[0].role.as_deref(),
-            Some("Narrated by"),
+            refs[0].credit,
+            ProviderCredit::Labeled("Narrated by".to_string()),
             "a non-authorial route keeps the label it was first credited with"
         );
         assert_eq!(refs[1].name, "The Author");
-        assert_eq!(refs[1].role.as_deref(), Some("author"));
+        assert_eq!(refs[1].credit, ProviderCredit::UnlabeledAuthorSlot);
     }
 
     /// Goodreads names the credit on the edge. "Author" — in either of the two
@@ -1905,9 +1951,12 @@ mod tests {
 
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].name, "First Person");
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::AssertedAuthor);
         assert_eq!(refs[1].name, "Second Person");
-        assert_eq!(refs[1].role.as_deref(), Some("Translator"));
+        assert_eq!(
+            refs[1].credit,
+            ProviderCredit::Labeled("Translator".to_string())
+        );
     }
 
     /// An edge with no role said nothing about the credit. Dropping it is the
@@ -1928,7 +1977,7 @@ mod tests {
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "First Person");
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::AssertedAuthor);
     }
 
     /// Every edge roleless is the layout having moved.
@@ -1951,10 +2000,11 @@ mod tests {
         );
     }
 
-    /// The JSON-LD fallback has no roles because the field it reads *is* the
-    /// author list — every entry in it is an author credit.
+    /// The JSON-LD fallback carries no role anywhere. Membership of the
+    /// `author[]` container is a placement, not a claim, so every entry in it is
+    /// an unlabelled slot rather than an assertion.
     #[tokio::test]
-    async fn goodreads_json_ld_entries_are_author_credits() {
+    async fn goodreads_json_ld_entries_are_unlabeled_placements() {
         let _guard = lock_breaker(RateBucket::Goodreads).await;
         let fetcher = queued(vec![ok(r#"<html><script type="application/ld+json">
                {"author":[{"@type":"Person","name":"First Person","url":"/author/show/31"},
@@ -1969,13 +2019,14 @@ mod tests {
         assert_eq!(refs.len(), 2);
         assert!(refs
             .iter()
-            .all(|entry| entry.role.as_deref() == Some("author")));
+            .all(|entry| entry.credit == ProviderCredit::UnlabeledAuthorSlot));
     }
 
     /// Open Library spells an ordinary author credit `/type/author_role`, and
-    /// an entry with no type at all is still in the work's author list.
+    /// an entry with no type at all is still in the work's author list. Neither
+    /// shape is an editorial claim, so both certify as unlabelled slots.
     #[tokio::test]
-    async fn open_library_certifies_author_role_and_a_missing_type_as_author() {
+    async fn open_library_certifies_author_role_and_a_missing_type_as_unlabeled_slots() {
         let _guard = lock_breaker(RateBucket::OpenLibrary).await;
         let fetcher = queued(vec![ok(r#"{"authors":[
                 {"type":{"key":"/type/author_role"},
@@ -1991,12 +2042,241 @@ mod tests {
             .expect("OpenLibrary contributor read");
 
         assert_eq!(refs.len(), 3);
-        assert_eq!(refs[0].role.as_deref(), Some("author"));
+        assert_eq!(refs[0].credit, ProviderCredit::UnlabeledAuthorSlot);
         assert_eq!(
-            refs[1].role.as_deref(),
-            Some("author"),
+            refs[1].credit,
+            ProviderCredit::UnlabeledAuthorSlot,
             "the authors[] container is the work's author list"
         );
-        assert_eq!(refs[2].role.as_deref(), Some("translator_role"));
+        assert_eq!(
+            refs[2].credit,
+            ProviderCredit::Labeled("translator_role".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // U9 D9-1a — the certification table, and the aggregation order over it
+    // -----------------------------------------------------------------------
+
+    fn gr_key(raw: &str) -> AuthorRouteKey {
+        AuthorRouteKey::parse(AuthorProvider::Goodreads, raw).expect("Goodreads author id")
+    }
+
+    fn credited(key: AuthorRouteKey, name: &str, credit: ProviderCredit) -> ProviderAuthorRef {
+        ProviderAuthorRef {
+            key,
+            name: name.to_string(),
+            credit,
+        }
+    }
+
+    /// D9-1a, Hardcover rows. Authorship is the residue of an empty field, so a
+    /// present-and-null `contribution` is a placement. A present *blank string*
+    /// is not the same thing — it is a label Hardcover wrote, and it stays
+    /// non-authorial exactly as U8 shipped it. An absent key or any other JSON
+    /// shape is a shape that moved and drops the entry.
+    #[test]
+    fn hardcover_credit_table() {
+        let null = serde_json::json!({"contribution": null});
+        assert_eq!(
+            hardcover_certified_credit(&null),
+            Some(ProviderCredit::UnlabeledAuthorSlot)
+        );
+
+        let labelled = serde_json::json!({"contribution": "Narrated by"});
+        assert_eq!(
+            hardcover_certified_credit(&labelled),
+            Some(ProviderCredit::Labeled("Narrated by".to_string()))
+        );
+
+        let blank = serde_json::json!({"contribution": ""});
+        assert_eq!(
+            hardcover_certified_credit(&blank),
+            Some(ProviderCredit::Labeled(String::new())),
+            "a blank string is a label Hardcover wrote, not an empty field"
+        );
+
+        let absent = serde_json::json!({"author": {"id": 41}});
+        assert_eq!(
+            hardcover_certified_credit(&absent),
+            None,
+            "an absent contribution key drops the entry"
+        );
+        for moved in [
+            serde_json::json!({"contribution": {"role": "author"}}),
+            serde_json::json!({"contribution": 42}),
+            serde_json::json!({"contribution": ["author"]}),
+        ] {
+            assert_eq!(
+                hardcover_certified_credit(&moved),
+                None,
+                "an unreadable contribution shape drops the entry: {moved}"
+            );
+        }
+    }
+
+    /// D9-1a, Goodreads Apollo rows. Goodreads is the only provider that
+    /// asserts; both spellings of its author credit mean the same thing and
+    /// every other credit travels verbatim.
+    #[test]
+    fn goodreads_apollo_credit_table() {
+        for asserted in ["Author", "author", "Goodreads Author", "goodreads author"] {
+            assert_eq!(
+                goodreads_certified_credit(asserted),
+                ProviderCredit::AssertedAuthor,
+                "{asserted:?} is an assertion of authorship"
+            );
+        }
+        assert_eq!(
+            goodreads_certified_credit("Translator"),
+            ProviderCredit::Labeled("Translator".to_string())
+        );
+        assert_eq!(
+            goodreads_certified_credit("Illustrator"),
+            ProviderCredit::Labeled("Illustrator".to_string())
+        );
+    }
+
+    /// D9-1a, OpenLibrary rows, drawing the distinction on **presence**.
+    ///
+    /// A structurally absent `type` and the boilerplate `/type/author_role` are
+    /// both placements in the author container. A `type` key that is present but
+    /// unreadable — null, non-string, blank, or bare `/type/` — is a shape this
+    /// reader cannot classify, and it must drop the entry rather than widen into
+    /// the author container (U9-F01).
+    #[test]
+    fn open_library_credit_table_distinguishes_absence_from_unreadability() {
+        let untyped = serde_json::json!({"author": {"key": "/authors/OL1A"}});
+        assert_eq!(
+            open_library_certified_credit(&untyped),
+            Some(ProviderCredit::UnlabeledAuthorSlot),
+            "no type field at all is the container's own placement"
+        );
+
+        for author_role in [
+            serde_json::json!({"type": {"key": "/type/author_role"}}),
+            serde_json::json!({"type": {"key": "author_role"}}),
+        ] {
+            assert_eq!(
+                open_library_certified_credit(&author_role),
+                Some(ProviderCredit::UnlabeledAuthorSlot),
+                "author_role is boilerplate structure, not an editorial claim"
+            );
+        }
+
+        let translator = serde_json::json!({"type": {"key": "/type/translator_role"}});
+        assert_eq!(
+            open_library_certified_credit(&translator),
+            Some(ProviderCredit::Labeled("translator_role".to_string()))
+        );
+    }
+
+    /// The five present-but-unreadable OpenLibrary shapes, each of which a
+    /// mechanical port of the U8 helper turns into an author placement.
+    ///
+    /// Under U9 a matching name on one of these would mint an automatic route
+    /// and a Latin mismatch would vanish silently. The D9-1a result is the exact
+    /// one Hardcover already gives an unreadable contribution — drop the entry,
+    /// so the read loop counts it — never a different credit class.
+    #[test]
+    fn open_library_refuses_a_present_but_unreadable_type() {
+        for unreadable in [
+            serde_json::json!({"type": {"key": null}}),
+            serde_json::json!({"type": {"key": 42}}),
+            serde_json::json!({"type": {"key": ""}}),
+            serde_json::json!({"type": {"key": "/type/"}}),
+            serde_json::json!({"type": "author_role"}),
+        ] {
+            assert_eq!(
+                open_library_certified_credit(&unreadable),
+                None,
+                "a type field this reader cannot read drops the entry: {unreadable}"
+            );
+        }
+    }
+
+    /// Focus-Q1. One person credited twice on one book keeps the strongest
+    /// *occurrence* — its credit **and** the name the provider used when it made
+    /// that credit — in the order `AssertedAuthor` > `UnlabeledAuthorSlot` >
+    /// `Labeled(_)`, whichever occurrence came back first.
+    ///
+    /// The two occurrences are deliberately spelled differently. Keeping the
+    /// weaker occurrence's spelling while claiming the stronger class would feed
+    /// the name guard the narrator's or translator's spelling of the person, so
+    /// the retained ref is asserted whole.
+    ///
+    /// A unit test rather than a door test on purpose: no shipped adapter can
+    /// produce the cross-class pair — Hardcover and OpenLibrary never assert,
+    /// and a Goodreads read commits to Apollo edges or JSON-LD for the whole
+    /// response, never both — so the ordering is only reachable here.
+    #[test]
+    fn aggregate_credits_keeps_the_strongest_credit_in_either_order() {
+        const STRONG_SPELLING: &str = "Strongest Occurrence Spelling";
+        const WEAK_SPELLING: &str = "Weaker Occurrence Spelling";
+
+        let pairs = [
+            (
+                ProviderCredit::AssertedAuthor,
+                ProviderCredit::UnlabeledAuthorSlot,
+            ),
+            (
+                ProviderCredit::AssertedAuthor,
+                ProviderCredit::Labeled("Narrated by".to_string()),
+            ),
+            (
+                ProviderCredit::UnlabeledAuthorSlot,
+                ProviderCredit::Labeled("Narrated by".to_string()),
+            ),
+        ];
+        for (stronger, weaker) in pairs {
+            let strong_occurrence = credited(gr_key("41"), STRONG_SPELLING, stronger.clone());
+            let weak_occurrence = credited(gr_key("41"), WEAK_SPELLING, weaker.clone());
+            for (first, second) in [
+                (strong_occurrence.clone(), weak_occurrence.clone()),
+                (weak_occurrence.clone(), strong_occurrence.clone()),
+            ] {
+                let order = format!("{:?} then {:?}", first.credit, second.credit);
+                let aggregated = aggregate_credits(vec![first, second]);
+                assert_eq!(aggregated.len(), 1, "one person is one route");
+                assert_eq!(aggregated[0].key, gr_key("41"));
+                assert_eq!(
+                    aggregated[0].credit, stronger,
+                    "{order} must keep {stronger:?}"
+                );
+                assert_eq!(
+                    aggregated[0].name, STRONG_SPELLING,
+                    "{order} must keep the strongest occurrence's own spelling"
+                );
+            }
+        }
+    }
+
+    /// Equal strength keeps the first occurrence, and the order the provider
+    /// credited people in is preserved.
+    #[test]
+    fn aggregate_credits_keeps_first_seen_order_and_the_first_equal_credit() {
+        let aggregated = aggregate_credits(vec![
+            credited(
+                gr_key("41"),
+                "Only Narrator",
+                ProviderCredit::Labeled("Narrated by".to_string()),
+            ),
+            credited(gr_key("42"), "The Author", ProviderCredit::AssertedAuthor),
+            credited(
+                gr_key("41"),
+                "Only Narrator",
+                ProviderCredit::Labeled("Illustrated by".to_string()),
+            ),
+        ]);
+
+        assert_eq!(aggregated.len(), 2);
+        assert_eq!(aggregated[0].name, "Only Narrator");
+        assert_eq!(
+            aggregated[0].credit,
+            ProviderCredit::Labeled("Narrated by".to_string()),
+            "equal strength keeps the label it was first credited with"
+        );
+        assert_eq!(aggregated[1].name, "The Author");
+        assert_eq!(aggregated[1].credit, ProviderCredit::AssertedAuthor);
     }
 }

@@ -77,7 +77,7 @@ const CANDIDATE_COLUMNS: &str =
     "id, author_id, provider, route_value, candidate_name, reason, name_verdict, \
      primary_name_verdict, top_work_preview, catalog_evidence_state, corroborated_title_count, \
      settled_work_count, previously_removed, status, evidence_generation, observed_at, \
-     evidence_work_id";
+     evidence_work_id, revoked_at";
 
 /// [`CANDIDATE_COLUMNS`] qualified by a table alias, for the one read that
 /// joins another table and would otherwise be ambiguous on `id`.
@@ -102,6 +102,7 @@ fn row_to_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<AuthorLinkCandidate
     let catalog: String = row.try_get("catalog_evidence_state").map_err(map_db_err)?;
     let status: String = row.try_get("status").map_err(map_db_err)?;
     let observed_at: String = row.try_get("observed_at").map_err(map_db_err)?;
+    let revoked_at: Option<String> = row.try_get("revoked_at").map_err(map_db_err)?;
     Ok(AuthorLinkCandidate {
         id: row.try_get("id").map_err(map_db_err)?,
         author_id: row.try_get("author_id").map_err(map_db_err)?,
@@ -129,6 +130,7 @@ fn row_to_candidate(row: &sqlx::sqlite::SqliteRow) -> Result<AuthorLinkCandidate
         observed_at: parse_dt(&observed_at)?,
         evidence_work_id: row.try_get("evidence_work_id").map_err(map_db_err)?,
         evidence_work_title: row.try_get("evidence_work_title").unwrap_or(None),
+        revoked_at: revoked_at.as_deref().map(parse_dt).transpose()?,
     })
 }
 
@@ -1284,11 +1286,89 @@ impl AuthorLinkDb for SqliteDb {
         Ok(attempts)
     }
 
+    async fn generation_authorial_credit_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u64, DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        verify_claim_tx(&mut tx, &claim).await?;
+
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(authorial_credits_seen), 0) \
+               FROM author_link_key_attempts \
+              WHERE user_id = ? AND author_id = ? AND evidence_generation = ?",
+        )
+        .bind(claim.user_id)
+        .bind(claim.author_id)
+        .bind(evidence_generation)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(total.max(0) as u64)
+    }
+
+    async fn revoke_dismissals_and_replay(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+
+        // Revoked, never deleted: the user's decision and the moment it stopped
+        // binding both stay on the record.
+        sqlx::query(
+            "UPDATE author_link_candidates SET revoked_at = ? \
+              WHERE user_id = ? AND author_id = ? \
+                AND status = 'dismissed' AND revoked_at IS NULL",
+        )
+        .bind(now_ts())
+        .bind(user_id)
+        .bind(author_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        // The same queue mutation the plain re-resolve door performs — queued,
+        // immediately due, any live lease voided — inside this transaction
+        // rather than beside it, so a revocation can never land without the
+        // author becoming runnable.
+        ensure_progress_tx(
+            &mut tx,
+            user_id,
+            author_id,
+            AuthorLinkTrigger::UserReResolve,
+        )
+        .await?;
+
+        // Queuing alone produces a due pass with no runnable attempts: the
+        // generation's key attempts are terminal and `prepare_key_attempts`
+        // never returns them. Clearing the fingerprint is the one lever that
+        // opens a new generation before any provider call, superseding the old
+        // questions and minting fresh, non-terminal attempts.
+        sqlx::query(
+            "UPDATE author_link_progress SET evaluated_fingerprint = NULL, updated_at = ? \
+              WHERE author_id = ? AND user_id = ?",
+        )
+        .bind(now_ts())
+        .bind(author_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db_err)?;
+
+        tx.commit().await.map_err(map_db_err)?;
+        Ok(())
+    }
+
     async fn complete_key_attempt(
         &self,
         claim: AuthorLinkClaim,
         key_attempt_id: i64,
         outcome: AuthorKeyAttemptOutcome,
+        authorial_credits_seen: u32,
     ) -> Result<(), DbError> {
         let mut tx = self.pool().begin().await.map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
@@ -1328,9 +1408,15 @@ impl AuthorLinkDb for SqliteDb {
             ),
         };
 
+        // The observation is assigned, never accumulated: an attempt row is unique
+        // per (generation, key) and a reclaimed running row is re-run and
+        // re-assigned, so the write stays correct under the existing retry and
+        // resume model. Carried in the transition statement itself, so no
+        // completed state can exist without its count.
         let updated = sqlx::query(
             "UPDATE author_link_key_attempts \
                 SET state = ?, next_attempt_at = ?, last_error = ?, diagnostic_code = ?, \
+                    authorial_credits_seen = ?, \
                     attempt_count = attempt_count + 1, claim_token = NULL, updated_at = ? \
               WHERE id = ? AND user_id = ? AND author_id = ? AND state = 'running' \
                 AND claim_token = ?",
@@ -1339,6 +1425,7 @@ impl AuthorLinkDb for SqliteDb {
         .bind(next_attempt_at)
         .bind(error)
         .bind(diagnostic)
+        .bind(i64::from(authorial_credits_seen))
         .bind(now_ts())
         .bind(key_attempt_id)
         .bind(claim.user_id)
@@ -1604,6 +1691,30 @@ impl AuthorLinkDb for SqliteDb {
             let provider = provider_str(candidate.key.provider());
             let value = candidate.key.value();
             let reason = candidate_reason_str(candidate.reason);
+
+            // The user already answered this question. Automation never asks it
+            // again — only the explicit re-resolve door can, by revoking the
+            // dismissal first. `revoked_at IS NULL` is load-bearing: a revoked
+            // dismissal keeps status = 'dismissed', so a status-only test would
+            // suppress it forever and make that door a no-op.
+            let dismissed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM author_link_candidates \
+                                WHERE user_id = ? AND author_id = ? AND provider = ? \
+                                  AND route_value = ? AND reason = ? \
+                                  AND status = 'dismissed' AND revoked_at IS NULL)",
+            )
+            .bind(claim.user_id)
+            .bind(candidate.author_id)
+            .bind(provider)
+            .bind(&value)
+            .bind(reason)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+            if dismissed {
+                continue;
+            }
+
             let previously_removed: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM author_provider_routes \
                                 WHERE user_id = ? AND provider = ? AND route_value = ? \

@@ -42,7 +42,9 @@ livrarr-http = { workspace = true, features = ["test-helpers"] }
 livrarr-external-data = { workspace = true }
 livrarr-materialize = { workspace = true }
 livrarr-server = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 axum = { workspace = true }
 assert_matches = "1"
 futures = { workspace = true }
@@ -192,6 +194,14 @@ path = "../../tests/behavioral/test_author_link_consumers.rs"
 [[test]]
 name = "test_author_link_role_gate"
 path = "../../tests/behavioral/test_author_link_role_gate.rs"
+
+# U9 unlabelled-credit gate (build/design-176/DESIGN-U9-unlabeled-credit-gate.md
+# r3). A new binary rather than an extension of the U8 one: the
+# ProviderAuthorRef.role -> credit change breaks that file's shipped fixtures and
+# editing a shipped test needs PM sanction (BLOCKED-U9-TESTS.md §1).
+[[test]]
+name = "test_author_link_credit_gate"
+path = "../../tests/behavioral/test_author_link_credit_gate.rs"
 
 # --- End author-provider linking Stage 4b red behavioral suite ---
 

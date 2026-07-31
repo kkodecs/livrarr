@@ -9,7 +9,7 @@ use livrarr_domain::identity_matching::AuthorVerdict;
 use livrarr_domain::{
     guard_author_route, AuthorLinkError, AuthorNameSource, AuthorNameVariant, AuthorProvider,
     AuthorRouteEvidenceSource, AuthorRouteGuardResult, AuthorRouteKey, OpenLibraryNameRole,
-    ProviderAuthorRef,
+    ProviderAuthorRef, ProviderCredit,
 };
 use livrarr_metadata::author_linking::{
     author_name_rank_table, choose_author_display_name, AuthorNameRankModel,
@@ -23,7 +23,7 @@ fn provider_ref(provider: AuthorProvider, raw: &str, name: &str) -> ProviderAuth
     ProviderAuthorRef {
         key: route(provider, raw),
         name: name.to_string(),
-        role: Some("author".to_string()),
+        credit: ProviderCredit::AssertedAuthor,
     }
 }
 
@@ -112,7 +112,7 @@ fn ac003_ac013_guard_mints_agreed_capability_only_for_agree() {
         ProviderAuthorRef {
             key: key.clone(),
             name: "Joanne Kathleen Rowling".to_string(),
-            role: Some("author".to_string()),
+            credit: ProviderCredit::AssertedAuthor,
         },
         Some(9001),
         AuthorRouteEvidenceSource::Tier1SettledWork,

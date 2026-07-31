@@ -138,11 +138,47 @@ pub trait AuthorLinkDb: Send + Sync {
         keys: Vec<SettledWorkProviderKey>,
     ) -> Result<Vec<AuthorKeyAttempt>, DbError>;
 
+    /// Record one key attempt's transition and, in the same statement, how many
+    /// authorial-slot observations it made.
+    ///
+    /// The count travels with the transition rather than in a second write, so
+    /// an attempt can never reach a completed state without its observation. A
+    /// failure arm passes 0 — a key that failed observed nothing.
     async fn complete_key_attempt(
         &self,
         claim: AuthorLinkClaim,
         key_attempt_id: i64,
         outcome: AuthorKeyAttemptOutcome,
+        authorial_credits_seen: u32,
+    ) -> Result<(), DbError>;
+
+    /// How many authorial-slot observations every key attempt in one evidence
+    /// generation has durably recorded.
+    ///
+    /// The Tier-2 gate reads this rather than a per-pass in-memory tally: a
+    /// terminal attempt is never returned by `prepare_key_attempts` again, so
+    /// what an earlier pass learned is otherwise absent from the next pass's
+    /// count and Tier 2 opens on a question that was already answered.
+    async fn generation_authorial_credit_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u64, DbError>;
+
+    /// Un-suppress every question this author's dismissals are silencing, and
+    /// make the author replay — in one transaction.
+    ///
+    /// All three effects land together or not at all: every still-active
+    /// dismissal is stamped `revoked_at` (never deleted, so the user's decision
+    /// stays on the record), the progress row is queued and made immediately due
+    /// with any live claim voided, and `evaluated_fingerprint` is cleared so the
+    /// next pass opens a new generation with fresh, non-terminal key attempts.
+    /// A revocation without the replay leaves the question unanswerable; a
+    /// replay without the revocation re-suppresses immediately.
+    async fn revoke_dismissals_and_replay(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
     ) -> Result<(), DbError>;
 
     async fn apply_guarded_route(

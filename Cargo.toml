@@ -51,6 +51,7 @@ tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
 unicode-normalization = "0.1"
+unicode-script = "0.5"
 url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

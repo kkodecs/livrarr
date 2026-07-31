@@ -31,8 +31,8 @@ use livrarr_domain::{
     guard_author_route, AuthorEvidenceFingerprint, AuthorLinkCandidateReason, AuthorLinkCursor,
     AuthorLinkProgressState, AuthorLinkProgressUpdate, AuthorLinkTrigger, AuthorProvider,
     AuthorRouteEvidenceSource, AuthorRouteGuardResult, AuthorRouteKey, OpenLibraryAuthorCandidate,
-    OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, RequestPriority,
-    RouteWriteOutcome,
+    OpenLibraryAuthorKey, OpenLibraryCatalogPage, ProviderAuthorRef, ProviderCredit,
+    RequestPriority, RouteWriteOutcome,
 };
 use livrarr_external_data::live_config::LiveMetadataConfig;
 use livrarr_external_data::{
@@ -119,7 +119,11 @@ fn provider_ref(raw_key: &str, name: &str, role: Option<&str>) -> ProviderAuthor
     ProviderAuthorRef {
         key: ol_route(raw_key),
         name: name.to_string(),
-        role: role.map(str::to_string),
+        credit: match role {
+            Some("author") => ProviderCredit::AssertedAuthor,
+            Some(label) => ProviderCredit::Labeled(label.to_string()),
+            None => ProviderCredit::Labeled(String::new()),
+        },
     }
 }
 
@@ -483,8 +487,8 @@ async fn a_person_credited_as_author_on_any_edition_aggregates_as_the_author() {
     assert_eq!(refs.len(), 1, "one person is one route");
     assert_eq!(refs[0].name, "Dual Credit Person");
     assert_eq!(
-        refs[0].role.as_deref(),
-        Some("author"),
+        refs[0].credit,
+        ProviderCredit::UnlabeledAuthorSlot,
         "any authorial credit makes the aggregated route authorial"
     );
 
@@ -498,8 +502,8 @@ async fn a_person_credited_as_author_on_any_edition_aggregates_as_the_author() {
         .expect("concrete Hardcover adapter, author credit first");
     assert_eq!(refs.len(), 1);
     assert_eq!(
-        refs[0].role.as_deref(),
-        Some("author"),
+        refs[0].credit,
+        ProviderCredit::UnlabeledAuthorSlot,
         "the order the editions came back in must not change the answer"
     );
 
@@ -516,9 +520,12 @@ async fn a_person_credited_as_author_on_any_edition_aggregates_as_the_author() {
         .expect("concrete Hardcover adapter, two people");
     assert_eq!(refs.len(), 2);
     assert_eq!(refs[0].name, "Only A Narrator");
-    assert_eq!(refs[0].role.as_deref(), Some("Narrated by"));
+    assert_eq!(
+        refs[0].credit,
+        ProviderCredit::Labeled("Narrated by".to_string())
+    );
     assert_eq!(refs[1].name, "The Author");
-    assert_eq!(refs[1].role.as_deref(), Some("author"));
+    assert_eq!(refs[1].credit, ProviderCredit::UnlabeledAuthorSlot);
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +589,39 @@ async fn apply_migration_080(db: &SqliteDb) {
         .run(db.pool())
         .await
         .expect("upgrade real migration-079 fixture through 080");
+}
+
+/// The rest of the chain, applied in the same step as 080.
+///
+/// A migration test builds its fixture at schema N-1 and runs the *current* road
+/// as the re-walk, and the current road writes `authorial_credits_seen` in the
+/// same statement that records a key attempt's transition (081, D9-3b). So the
+/// re-walk needs the whole chain through head, exactly as the composition root
+/// guarantees at startup: no schema between 080 and head is a state production
+/// can ever reach. 081's own requeue voids live claim tokens, so it lands here —
+/// before the re-walk's claim is taken — and never between a claim and its use.
+async fn apply_migration_081(db: &SqliteDb) {
+    let only_081 = Migrator {
+        migrations: Cow::Owned(
+            ALL_MIGRATIONS
+                .iter()
+                .filter(|migration| migration.version == 81)
+                .cloned()
+                .collect(),
+        ),
+        ignore_missing: true,
+        locking: true,
+        no_tx: false,
+    };
+    assert_eq!(
+        only_081.iter().count(),
+        1,
+        "migration 081 must exist and be the only one applied here"
+    );
+    only_081
+        .run(db.pool())
+        .await
+        .expect("upgrade the migration-080 fixture through 081");
 }
 
 /// Every column of one progress row, as text, for a byte-identical comparison.
@@ -798,6 +838,7 @@ async fn migration_080_requeues_only_affected_authors_and_the_rewalk_retires_the
     let route_before = route_snapshot(&db, inherited_route).await;
 
     apply_migration_080(&db).await;
+    apply_migration_081(&db).await;
 
     // The control author is untouched in every column.
     assert_eq!(

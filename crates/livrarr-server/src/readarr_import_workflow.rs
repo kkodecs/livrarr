@@ -1796,6 +1796,18 @@ async fn resolve_readarr_author_route(
                 "readarr import: author evidence was not certified as an author claim"
             );
         }
+        Some(AuthorRouteGuardResult::UnlabeledMismatchDropped(dropped)) => {
+            // Unreachable while this door asserts authorship: the script
+            // carve-out only ever reaches an unlabelled credit. If it ever stops
+            // asserting, a name disagreement is not a question this door may
+            // raise, so nothing is written.
+            warn!(
+                author_id,
+                route = %dropped.evidence().key.value(),
+                verdict = ?dropped.verdict(),
+                "readarr import: unlabelled author evidence dropped on a name mismatch"
+            );
+        }
         None => {
             // No usable id, so no route question to answer — but the spelling
             // Readarr used is still a name this author is known by, and the

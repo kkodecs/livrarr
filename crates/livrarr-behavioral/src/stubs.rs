@@ -748,6 +748,23 @@ impl AuthorLinkDb for StubAuthorLinkDb {
         claim: AuthorLinkClaim,
         key_attempt_id: i64,
         outcome: AuthorKeyAttemptOutcome,
+        authorial_credits_seen: u32,
+    ) -> Result<(), DbError> {
+        todo!()
+    }
+
+    async fn generation_authorial_credit_count(
+        &self,
+        claim: AuthorLinkClaim,
+        evidence_generation: i64,
+    ) -> Result<u64, DbError> {
+        todo!()
+    }
+
+    async fn revoke_dismissals_and_replay(
+        &self,
+        user_id: UserId,
+        author_id: AuthorId,
     ) -> Result<(), DbError> {
         todo!()
     }
