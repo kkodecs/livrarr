@@ -3,6 +3,9 @@ metadata:
   stage: v2-operational
   spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
   ir_v1_ref: ir-v1-author-provider-linking.yaml
+  design_supersession:
+    - "U8 (role-aware candidate gating + review card evidence): build/design-176/DESIGN-U8-role-gating.md r4 governs. Its content is not duplicated here."
+    - "U9 (unlabeled-credit gate with script carve-out): build/design-176/DESIGN-U9-unlabeled-credit-gate.md r4 governs. Its content is not duplicated here."
 
 doors:
   - door: "Add-box work/author path"
@@ -358,8 +361,8 @@ modules:
           errors: [NotFound, Database]
           pseudocode:
             - "Idempotently ensure the user's author progress row exists."
-            - "Make the row due according to trigger without stealing or clearing a live lease."
-            - "For UserReResolve, reopen eligible dismissed evidence and re-arm terminal key outcomes as allowed by the state machine."
+            - "Make the row due according to trigger. An automatic trigger never steals or clears a live lease. AuthorLinkTrigger::UserReResolve is the one user-directed exception: it forces state queued and voids claim_token/lease_until, exactly as migration 078's trigger voids a claim when work evidence changes. The user just changed the state the worker is deciding from, so the stale worker takes ClaimLost rather than writing a route the user's action already answered."
+            - "Reopening a dismissal is not this operation's job — AuthorLinkDb::revoke_dismissals_and_replay owns it and is wired to the re-resolve door only."
           call_annotations:
             - { call: "AuthorLinkDb::ensure_enqueued", type: NEW, target: "AuthorLinkDb::ensure_enqueued(UserId, AuthorId, AuthorLinkTrigger) -> Result<(), DbError>" }
           invariants:
@@ -432,14 +435,14 @@ modules:
             - { name: provider, type: AuthorProvider }
             - { name: work_route, type: String }
             - { name: priority, type: RequestPriority }
-          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>"
-          errors: [UnsupportedProvider, NotConfigured, Retryable, Permanent, LayoutDrift]
+          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>; UnsupportedProvider is deliberately absent from the error set — see the pseudocode. The AuthorProviderError::UnsupportedProvider variant is retained for the attempt-ledger vocabulary it feeds"
+          errors: [NotConfigured, Retryable, Permanent, LayoutDrift]
           pseudocode:
             - "Require RequestPriority::Low for author-road callers."
             - "Dispatch OpenLibrary, Goodreads, or Hardcover to its keyed work-author adapter."
             - "Return every contributor ref associated with the selected work; do not select a winning author here."
-            - "Map an unsupported provider to UnsupportedProvider."
-            - "At each adapter boundary, parse either Retry-After form at response-receipt time into an absolute UTC retry_not_before; preserve it in AuthorProviderError::Retryable { error, retry_not_before }, using None plus a diagnostic for an absent or invalid header."
+            - "No UnsupportedProvider branch exists. The dispatch matches exhaustively on the three-variant AuthorProvider enum, so the type forbids the state — the same family as F-011. AuthorProviderError::UnsupportedProvider remains in the error enum for the attempt-ledger vocabulary it feeds, but nothing at this seam can produce it."
+            - "At the OpenLibrary adapter boundary, parse either Retry-After form at response-receipt time into an absolute UTC retry_not_before and preserve it in AuthorProviderError::Retryable { error, retry_not_before }, using None plus a diagnostic for an absent or invalid header. Goodreads and Hardcover retryables carry retry_not_before: None — their shared transport helpers (fetch_goodreads_html, hc_post) are the enrichment path's transport too and their error types carry a status without headers. Widening them is a named post-feature residual; the road's capped-backoff-on-None handles a GR/HC 429 correctly, just less precisely."
           call_annotations:
             - { call: "OpenLibraryClient::fetch_work_authors", type: NEW, target: "OpenLibraryClient::fetch_work_authors(String, RequestPriority)" }
             - { call: "GoodreadsClient::fetch_work_authors", type: NEW, target: "GoodreadsClient::fetch_work_authors(String, RequestPriority)" }
@@ -452,7 +455,7 @@ modules:
           decisions:
             - { key: "retry_hint_seam", value: "typed absolute UTC lower bound in AuthorProviderError::Retryable.retry_not_before", rationale: "The amended enum carries provider timing across all gateway methods without an error-string parsing protocol; invalid or absent Retry-After remains Retryable with None and a diagnostic." }
           tdd_directives:
-            - "Drive each concrete adapter seam with multi-contributor fixtures plus unsupported/not-configured/retryable/permanent/layout-drift responses and both Retry-After forms; assert absolute UTC hint preservation, invalid-header None plus diagnostics, every returned ref remains unselected, and priority is Low."
+            - "Drive each concrete adapter seam with multi-contributor fixtures plus not-configured/retryable/permanent/layout-drift responses; assert every returned ref remains unselected and priority is Low. Both Retry-After forms, absolute UTC hint preservation, and invalid-header None plus diagnostics are OpenLibrary-only assertions — Goodreads and Hardcover retryables carry retry_not_before: None by construction, so assert exactly that for them. There is no unsupported-provider case to drive: the three-variant AuthorProvider enum type-forbids it."
 
         - name: "AuthorProviderGateway::search_open_library_authors"
           inputs:
@@ -745,7 +748,7 @@ modules:
             - "Select Pending and due Retryable attempts in work-id, provider, route order and mark them Running with this claim token."
             - "Return the claimed attempts."
           call_annotations:
-            - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(AuthorProvider, &str)" }
+            - { call: "str::trim", type: STDLIB, target: "Rust str::trim. These are WORK keys (OL...W, Goodreads book id, Hardcover book id), not author routes, so the canonical form here is the trimmed value. AuthorRouteKey::parse is NOT called: the author-route parser would reject every one of them." }
             - { call: "Vec::sort_by", type: STDLIB, target: "Rust Vec deterministic sort" }
             - { call: "sqlx::query_as", type: LIBRARY, library: "sqlx", target: "sqlx" }
           invariants:
@@ -758,6 +761,7 @@ modules:
             - { name: claim, type: AuthorLinkClaim }
             - { name: key_attempt_id, type: i64 }
             - { name: outcome, type: AuthorKeyAttemptOutcome }
+            - { name: authorial_credits_seen, type: "u32; written in the same statement as the transition, so an attempt can never reach a completed state without its observation. A failure arm passes 0 — a key that failed observed nothing" }
           output: "Result<(), DbError>; token-checked atomic outcome write; completion never rolls back route/candidate commits from this or sibling keys"
           errors: [NotFound, ClaimLost, Constraint]
           pseudocode:
@@ -1140,7 +1144,7 @@ modules:
             - "Begin the existing merge_authors_tx transaction and validate distinct same-user authors."
             - "Execute the existing works/series/cache/monitor-field repoint and fold sequence, preserving its exact three-field report."
             - "Union loser name variants into survivor with canonical/source deduplication; for duplicate OpenLibrary variants retain role Primary over Alias over null."
-            - "Move or coalesce loser route tuples under survivor; when survivor has the exact tombstone and loser has it active, keep the tombstone; when both are active, keep the stronger provenance and oldest identity row."
+            - "Move loser route tuples under survivor. Route rows move rather than coalesce, and no same-key precedence branch exists: UNIQUE(user_id, provider, route_value) (migration 078 line 20) is user-wide, so a survivor and a loser under the same user can never hold the same canonical tuple. The exact-key precedence rules earlier revisions described are unreachable state and are deliberately not implemented (F-011). Staged legacy values move too, survivor's own staged value winning a provider collision."
             - "Convert conflicting current candidates/progress into survivor-scoped review state, supersede loser state, and ensure one survivor progress row remains due."
             - "Delete the loser only after dependent rows are folded, commit, and return the original report shape."
           call_annotations:
@@ -1150,7 +1154,7 @@ modules:
           invariants:
             - "Merge is monotonic for routes and monitoring; survivor tombstones are never silently cleared."
           tdd_directives:
-            - "POST through the existing real merge router over a migration-077-upgraded SqliteDb; pin route/name/progress/candidate folds, survivor tombstone precedence, works/series behavior, cross-user rejection, and the exact three-field report."
+            - "POST through the existing real merge router over a migration-077-upgraded SqliteDb; pin route/name/progress/candidate folds, works/series behavior, cross-user rejection, and the exact three-field report. Do NOT pin same-key survivor precedence — UNIQUE(user_id, provider, route_value) makes the state unreachable (F-011); pin instead that route rows MOVE to the survivor and that a survivor tombstone is never resurrected by the merge."
 
   - name: livrarr-external-data
     responsibility: "Fetch road-scoped keyed work contributors for OL/GR/HC without carrying route policy or widening shared enrichment payloads."
@@ -1159,7 +1163,7 @@ modules:
       - "Only contributors associated with the selected work become ProviderAuthorRef values."
       - "All author-road requests use the shared outbound queue and RequestPriority::Low."
       - "Adapters report unreadable layout separately from a successfully parsed empty contributor set."
-      - "OpenLibrary work-author hydration canonical-deduplicates author keys before lookup; positive names use one bounded TTL cache and same-key singleflight, while misses remain governed by the shared OL one-second bucket with at most two hydration requests in flight."
+      - "OpenLibrary work-author hydration runs per contributor entry as the record is walked, and canonical deduplication plus credit aggregation happen AFTER the read in aggregate_credits — not before lookup. The no-repeat-traffic effect is preserved by the hydrator rather than by ordering: positive names use one bounded TTL cache and same-key singleflight, so a key repeated within or across works costs no second request, while misses remain governed by the shared OL one-second bucket with at most two hydration requests in flight."
     capability_survey:
       - capability: "OpenLibrary paced transport"
         existing_source: "crates/livrarr-domain/src/services/http.rs:132; existing OpenLibrary RateBucket"
@@ -1172,7 +1176,7 @@ modules:
       - capability: "Hardcover GraphQL transport"
         existing_source: "crates/livrarr-external-data/src/hardcover.rs:67-140"
         reuse_decision: wrap
-        rationale: "Reuse hc_post and pin the verified books_by_pk.contributions.author.id/name shape with a contract fixture."
+        rationale: "Reuse hc_post and pin the verified editions[].contributions[].author.id/name shape with a contract fixture — the same editions(where: {book_id}) shape the shipped fetch_hardcover_editions already uses."
     internal_operations:
       - name: "OpenLibraryAuthorHydrator::name_for_key"
         inputs:
@@ -1180,6 +1184,7 @@ modules:
           - { name: priority, type: RequestPriority }
         output: "Result<String, ProviderFetchError>; one validated nonempty author name"
         errors: [Retryable, Permanent]
+        build_note: "Delivered in U4's gateway composition, not U3's road (BLOCKED-U3 §1, PM-ruled: this is transport work). U3 shipped the inline-name-first, hydrate-on-absence adapter; U4 added the TTL cache, same-key singleflight, and in-flight semaphore around it. Both halves are live."
         pseudocode:
           - "Require the caller's already-canonical OpenLibrary author key and RequestPriority::Low."
           - "Under a short mutex, return a positive cache entry when its configured TTL has not expired; evict expired entries and maintain the configured bounded capacity in deterministic least-recently-used order."
@@ -1219,7 +1224,7 @@ modules:
             - "Parse work_key as a canonical OpenLibrary work route and reject malformed input."
             - "Fetch the keyed work record through the shared OpenLibrary queue at priority."
             - "Extract every authors[].author.key associated with that work, parse each through AuthorRouteKey::parse, and canonical-deduplicate keys while retaining first-seen contributor order."
-            - "Hydrate each distinct key through OpenLibraryAuthorHydrator::name_for_key; its positive TTL cache, same-key singleflight, shared one-second OL bucket, and maximum-two in-flight semaphore apply across works."
+            - "Read each contributor's name from the work record when the record carries one, and hydrate ONLY a key the record leaves unnamed through OpenLibraryAuthorHydrator::name_for_key; its positive TTL cache, same-key singleflight, shared one-second OL bucket, and maximum-two in-flight semaphore apply across works. Inline-name-first, hydrate-on-absence: a real OpenLibrary work record carries keys and no names and still hydrates, while a record that already names its contributors spends no request. A hydrate-always adapter is not the built shape."
             - "If one hydration fails, return its typed error without a partial contributor vector; keep already completed positive sibling names cached so the retry requests only incomplete keys."
             - "Return one canonical ProviderAuthorRef per distinct associated author key in first-seen order."
             - "Return retryable/permanent transport errors distinctly, preserving any adapter-parsed absolute UTC Retry-After lower bound for the gateway mapping; a valid record with no contributors returns an empty vector."
@@ -1264,11 +1269,11 @@ modules:
           errors: [NotConfigured, Retryable, Permanent, LayoutDrift]
           pseudocode:
             - "If Hardcover is disabled or lacks a token, return NotConfigured without a request."
-            - "Parse book_key as the books_by_pk integer id."
-            - "Call hc_post with the verified contributions.author.id/name query at priority."
+            - "Parse book_key as the Hardcover book integer id."
+            - "Call hc_post at priority with editions(where: {book_id: {_eq: $bookId}}) { contributions { contribution author { id name } } }, NOT books_by_pk. Hardcover credits contributors per edition of a book, so the book's editions are the association this reads; this is the same shape the shipped fetch_hardcover_editions already uses."
             - "Map retryable transport failures with their typed Retry-After lower bound; map non-retryable GraphQL/response failures that preserve a readable contract boundary to Permanent."
-            - "If books_by_pk, contributions, or any contribution's author.id/name association is unreadable or has the wrong shape, return LayoutDrift rather than Permanent, NotConfigured, or an empty success."
-            - "Treat a readable books_by_pk object with an empty contributions array as a valid empty contributor set."
+            - "If /data/editions, a contributions array, or any contribution's author.id/name association is unreadable or has the wrong shape, return LayoutDrift rather than Permanent, NotConfigured, or an empty success."
+            - "Treat a readable editions array whose contributions are readable and empty as a valid empty contributor set."
             - "Parse every returned author id through AuthorRouteKey::parse and return all associated names."
             - "On retryable transport, preserve any adapter-parsed absolute UTC Retry-After lower bound for the gateway mapping."
           call_annotations:
@@ -1276,8 +1281,8 @@ modules:
             - { call: "AuthorRouteKey::parse", type: NEW, target: "AuthorRouteKey::parse(Hardcover, &str)" }
             - { call: "str::parse::<u64>", type: STDLIB, target: "Rust FromStr for u64" }
           tdd_directives:
-            - "Use the real Hardcover adapter seam with the pinned live-probed books_by_pk.contributions.author.id/name fixture and multiple contributions; assert every associated canonical ref and Low priority."
-            - "Disable Hardcover and separately omit its token; assert NotConfigured with zero HTTP requests. Then supply enabled config with missing/wrong-type books_by_pk, contributions, author, author.id, and author.name shapes; assert each is LayoutDrift, never NotConfigured, Permanent, or empty success."
+            - "Use the real Hardcover adapter seam with the pinned live-probed editions[].contributions[].author.id/name fixture and multiple contributions; assert every associated canonical ref and Low priority."
+            - "Disable Hardcover and separately omit its token; assert NotConfigured with zero HTTP requests. Then supply enabled config with missing/wrong-type editions, contributions, author, author.id, and author.name shapes; assert each is LayoutDrift, never NotConfigured, Permanent, or empty success."
             - "Return a readable empty contributions array and assert an empty success; return GraphQL errors and assert Permanent; return valid/invalid Retry-After transport failures and assert Retryable with exact typed timing."
 
   - name: livrarr-enrichment
@@ -1572,11 +1577,11 @@ modules:
           errors: [ClaimLost, Database]
           pseudocode:
             - "Load AuthorRoadInput under claim and fail immediately on lost claim."
-            - "If display_name_dirty, choose the display variant from current variants and work languages; when it differs, commit rename_author_and_cascade before any dirty clear."
+            - "If display_name_dirty, choose the display variant from current variants and work languages; when it differs, commit AuthorDb::converge_author_display_name before any dirty clear. The road enters the AutomaticConvergence door, never rename_author_and_cascade: both doors share ONE private display_name_cascade body (FP-017 holds — the classification is which door you enter, not a second mechanism), and the user door stamps a User variant that would outrank every later provider name and freeze convergence on the machine's first guess. RenameAuthorDbRequest carries no origin field; a green exhaustive struct literal in the db suite makes a fifth field impossible."
             - "After the local phase, retain dirty in the eventual update unless stored display_name_generation still equals the claim snapshot."
             - "If the live settled-evidence fingerprint equals the evaluated fingerprint and no current-generation key retry is due, perform no provider call; advance only local/due scheduling state."
             - "If the fingerprint changed, increment evidence_generation, supersede older candidates, reset the road cursor, and materialize every canonical OL/GR/HC key on every Confirmed/Provisional work."
-            - "If there are no settled works, skip all providers, run the isolated read-only legacy 0.90 shadow metric, and prepare ParkedNoSettledWork with a configured future due time."
+            - "If there are no settled works, skip all providers, run the isolated read-only legacy 0.90 shadow metric, and prepare ParkedNoSettledWork due PARK_RECHECK_HOURS ahead (a module constant, not configuration)."
             - "Prepare deterministic Pending and due-Retryable key attempts for the current generation."
             - "For each attempt, call fetch_work_authors with Low priority outside a transaction."
             - "For every returned contributor ref, call guard_author_route against the current associated-name snapshot."
@@ -1584,9 +1589,9 @@ modules:
             - "For every Rejected result, build a NameGuardFailed candidate with the actual verdict mirrored into primary_name_verdict, empty aliases, no preview, Pending/not-run catalog state, and zero count; persist it and never route it."
             - "Only after all contributor effects commit, complete the key attempt as Succeeded."
             - "Map NotConfigured to SkippedNotConfigured, Permanent to SkippedPermanent, LayoutDrift to ParkedLayoutDrift, and UnsupportedProvider to SkippedPermanent with diagnostic unsupported_provider; emit the operator error and continue siblings."
-            - "For any Tier-1 or Tier-2 AuthorProviderError::Retryable { error, retry_not_before }, use the relevant persisted key-attempt or author-progress attempt_count and compute base = max(now + capped_backoff(attempt_count), retry_not_before ?? now), then next_attempt_at = base + deterministic per-author/key jitter; capped_backoff and jitter durations come only from deployment configuration, and attempt count alone never terminalizes."
+            - "For any Tier-1 or Tier-2 AuthorProviderError::Retryable { error, retry_not_before }, use the relevant persisted key-attempt or author-progress attempt_count and compute base = max(now + capped_backoff(attempt_count), retry_not_before ?? now), then next_attempt_at = base + deterministic per-author/key jitter; attempt count alone never terminalizes. Every road duration is a MODULE CONSTANT in crates/livrarr-metadata/src/author_linking.rs, not deployment configuration and not TOML: SWEEP_LEASE_MINUTES, PARK_RECHECK_HOURS, LINKED_RECHECK_HOURS, RETRY_BASE_SECONDS, RETRY_CAP_SECONDS, RETRY_JITTER_SECONDS. Config plumbing would be added only if the PO wants operator tuning."
             - "Complete each failed key attempt independently and continue all later siblings."
-            - "After runnable Tier 1 keys, if no active OL route and no outstanding retryable OL key, run Tier 2 even when GR/HC retries or terminal failures remain."
+            - "After runnable Tier 1 keys, enter Tier 2 only when ALL FOUR hold: Tier 1 actually had attempts to run; this evidence generation's durable authorial-credit sum (AuthorLinkDb::generation_authorial_credit_count) is zero; there is no active OL route; and no outstanding retryable OL key. GR/HC retries or terminal failures still never block entry. Tier 2 exists for authors whose keys said nothing about their author — a key that credited someone as an author, to attach or to review or to leave tombstoned, has already produced the better evidence, and an outstanding OpenLibrary retry is about to. A key that credited only a translator answered a different question and does not close this one. The count is read from the generation, not from a per-pass in-memory tally: a terminal attempt is never handed back by prepare_key_attempts, so an earlier pass's observations are otherwise invisible and Tier 2 opens on a question already answered."
             - "Tier 2 searches OL in the background at Low priority; evaluate the primary into primary_name_verdict and each canonical-distinct alternate into AuthorCandidateAlternateNameEvidence, then set name_verdict by strongest result in Agree, Grey, Abstain, Disagree order."
             - "Copy top_work into top_work_preview as a labeled preview and fetch-priority hint; it never increments corroboration."
             - "Fetch candidate catalogs in priority order with resumable cursors; count each local settled work id at most once when any catalog title returns TitleVerdict::Same."
@@ -1599,13 +1604,14 @@ modules:
           call_annotations:
             - { call: "AuthorLinkDb::load_road_input", type: NEW, target: "AuthorLinkDb::load_road_input(AuthorLinkClaim)" }
             - { call: "choose_author_display_name", type: NEW, target: "choose_author_display_name(&[AuthorNameVariant], work languages)" }
-            - { call: "AuthorDb::rename_author_and_cascade", type: NEW, target: "AuthorDb::rename_author_and_cascade(RenameAuthorDbRequest)" }
+            - { call: "AuthorDb::converge_author_display_name", type: NEW, target: "AuthorDb::converge_author_display_name(RenameAuthorDbRequest) -> Result<Author, DbError>; the AutomaticConvergence door into the one shared cascade. The road never calls rename_author_and_cascade" }
             - { call: "AuthorLinkDb::prepare_key_attempts", type: NEW, target: "AuthorLinkDb::prepare_key_attempts(AuthorLinkClaim, i64, Vec<SettledWorkProviderKey>)" }
             - { call: "AuthorProviderGateway::fetch_work_authors", type: NEW, target: "AuthorProviderGateway::fetch_work_authors(AuthorProvider, String, Low) -> Result<Vec<ProviderAuthorRef>, AuthorProviderError>, including structured Retryable.retry_not_before" }
             - { call: "guard_author_route", type: NEW, target: "guard_author_route(&[String], ProviderAuthorRef, Option<WorkId>, Tier1SettledWork) -> AuthorRouteGuardResult with opaque Agreed/Rejected payloads" }
             - { call: "AuthorLinkDb::apply_guarded_route", type: NEW, target: "AuthorLinkDb::apply_guarded_route(GuardedRouteWrite)" }
             - { call: "AuthorLinkDb::record_candidates", type: NEW, target: "AuthorLinkDb::record_candidates(AuthorLinkClaim, Vec<AuthorLinkCandidate>)" }
-            - { call: "AuthorLinkDb::complete_key_attempt", type: NEW, target: "AuthorLinkDb::complete_key_attempt(AuthorLinkClaim, i64, AuthorKeyAttemptOutcome)" }
+            - { call: "AuthorLinkDb::complete_key_attempt", type: NEW, target: "AuthorLinkDb::complete_key_attempt(AuthorLinkClaim, i64, AuthorKeyAttemptOutcome, authorial_credits_seen: u32); the count travels with the transition, and a failure arm passes 0" }
+            - { call: "AuthorLinkDb::generation_authorial_credit_count", type: NEW, target: "AuthorLinkDb::generation_authorial_credit_count(AuthorLinkClaim, i64) -> Result<u64, DbError>; the Tier-2 entry gate" }
             - { call: "AuthorProviderGateway::search_open_library_authors", type: NEW, target: "AuthorProviderGateway::search_open_library_authors(String, u32, Low) -> Result<Vec<OpenLibraryAuthorCandidate>, AuthorProviderError>, including alternate_names" }
             - { call: "author_verdict", type: EXISTING, target: "livrarr_domain::identity_matching::author_verdict(&[String], &[String]) -> AuthorVerdict" }
             - { call: "AuthorProviderGateway::fetch_open_library_catalog_page", type: NEW, target: "AuthorProviderGateway::fetch_open_library_catalog_page(OpenLibraryAuthorKey, Option<String>, Low)" }
@@ -1621,7 +1627,7 @@ modules:
             - "Never call work matching/settle identity, hold a DB transaction over provider I/O, use Normal/Interactive priority, or read/write legacy scalar author keys."
           decisions:
             - { key: "tier2_fetch_priority", value: "top_work Same-preview first, then summary name verdict, then canonical route key", rationale: "P2 allows top_work as a fetch-priority hint but not evidence; stable secondary keys make restart order deterministic." }
-            - { key: "retry_jitter", value: "FNV-1a-64 author/key tuple mapped into the deployment-configured jitter window and added after max(now + capped_backoff(attempt_count), retry_not_before ?? now)", rationale: "Deterministic per-author/key jitter prevents synchronized retries while remaining restart-stable; all durations remain deployment configuration." }
+            - { key: "retry_jitter", value: "FNV-1a-64 author/key tuple mapped into the RETRY_JITTER_SECONDS window and added after max(now + capped_backoff(attempt_count), retry_not_before ?? now)", rationale: "Deterministic per-author/key jitter prevents synchronized retries while remaining restart-stable. As built the window and every other road duration is a module constant in crates/livrarr-metadata/src/author_linking.rs, not deployment configuration." }
             - { key: "retry_after_transport", value: "destructure AuthorProviderError::Retryable.retry_not_before and apply max(now + capped_backoff(attempt_count), retry_not_before ?? now) before jitter", rationale: "The amended typed hint is an absolute provider lower bound; attempt count remains scheduling input and never a terminality rule." }
             - { key: "tier2_evidence_representation", value: "populate primary_name_verdict, ordered alternate_name_evidence, top_work_preview, catalog_evidence_state, and observed Same-only count on every parked candidate", rationale: "The amended DTO preserves the full evidence protocol across persistence/restart without permitting Tier-2 route writes." }
           tdd_directives:
@@ -1902,7 +1908,7 @@ modules:
       - "AC-010 pins tombstone honor and sole explicit re-pick clearing."
       - "AC-011 drives the real Readarr import branch with a pre-observation name snapshot, Agreed attach, Rejected claimless candidate recording, unusable-id None, and durable enqueue on every branch."
       - "AC-014 upgrades a real legacy fixture and exercises provenance upgrade versus contradiction with no monitor regression."
-      - "Structured Retryable fixtures cover OL/GR/HC, both Retry-After forms, invalid/absent headers, exact max(backoff, provider lower bound) precedence, deterministic author/key jitter, and attempt-count non-terminality."
+      - "Structured Retryable fixtures cover OL/GR/HC, exact max(backoff, provider lower bound) precedence, deterministic author/key jitter, and attempt-count non-terminality. Both Retry-After forms and invalid/absent headers are OpenLibrary-only; the GR/HC fixtures assert retry_not_before: None and the capped-backoff path that follows from it."
     public_api:
       functions: []
 
@@ -2000,7 +2006,7 @@ migration_steps:
   - "In one cutover change, ingest/verify legacy routes, switch all consumers to route queries, delete resolve_ol_key and every production >=0.90 route writer, replace both production NoOpBibliographyTrigger sites, and remove generic route fields."
   - "Run real migration-077 upgrade acceptance through monitor selection/gate, bibliography, series, projection, remove/re-pick, merge, and restart."
   - "Wire explicit Add-box/standalone/manual-import selections through attach_selected_route, Readarr guarded evidence, and the Review/Authors/detail UI."
-  - "Register the recurring author-link worker last, with all duration constants from deployment configuration and deterministic initial staggering."
+  - "Register the recurring author-link worker last, with deterministic initial staggering. As built every road duration is a module constant in crates/livrarr-metadata/src/author_linking.rs, not deployment configuration."
 
 requirement_coverage:
   REQ-001:
@@ -2049,3 +2055,35 @@ requirement_coverage:
     - "AuthorLinkDb::ingest_legacy_routes"
     - "AuthorLinkDb::verify_cutover_ready"
     - "AuthorResponseAssembler::route_view"
+
+amendments:
+  - date: 2026-07-31
+    change: "r1 close-out fold to as-built — this artifact's first amendments block. Ten already-ruled corrections, each verified against source before transcription; none is a new decision. (1) AuthorLinkWorkflow::enqueue — AuthorLinkTrigger::UserReResolve is the one user-directed exception that voids a live claim/lease. (2) HardcoverClient::fetch_work_authors reads editions(where: {book_id}), not books_by_pk; the capability-survey and TDD wordings follow. (3) The road's dirty-name phase enters AuthorDb::converge_author_display_name, the AutomaticConvergence door into ONE private display_name_cascade body; RenameAuthorDbRequest carries no origin field. (4) Tier-2 entry now names all four as-built conditions, including the durable generation authorial-credit sum. (5) Road timing durations are module constants in crates/livrarr-metadata/src/author_linking.rs, not deployment configuration — corrected at the retry step, the ParkedNoSettledWork step, the retry_jitter decision, and the worker-registration migration step. (6) Retry-After preservation is OpenLibrary-only; GR/HC header plumbing is a named post-feature residual. (7) The exact-key merge-precedence branch is removed from AuthorDb::merge_authors — it is schema-dead under UNIQUE(user_id, provider, route_value) (migration 078 line 20). (8) prepare_key_attempts trims WORK keys and does not call AuthorRouteKey::parse. (9) OpenLibraryClient::fetch_work_authors is inline-name-first, hydrate-on-absence; the hydrator cache layer was delivered in U4's gateway composition. (10) The UnsupportedProvider branch is removed from AuthorProviderGateway::fetch_work_authors — the three-variant AuthorProvider enum type-forbids it. Also folded: complete_key_attempt's fourth argument authorial_credits_seen and the generation_authorial_credit_count call annotation, without which the amended Tier-2 gate could not be stated. FOLLOW-UP, same date, on PM rulings to BLOCKED-IR-FOLD §2.1/§2.3/§2.4: AuthorLinkWorkflow::enqueue no longer claims to reopen dismissals (revoke_dismissals_and_replay owns that, wired to the re-resolve door only); the livrarr-external-data hydration module invariant now states the built ordering (per-entry hydration, dedup and aggregation after the read in aggregate_credits, no-repeat traffic preserved by singleflight and the TTL cache rather than by ordering); three TDD directives were cleaned of branches this fold removed (merge same-key precedence, and both-Retry-After-forms at the gateway and road seams); and UnsupportedProvider was removed from fetch_work_authors' declared error set in BOTH IRs, the enum variant being retained for the attempt-ledger vocabulary."
+    reason: "Ruling sources, in order: (1) BLOCKED-U3 §3, ruled accepted. (2) BLOCKED-U3 §2, ruled 'editions is correct, IR/contract text is wrong'; contract FP-010 already conforms. (3) BLOCKED-U5 §1, ruled ACCEPTED, amending BLOCKED-U3 §4's earlier origin-field form. (4) and (5) U3 deviations, accepted. (6) BLOCKED-U4 §3, ruled 'OL-only accepted for F1'. (7) tests-review F-011, confirmed by the U2 seat and an independent reviewer, and NOT implemented in U2 by instruction. (8) U2 deviations, accepted. (9) BLOCKED-U3 §1, routed to U4. (10) U4 deviation, accepted — 'same family as F-011, flagged for IR removal'. All rulings are recorded in build/design-176/DEV-UNITS.md; the fold instruction is build/design-176/PACKET-IR-FOLD.md. Items the fold could NOT close are in build/design-176/BLOCKED-IR-FOLD.md."
+
+status:
+  delivered:
+    - "U1 — domain guard and value types."
+    - "U2 — database layer (routes, tombstones, candidates, claim/lease machinery, per-key attempt ledger)."
+    - "U3 — the linking road (run_author: Tier 1 walk-all-keys, Tier 2 park-always, Tier 3 park)."
+    - "U4 — provider gateway composition, including the OpenLibrary author-name hydrator's cache layer."
+    - "U5 — the eight HTTP doors."
+    - "U6 — consumers and the one-release cutover; the legacy >=0.90 guessers are deleted."
+    - "U7 — frontend (Review Authors section, badges/filter, routes panel, rename, variant pick, merge door)."
+    - "U8 — role-aware candidate gate and review-card evidence. Governing artifact: DESIGN-U8-role-gating.md r4."
+    - "U9 — unlabeled-credit gate, script carve-out, and durable dismissals. Governing artifact: DESIGN-U9-unlabeled-credit-gate.md r4."
+  deferred:
+    - item: "U8b — repair of historically auto-attached tier1_inherited routes."
+      where: "build/design-176/PARKED-U8b-route-repair.md, carrying four binding r2 review findings as its spec input."
+    - item: "Add-author door priority raise to RequestPriority::Interactive."
+      where: "BLOCKED-U4 §1, ruled: the door KEEPS RequestPriority::Normal for this feature. One line, separate fix."
+    - item: "Goodreads and Hardcover Retry-After header plumbing."
+      where: "BLOCKED-U4 §3. Their shared transport helpers are the enrichment path's transport too; widening the error types is cross-cutting shared-provider surgery."
+    - item: "NonAuthorialProviderRef.role tightening from Option<String> to non-optional."
+      where: "Accepted U9 Step-4a deviation; the field is always Some under the shipped gate."
+    - item: "Removal of the dead AppState.author_link_service field and the stateless LiveAuthorLinkingService unit struct."
+      where: "BLOCKED-U5 §2. Nothing reads the field; removal needs sanctioned edits to two AppState test fixtures."
+    - item: "Behavioral coverage of the AutomaticConvergence display-name arm."
+      where: "BLOCKED-U3 §4 / BLOCKED-U5 §1. Pinned today only by three in-crate tests in sqlite_author.rs (display_name_origin_tests)."
+    - item: "Strengthening the include_str!(main.rs) composition-ordering proxy."
+      where: "A known-weak test proxy carried since U1. It may be strengthened once startup composition is callable, and must not be weakened."

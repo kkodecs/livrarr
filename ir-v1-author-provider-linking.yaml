@@ -3,6 +3,9 @@ metadata:
   stage: v1-structural
   spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
   version: 3
+  design_supersession:
+    - "U8 (role-aware candidate gating + review card evidence): build/design-176/DESIGN-U8-role-gating.md r4 governs. Its content is not duplicated here."
+    - "U9 (unlabeled-credit gate with script carve-out): build/design-176/DESIGN-U9-unlabeled-credit-gate.md r4 governs. Its content is not duplicated here."
 
 system_architecture:
   components:
@@ -114,9 +117,15 @@ approved_libraries:
   - name: '@tanstack/react-query'
     version: '5'
     usage: Existing frontend query cache; Review and Authors mutations invalidate its keys.
+  - name: unicode-script
+    version: '0.5'
+    usage: Unicode Script-property lookup behind livrarr-domain text_norm::contains_non_latin_letters, the U9 guard script carve-out. Script property, never a Unicode block. PO-approved 2026-07-31.
+  - name: tracing-test
+    version: '0.2'
+    usage: Dev-only. livrarr-behavioral [dev-dependencies] with features ["no-env-filter"]; #[traced_test] log capture for the U9 drop-warning assertions. Never a production dependency. PO-approved 2026-07-31.
   - name: existing-dependencies-only
     version: n/a
-    usage: No new library or crate dependency is proposed.
+    usage: No new library or crate dependency beyond the two PO-approved 2026-07-31 entries above (unicode-script, dev-only tracing-test) is proposed.
 
 modules:
   - name: livrarr-domain
@@ -266,17 +275,39 @@ modules:
             - { name: evidence, type: "private AuthorRouteEvidence" }
             - { name: verdict, type: "private AuthorVerdict; Grey, Abstain, or Disagree only" }
           construction: Only guard_author_route can construct this non-Deserialize value; read-only accessors expose evidence and the actual non-Agree verdict.
+        - kind: opaque
+          name: NonAuthorialProviderRef
+          fields:
+            - { name: key, type: "private AuthorRouteKey" }
+            - { name: observed_name, type: "private String" }
+            - { name: role, type: "private Option<String>; always Some under the U9 gate" }
+          construction: Only guard_author_route constructs it, from a ProviderCredit::Labeled credit; read-only accessors expose the filtered label for operator visibility. U8 surface — see the U8 design pointer in metadata.
+        - kind: opaque
+          name: DroppedAuthorCreditEvidence
+          fields:
+            - { name: evidence, type: "private AuthorRouteEvidence" }
+            - { name: verdict, type: "private AuthorVerdict; the actual non-Agree verdict" }
+          construction: Only guard_author_route constructs it. Structurally identical to RejectedAuthorRouteEvidence and deliberately a distinct type — the duplication is the statement that this evidence must never reach a candidate writer.
         - kind: enum
           name: AuthorRouteGuardResult
           fields:
             - { name: Agreed, type: AgreedAuthorRouteEvidence }
             - { name: Rejected, type: RejectedAuthorRouteEvidence }
+            - { name: NonAuthorial, type: NonAuthorialProviderRef }
+            - { name: UnlabeledMismatchDropped, type: DroppedAuthorCreditEvidence }
+        - kind: enum
+          name: ProviderCredit
+          fields:
+            - { name: AssertedAuthor, type: unit }
+            - { name: UnlabeledAuthorSlot, type: unit }
+            - { name: Labeled, type: String }
+          construction: Absence is not representable. A gateway that cannot read a credit's shape drops the entry rather than constructing a ref, so the boundary is fail-closed by type rather than by convention.
         - kind: struct
           name: ProviderAuthorRef
           fields:
             - { name: key, type: AuthorRouteKey }
             - { name: name, type: String }
-            - { name: role, type: "Option<String>" }
+            - { name: credit, type: "ProviderCredit; certified by the gateway that read the response, never a raw provider string" }
         - kind: enum
           name: AuthorLinkTrigger
           fields:
@@ -455,6 +486,16 @@ modules:
             - { name: source, type: AuthorRouteEvidenceSource }
           output: "AuthorRouteGuardResult; sole constructor of AgreedAuthorRouteEvidence and sole place that calls canonical author_verdict"
           errors: []
+        - name: "identity_matching::dedupe_associated_names"
+          inputs:
+            - { name: names, type: "&[String]" }
+          output: "Vec<String>; one author's own names with canonically identical spellings collapsed by canonical_author_key, first spelling of each key surviving, blanks dropped"
+          errors: []
+        - name: "text_norm::contains_non_latin_letters"
+          inputs:
+            - { name: name, type: "&str" }
+          output: "bool; crate-internal (pub(crate)). True when any script-bearing letter has a Unicode Script property other than Latin/Common/Inherited. Script property, never a Unicode block"
+          errors: []
         - name: "AuthorLinkService::list_review"
           inputs:
             - { name: user_id, type: UserId }
@@ -529,8 +570,8 @@ modules:
             - { name: provider, type: AuthorProvider }
             - { name: work_route, type: String }
             - { name: priority, type: RequestPriority }
-          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>"
-          errors: [UnsupportedProvider, NotConfigured, Retryable, Permanent, LayoutDrift]
+          output: "Result<Vec<ProviderAuthorRef>, AuthorProviderError>; UnsupportedProvider is deliberately absent from the error set — the dispatch matches exhaustively on the three-variant AuthorProvider enum, so the type forbids it (same family as F-011). The AuthorProviderError::UnsupportedProvider variant is retained: the attempt ledger still stores it as SkippedPermanent with diagnostic code unsupported_provider"
+          errors: [NotConfigured, Retryable, Permanent, LayoutDrift]
         - name: "AuthorProviderGateway::search_open_library_authors"
           inputs:
             - { name: query, type: String }
@@ -588,12 +629,23 @@ modules:
             - { name: work_route, type: String }
             - { name: priority, type: RequestPriority }
         - kind: struct
+          name: CreateAuthorGateRequest
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: name, type: String }
+            - { name: sort_name, type: "Option<String>" }
+            - { name: import_id, type: "Option<String>" }
+            - { name: initial_name_source, type: AuthorNameSource }
+            - { name: trigger, type: AuthorLinkTrigger }
+          construction: Deliberately carries no ol_key/gr_key/hc_key. An author is created or adopted on identity alone; an explicitly selected provider route is a separate user-sovereign step after the gate commits.
+        - kind: struct
           name: RenameAuthorDbRequest
           fields:
             - { name: user_id, type: UserId }
             - { name: author_id, type: AuthorId }
             - { name: display_name, type: String }
             - { name: variant_id, type: i64 }
+          construction: Four fields, unchanged. Display-name origin is carried by WHICH AuthorDb method is entered (rename_author_and_cascade = UserChoice, converge_author_display_name = AutomaticConvergence), not by a field here.
       functions:
         - name: "AuthorLinkDb::ensure_enqueued"
           inputs:
@@ -602,6 +654,11 @@ modules:
             - { name: trigger, type: AuthorLinkTrigger }
           output: "Result<(), DbError>"
           errors: [NotFound, Constraint]
+        - name: "AuthorLinkDb::create_or_adopt_author"
+          inputs:
+            - { name: request, type: CreateAuthorGateRequest }
+          output: "Result<(Author, bool), DbError>; the shared author create/adopt gate — one transaction converging a creation race onto a single author row with its initial name variant and a due progress row. The bool is whether this caller created it"
+          errors: [NotFound, Constraint, Database]
         - name: "AuthorLinkDb::ensure_missing_progress_rows"
           inputs:
             - { name: limit, type: u32 }
@@ -619,6 +676,18 @@ modules:
             - { name: claim, type: AuthorLinkClaim }
           output: "Result<AuthorRoadInput, DbError>"
           errors: [NotFound, ClaimLost]
+        - name: "AuthorLinkDb::load_progress"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<AuthorLinkProgress, DbError>; the durable progress row. The road needs the persisted evidence generation and attempt count load_road_input leaves out, and the re-resolve door returns this row directly"
+          errors: [NotFound, Database]
+        - name: "AuthorLinkDb::begin_evidence_generation"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: evidence_generation, type: i64 }
+          output: "Result<(), DbError>; move the stored generation forward (never backward), supersede still-pending older-generation candidates, and clear the road cursor. Persisted before any route or candidate write so every effect of the pass lands in one reviewable generation"
+          errors: [ClaimLost, Constraint]
         - name: "AuthorLinkDb::compute_evidence_fingerprint"
           inputs:
             - { name: user_id, type: UserId }
@@ -637,8 +706,21 @@ modules:
             - { name: claim, type: AuthorLinkClaim }
             - { name: key_attempt_id, type: i64 }
             - { name: outcome, type: AuthorKeyAttemptOutcome }
+            - { name: authorial_credits_seen, type: "u32; how many authorial-slot observations this attempt made. Travels with the transition in one statement so an attempt can never reach a completed state without its observation; a failure arm passes 0" }
           output: "Result<(), DbError>; token-checked atomic outcome write; completion never rolls back route/candidate commits from this or sibling keys"
           errors: [NotFound, ClaimLost, Constraint]
+        - name: "AuthorLinkDb::generation_authorial_credit_count"
+          inputs:
+            - { name: claim, type: AuthorLinkClaim }
+            - { name: evidence_generation, type: i64 }
+          output: "Result<u64, DbError>; the sum of authorial_credits_seen over every key attempt in one evidence generation. The Tier-2 gate reads this rather than a per-pass in-memory tally — a terminal attempt is never returned by prepare_key_attempts again"
+          errors: [ClaimLost, Database]
+        - name: "AuthorLinkDb::revoke_dismissals_and_replay"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<(), DbError>; one transaction, three effects together or not at all — stamp revoked_at on every still-active dismissal (never delete), queue the author immediately due with any live claim voided, and clear evaluated_fingerprint so the next pass opens a new generation with fresh non-terminal attempts. Wired to the re-resolve door ONLY"
+          errors: [NotFound, Constraint, Database]
         - name: "AuthorLinkDb::apply_guarded_route"
           inputs:
             - { name: write, type: GuardedRouteWrite }
@@ -706,6 +788,12 @@ modules:
             - { name: provider, type: "Option<AuthorProvider>" }
           output: "Result<Vec<AuthorRoute>, DbError>; state=active only, canonical values, stable provenance-rank/id order"
           errors: [NotFound, Database]
+        - name: "AuthorLinkDb::list_routes_for_view"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<Vec<AuthorRoute>, DbError>; every route row the author-detail panel shows — active rows first, then removal history. Removed rows are provenance, never linkage: link state and monitorability derive from the active rows alone"
+          errors: [NotFound, Database]
         - name: "AuthorLinkDb::has_active_route"
           inputs:
             - { name: user_id, type: UserId }
@@ -731,6 +819,19 @@ modules:
             - { name: observations, type: "&[ProviderAuthorNameObservation]" }
           output: "Result<u32, DbError>; when at least one distinct variant is inserted, atomically increment display_name_generation, set display_name_dirty=1, and pull next_attempt_at forward to now without disturbing a live lease"
           errors: [NotFound, Database]
+        - name: "AuthorNameVariantDb::record_author_observed_names"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+            - { name: observations, type: "&[ProviderAuthorNameObservation]" }
+          output: "Result<u32, DbError>; the same observation write for a caller that already holds the author. The work-scoped form resolves the author FROM a work; a Readarr author batch has no work in hand, and a name dropped there is one the display picker can never offer again (FP-035)"
+          errors: [NotFound, Database]
+        - name: "AuthorNameVariantDb::list_name_variants"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: author_id, type: AuthorId }
+          output: "Result<Vec<AuthorNameVariant>, DbError>; every spelling recorded for the author, oldest row first. The display-name picker cannot offer choices it cannot list, and the name guard needs the author's full associated-name snapshot rather than just authors.name"
+          errors: [NotFound, Database]
         - name: "AuthorLinkDb::ingest_legacy_routes"
           inputs: []
           output: "Result<AuthorRouteBackfillReport, DbError>; parse every nonempty scalar with AuthorRouteKey before canonical insert"
@@ -742,7 +843,12 @@ modules:
         - name: "AuthorDb::rename_author_and_cascade"
           inputs:
             - { name: request, type: RenameAuthorDbRequest }
-          output: "Result<Author, DbError>"
+          output: "Result<Author, DbError>; the UserChoice door into the one display-name cascade — exactly one variant carries the user's selection"
+          errors: [NotFound, Constraint]
+        - name: "AuthorDb::converge_author_display_name"
+          inputs:
+            - { name: request, type: RenameAuthorDbRequest }
+          output: "Result<Author, DbError>; the AutomaticConvergence door into the SAME cascade. It moves authors.name, works.author_name, and merge_generation exactly as the user door does and touches no user authority: no User variant is fabricated and no user_selected_at is stamped or cleared. Writing one would make the machine's own choice outrank every later provider name and freeze convergence on it"
           errors: [NotFound, Constraint]
         - name: "AuthorDb::merge_authors"
           inputs:
@@ -1106,6 +1212,9 @@ shared_types:
       - { name: status, type: AuthorLinkCandidateStatus }
       - { name: evidence_generation, type: i64 }
       - { name: observed_at, type: "DateTime<Utc>" }
+      - { name: evidence_work_id, type: "Option<WorkId>; the settled work whose provider record raised this question. None for a name-search candidate and for a question whose evidence work has since been deleted. U8 surface" }
+      - { name: evidence_work_title, type: "Option<String>; hydrated only by the review read that joins it; a scalar read leaves it absent rather than showing a stale title. U8 surface" }
+      - { name: revoked_at, type: "Option<DateTime<Utc>>; when a dismissal stopped suppressing this question. A dismissed row is revoked, never deleted — the user's decision and its resolution time stay on the record, and only this stamp says the answer no longer binds" }
   - kind: struct
     name: AuthorLinkProgress
     fields:
@@ -1152,6 +1261,9 @@ amendments:
   - date: 2026-07-29
     change: "r5 design-review fold amendments. F-002: HardcoverClient::fetch_work_authors gains LayoutDrift to its error set. F-006: add AuthorLinkService::attach_selected_route and AuthorLinkDb::attach_route_as_user — the explicit user-sovereign route attach for a UI-selected key that is not a persisted review candidate; it shares one private user-attach transaction with pick_candidate_as_user, so there are two UI entry shapes but one user-sovereign persistence standard."
     reason: "Design review r1 (xai) F-002 and F-006, both ruled ACCEPT by the architect chair (build/design-176/architect/REVIEW-RULINGS.md). F-002 is conformance to already-ratified contract FP-010, which requires Hardcover Tier-1 to degrade to a key-local NotConfigured skip or LayoutDrift park — the r4 error set could only report Permanent, losing the operator-visible re-resolvable park. F-006 replaces the disguised scalar ol_key write on the interactive add path with an explicit classified user operation, preserving REQ-004's exhaustive user-sovereign/keyed-evidence/road-guarded vocabulary. No new route type, provenance, table, entity, or handler-level SQL."
+  - date: 2026-07-31
+    change: "r6 close-out fold to as-built. Every row below is an already-ruled item transcribed after verification against source; none is a new decision. (a) livrarr-db gains CreateAuthorGateRequest and four U3/U6 trait methods the units added — AuthorLinkDb::create_or_adopt_author, ::load_progress, ::begin_evidence_generation, ::list_routes_for_view — plus AuthorNameVariantDb::record_author_observed_names and AuthorNameVariantDb::list_name_variants, the U6 name-variant list read seam. (b) AuthorDb gains converge_author_display_name, the AutomaticConvergence door into the one shared display-name cascade; RenameAuthorDbRequest keeps its four fields. (c) U9 surface: ProviderCredit replaces ProviderAuthorRef.role; AuthorLinkDb::complete_key_attempt takes authorial_credits_seen: u32; AuthorLinkDb::generation_authorial_credit_count and ::revoke_dismissals_and_replay are added; AuthorLinkCandidate gains revoked_at; AuthorRouteGuardResult gains UnlabeledMismatchDropped(DroppedAuthorCreditEvidence); identity_matching::dedupe_associated_names and crate-internal text_norm::contains_non_latin_letters are recorded. (d) approved_libraries gains unicode-script 0.5 and dev-only tracing-test 0.2, each PO-approved 2026-07-31, and the existing-dependencies-only row is corrected. (e) metadata gains design-supersession pointers to the U8 and U9 design documents."
+    reason: "Ruling sources, one per row: (a) U3 handback PM ruling and BLOCKED-U5 §3 / BLOCKED-U6 §3, all recorded in build/design-176/DEV-UNITS.md — list_routes_for_view and list_name_variants are the two seams BLOCKED-U5 §3's ruling authorised together (DEV-UNITS.md:207-212: 'U6 adds it' plus 'U6 also adds a name-variant list read seam'), the second folded on the 2026-07-31 follow-up ruling to BLOCKED-IR-FOLD §2.2. (b) BLOCKED-U5 §1, ruled ACCEPTED and amending BLOCKED-U3 §4's earlier request for an origin field — a green exhaustive struct literal in test_author_link_db.rs made a fifth field impossible, so the classification moved to which trait door is entered while FP-017's one-cascade rule holds. (c) U9 unit, whose contract is DESIGN-U9-unlabeled-credit-gate.md r4 (PO gate 2026-07-31). (d) PO approval 2026-07-31 recorded in the U9 DEV-UNITS entry. (e) close-out packet PACKET-IR-FOLD.md. Two entries in (c) carry a scope note: AuthorRouteGuardResult::NonAuthorial/NonAuthorialProviderRef and AuthorLinkCandidate.evidence_work_id/evidence_work_title are U8 surface, added here only because writing the U9 arm/field into an otherwise stale enum and struct would have published a shape that is complete and wrong; see BLOCKED-IR-FOLD.md."
 
 dependency_graph:
   - { source: livrarr-http, target: livrarr-domain }
