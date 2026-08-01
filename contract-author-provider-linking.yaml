@@ -2,7 +2,7 @@ metadata:
   feature: author-provider-linking
   spec_ref: /mnt/opt/livrarr/spec-author-provider-linking.md
   ir_ref: ir-v1-author-provider-linking.yaml
-  version: 3
+  version: 4
 
 module_dependency:
   - id: DEP-001
@@ -97,8 +97,8 @@ forbidden_pattern:
     severity: P1
     rationale: ST-003 and REQ-006.
   - id: FP-006
-    pattern: 'RateBucket::OpenLibrary(?s:.){0,240}UserAgentProfile::Custom|UserAgentProfile::Custom(?s:.){0,240}RateBucket::OpenLibrary'
-    description: Do not introduce a new OpenLibrary user-agent string.
+    pattern: 'RateBucket::OpenLibrary.{0,240}UserAgentProfile::Custom|UserAgentProfile::Custom.{0,240}RateBucket::OpenLibrary'
+    description: Do not introduce a new OpenLibrary user-agent string. (Pattern rewritten 2026-08-01 — (?s:.) is Perl-only, grep ERE never scanned it; now single-line.)
     severity: P0
     rationale: ST-003. All OL calls use the existing Server profile and contact-bearing identifier.
   - id: FP-007
@@ -158,7 +158,12 @@ forbidden_pattern:
     rationale: ST-007 forbids treating the cascade as novel plumbing.
   - id: FP-018
     pattern: 'INSERT\s+INTO\s+authors'
-    description: Author inserts are permitted only in livrarr-db::sqlite_author and numbered migrations; no door owns author creation SQL.
+    exclude:
+      - "sqlite_author.rs"
+      - "sqlite_author_link.rs"
+      - "*.sql"
+      - "pool.rs"
+    description: Author inserts are permitted only in livrarr-db::sqlite_author (the pre-F1 writer), the F1 create/adopt gate livrarr-db::sqlite_author_link::create_or_adopt_author_tx, and numbered migrations; no door owns author creation SQL. Scope amended at the code gate 2026-08-01 — the gate lives in sqlite_author_link (BLOCKED-U2 §1 reading, HANDBACK-U6 §4 zero-production-caller enumeration, both r2 code reviews PASS); pool.rs excluded for its cfg(test)-only seed/uniqueness fixtures (all 3 hits verified test-gated 2026-08-01).
     severity: P0
     rationale: ST-008 and the no-SQL-outside-db rule. Concurrency must converge through the single create gate.
   - id: FP-019
@@ -182,8 +187,8 @@ forbidden_pattern:
     severity: P0
     rationale: REQ-001 and AC-010.
   - id: FP-023
-    pattern: 'ON\s+CONFLICT(?s:.){0,600}(removed_at\s*=\s*NULL|state\s*=\s*[''"]active[''"])'
-    description: Generic upsert must not reactivate a tombstoned route; only the explicit user-pick transaction may do so.
+    pattern: 'ON\s+CONFLICT.{0,600}(removed_at\s*=\s*NULL|state\s*=\s*[''"]active[''"])'
+    description: Generic upsert must not reactivate a tombstoned route; only the explicit user-pick transaction may do so. (Pattern rewritten 2026-08-01 — (?s:.) is Perl-only, grep ERE never scanned it; now single-line.)
     severity: P0
     rationale: REQ-001 and AC-010.
   - id: FP-024
@@ -197,8 +202,14 @@ forbidden_pattern:
     severity: P0
     rationale: F1 boundary and the canonical identity/enrichment separation.
   - id: FP-026
-    pattern: 'ALTER\s+TABLE\s+works|CREATE\s+(UNIQUE\s+)?INDEX(?s:.){0,300}\s+ON\s+works'
-    description: F1 migrations may not change the works schema or uniqueness model.
+    pattern: 'ALTER\s+TABLE\s+works|CREATE\s+(UNIQUE\s+)?INDEX[^;]{0,300}\s+ON\s+works'
+    include:
+      - "077_*.sql"
+      - "078_*.sql"
+      - "079_*.sql"
+      - "080_*.sql"
+      - "081_*.sql"
+    description: F1 migrations may not change the works schema or uniqueness model. Scope amended at the code gate 2026-08-01 to this feature's own migrations (077-081), the rule's stated subject — unscoped it matched 25 pre-existing works migrations (012-076). Pattern's (?s:.) was Perl-only (grep ERE parsed it literally, so the INDEX alternative never scanned); rewritten single-line.
     severity: P0
     rationale: Additive F1 boundary. The authorized rename cascade is data mutation through existing columns, not a schema change.
   - id: FP-027
