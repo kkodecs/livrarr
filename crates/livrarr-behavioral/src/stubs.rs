@@ -582,53 +582,56 @@ impl AuthorProviderGateway for StubAuthorProviderGateway {
 pub struct StubAuthorLinkService;
 
 impl AuthorLinkService for StubAuthorLinkService {
-    async fn list_review(&self, user_id: UserId) -> Result<Vec<AuthorLinkReview>, AuthorLinkError> {
+    async fn list_review(
+        &self,
+        _user_id: UserId,
+    ) -> Result<Vec<AuthorLinkReview>, AuthorLinkError> {
         todo!()
     }
 
     async fn pick_candidate(
         &self,
-        user_id: UserId,
-        candidate_id: i64,
+        _user_id: UserId,
+        _candidate_id: i64,
     ) -> Result<AuthorRoute, AuthorLinkError> {
         todo!()
     }
 
     async fn attach_selected_route(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        key: AuthorRouteKey,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _key: AuthorRouteKey,
     ) -> Result<AuthorRoute, AuthorLinkError> {
         todo!()
     }
 
     async fn dismiss_candidate(
         &self,
-        user_id: UserId,
-        candidate_id: i64,
+        _user_id: UserId,
+        _candidate_id: i64,
     ) -> Result<(), AuthorLinkError> {
         todo!()
     }
 
     async fn remove_route(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        route_id: i64,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _route_id: i64,
     ) -> Result<(), AuthorLinkError> {
         todo!()
     }
 
     async fn re_resolve(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
+        _user_id: UserId,
+        _author_id: AuthorId,
     ) -> Result<AuthorLinkProgress, AuthorLinkError> {
         todo!()
     }
 
-    async fn progress(&self, user_id: UserId) -> Result<AuthorSweepProgress, AuthorLinkError> {
+    async fn progress(&self, _user_id: UserId) -> Result<AuthorSweepProgress, AuthorLinkError> {
         todo!()
     }
 }
@@ -638,35 +641,35 @@ pub struct StubAuthorLinkWorkflow;
 impl AuthorLinkWorkflow for StubAuthorLinkWorkflow {
     async fn enqueue(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        trigger: AuthorLinkTrigger,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _trigger: AuthorLinkTrigger,
     ) -> Result<(), AuthorLinkError> {
         todo!()
     }
 
     async fn submit_evidence(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        evidence: AgreedAuthorRouteEvidence,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _evidence: AgreedAuthorRouteEvidence,
     ) -> Result<RouteWriteOutcome, AuthorLinkError> {
         todo!()
     }
 
     async fn record_readarr_rejection(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        rejected: RejectedAuthorRouteEvidence,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _rejected: RejectedAuthorRouteEvidence,
     ) -> Result<AuthorLinkCandidate, AuthorLinkError> {
         todo!()
     }
 
     async fn run_due(
         &self,
-        batch_size: u32,
-        cancel: CancellationToken,
+        _batch_size: u32,
+        _cancel: CancellationToken,
     ) -> Result<AuthorSweepTickSummary, AuthorLinkError> {
         todo!()
     }
@@ -677,9 +680,9 @@ pub struct StubAuthorLinkDb;
 impl AuthorLinkDb for StubAuthorLinkDb {
     async fn ensure_enqueued(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        trigger: AuthorLinkTrigger,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _trigger: AuthorLinkTrigger,
     ) -> Result<(), DbError> {
         todo!()
     }
@@ -691,20 +694,20 @@ impl AuthorLinkDb for StubAuthorLinkDb {
         Err(DbError::NotFound { entity: "author" })
     }
 
-    async fn ensure_missing_progress_rows(&self, limit: u32) -> Result<u32, DbError> {
+    async fn ensure_missing_progress_rows(&self, _limit: u32) -> Result<u32, DbError> {
         todo!()
     }
 
     async fn claim_due(
         &self,
-        now: DateTime<Utc>,
-        lease_until: DateTime<Utc>,
-        limit: u32,
+        _now: DateTime<Utc>,
+        _lease_until: DateTime<Utc>,
+        _limit: u32,
     ) -> Result<Vec<AuthorLinkClaim>, DbError> {
         todo!()
     }
 
-    async fn load_road_input(&self, claim: AuthorLinkClaim) -> Result<AuthorRoadInput, DbError> {
+    async fn load_road_input(&self, _claim: AuthorLinkClaim) -> Result<AuthorRoadInput, DbError> {
         todo!()
     }
 
@@ -728,151 +731,151 @@ impl AuthorLinkDb for StubAuthorLinkDb {
 
     async fn compute_evidence_fingerprint(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
+        _user_id: UserId,
+        _author_id: AuthorId,
     ) -> Result<AuthorEvidenceFingerprint, DbError> {
         todo!()
     }
 
     async fn prepare_key_attempts(
         &self,
-        claim: AuthorLinkClaim,
-        evidence_generation: i64,
-        keys: Vec<SettledWorkProviderKey>,
+        _claim: AuthorLinkClaim,
+        _evidence_generation: i64,
+        _keys: Vec<SettledWorkProviderKey>,
     ) -> Result<Vec<AuthorKeyAttempt>, DbError> {
         todo!()
     }
 
     async fn complete_key_attempt(
         &self,
-        claim: AuthorLinkClaim,
-        key_attempt_id: i64,
-        outcome: AuthorKeyAttemptOutcome,
-        authorial_credits_seen: u32,
+        _claim: AuthorLinkClaim,
+        _key_attempt_id: i64,
+        _outcome: AuthorKeyAttemptOutcome,
+        _authorial_credits_seen: u32,
     ) -> Result<(), DbError> {
         todo!()
     }
 
     async fn generation_authorial_credit_count(
         &self,
-        claim: AuthorLinkClaim,
-        evidence_generation: i64,
+        _claim: AuthorLinkClaim,
+        _evidence_generation: i64,
     ) -> Result<u64, DbError> {
         todo!()
     }
 
     async fn generation_outstanding_retries(
         &self,
-        claim: AuthorLinkClaim,
-        evidence_generation: i64,
+        _claim: AuthorLinkClaim,
+        _evidence_generation: i64,
     ) -> Result<Vec<livrarr_domain::OutstandingKeyRetry>, DbError> {
         todo!()
     }
 
     async fn generation_pending_candidate_count(
         &self,
-        claim: AuthorLinkClaim,
-        evidence_generation: i64,
+        _claim: AuthorLinkClaim,
+        _evidence_generation: i64,
     ) -> Result<u32, DbError> {
         todo!()
     }
 
     async fn revoke_dismissals_and_replay(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
+        _user_id: UserId,
+        _author_id: AuthorId,
     ) -> Result<(), DbError> {
         todo!()
     }
 
     async fn apply_guarded_route(
         &self,
-        write: GuardedRouteWrite,
+        _write: GuardedRouteWrite,
     ) -> Result<RouteWriteOutcome, DbError> {
         todo!()
     }
 
     async fn record_candidates(
         &self,
-        claim: AuthorLinkClaim,
-        candidates: Vec<AuthorLinkCandidate>,
+        _claim: AuthorLinkClaim,
+        _candidates: Vec<AuthorLinkCandidate>,
     ) -> Result<(), DbError> {
         todo!()
     }
 
     async fn record_readarr_rejection(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        rejected: RejectedAuthorRouteEvidence,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _rejected: RejectedAuthorRouteEvidence,
     ) -> Result<AuthorLinkCandidate, DbError> {
         todo!()
     }
 
     async fn advance_progress(
         &self,
-        claim: AuthorLinkClaim,
-        update: AuthorLinkProgressUpdate,
+        _claim: AuthorLinkClaim,
+        _update: AuthorLinkProgressUpdate,
     ) -> Result<(), DbError> {
         todo!()
     }
 
     async fn pick_candidate_as_user(
         &self,
-        user_id: UserId,
-        candidate_id: i64,
+        _user_id: UserId,
+        _candidate_id: i64,
     ) -> Result<AuthorRoute, DbError> {
         todo!()
     }
 
     async fn attach_route_as_user(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        key: AuthorRouteKey,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _key: AuthorRouteKey,
     ) -> Result<AuthorRoute, DbError> {
         todo!()
     }
 
     async fn dismiss_candidate_as_user(
         &self,
-        user_id: UserId,
-        candidate_id: i64,
+        _user_id: UserId,
+        _candidate_id: i64,
     ) -> Result<(), DbError> {
         todo!()
     }
 
-    async fn list_review(&self, user_id: UserId) -> Result<Vec<AuthorLinkReview>, DbError> {
+    async fn list_review(&self, _user_id: UserId) -> Result<Vec<AuthorLinkReview>, DbError> {
         todo!()
     }
 
-    async fn sweep_progress(&self, user_id: UserId) -> Result<AuthorSweepProgress, DbError> {
+    async fn sweep_progress(&self, _user_id: UserId) -> Result<AuthorSweepProgress, DbError> {
         todo!()
     }
 
     async fn remove_route_as_user(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        route_id: i64,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _route_id: i64,
     ) -> Result<(), DbError> {
         todo!()
     }
 
     async fn list_active_routes(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        provider: Option<AuthorProvider>,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _provider: Option<AuthorProvider>,
     ) -> Result<Vec<AuthorRoute>, DbError> {
         todo!()
     }
 
     async fn has_active_route(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
-        provider: AuthorProvider,
+        _user_id: UserId,
+        _author_id: AuthorId,
+        _provider: AuthorProvider,
     ) -> Result<bool, DbError> {
         todo!()
     }
@@ -887,8 +890,8 @@ impl AuthorLinkDb for StubAuthorLinkDb {
 
     async fn compatibility_projection(
         &self,
-        user_id: UserId,
-        author_id: AuthorId,
+        _user_id: UserId,
+        _author_id: AuthorId,
     ) -> Result<AuthorCompatibilityProjection, DbError> {
         todo!()
     }
@@ -905,9 +908,9 @@ impl AuthorLinkDb for StubAuthorLinkDb {
 impl AuthorNameVariantDb for StubAuthorLinkDb {
     async fn record_observed_names(
         &self,
-        user_id: UserId,
-        work_id: WorkId,
-        observations: &[ProviderAuthorNameObservation],
+        _user_id: UserId,
+        _work_id: WorkId,
+        _observations: &[ProviderAuthorNameObservation],
     ) -> Result<u32, DbError> {
         todo!()
     }
