@@ -1,0 +1,1727 @@
+metadata:
+  feature: identity-layer-rewrite
+  stage: v4-architecture-r3-folded
+  spec_ref: /mnt/opt/livrarr/spec-identity-layer-rewrite.md
+  version: 4
+  escalation_ref: /mnt/opt/livrarr/build/reviews/identity-layer-rewrite/BLOCKED-fold-arch-r3.md
+  review_fold:
+    round: r3
+    folded_at: 2026-08-05
+    sources:
+      - build/reviews/identity-layer-rewrite/REVIEW-ARCH-anthropic-r3.md
+    disposition_ref: build/reviews/identity-layer-rewrite/FOLD-ARCH-R3.md
+    prior_round: r2
+    note: "Final architecture micro-fold r3: both families verified all seven r2 dispositions resolved; XAI reported no fresh finding, and the two final Anthropic sentence-scale findings were accepted. No r4 review follows."
+
+system_architecture:
+  components:
+    - name: Work identity road
+      description: "The one creation and re-key entry at livrarr-metadata::identity_road; all six doors submit typed evidence bundles and receive a settled, review-pending, deferred, or rejected outcome."
+      type: in-process application service
+    - name: Identity matching authority
+      description: "Pure deterministic title, contributor, route, and sampled whose-text decisions with separately named lost-match and wrong-merge guard sets."
+      type: livrarr-domain pure functions plus livrarr-identity orchestration
+    - name: Route and edition store
+      description: "User-scoped work/edition routes, first-class editions, title tuples, contributors, relationships, conflicts, review cards, archives, defaults, and cover evidence."
+      type: SQLite behind livrarr-domain repository traits
+    - name: Provider evidence boundary
+      description: "Existing provider transports normalize work/edition/contributor evidence only after the corresponding ST-006 capture probe has established each raw shape."
+      type: livrarr-external-data adapters through the shared outbound queue
+    - name: Route-driven enrichment and presentation projection
+      description: "Consumes the closed usable-route set, writes edition/work metadata through repositories, and recomputes subtitle and cover projections without mutating identity anchors."
+      type: livrarr-enrichment plus livrarr-metadata orchestration
+    - name: Local EPUB cover inspector
+      description: "Inspects owned EPUB revisions without provider traffic and distinguishes extracted, verified-no-cover, could-not-inspect, and file-gone outcomes."
+      type: blocking file adapter in livrarr-library
+    - name: Identity review surfaces
+      description: "Conflict, group-identity, field-resolution, contributor-order, import, format/language, migration-repair, and invariant-repair cards: local exclusive list/show/resolve CLI while the marker is inactive, authenticated Axum/React after activation, plus connectedness badge and informational sibling panel."
+      type: local cutover CLI plus Axum JSON API and React client
+    - name: Identity cutover controller
+      description: "Rehearses the deterministic mapping on a copied real-library snapshot, persists repair/review blockers, and activates the new unique index only after every blocker is resolved."
+      type: explicit livrarr-db migration service wired by livrarr-server
+  connections:
+    - from: Six creation doors
+      to: Work identity road
+      protocol: "IdentityRoadService::settle(IdentityRoadRequest)"
+      description: "Direct add, manual import, list import, author monitor, series monitor, and Readarr import have no alternate Work-creation or identity-settlement call."
+    - from: Work identity road
+      to: Identity matching authority
+      protocol: typed domain evidence and verdicts
+      description: "P5 precedence, P3 guard separation, P8 classification, group reconciliation, and merge eligibility are deterministic."
+    - from: Work identity road
+      to: Route and edition store
+      protocol: livrarr-domain repository traits
+      description: "A single transaction commits the work, title tuple, contributors, routes/editions, badge projection, review state, and audit outcome."
+    - from: Work identity road
+      to: Author linking road
+      protocol: "guard_author_route followed by AuthorLinkWorkflow::submit_evidence"
+      description: "A settled provider author id may attach only to the stored primary author; absent ids cause no fallback call."
+    - from: Provider evidence boundary
+      to: Work identity road
+      protocol: normalized provider DTOs
+      description: "Provider ids and sampled classification/alias proof enter identity; raw provider payloads and metadata fields do not become matching authority."
+    - from: Route-driven enrichment and presentation projection
+      to: Route and edition store
+      protocol: domain repository traits implemented in livrarr-db
+      description: "Enrichment reads usable routes and persists normalized work/edition facts; it never calls livrarr-identity or writes route ownership."
+    - from: Route-driven enrichment and presentation projection
+      to: Work identity road
+      protocol: "EnrichmentApplyOutcome.captured_route_evidence, brokered by livrarr-metadata"
+      description: "The metadata caller executes provider calls, asks enrichment to apply metadata facts, then resubmits any captured route evidence to IdentityRoadService::settle with EnrichmentPass, ManualRefresh, or ConvergenceVisit origin. Enrichment itself neither calls identity nor writes identity_routes."
+    - from: Local EPUB cover inspector
+      to: Route-driven enrichment and presentation projection
+      protocol: EmbeddedCoverInspectionResult
+      description: "An extracted local cover is edition evidence at the owned-file rank; absence and inspection failure stay distinct."
+    - from: Identity review surfaces
+      to: Work identity road
+      protocol: "ReviewResolutionCommand mapped to IdentityRoadService::resolve_review"
+      description: "Every mutation re-enters the same road continuation. The HTTP handler supplies an AuthenticatedUser actor after activation; the exclusive one-shot CLI supplies a CutoverOperator actor before activation. Both validate generation/kind and write the same audit; neither owns orchestration."
+    - from: Identity cutover controller
+      to: Route and edition store
+      protocol: exclusive SQLite transaction after snapshot report approval
+      description: "Legacy reads are frozen, mapping is repeatable, and the new unique index is the final activation write."
+  deployment:
+    topology: "Existing single Livrarr process, React bundle, and SQLite database; no new service."
+    notes: "The feature uses a one-shot operator process for non-empty-library cutover and refuses to bind HTTP or start jobs while 082/083 are installed but the authority marker is inactive. Fresh/empty databases activate the new authority automatically before any repository is returned. Background work stays cancellation-aware and uses the existing outbound queue."
+
+languages:
+  - { language: Rust, version: "edition 2021", usage: "Domain model, repositories, provider normalization, deterministic identity road, file inspection, HTTP composition, and tests." }
+  - { language: TypeScript, version: "6.0", usage: "Connectedness badges, review cards, route/edition/cover panels, and typed API calls." }
+  - { language: SQL, version: SQLite, usage: "Additive migrations 082+, user-scoped storage, archives, review state, and final partial/unique indexes." }
+
+frameworks:
+  - { name: Axum, version: "0.8", usage: "Authenticated identity, edition, review, cover, import-review, and manual-search endpoints." }
+  - { name: React, version: "19.2", usage: "Identity badge, route/edition details, review surfaces, cover placeholders, and informational sibling panel." }
+  - { name: TanStack Query, version: "5.96", usage: "Server-state fetching, mutation invalidation, and review/convergence polling." }
+  - { name: Tokio, version: "1", usage: "Cancellation-aware background convergence and spawn_blocking isolation for EPUB inspection and snapshot work." }
+
+approved_libraries:
+  - { name: clap, version: "4", usage: "Existing livrarr-server derive-based CLI parsing for serve and identity-cutover rehearse/list/show/resolve/apply subcommands." }
+  - { name: chrono, version: "0.4", usage: "Audit, route, review, projection, file-revision, and migration timestamps." }
+  - { name: serde, version: "1", usage: "Domain DTOs, provider normalization, HTTP payloads, and persisted evidence." }
+  - { name: serde_json, version: "1", usage: "Provider payload decoding and preserved raw/sanitized audit evidence; never matching policy." }
+  - { name: thiserror, version: "2", usage: "Typed domain, repository, migration, provider, and inspection errors." }
+  - { name: trait-variant, version: "0.1", usage: "Send async service/repository traits using generic or enum dispatch; never dyn trait objects." }
+  - { name: tokio, version: "1", usage: "Async orchestration, cancellation-aware tasks, and spawn_blocking." }
+  - { name: tokio-util, version: "0.7", usage: "Existing CancellationToken for convergence, migration, and file inspection workflows." }
+  - { name: sqlx, version: "0.8", usage: "SQLite transactions, additive migrations, rehearsal, atomic route transfer, and final index activation." }
+  - { name: reqwest, version: "0.12", usage: "Existing livrarr-http transport only; no independent provider client." }
+  - { name: tracing, version: "0.1", usage: "Structured diagnostics and could-not-inspect/provider-drift logging; never control flow." }
+  - { name: regex, version: "1", usage: "Existing identity title parser and deterministic normalization authority." }
+  - { name: unicode-normalization, version: "0.1", usage: "Existing title and contributor identity normalization." }
+  - { name: uuid, version: "1", usage: "Existing opaque review/claim tokens only; uniqueness keys and migration distinctions are deterministic, not random." }
+  - { name: quick-xml, version: "0.37", usage: "Existing workspace XML parser for EPUB container/OPF cover discovery." }
+  - { name: zip, version: "2", usage: "Existing workspace ZIP implementation for read-only EPUB container inspection." }
+  - { name: sha2, version: "0.10", usage: "Existing workspace SHA-256 implementation for observed file revisions and rehearsal report fingerprints." }
+  - { name: image, version: "0.25", usage: "Existing cover-byte decoding and dimensions validation at the materialization boundary." }
+  - { name: url, version: "2", usage: "Existing provider/detail URL parsing; route ids are normalized by typed parsers, not URL string slicing." }
+  - { name: "@tanstack/react-query", version: "5", usage: "Existing frontend query cache for identity and review server state." }
+
+new_dependencies:
+  - dependency: "livrarr-library -> zip 2"
+    justification: "Read owned EPUB containers with the established workspace ZIP crate; no new ecosystem package and no hand-rolled archive parser."
+
+architecture_decisions:
+  identity_anchor: "A stable Livrarr WorkId is the own-work anchor. Provider ids are routes owned by exactly one Work or one Edition; route reads resolve both owners to a work."
+  route_single_source: "identity_routes is the sole store for provider-scoped ids. A row has exactly one owner: work_id XOR edition_id. Edition-owned rows project through editions.work_id at read time and are never copied into a work route row or legacy scalar."
+  connectedness_badge: "IdentityStatus is a projection with exactly UserConfirmed, Connected, and NotConnected. Conflicts/reviews are independent records and never overload the badge."
+  title_authority: "IdentityTitleTuple is captured once from the P5-winning evidence. Work.title is its main; machine subtitle projection is display-only and excluded from every identity key and matcher."
+  primary_author: "The first stored WorkContributor is the only primary-author seat. Every creation road canonicalizes contributors before ids can affect ordering; roles never select primary."
+  identity_road_chokepoint: "crates/livrarr-metadata/src/identity_road.rs::IdentityRoadServiceImpl::settle is the only production road entry for all six Work creation doors and every re-key continuation."
+  sibling_seam: "livrarr-identity and livrarr-enrichment share only livrarr-domain types/traits. Neither crate depends on or calls the other."
+  migration_activation: "Migrations 082/083, blocked live staging, local CLI review resolution, idempotent staged-state revalidation, and activation form one maintenance-window operator operation for a non-empty single-user alpha database. Rerun Apply upserts by typed key and treats committed resolutions as authoritative rather than re-deriving over them. Both legacy reads and legacy writes cease at the one identity-layer cutover marker; the new binary refuses serving while that marker is inactive, so staged cards do not create a split-brain window. A transactionally proven empty/fresh database takes the trivially-empty rehearsal branch and activates immediately before create_test_db(), startup repositories, HTTP, or jobs can run. idx_works_identity_v2 remains the final activation write. PO-RATIFY."
+  primary_author_projection: "WorkContributor at ordinal zero is authoritative. works.primary_author_id is a derived, transaction-maintained projection required only because SQLite cannot build the work uniqueness index across a join; every contributor/order mutation updates it in the same settlement transaction and the commit asserts equality before the key can be observed."
+
+prototype_probes:
+  - id: PROBE-ST006-A
+    system_truth: ST-006(a)
+    stage: early-code-before-provider-contributor-branching
+    capture_target: "Raw OpenLibrary `/works/OL4288870W.json` author entries plus at least one additional data-rich OL work whose author array contains every observed `role` representation; retain raw entry, type key, null/absence, and exact label."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-A-ol-author-role.json"
+    unblocks: [livrarr-external-data-contributor-normalization]
+    success_condition: "Observed role value domain and unreadable-shape behavior are recorded. Capture alone does not permit role-based primary selection; that still requires a spec amendment."
+  - id: PROBE-ST006-B
+    system_truth: ST-006(b)
+    stage: early-code-before-hardcover-shape-branching
+    capture_target: "The existing Hardcover GraphQL record reached by the Einstein ISBN 9780743264747, including compilation, parent_book_id, canonical_id, alternative_titles, every default_*_edition, all edition references, nulls, and any dangling references."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-B-hardcover-work-shape.json"
+    unblocks: [livrarr-external-data-hardcover-shape, livrarr-enrichment-work-shape-ingest]
+    success_condition: "Full observed value/null/reference domain is captured without inferring semantics for missing or dangling values."
+  - id: PROBE-ST006-C
+    system_truth: ST-006(c)
+    stage: early-code-before-goodreads-edition-pagination
+    capture_target: "Goodreads `/work/editions/985244` first page and every continuation request/response until exhaustion, retaining cursor/page tokens, duplicate behavior, terminal-page shape, and the three known book ids 10884, 2059858, and 6602781."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-C-gr-editions-pagination.json"
+    unblocks: [livrarr-external-data-goodreads-editions, livrarr-enrichment-goodreads-editions]
+    success_condition: "Pagination, empty/terminal, duplicate, and drift shapes are observed; no code branches on guessed page counts or cursors."
+  - id: PROBE-ST006-D
+    system_truth: ST-006(d)
+    stage: early-code-before-settle-road-author-inheritance
+    capture_target: "The existing Hardcover Einstein `contributions { author { id name } }` query and Goodreads pages 10884, 2059858, and 6602781 across every supported parse layout, retaining author href/id presence, absence, and malformed cases."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-D-provider-author-ids.json"
+    unblocks: [livrarr-external-data-author-id-evidence, livrarr-metadata-author-inheritance]
+    success_condition: "Author-id availability and GR href reliability are established. Missing/unreadable id evidence produces no link and no fallback matcher."
+  - id: PROBE-ST006-E
+    system_truth: ST-006(e)
+    stage: early-code-before-whose-text-classification
+    capture_target: "A sanitized fixture manifest containing raw payloads from each applicable existing provider for six PO-identified controls: translation, abridgement, adaptation, study guide, omnibus, and ordinary same-work edition; each manifest row names provider, provider id, expected class, and exact observable signal path."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-E-whose-text-signals.json"
+    unblocks: [livrarr-external-data-text-signals, livrarr-identity-text-classifier, livrarr-metadata-group-reconciliation]
+    success_condition: "Every automatic classifier arm cites one captured signal. Any class/provider without a recognized signal remains ReviewRequired; title keywords are never signals."
+  - id: PROBE-ST006-F
+    system_truth: ST-006(f)
+    stage: early-code-before-provider-alias-equivalence
+    capture_target: "Raw alias/canonical-pointer payloads for the data-rich Hardcover Einstein record and Goodreads work 985244, including any case where one provider presents two work ids as one canonical work; record an explicit empty result when no such shape is observed."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST006-F-work-id-aliases.json"
+    unblocks: [livrarr-external-data-alias-proof, livrarr-identity-same-provider-alias]
+    success_condition: "Only a captured provider-owned alias/canonical shape can construct AliasEquivalenceProof. An empty capture leaves every same-provider disagreement in conflict class A."
+  - id: PROBE-ST007-EPUB
+    system_truth: ST-007
+    stage: early-code-before-local-cover-release
+    capture_target: "A sanitized run over the PO's real EPUB library selecting at least one embedded-cover file, one verified-no-cover file, and one malformed/encrypted/unreadable revision when present; record revision fingerprints and zero provider-call count."
+    capture_artifact: "build/probes/identity-layer-rewrite/ST007-real-library-epub-cover.json"
+    unblocks: [livrarr-library-real-library-cover-validation]
+    success_condition: "The three inspection outcomes remain distinguishable and retry semantics are verified on real revisions."
+
+route_failure_policy:
+  - route_kind: OpenLibraryWork
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Keep the active route and committed work/edition state; record the provider outcome and retry only on the normal refresh/convergence cadence. A route lookup failure never detaches or downgrades the route."
+    parse_drift: "Return LayoutDrift with no metadata or identity write, preserve the route, and keep the normal retry cadence; never reinterpret the id as another kind."
+    provider_outage: "Pause without retry-budget burn under the shared queue/breaker policy; manual refresh stays available and no zero-route/manual-search state is shown."
+  - route_kind: GoodreadsWork
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Keep the route and existing state; retry at normal cadence. Edition enumeration is unavailable until PROBE-ST006-C but connectedness remains valid."
+    parse_drift: "Write no payload-derived facts, preserve the route, and expose a retryable drift outcome; no fallback to Goodreads book-id semantics."
+    provider_outage: "Pause through the existing breaker/cadence with no route mutation and no standalone sweep."
+  - route_kind: HardcoverWork
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Keep the route and existing state; retry on normal cadence. A not-found response is provider evidence only and cannot silently retire a user or surviving route."
+    parse_drift: "Return LayoutDrift, preserve all routes/defaults/editions, and emit no shape-dependent facts until PROBE-ST006-B permits the parser arm."
+    provider_outage: "Pause through the existing queue/breaker without consuming the route or creating a conflict."
+  - route_kind: Isbn13Edition
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Retain the edition-owned route and try only independently eligible existing providers; an exhausted pass changes no edition home and follows normal convergence."
+    parse_drift: "Isolate drift to the failing provider response, preserve the ISBN route/home, and consume no malformed metadata. Shared ISBN may confirm identity only inside the authority."
+    provider_outage: "If readable file evidence supplies a valid minimum, Readarr persists that minimum-founded routed work plus one idempotent convergence retry; otherwise existing work state is unchanged."
+  - route_kind: AsinEdition
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Retain the edition-owned route and existing edition facts; Audible/Audnexus misses never imply a different work or format."
+    parse_drift: "Preserve the route/home and return a provider-local drift outcome; ASIN kind alone never supplies format or language."
+    provider_outage: "Readarr follows the same minimum-founded persistence rule as ISBN with one idempotent retry; background passes pause without storms."
+  - route_kind: GoodreadsBookEdition
+    usable_for_automatic_enrichment: true
+    fetch_failure: "Preserve the edition-owned route and retry at the normal convergence cadence; no standalone request is added solely to upgrade the work id."
+    parse_drift: "Change nothing and retry normally. Any already-fetched readable page captures its Goodreads work id idempotently; layout drift captures nothing."
+    provider_outage: "Change nothing and retain normal cadence. A later enrichment, manual refresh, or convergence visit may complete the no-extra-request work-id upgrade."
+  - route_kind: Undeclared
+    usable_for_automatic_enrichment: false
+    fetch_failure: "No automatic fetch is scheduled; the active route still makes the badge Connected."
+    parse_drift: "No parser is selected until the kind is deliberately added to the closed usable list."
+    provider_outage: "No retry outcome accumulates; manual title+author provider search remains available."
+
+route_capture_handoff:
+  owner: "livrarr-metadata is the broker. It invokes livrarr-enrichment, receives EnrichmentApplyOutcome, and is the only component that may turn captured_route_evidence into an existing-work IdentityRoadRequest."
+  triggers:
+    - { trigger: EnrichmentPass, executor: "livrarr-metadata route-driven enrichment workflow", route_write: "submit every captured nonempty typed route to IdentityRoadService::settle before the pass reports complete" }
+    - { trigger: ManualRefresh, executor: "livrarr-metadata user-watching refresh workflow", route_write: "submit captured routes through settle inline and surface any conflict/review result" }
+    - { trigger: ConvergenceVisit, executor: "livrarr-server tick calling livrarr-metadata convergence workflow", route_write: "submit captured routes through settle idempotently before checkpointing the visit" }
+  goodreads_rule: "GoodreadsBookPage parsing may emit GoodreadsWork evidence only when the work id is readable in the already-fetched page. The handoff makes zero extra provider requests; duplicate evidence is idempotent and disagreement follows class A/C policy."
+  sibling_invariant: "livrarr-enrichment never imports/calls livrarr-identity or livrarr-metadata and never writes identity_routes/IdentityStatus. Returning a domain evidence value to its caller preserves the sibling seam."
+
+door_evidence_contract:
+  chokepoint: "livrarr-metadata::identity_road::IdentityRoadServiceImpl::settle"
+  evidence_precedence: [UserChoice, OwnedFile, ProviderIdentity, MinimumTitleAuthors]
+  doors:
+    - door: DirectAdd
+      current_entry: "livrarr-handlers/src/work.rs::add"
+      watching: human
+      user_choice: always
+      owned_file: never
+      provider_identity: conditional
+      minimum_only: conditional
+      outcome_policy: "The user's candidate pick or explicit title+author creation settles/flags inline; no provider/file evidence still creates the valid zero-route work."
+    - door: ManualImport
+      current_entry: "livrarr-handlers/src/manual_import.rs::import"
+      watching: human
+      user_choice: always
+      owned_file: always
+      provider_identity: conditional
+      minimum_only: conditional
+      outcome_policy: "User choice outranks file; file outranks provider. Dedup and disagreement flag before any file attaches elsewhere."
+    - door: ListImport
+      current_entry: "livrarr-handlers/src/list_import.rs::confirm"
+      watching: human-on-review-add
+      user_choice: conditional
+      owned_file: never
+      provider_identity: conditional
+      minimum_only: conditional
+      outcome_policy: "The review/add surface flags possible duplicates; a machine continuation decides only authority-certain evidence or parks."
+    - door: AuthorMonitor
+      current_entry: "livrarr-metadata/src/author_monitor_workflow.rs::run_monitor"
+      watching: machine
+      user_choice: never
+      owned_file: never
+      provider_identity: always
+      minimum_only: never
+      outcome_policy: "Decide through the authority or defer; provider identity is mandatory and no evidence may be invented."
+    - door: SeriesMonitor
+      current_entry: "livrarr-metadata/src/series_query_service/service.rs::run_series_monitor_worker"
+      watching: machine
+      user_choice: never
+      owned_file: never
+      provider_identity: conditional
+      minimum_only: conditional
+      outcome_policy: "Consume a present monitored provider id; otherwise create a valid zero-route minimum work or defer, never synthesize an id."
+    - door: ReadarrImport
+      current_entry: "livrarr-server/src/readarr_import_workflow.rs::start"
+      watching: machine-with-import-review-recovery
+      user_choice: never
+      owned_file: always
+      provider_identity: conditional
+      minimum_only: conditional
+      outcome_policy: "Valid embedded identifiers resolve first. Agreeing hits settle; conflicts park unattached; no-hit plus valid agreeing minimum creates a routed work; identifier-free valid minimum parks import review with no work/file attachment."
+  wiring_proof: "Each creation door has a door-gate row proving IdentityRoadOrigin::CreationDoor reaches IdentityRoadService::settle. A typed DoorEvidence constructor rejects Always absence, Never injection, and minimum-only coexistence with route-bearing evidence before settlement. EnrichmentPass, ManualRefresh, and ConvergenceVisit are existing-work origins governed separately by route_capture_handoff."
+
+merge_field_policy:
+  identity_predicate: "Auto-merge only when title_verdict=Same, author_verdict=Agree, id evidence is not WorkKeyContradiction, and no surviving audited different-from-all relation exists in the complete proposed cohort."
+  survivor: "Lowest stable Livrarr WorkId among authority-certain same-text anchors; an explicit attach-to-anchor review outcome names its selected survivor instead."
+  plural_fields:
+    - field: routes
+      policy: "Lossless union of active routes by typed key; ownership collision parks class C; displaced routes move to the audited archive and never re-enter matching/projection."
+    - field: editions
+      policy: "Reparent whole editions to the survivor without inferring co-edition; duplicate edition ids converge only through direct co-edition proof or explicit user target. Empty losing shells are archived."
+    - field: library_items
+      policy: "Repoint every file to the survivor; path collision remains an explicit import/file review outcome and never drops a file."
+    - field: contributors_and_roles
+      policy: "Union author-record contributors, collapse repeated author ids, retain all sourced roles, preserve the survivor's primary while it remains, and use the contributor-order review for unresolved full-key ties."
+    - field: alternative_titles
+      policy: "Union exact values with source/provenance; display/title identity never derives from this collection."
+    - field: subjects_people_places_times_topics
+      policy: "Union by subject taxonomy plus normalized value while preserving exact source spellings/provenance."
+    - field: containment_relations
+      policy: "Union both directions and unresolved references; preserve provider ids and never discard a pointer merely because the target is absent locally."
+    - field: cover_candidates
+      policy: "Retain every active candidate and provenance; recompute each slot under REQ-014. The rank winner is selected, not the only retained cover."
+    - field: history_conflicts_reviews_archives
+      policy: "Repoint/deduplicate active cards by semantic key, preserve every audit/archive row, and exclude archived losers/routes from active group scans."
+    - field: import_origins_and_provider_observations
+      policy: "Union origin records and immutable observations; no first-arrival winner."
+  singular_fields:
+    - fields: [identity_title_main, identity_title_subtitle, identity_title_volume]
+      policy: "A user-set value or explicit absence beats machine/migrated. Conflicting user-set values pause on FieldResolutionReview. Equal machine values coalesce; a sole present value survives; differing present machine values pause. The selected tuple re-keys through the full group lifecycle."
+    - fields: [subtitle_override_state, subtitle_override_value]
+      policy: "Treat UserValue and UserAbsent as user-set singulars. Conflicts pause. Automatic is absence of override; after merge the rendered subtitle and machine projection are recomputed, never copied."
+    - fields: [machine_subtitle_projection, machine_subtitle_provenance]
+      policy: "Never merge stored values. Recompute totally from preserved editions/defaults/source order after the transaction; this cannot alter tuple, key, distinction, or identity review state."
+    - fields: [primary_author_id]
+      policy: "Retain the survivor's primary while it remains a contributor. If removed, propose the canonical successor and complete re-key review before commit. Conflicting contributor partition/order evidence pauses; zero contributors is rejected."
+    - fields: [text_distinction]
+      policy: "Retain the selected survivor's durable distinction. Retire every merged loser's distinction only in the audited same-work merge; never mint one for attach/merge."
+    - fields: [canonical_work_pointer]
+      policy: "User evidence beats machine. Conflicting user values/absence or two different present machine values pause; no arbitrary provider winner."
+    - fields: [default_edition_per_format]
+      policy: "Evaluate separately per declared format. User evidence beats machine; conflicting user choices or different present machine defaults pause. Unknown-format editions are ineligible."
+    - fields: [description, original_title, year, language, page_count, duration_seconds, publisher, publish_date, narrator, narration_type, abridged, rating, rating_count, series_name, series_position]
+      policy: "For each field independently, user-set value/absence beats machine. User/user conflict pauses. Equal machine values or sole present values coalesce; differing present machine values pause unless a listed requirement supplies a total derivation. No generic provider priority resolves conflicts."
+    - fields: [ebook_cover_selection, audiobook_cover_selection]
+      policy: "Do not merge selections. Recompute from retained candidates using REQ-014; user choice is rank zero, file precedes provider, and audiobook may explicitly fall back to selected ebook."
+    - fields: [identity_status]
+      policy: "Derive after route merge: zero active routes=NotConnected; active route plus surviving user-confirmation provenance=UserConfirmed; otherwise Connected. A violated user-confirmed-with-zero-route invariant falls back and emits repair review."
+    - fields: [enrichment_status, enriched_at, enrichment_source, merge_generation, identity_generation]
+      policy: "Operational projections are recomputed or advanced from preserved outcomes after content settlement; they never choose content, identity, or a merge survivor."
+    - fields: [added_at]
+      policy: "Retain the earliest fact timestamp while preserving every original Added history event."
+    - fields: [monitor_ebook, monitor_audiobook]
+      policy: "OR-combine each flag independently."
+
+migration_plan:
+  current_max_verified: "081_author_link_unlabeled_credit_gate.sql"
+  activation_trigger_surface:
+    deployment_shape: "The single-user alpha runs one livrarr-server binary against one local SQLite database. Cutover runs as a one-shot process that acquires the same database/PID lock as the server and never binds HTTP or starts background jobs."
+    operator: "Native flow: stop the normal server, invoke `livrarr --data <data-dir> identity-cutover rehearse --snapshot <copied-db>` twice, invoke `identity-cutover apply --approved-report <report>` to stage the live mapping and durable blockers, resolve every listed card with list/show/resolve, rerun Apply to activate, then restart normal serving. Existing single-container Docker flow: `docker compose stop livrarr`; run each one-shot command as `docker compose run --rm --no-deps livrarr /app/livrarr --data /config identity-cutover <subcommand>` so the existing `/config` volume and service configuration are reused; after successful Apply run `docker compose up -d livrarr`. A blocked Apply is expected to commit only staged migration rows/cards, never the authority marker/index; each later one-shot invocation reacquires the same exclusive lock. PO-RATIFY."
+    normal_startup: "After migrations and before constructing repositories, binding HTTP, or starting jobs, livrarr-server::init_database calls ensure_identity_authority_ready. A non-empty database with an inactive marker fails startup with a cutover-required error; it never serves in a mixed-authority state."
+    test_and_fresh_startup: "The ordinary livrarr-db::create_test_db calls the DB-level SqliteDb::ensure_identity_authority_ready directly after migrations; production init_database alone calls the livrarr-server wrapper, which delegates to that DB method. If works and every legacy identity/review source are transactionally empty, the controller records a deterministic trivially-empty rehearsal and immediately activates the new marker/index in that transaction. The separate test-only create_pre_cutover_identity_test_db constructor deliberately returns an inactive legacy fixture without ever calling readiness; it does not undo an Activated marker."
+    shared_cutover_event: "The committed identity-layer authority marker is the single event for both read and write authority. Before it, the new binary is maintenance-only; after it, legacy identity reads and writes are both forbidden. Marker flip, old-index retirement, legacy-consumer disablement, primary-author projection verification, and creation of idx_works_identity_v2 are atomic."
+    caller_boundary: "SqliteDb::ensure_identity_authority_ready is the authority implementation. Its callers are livrarr-db::create_test_db and the livrarr-server::ensure_identity_authority_ready_before_serve wrapper used only by production init_database; livrarr-db never imports or calls livrarr-server. The test-only pre-cutover constructor calls neither surface."
+    rerun_apply_reconciliation: "A rerun Apply revalidates the previously staged mapping plus every committed operator resolution idempotently. Stable typed keys drive upsert/no-op behavior: an equal staged row is reused, never re-inserted into its own uniqueness constraint; committed resolution records are authoritative and their chosen graph is validated, never re-derived over, discarded, or replaced by a fresh copy of the resolved card. Any actual divergence from the staged typed key, resolution generation, or resolved invariant is a reported failure rather than silent overwrite."
+    pre_activation_report_check: "Before activation, compare the live schema version and the fingerprint of the frozen legacy-source domain against source_schema_version and source_fingerprint in the approved report. Do not compare the post-resolution canonical output with the rehearsal's canonical_output_fingerprint. Recompute the canonical-output fingerprint fresh from the revalidated, resolved graph and persist it on the activation report."
+  pre_activation_review_cli:
+    trust_and_exclusivity: "List/show/resolve run only in the local one-shot cutover process after it acquires the same PID/database exclusion used by Apply. They bind no socket, construct no HTTP router, start no jobs, and accept no remote actor. Every resolution is audited as CutoverOperator { installation_id, invocation_id } and dispatches the exact IdentityRoadService::resolve_review continuation used by the authenticated post-activation HTTP handler. The inactive marker remains inactive until the final Apply transaction, so no normal writer can race or form a second authority."
+    resolution_provenance: "A CutoverOperator resolving a card stamps EvidenceProvenance::User exactly as an AuthenticatedUser resolving the identical card. It is an audited human decision, so REQ-024 user-beats-machine precedence and later conflict behavior are identical; it is never stamped Migrated merely because it occurred during cutover."
+    operator_scope: "CutoverOperator is installation-wide by design. In the single-user alpha the exclusive process verifies actor.installation_id against this database's installation id and admits only the user-scoped card row belonging to the installation's sole configured user, making the operator that user for scope validation. A future multi-user build may construct this actor only through an explicit admin capability; after the same installation-id check that capability may resolve card rows across users in that installation. Ordinary AuthenticatedUser actors remain restricted to card.user_id equality."
+    command_flow:
+      - "`identity-cutover list` emits all unresolved card ids, generations, user scopes, and ReviewKinds from the configured live data directory."
+      - "`identity-cutover show --card <id>` emits the preserved evidence, allowed actions, and current generation for one card without mutation."
+      - "`identity-cutover resolve --card <id> --expected-generation <n> --action-file <json>` parses exactly one typed ReviewResolutionCommand, rejects a mismatched card kind or stale generation, calls IdentityRoadService::resolve_review, and writes the resolution plus audit atomically."
+      - "Cancellation or validation failure leaves the card pending. The operator repeats list/show/resolve, then reruns Apply with the approved report. Apply idempotently revalidates staged typed-key rows plus authoritative committed resolutions; if cards remain it returns Blocked without duplicating rows/cards. Its pre-activation comparison uses only schema version plus the frozen legacy-source fingerprint from the approved report, then recomputes and records the resolved canonical-output fingerprint fresh."
+    reachable_review_kinds:
+      - { kind: IdentityConflict, actions: "Accept or reject the candidate, or select DifferentWork; every accepting action names the surviving route set and target edition when applicable." }
+      - { kind: PendingRoute, actions: "Affirm exactly the card's non-conflicting parked candidate with EvidenceProvenance::User and the complete surviving route set, or cancel leaving candidate and card pending." }
+      - { kind: GroupIdentity, actions: "Attach or merge using a chosen anchor, affirm DifferentFromAll, or cancel without mutation." }
+      - { kind: FieldResolution, actions: "Choose a listed preserved value, choose explicit absence where allowed, or cancel; no arbitrary value or provider-priority winner." }
+      - { kind: ContributorOrder, actions: "Submit the complete identity partition, full contributor order, and primary seat, or cancel." }
+      - { kind: EditionEvidence, actions: "Choose cited direct evidence, retain Unknown/absence, archive an otherwise-empty shell, or cancel." }
+      - { kind: ImportIdentity, actions: "Supply corrected metadata and retry, choose a resolving identifier, choose explicit identity or valid minimum creation, or cancel; no file attaches while pending." }
+      - { kind: MigrationRepair, actions: "Supply a corrected typed value, assign scope plus owner, or discard proven non-identity with mandatory immutable audit." }
+      - { kind: InvariantRepair, actions: "Recompute from authority, supply a missing reference, or discard only a malformed derived row with mandatory immutable audit." }
+  migration_082_schema_inventory:
+    invariant: "Every user-scoped table listed here carries a NOT NULL user_id, every primary/unique key begins with user_id where applicable, every child relation uses a composite (user_id, parent_id) foreign key, and every query includes user_id = caller_user_id. Installation-scoped rows contain no per-user identity payload and are the only deliberate exceptions."
+    tables:
+      - { table: works, scope: user, user_id: "existing NOT NULL; every identity tuple/key/primary_author projection write retains the existing user predicate", role: "altered with normalized identity tuple, text_distinction, identity_status, identity_generation, and derived primary_author_id" }
+      - { table: identity_routes, scope: user, user_id: "required", role: "active route and exactly-one-owner row" }
+      - { table: editions, scope: user, user_id: "required", role: "first-class edition owned by (user_id, work_id)" }
+      - { table: work_contributors, scope: user, user_id: "required", role: "ordered Author references; ordinal zero is authoritative primary" }
+      - { table: work_contributor_roles, scope: user, user_id: "required", role: "sourced roles for one (user_id, work_id, author_id) contributor" }
+      - { table: work_relationships, scope: user, user_id: "required", role: "contains/part-of and unresolved route references" }
+      - { table: work_subjects, scope: user, user_id: "required", role: "sourced people/place/time/topic values" }
+      - { table: work_default_editions, scope: user, user_id: "required", role: "one explicit default per known format and work" }
+      - { table: edition_cover_candidates, scope: user, user_id: "required", role: "retained cover evidence owned by an edition" }
+      - { table: work_cover_selections, scope: user, user_id: "required", role: "per-format selected source and fallback provenance" }
+      - { table: embedded_cover_inspections, scope: user, user_id: "required", role: "durable per-library-item outcome keyed by (user_id, library_item_id, revision_size_bytes, revision_modified_ns, revision_sha256); stores Extracted/VerifiedNoCover/CouldNotInspect/FileGone, candidate reference, sanitized error code, and inspected_at, never cover bytes" }
+      - { table: machine_subtitle_projections, scope: user, user_id: "required", role: "display-only selected-edition projection" }
+      - { table: identity_conflicts_v2, scope: user, user_id: "required", role: "class A/B/C parked candidate and resolution; migration 083 adds a read-only legacy-named compatibility view identity_conflicts over it" }
+      - { table: identity_review_cards, scope: user, user_id: "required", role: "group, field, contributor, edition, import, migration-repair, and invariant-repair reviews" }
+      - { table: identity_route_archives, scope: user, user_id: "required", role: "retired/rejected route attachment audit" }
+      - { table: identity_merge_archives, scope: user, user_id: "required", role: "same-work loser and preserved-field audit" }
+      - { table: identity_audit_events, scope: user, user_id: "required", role: "append-only route/review/merge resolution facts" }
+      - { table: identity_provider_attempts, scope: user, user_id: "required", role: "idempotent route convergence and retry observations" }
+      - { table: identity_cutover_runs, scope: installation, user_id: "not present; database-wide control row with fingerprints/counts only", role: "rehearsal/apply lifecycle" }
+      - { table: identity_cutover_reports, scope: installation, user_id: "not present; canonical aggregate fingerprints/counts only, no raw route or user payload", role: "approved deterministic report" }
+    persisted_type_audit:
+      - { type: Work, backing: works, user_id: "required (existing field)" }
+      - { type: WorkRoute, backing: identity_routes, user_id: required }
+      - { type: IdentityRouteRow, backing: identity_routes, user_id: required }
+      - { type: Edition, backing: editions, user_id: required }
+      - { type: WorkContributor, backing: work_contributors, user_id: required }
+      - { type: WorkContributorRoleRow, backing: work_contributor_roles, user_id: required }
+      - { type: WorkRelationship, backing: work_relationships, user_id: required }
+      - { type: WorkSubjectRow, backing: work_subjects, user_id: required }
+      - { type: DefaultEdition, backing: work_default_editions, user_id: required }
+      - { type: EditionCoverCandidateRow, backing: edition_cover_candidates, user_id: required }
+      - { type: WorkCoverSelectionRow, backing: work_cover_selections, user_id: required }
+      - { type: EmbeddedCoverInspectionRecord, backing: embedded_cover_inspections, user_id: required }
+      - { type: MachineSubtitleProjection, backing: machine_subtitle_projections, user_id: required }
+      - { type: IdentityConflict, backing: identity_conflicts_v2, user_id: required }
+      - { type: IdentityReviewCardRow, backing: identity_review_cards, user_id: required }
+      - { type: IdentityRouteArchiveRow, backing: identity_route_archives, user_id: required }
+      - { type: IdentityMergeArchiveRow, backing: identity_merge_archives, user_id: required }
+      - { type: IdentityAuditEventRow, backing: identity_audit_events, user_id: required }
+      - { type: IdentityProviderAttemptRow, backing: identity_provider_attempts, user_id: required }
+      - { type: CapturedIdentity, backing: "aggregate over user-scoped rows", user_id: required }
+      - { type: IdentityCutoverRun, backing: identity_cutover_runs, user_id: "not present; installation-scoped and payload-free" }
+      - { type: IdentityMigrationReport, backing: identity_cutover_reports, user_id: "not present; installation-scoped aggregate counts/fingerprints only" }
+  files:
+    - number: 082
+      name: 082_identity_layer_foundation.sql
+      role: "Add identity_routes, editions, edition/default/cover/projection storage including embedded_cover_inspections, identity title tuple/key columns, contributors/roles, relationships/subjects, typed review/archive/audit tables, and cutover-run tables. Add no new identity unique index and edit no applied migration."
+    - number: 083
+      name: 083_identity_layer_cutover_support.sql
+      role: "Add compatibility views/read markers and indexes that are non-unique and safe before activation; freeze legacy identity writers through code/contract, not triggers that dual-write."
+    - number: 084
+      name: 084_identity_layer_legacy_retirement.sql
+      role: "A later activation-gated cleanup release rebuilds legacy tables to remove retired scalar route/name/trust storage and external_ids only after the cutover marker and audit prove every value exists in its new single source. It is never applied in the foundation deployment."
+  mapping:
+    - { legacy: ol_key, target: "IdentityRoute(owner=Work, provider=OpenLibrary, kind=OpenLibraryWork)" }
+    - { legacy: hc_key, target: "IdentityRoute(owner=Work, provider=Hardcover, kind=HardcoverWork)" }
+    - { legacy: gr_key, target: "IdentityRoute(owner=provisional Edition, provider=Goodreads, kind=GoodreadsBookEdition)" }
+    - { legacy: isbn_13, target: "IdentityRoute(owner=provisional Edition, provider=IsbnRegistry, kind=Isbn13Edition)" }
+    - { legacy: asin, target: "IdentityRoute(owner=provisional Edition, provider=Amazon, kind=AsinEdition)" }
+    - { legacy: external_ids.Isbn10, target: "IdentityRoute(owner=provisional Edition, provider=IsbnRegistry, kind=Undeclared{provider_kind:isbn_10,scope:Edition}); preserved but not automatically usable" }
+    - { legacy: external_ids.Isbn13, target: "IdentityRoute(owner=provisional Edition, provider=IsbnRegistry, kind=Isbn13Edition)" }
+    - { legacy: external_ids.Asin, target: "IdentityRoute(owner=provisional Edition, provider=Amazon, kind=AsinEdition)" }
+    - { legacy: external_ids.OpenLibraryWork, target: "IdentityRoute(owner=Work, provider=OpenLibrary, kind=OpenLibraryWork)" }
+    - { legacy: external_ids.OpenLibraryEdition, target: "IdentityRoute(owner=provisional Edition, provider=OpenLibrary, kind=Undeclared{provider_kind:open_library_edition,scope:Edition}); preserved but not automatically usable" }
+    - { legacy: external_ids.GoodreadsBook, target: "IdentityRoute(owner=provisional Edition, provider=Goodreads, kind=GoodreadsBookEdition)" }
+    - { legacy: external_ids.HardcoverBook, target: "IdentityRoute(owner=Work, provider=Hardcover, kind=HardcoverWork), because the existing HC `book` ontology is work-shaped" }
+    - { legacy: external_ids.GoogleBooksVolume, target: "IdentityRoute(owner=provisional Edition, provider=Other(google_books), kind=Undeclared{provider_kind:google_books_volume,scope:Edition}); preserved but not automatically usable" }
+  external_id_collision_rule: "The legacy table permits the same typed value on multiple Works. A same-user collision materializes one class-C review card and leaves both legacy rows/new candidate ownership untouched until audited resolution; migration order never chooses an owner."
+  anchor_ledger_mapping:
+    branch_order:
+      - "First trim anchor_value. An empty value is the legacy set_identity_pending state sentinel, not an identifier: consume it as state-only evidence, create no route/candidate/card, and preserve its source row in the migration audit counts."
+      - "Only a non-empty value reaches anchor_type and confidence mapping. Invalid typed values become MigrationRepairReview; they never become routes."
+      - "Only successfully typed non-empty values may produce active, parked, or retired route records under confidence."
+    types:
+      - { legacy: work_identity_anchors.ol_work, target: "OpenLibraryWork owned by Work" }
+      - { legacy: work_identity_anchors.gr_work, target: "GoodreadsWork owned by Work; unlike works.gr_key, this ledger type is not a Goodreads book id" }
+      - { legacy: work_identity_anchors.hc_work, target: "HardcoverWork owned by Work" }
+      - { legacy: work_identity_anchors.isbn_13, target: "Isbn13Edition owned by a proven or provisional Edition" }
+      - { legacy: work_identity_anchors.asin, target: "AsinEdition owned by a proven or provisional Edition" }
+      - { legacy: unknown_anchor_type, target: "MigrationRepairReview retaining the original row/value; no scope is guessed and activation waits for resolution" }
+    confidence:
+      confirmed: "Create an active route with mapped setter/provenance. Setter=user supplies user-confirmation provenance."
+      pending: "Create a parked route candidate/review entry, never an active route or Connected badge by itself."
+      superseded: "Create a retired route archive retaining set_at, setter, value, and superseded_by; exclude it from matching/projection."
+  legacy_conflict_mapping:
+    - { legacy_kinds: [incoming_different_ol_key, incoming_different_gr_key, incoming_different_hc_key, ol_redirect_collision], target: "class A, unless the same typed route is discovered active on another Work during mapping, which is class C" }
+    - { legacy_kinds: [quorum_tie], target: "class B with every preserved tied candidate/evidence payload" }
+    - { legacy_status: open, target: "Pending new conflict card; existing routes remain untouched" }
+    - { legacy_status: "resolved or dismissed", target: "Resolved audit/archive row retaining the raw legacy action, notes, source path, timestamps, and payload; no active card" }
+  legacy_review_and_retry_mapping: "Carry work_identity_review_candidates, nonblank pending anchor evidence, dead-end counters, provider retry state, and convergence scheduling into typed review/attempt rows. Blank pending-anchor sentinels are audited as consumed state markers and create no card. Any other row that cannot be typed becomes a repair card with its raw value and blocks activation; nothing is silently dropped or treated as Connected."
+  co_edition_rule: "Group edition ids only when one preserved provider response or owned-file observation directly presented them together. Otherwise each id receives its own format=Unknown, language=None provisional edition. Identifier kind never infers either field."
+  title_rule: "Parse legacy title with the authority; structured nonblank subtitle/volume wins its parsed counterpart, blank is absent, and missing/invalid main creates a repair card while retaining the legacy row/key. Provenance is preserved or marked Migrated."
+  badge_rule:
+    authority: "Derive only from the final surviving active route set, never from a raw legacy setter/confidence/status column or from parked/blank evidence."
+    total_order:
+      - "If at least one surviving active route carries successfully migrated user-confirmation provenance, persist UserConfirmed."
+      - "Else if at least one surviving active route exists, persist Connected."
+      - "Else persist NotConnected."
+    legacy_totality: "setter=user + confidence=pending is parked when nonblank and consumed as state-only when blank, so neither arm can create UserConfirmed without a route. Empty-string sentinels, pending/superseded rows, unknown/unparseable setters (mapped to non-user Migrated/AutoSearch provenance), every legacy IdentityStatus variant, and zero-row works all terminate in exactly one branch. Review/conflict rows remain orthogonal."
+  distinction_rule: "Common is the default. A reviewed/deterministically established different text receives `work:<stable WorkId>` as its durable non-common distinction; no random value, arrival order, or display field participates."
+  rehearsal: "Copy the PO's real SQLite library, run the same IdentityCutoverService twice from identical copies, serialize rows/cards/keys in stable primary-key order, and require byte-identical reports and SHA-256 fingerprints before Apply is enabled."
+  repair_review_actions:
+    MigrationRepairReview:
+      - "Supply a corrected typed value and provider kind, then rerun validation and mapping."
+      - "Assign Work/Edition scope and an explicit target owner for a preserved nonblank value, then rerun collision checks."
+      - "Discard a proven non-identity/sentinel value with mandatory reason and immutable raw-row audit; required legacy data cannot be discarded."
+    InvariantRepair:
+      - "Recompute the broken projection from authoritative routes/editions/contributors and record before/after values."
+      - "Supply the missing owner/reference needed to restore the declared invariant, then rerun complete-group and collision checks."
+      - "Discard only a malformed derived/candidate row with mandatory reason and immutable audit; authoritative route, edition, contributor, and file facts cannot be discarded."
+    activation_rule: "Every action is the same audited IdentityRoadService::resolve_review continuation, reached either from the authenticated HTTP handler after activation or from the local exclusive cutover CLI before activation. The pre-marker actor is CutoverOperator, not a fabricated HTTP identity. Cancellation leaves the card pending; activation remains blocked until the rerun proves zero repair cards."
+  pre_cutover_test_fixture:
+    constructor: "#[cfg(any(test, feature = \"test-helpers\"))] livrarr_db::test_helpers::create_pre_cutover_identity_test_db(fixture: LegacyIdentityFixture) -> PreCutoverIdentityTestDb"
+    semantics: "Create a real single-connection SQLite :memory: database with foreign keys enabled, apply the historical schema plus migrations 082/083, seed the supplied legacy rows before readiness, and return with the authority marker in NotRun/inactive state. The constructor never calls ensure_identity_authority_ready and never rolls back or unsets an Activated marker; its wrapper exposes the SqliteDb only to cutover/rehearsal tests and is unavailable to production builds."
+    fixture_coverage: "LegacyIdentityFixture can express complete identity groups, subtitle present/absent, every legacy badge-state by route-set combination, monitoring flags, conflicts/review rows, ledger/dead-end/provider-attempt rows, and identical cloned inputs for repeatability. AC-021 group reconciliation and AC-023 non-empty migration/legacy-totality fixtures therefore execute against a genuine pre-marker database."
+    ordinary_test_boundary: "create_test_db remains the default helper and directly calls SqliteDb::ensure_identity_authority_ready, so ordinary tests still observe only Activated new authority."
+  startup_legacy_identity_sequence:
+    marker_guard: "After step 8 migrations and the step 9a compatibility-version read, read the authority marker once before any legacy identity writer. When Active, skip every identity-mutating step 9b through 9e. When inactive, normal production startup returns CutoverRequired; only the exclusive one-shot cutover initializer may run the legacy passes, before rehearsal/mapping. Fresh empty databases take the DB readiness branch without running legacy writers."
+    enumerated_steps:
+      - { step: "4-7", site: "crates/livrarr-server/src/main.rs permission check, PID lock, SQLite connect, pre-migration backup", classification: "non-identity startup infrastructure; always retained" }
+      - { step: "8", site: "crates/livrarr-server/src/main.rs migration runner", classification: "always runs additive migrations; 082/083 install inactive support, while separately released 084 is activation-gated and never part of foundation startup" }
+      - { step: "9a", site: "crates/livrarr-server/src/main.rs:680-685 database compatibility/version gate", classification: "read-only and always retained; authority marker is read immediately after it" }
+      - { step: "9b-work", site: "crates/livrarr-server/src/main.rs:687-694 backfill_normalized_identity", classification: "legacy writer; only the exclusive inactive cutover initializer may invoke it, permanently skipped when Active" }
+      - { step: "9b-author", site: "crates/livrarr-server/src/main.rs:696-704 author normalization/backfill sibling", classification: "legacy work author/name writer; only the exclusive inactive cutover initializer may invoke it, permanently skipped when Active" }
+      - { step: "9c", site: "crates/livrarr-server/src/main.rs:706-714 backfill_identity_key_recompute", classification: "legacy identity-key writer; only pre-marker cutover input, permanently skipped when Active" }
+      - { step: "9d", site: "crates/livrarr-server/src/main.rs:716-724 backfill_work_identity_ledger", classification: "writes work_identity_anchors; only pre-marker cutover input, permanently skipped when Active" }
+      - { step: "9e", site: "crates/livrarr-server/src/main.rs:726-733 clear_subtitle_rule_deadends", classification: "deletes work_identity_anchors and mutates retry scheduling; run only before mapping captures its outcome into identity_provider_attempts, permanently skipped when Active" }
+      - { step: "10", site: "crates/livrarr-server/src/main.rs backup cleanup", classification: "non-identity startup infrastructure; always retained" }
+    completeness: "Repository-wide startup inspection found no sibling legacy-identity startup writers outside these main.rs 9b-9e calls. This sequence and the legacy consumer inventory jointly cover every startup reader/writer relevant to FP-026/FP-027."
+  legacy_uniqueness_authority_cutover:
+    class_sweep: "Sixteen production/test-helper consumer groups cover every DB method and every production caller that creates, writes, queries, recomputes, or relies on (user_id, normalized_title, normalized_author) or the sibling legacy identity ledger as authority. Normalized legacy columns may remain compatibility data until 084 but never select or suppress identity after the marker."
+    consumers:
+      - { site: "crates/livrarr-db/src/pool.rs:400-804 backfill_normalized_identity / idx_works_identity creation", disposition: "Pre-marker migration input only; invoked by the cutover controller before mapping, then permanently disabled by the shared marker. Its old-key duplicate merge does not run after activation." }
+      - { site: "crates/livrarr-server/src/main.rs:687-694 startup invocation", disposition: "Replace ordinary startup invocation with ensure_identity_authority_ready; non-empty inactive databases refuse serving and the one-shot cutover process alone may run the legacy backfill." }
+      - { site: "crates/livrarr-server/src/main.rs:696-704 author backfill startup sibling", disposition: "Classify as a legacy author/name writer and guard it with the same marker: exclusive pre-marker cutover input only, permanently skipped after activation." }
+      - { site: "crates/livrarr-db/src/pool.rs:984-1047 backfill_identity_key_recompute / identity_key_generation", disposition: "Run at most as a pre-marker compatibility input; retire its startup call and marker as authority at activation. No post-marker normalized_title/normalized_author rewrite participates in identity." }
+      - { site: "crates/livrarr-server/src/main.rs:706-714 recompute startup invocation", disposition: "Guard off permanently once the shared marker is active; fresh databases skip directly to new authority." }
+      - { site: "crates/livrarr-server/src/main.rs:716-724 backfill_work_identity_ledger", disposition: "Writes work_identity_anchors and therefore runs only inside the exclusive pre-marker cutover initializer; permanently skipped after the shared marker." }
+      - { site: "crates/livrarr-server/src/main.rs:726-733 clear_subtitle_rule_deadends", disposition: "Deletes work_identity_anchors and affects retries; run before migration mapping records the surviving attempt state, then permanently skip after the marker." }
+      - { site: "crates/livrarr-db/src/sqlite_work.rs:178-222 insert_work_row ON CONFLICT(user_id, normalized_title, normalized_author)", disposition: "Delete the conflict target from the production creation road; commit_settlement performs complete-group reconciliation and relies on idx_works_identity_v2." }
+      - { site: "crates/livrarr-db/src/sqlite_work.rs:1589-1613 WorkDbCreate race-loser reselect", disposition: "Replace old-key reselect with SettlementCommitOutcome from the identity road; no direct create path survives." }
+      - { site: "crates/livrarr-db/src/sqlite_work.rs:988-1039 find_by_normalized_match and find_normalized_match_no_anchor_for_user", disposition: "Retire as identity/dedup authority. New broad-main/primary and exact-tuple/primary group repository queries feed the matching authority; route absence is read from identity_routes, not work_identity_anchors." }
+      - { site: "crates/livrarr-metadata/src/work_service.rs:680-698 direct-add adopt path calling find_normalized_match_no_anchor_for_user", disposition: "Route adopt lookup through IdentityRoadService::settle and complete-group reconciliation. A normalized first-row match may neither select an existing Work nor suppress creation. This row folds Anthropic r2 F03 and the matching XAI r2 section 2 observation once." }
+      - { site: "crates/livrarr-metadata/src/work_service.rs:746-765 and 2795-2820 normalized-match consumers", disposition: "Route both add-time and helper dedup through IdentityRoadService::settle and reconcile_complete_group; no first-row normalized lookup may select a Work." }
+      - { site: "crates/livrarr-db/src/sqlite_work.rs:1202-1222 plus work_service.rs:1472-1499 normalized key updates", disposition: "Explicit title/contributor edits update IdentityTitleTuple and derived v2 key only through the road transaction. Legacy normalized columns, if retained for compatibility, are non-authoritative and cannot trigger ON CONFLICT." }
+      - { site: "crates/livrarr-db/src/lib.rs:89-112 create_test_db idx_works_user_normalized", disposition: "Remove the test-only legacy unique index. After migrations create_test_db takes the trivially-empty activation branch and creates idx_works_identity_v2, so tests exercise production authority." }
+      - { site: "crates/livrarr-db/src/pool.rs test fixtures around 1212-1409 and 1533-1650", disposition: "Rewrite authority assertions/fixtures against the v2 index and complete-group outcomes; any compatibility-column checks are explicitly non-authoritative migration tests." }
+      - { site: "crates/livrarr-db/src/api/work.rs WorkDbCreate and normalized-match API", disposition: "Remove direct uniqueness semantics from the public contract; only the identity settlement repository may create/re-key a Work. Display/search compatibility fields do not imply identity authority." }
+  live_sequence:
+    - "The operator's one-shot apply process acquires the exclusive DB/PID lock, applies 082/083, and never starts HTTP or jobs; normal startup observes inactive marker plus non-empty legacy state and refuses to serve."
+    - "Verify the two byte-identical approved snapshot reports, including source_schema_version and the frozen legacy-source fingerprint. For a transactionally empty fresh/test database, record the trivially-empty report and jump directly to activation."
+    - "Populate routes, editions, tuple/key fields, contributors, archives, and every reachable review-card class using the rehearsed code path; a blocked Apply commits only staged new rows/cards and audit while legacy columns remain read-only and the marker/index remain inactive."
+    - "With normal serving still stopped, use the exclusive identity-cutover list/show/resolve commands to dispatch every conflict, group-identity, field-resolution, contributor-order, edition-evidence, import-identity, migration-repair, and invariant-repair card through IdentityRoadService::resolve_review. Each one-shot invocation releases its lock on exit; unresolved state remains maintenance-only."
+    - "Rerun Apply idempotently revalidates the staged graph: upsert/no-op by stable typed key, reuse every committed resolution as authoritative, and never re-derive over or reinsert a staged row/resolved card. If any card remains, commit no authority change and remain Blocked. Before activation compare only live schema version plus the frozen legacy-source fingerprint with the approved report; recompute canonical_output_fingerprint fresh from the resolved graph and record it on the activation report."
+    - "In one activation transaction, re-enumerate every complete group, verify zero collisions/blockers, assert works.primary_author_id equals work_contributors ordinal-zero for every Work, disable every listed legacy uniqueness consumer, drop idx_works_identity/idx_works_user_normalized, switch the shared read/write authority marker, create idx_works_identity_v2 on (user_id, normalized_identity_main, normalized_identity_subtitle, normalized_identity_volume, primary_author_id, text_distinction) as the final write, then commit."
+    - "Re-enable writers only after route/edition/title readers and all six doors observe the new authority. Preserve the rehearsal and activation report."
+  feature_completion_gate: "The foundation feature is accepted when the activation marker is committed, idx_works_identity_v2 is authoritative, every legacy uniqueness consumer is retired/guarded off, every mapped value/audit row is reachable, all six doors use the identity road, and zero blocking cards/collisions remain. Migration 084 is a separately tracked post-activation cleanup release and is not a prerequisite for foundation acceptance."
+  post_activation_cleanup_gate: "Migration 084 may run only after the activation audit proves every retired scalar/table value remains reachable in its new source. It physically removes compatibility storage but does not change the already-live identity authority or feature acceptance."
+
+ui_contract:
+  badge_labels: [User-confirmed, Connected, Not-connected]
+  sibling_panel_behavior: "Informational only. It states that confirming identity changes no siblings and offers no clear/remove/threatening action."
+  sibling_panel_literal_copy: "Confirming this book's identity affects only this book. Other books by this author stay exactly as they are." # frozen by PO 2026-08-08
+  cover_source_labels: [Yours, Your-file, OpenLibrary, Goodreads, Hardcover, Google-Books, Audible, Audnexus, Other-provider]
+  cover_trust_labels: []
+  cover_placeholders:
+    work_scoped: Cover-found-format-needed
+    slot_scoped: [Nowhere-to-look, Searching-for-a-cover, No-cover-found]
+
+minimal_work_contract:
+  required_input: "A valid parsed main title and at least one resolved Author record."
+  zero_route_is_valid: true
+  capabilities:
+    - create_through_identity_road
+    - list_and_detail_display_with_placeholders
+    - edit_and_rekey
+    - monitor_ebook_and_audiobook_independently
+    - attach_or_import_owned_files
+    - write_tags_from_primary_author_record
+    - set_user_cover
+    - extract_and_rank_owned_epub_cover
+    - manual_title_author_provider_search
+  intentional_exclusion: "Automatic provider enrichment is not scheduled without at least one declared usable route."
+
+subtitle_projection_policy:
+  identity_capture_truth_table:
+    - { structured: present, parsed_tail: absent, stored: "(parse.main, structured)" }
+    - { structured: absent, parsed_tail: present, stored: "(parse.main, parse.subtitle)" }
+    - { structured: present, parsed_tail: present, stored: "(parse.main, structured), with no comparison between the two subtitle strings" }
+    - { structured: absent, parsed_tail: absent, stored: "(parse.main, absent)" }
+  edition_selection_tiers:
+    - default_ebook
+    - default_audiobook
+    - default_physical
+    - default_other_named_formats_lexical
+    - nondefault_ebook
+    - nondefault_audiobook
+    - nondefault_physical
+    - nondefault_other_named_formats_lexical
+    - unknown_format
+  within_tier_source_order:
+    - user_owned_file
+    - Hardcover
+    - OpenLibrary
+    - Goodreads
+    - GoogleBooks
+    - Audible
+    - Audnexus
+    - other_provider_lexical
+    - source_less_or_migration_only
+  exact_tiebreak: [provider_scoped_edition_id, stable_edition_id]
+  selected_absence: "The selected edition's absent subtitle is the machine projection; no lower-ranked edition lends a value."
+  rendered_order: "UserValue renders its value; UserAbsent renders absent; Automatic renders non-absent machine projection, else identity tuple subtitle, else absent."
+  recompute_triggers:
+    - committed_candidate_edition_change
+    - default_designation_change
+    - edition_format_change
+    - source_order_field_change
+    - selected_edition_subtitle_value_change
+    - selected_edition_subtitle_provenance_change
+  atomicity: "Every trigger recomputes value and provenance in the committing transaction. Parked evidence changes neither. The tuple/key/distinction/merge state remain byte-identical."
+
+identity_conflict_policy:
+  classes:
+    A: "Same-provider work-id candidate disagrees with an existing work-id route; absent accepted alias proof, always park."
+    B: "Cross-provider work-key disagreement discovered by the matching authority; veto is replaced by a non-blocking card."
+    C: "Any typed arriving route is already active on a different Work for the same user."
+  pending: "Keep existing routes and edition graph untouched, park the candidate/evidence, and continue matching with uncontested evidence."
+  resolutions:
+    accept: "Attach the candidate to the named winner; retire every explicitly displaced route to archive; record the exact surviving route set."
+    reject: "Discard the candidate, preserve the current graph, and audit the exact surviving route set."
+    different_work: "Name which Work keeps the route, apply the same transfer rules as accept when ownership changes, and audit the exact surviving route set."
+  work_route_transfer: "Move only the work-owned route atomically; archive the former attachment."
+  edition_route_transfer:
+    moved_state: "Move only the contested edition-owned route. Never imply movement of its source Edition, sibling routes, cover, subtitle, language, or format."
+    qualifying_target: "A target Edition qualifies only when the parked provider/file payload presents the contested id with a non-contested edition id already homed there."
+    zero_targets: "Create one format=Unknown, language=None provisional Edition on the winning Work and attach the contested route."
+    one_target: "Attach the route to that sole qualified Edition."
+    several_targets: "Keep the card pending until the user selects one."
+    user_override: "An explicit target-Edition choice wins over the qualified set."
+    losing_shell: "Keep every non-contested fact/route on the losing Edition; archive it only if empty."
+    atomicity: "Archive old attachment, attach new owner, update route projection, recompute presentation, and resolve the card in one transaction; any failure leaves the original graph and pending action retryable."
+
+reconciliation_policy:
+  candidate_enumeration:
+    broad: "Every active Work for the user sharing normalized main plus primary AuthorId reaches the authority even when subtitle/volume tuple parts differ."
+    exact_group: "Before every create/re-key commit, enumerate every active Work sharing the complete identity-title tuple plus primary AuthorId, regardless of text distinction."
+    archived: "Archived losers are retrievable but excluded."
+  evaluation_order:
+    - sampled_whose_text_classification_when_applicable
+    - pairwise_authority_certain_predicate
+    - surviving_different_from_all_audit_check_across_entire_proposed_cohort
+  total_branches:
+    empty_group: "A new Work uses Common; an edited Work retains its bound distinction."
+    same_text_cohort: "With authority-certain same-text anchors and no surviving different-from-all relation inside the full cohort, lowest WorkId survives and every eligible anchor/candidate merges into it."
+    audited_cohort_conflict: "Any surviving different-from-all pair pauses the complete group on one GroupIdentityReview."
+    all_different: "With every comparison established different text, commit with the existing non-common distinction or one deterministic new `work:<WorkId>` distinction."
+    unresolved: "With no same-text anchor and any unresolved/non-authority-certain comparison, pause one card listing every member, distinction, and pairwise evidence."
+  review_outcomes:
+    - attach_or_merge_into_one_selected_listed_anchor
+    - affirm_different_from_all_against_every_listed_anchor
+    - cancel
+  pending_effect: "An edited Work retains its old key; a new candidate claims no key and commits no Work/contributor/co-created Author record."
+  cancellation: "Edit cancellation retains the old key and contributor set; create cancellation discards the candidate."
+
+readarr_identity_precedence:
+  scope: "Owned-file evidence is embedded ISBN/ASIN and embedded cover. Structured embedded title+author may provide a minimum. Filename/release-name matching is absent."
+  branches:
+    - when: "At least one valid embedded identifier resolves and every provider result agrees on one identity."
+      outcome: "Settle that identity and persist every valid edition route even if title/author is absent, invalid, or disagrees across files."
+    - when: "Valid identifiers resolve to conflicting identities."
+      outcome: "Park REQ-007 conflict review; create no Work and attach no file until an audited conflict exit."
+    - when: "Identifiers exist, no provider hit, and readable files agree on a valid minimum."
+      outcome: "Create the minimum-founded Work, persist every valid embedded edition route, and mark Connected. An outage adds exactly one idempotent convergence retry without changing the persisted result."
+    - when: "Identifiers exist, no provider hit, and minimum is missing/invalid, metadata is unreadable/malformed, or files disagree."
+      outcome: "Park one unattached import-review card and no Work. If outage also exists, retain one idempotent retry that may later settle an agreeing hit."
+    - when: "No valid identifiers and readable files agree on a valid minimum."
+      outcome: "Park the conditional minimum-only import-review card with no Work/file attachment. Explicit confirmation may create a NotConnected minimum Work and then attach embedded cover."
+    - when: "No valid identifiers and the minimum is missing/invalid, unreadable/malformed, or disputed."
+      outcome: "Park one unattached import-review card and no Work."
+  nonconflict_exits:
+    - corrected_metadata_and_retry
+    - later_resolving_identifier_hit_when_applicable
+    - explicit_import_review_identity_or_minimum_creation_choice
+    - cancellation
+
+contributor_policy:
+  storage: "Every WorkContributor references an AuthorId. The per-book author-name scalar retires; exact source names and roles remain evidence/variants, not identity pointers."
+  primary: "Ordinal zero is the primary at reference, uniqueness, tags, matching, and author-route inheritance."
+  indexed_projection: "works.primary_author_id is a derived cache of work_contributors[ordinal=0].author_id solely for idx_works_identity_v2. commit_settlement, contributor review resolution, merge, reorder, and primary-removal continuations update contributors and this projection in one transaction, reject zero/multiple ordinal-zero rows, assert equality before key-collision evaluation, and roll back together. No caller may write the projection directly."
+  existing_work: "A surviving existing primary stays ordinal zero regardless of provider reorder or newly arriving lower AuthorId."
+  co_created_pre_id_key:
+    - normalized_full_author_identity_name
+    - sorted_provider_route_set
+    - sorted_exact_source_name_set
+  forbidden_pre_id_inputs: [incoming_array_position, unsampled_role, eventual_author_record_id]
+  occurrence_collapse: "Evidence-identical occurrences F1 resolves to one Author collapse to one contributor and retain the union of sourced roles."
+  unresolved_full_key_tie:
+    interactive: "Obtain and audit a partition into Author identities plus full contributor order and primary inline."
+    machine: "Park ContributorOrderReview with source evidence/proposed contributors. New Work/Author/contributor rows do not commit; an existing Work remains unchanged."
+    cancellation: "Discard a new candidate or leave the existing Work unchanged."
+  post_resolution_order: "Create/co-create Author records in the resolved canonical order. For a new Work, or after the old primary no longer remains, lowest stable AuthorId is first and the rest follow stable AuthorId order."
+  primary_removal: "Propose the canonical successor and finish REQ-024 group/re-key lifecycle before commit. Rejection retains the old contributor; an attempted zero-contributor result is rejected."
+  role_gate: "PROBE-ST006-A permits storage/parser normalization only. Role-based primary selection remains forbidden until a new spec amendment defines the role domain, equal/no-writer tiebreaks, migration, key stability, and acceptance changes."
+
+cover_policy:
+  target_slots: [ebook, audiobook]
+  rank_per_slot:
+    - explicit_user_choice_for_slot
+    - owned_file_cover_from_edition_of_same_known_format
+    - work_default_edition_cover_for_same_format
+    - any_other_edition_cover_for_same_known_format
+  audiobook_fallback: "Only after no eligible audiobook cover, use the selected ebook cover with an explicit fallback label; a real audiobook cover replaces it."
+  monotonicity: "A refresh never replaces an incumbent with a lower-rank candidate. A removed higher-rank source falls to the best remaining candidate. User choice always wins."
+  retained_unknown_cover: "Eligible for no format slot. While any slot is uncovered it appears in exactly one work-scoped FormatNeeded panel ordered by the subtitle edition order; when all slots are covered it remains retained without a panel."
+  format_needed_actions:
+    - assign_selected_cover_format
+    - wait_for_direct_evidence
+    - reject_selected_cover_only_and_archive_provenance
+    - set_cover_for_selected_uncovered_slot
+  slot_evaluation:
+    no_usable_routes: "NowhereToLook plus manual provider search, even while FormatNeeded is also present."
+    usable_routes_and_panel: "The shared FormatNeeded panel supplies the placeholder; mutations recompute every slot once."
+    usable_routes_without_panel_pending: "Searching with wait or set-cover."
+    usable_routes_without_panel_exhausted: "NoCoverFound with on-demand provider re-ask."
+  source_display: "Show provider/your-file/yours only; no trust grade or validated/unvalidated label/storage survives."
+
+modules:
+  - name: livrarr-domain
+    responsibility: "Own the route/edition/title/contributor/conflict/review/cover/migration vocabulary, the deterministic matching authority, typed door evidence constructors, and all Send service/repository traits."
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-007, REQ-008, REQ-009, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026]
+    dependencies: []
+    blocking_probes: [PROBE-ST006-E, PROBE-ST006-F]
+    public_api:
+      types:
+        - kind: enum
+          name: IdentityProvider
+          fields:
+            - { name: OpenLibrary, type: unit }
+            - { name: Goodreads, type: unit }
+            - { name: Hardcover, type: unit }
+            - { name: IsbnRegistry, type: unit }
+            - { name: Amazon, type: unit }
+            - { name: Other, type: String }
+        - kind: enum
+          name: RouteScope
+          fields:
+            - { name: Work, type: unit }
+            - { name: Edition, type: unit }
+        - kind: enum
+          name: RouteKind
+          fields:
+            - { name: OpenLibraryWork, type: unit }
+            - { name: GoodreadsWork, type: unit }
+            - { name: HardcoverWork, type: unit }
+            - { name: Isbn13Edition, type: unit }
+            - { name: AsinEdition, type: unit }
+            - { name: GoodreadsBookEdition, type: unit }
+            - { name: Undeclared, type: "{ provider_kind: String, scope: RouteScope }" }
+        - kind: enum
+          name: RouteOwner
+          fields:
+            - { name: Work, type: WorkId }
+            - { name: Edition, type: EditionId }
+        - kind: enum
+          name: WorkRouteState
+          fields:
+            - { name: Active, type: unit }
+            - { name: Retired, type: "{ audit_id: i64 }" }
+        - kind: enum
+          name: RouteProvenance
+          fields:
+            - { name: UserChoice, type: unit }
+            - { name: OwnedFile, type: "{ library_item_id: Option<LibraryItemId>, file_revision: FileRevision }" }
+            - { name: Provider, type: IdentityProvider }
+            - { name: Migrated, type: "{ legacy_field: String }" }
+            - { name: MergeCoalesced, type: unit }
+        - kind: struct
+          name: WorkRoute
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: owner, type: RouteOwner }
+            - { name: resolved_work_id, type: WorkId }
+            - { name: provider, type: IdentityProvider }
+            - { name: kind, type: RouteKind }
+            - { name: provider_scoped_id, type: String }
+            - { name: state, type: WorkRouteState }
+            - { name: provenance, type: RouteProvenance }
+            - { name: user_confirmed, type: bool }
+            - { name: observed_at, type: "DateTime<Utc>" }
+        - kind: enum
+          name: EditionFormat
+          fields:
+            - { name: Ebook, type: unit }
+            - { name: Audiobook, type: unit }
+            - { name: Physical, type: unit }
+            - { name: Other, type: String }
+            - { name: Unknown, type: unit }
+        - kind: struct
+          name: Edition
+          fields:
+            - { name: id, type: EditionId }
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: format, type: EditionFormat }
+            - { name: language, type: "Option<String>" }
+            - { name: subtitle, type: "Option<SourcedValue<String>>" }
+            - { name: routes, type: "Vec<WorkRoute>; every member owner=Edition(id)" }
+            - { name: covers, type: "Vec<CoverCandidate>" }
+            - { name: source_provider, type: "Option<IdentityProvider>" }
+            - { name: provider_edition_id, type: "Option<String>" }
+            - { name: state, type: "Active | Archived" }
+        - kind: struct
+          name: IdentityTitleTuple
+          fields:
+            - { name: main, type: String }
+            - { name: subtitle, type: "Option<String>" }
+            - { name: volume, type: "Option<String>" }
+            - { name: normalized_main, type: String }
+            - { name: normalized_subtitle, type: String }
+            - { name: normalized_volume, type: String }
+            - { name: provenance, type: EvidenceProvenance }
+        - kind: enum
+          name: SubtitleOverride
+          fields:
+            - { name: Automatic, type: unit }
+            - { name: UserValue, type: String }
+            - { name: UserAbsent, type: unit }
+        - kind: struct
+          name: MachineSubtitleProjection
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: value, type: "Option<String>; selected-edition absence remains absence" }
+            - { name: edition_id, type: "Option<EditionId>" }
+            - { name: provenance, type: "Option<EvidenceProvenance>" }
+            - { name: computed_at_generation, type: i64 }
+        - kind: struct
+          name: WorkContributor
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: author_id, type: AuthorId }
+            - { name: ordinal, type: u32 }
+            - { name: roles, type: "Vec<SourcedRole>" }
+        - kind: enum
+          name: WorkReference
+          fields:
+            - { name: Local, type: WorkId }
+            - { name: Unresolved, type: RouteKey }
+        - kind: enum
+          name: WorkRelationshipKind
+          fields:
+            - { name: Contains, type: unit }
+            - { name: PartOf, type: unit }
+        - kind: struct
+          name: WorkRelationship
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: from_work_id, type: WorkId }
+            - { name: kind, type: WorkRelationshipKind }
+            - { name: target, type: WorkReference }
+            - { name: provenance, type: EvidenceProvenance }
+        - kind: struct
+          name: WorkShapeExtensions
+          fields:
+            - { name: alternative_titles, type: "Vec<SourcedValue<String>>" }
+            - { name: compilation, type: "Option<SourcedValue<bool>>" }
+            - { name: relationships, type: "Vec<WorkRelationship>; contains and part-of stored as reciprocal local rows when both Works exist" }
+            - { name: canonical_pointer, type: "Option<SourcedValue<WorkReference>>" }
+            - { name: default_editions, type: "Vec<DefaultEdition>" }
+            - { name: contributors, type: "nonempty Vec<WorkContributor>" }
+            - { name: subject_people, type: "Vec<SourcedValue<String>>" }
+            - { name: subject_places, type: "Vec<SourcedValue<String>>" }
+            - { name: subject_times, type: "Vec<SourcedValue<String>>" }
+            - { name: subject_topics, type: "Vec<SourcedValue<String>>" }
+        - kind: enum
+          name: IdentityStatus
+          fields:
+            - { name: UserConfirmed, type: unit }
+            - { name: Connected, type: unit }
+            - { name: NotConnected, type: unit }
+        - kind: struct
+          name: CapturedIdentity
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: own_work_id, type: WorkId }
+            - { name: identity_title, type: IdentityTitleTuple }
+            - { name: primary_author_id, type: AuthorId }
+            - { name: active_routes, type: "Vec<WorkRoute>" }
+            - { name: status, type: IdentityStatus }
+            - { name: identity_generation, type: i64 }
+        - kind: enum
+          name: IdentityConflictClass
+          fields:
+            - { name: SameProviderWorkIdDisagreement, type: unit }
+            - { name: CrossProviderWorkKeyDisagreement, type: unit }
+            - { name: RouteOwnedByDifferentWork, type: unit }
+        - kind: enum
+          name: IdentityConflictResolution
+          fields:
+            - { name: Accept, type: "{ surviving_routes: Vec<RouteKey>, target_edition: Option<EditionId> }" }
+            - { name: Reject, type: "{ surviving_routes: Vec<RouteKey> }" }
+            - { name: DifferentWork, type: "{ winning_work_id: WorkId, surviving_routes: Vec<RouteKey>, target_edition: Option<EditionId> }" }
+        - kind: struct
+          name: IdentityConflict
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: class, type: IdentityConflictClass }
+            - { name: current_work_id, type: WorkId }
+            - { name: candidate, type: ParkedRouteCandidate }
+            - { name: status, type: "Pending | Resolved" }
+            - { name: resolution, type: "Option<IdentityConflictResolution>" }
+            - { name: audit_id, type: "Option<i64>" }
+        - kind: enum
+          name: ReviewResolutionCommand
+          fields:
+            - { name: IdentityConflict, type: "{ card_id: i64, expected_generation: i64, action: IdentityConflictResolution }" }
+            - { name: PendingRoute, type: "{ card_id: i64, expected_generation: i64, action: Affirm { surviving_routes: Vec<RouteKey> } }" }
+            - { name: GroupIdentity, type: "{ card_id: i64, expected_generation: i64, action: AttachOrMerge { anchor: WorkId } | DifferentFromAll }" }
+            - { name: FieldResolution, type: "{ card_id: i64, expected_generation: i64, action: ChoosePreservedValue { evidence_id: i64 } | ExplicitAbsence }" }
+            - { name: ContributorOrder, type: "{ card_id: i64, expected_generation: i64, partition: Vec<ContributorPartition>, order: Vec<AuthorRef>, primary: AuthorRef }" }
+            - { name: EditionEvidence, type: "{ card_id: i64, expected_generation: i64, action: ChooseDirectEvidence { evidence_id: i64 } | RetainUnknownOrAbsent | ArchiveEmptyShell }" }
+            - { name: ImportIdentity, type: "{ card_id: i64, expected_generation: i64, action: CorrectedMetadataRetry { evidence: IdentityEvidenceBundle } | ResolvingIdentifier { route: RouteKey } | ExplicitIdentityOrMinimum { choice: ImportIdentityChoice } }" }
+            - { name: MigrationRepair, type: "{ card_id: i64, expected_generation: i64, action: CorrectTypedValue { route: RouteKey } | AssignScopeAndOwner { route: RouteKey, owner: RouteOwner } | DiscardProvenNonIdentity { reason: String } }" }
+            - { name: InvariantRepair, type: "{ card_id: i64, expected_generation: i64, action: Recompute | SupplyMissingReference { reference: WorkReference } | DiscardMalformedDerivedRow { reason: String } }" }
+        - kind: enum
+          name: DoorKind
+          fields:
+            - { name: DirectAdd, type: unit }
+            - { name: ManualImport, type: unit }
+            - { name: ListImport, type: unit }
+            - { name: AuthorMonitor, type: unit }
+            - { name: SeriesMonitor, type: unit }
+            - { name: ReadarrImport, type: unit }
+        - kind: enum
+          name: IdentityRoadOrigin
+          fields:
+            - { name: CreationDoor, type: DoorKind }
+            - { name: EnrichmentPass, type: unit }
+            - { name: ManualRefresh, type: unit }
+            - { name: ConvergenceVisit, type: unit }
+        - kind: struct
+          name: IdentityEvidenceBundle
+          fields:
+            - { name: user_choice, type: "Option<UserIdentityChoice>" }
+            - { name: owned_files, type: "Vec<OwnedFileEvidence>" }
+            - { name: provider_identity, type: "Vec<ProviderIdentityEvidence>" }
+            - { name: minimum, type: "Option<MinimumWorkEvidence>" }
+        - kind: struct
+          name: IdentityRoadRequest
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: origin, type: IdentityRoadOrigin }
+            - { name: evidence, type: IdentityEvidenceBundle }
+            - { name: interaction, type: "HumanWatching | MachineAlone" }
+            - { name: existing_work_id, type: "Option<WorkId>" }
+        - kind: enum
+          name: IdentityRoadOutcome
+          fields:
+            - { name: Settled, type: "{ work_id: WorkId, created: bool, routes: Vec<WorkRoute>, status: IdentityStatus }" }
+            - { name: ReviewPending, type: "{ review_id: i64, kind: ReviewKind, unattached: bool }" }
+            - { name: Deferred, type: "{ reason: DeferReason }" }
+            - { name: Rejected, type: "{ reason: IdentityRoadError }" }
+        - kind: struct
+          name: LostMatchGuardSet
+          fields:
+            - { name: one_sided_subtitle_recovery, type: bool }
+            - { name: shared_edition_id_confirmation, type: bool }
+            - { name: translation_same_text_signals, type: "Set<SampledSignalId>" }
+        - kind: struct
+          name: WrongMergeGuardSet
+          fields:
+            - { name: main_title_guard, type: MainTitleGuard }
+            - { name: volume_conflict_guard, type: bool }
+            - { name: author_disagreement_guard, type: bool }
+            - { name: work_key_contradiction_guard, type: bool }
+            - { name: audited_different_text_guard, type: bool }
+        - kind: opaque
+          name: SampledTextSignal
+          fields:
+            - { name: probe_id, type: "private PROBE-ST006-E" }
+            - { name: provider_path, type: "private String" }
+            - { name: class, type: "private Translation | Abridgement | Adaptation | StudyGuide | Omnibus" }
+          construction: "Only provider adapters backed by the accepted PROBE-ST006-E registry can construct this non-Deserialize capability."
+        - kind: opaque
+          name: AliasEquivalenceProof
+          fields:
+            - { name: provider, type: "private IdentityProvider" }
+            - { name: work_ids, type: "private nonempty set" }
+            - { name: probe_id, type: "private PROBE-ST006-F" }
+          construction: "Only an adapter arm backed by accepted PROBE-ST006-F evidence can construct this non-Deserialize capability."
+        - kind: enum
+          name: TextIdentityVerdict
+          fields:
+            - { name: SameText, type: SampledTextSignal }
+            - { name: DifferentText, type: SampledTextSignal }
+            - { name: ReviewRequired, type: unit }
+        - kind: enum
+          name: AuthorInheritanceOutcome
+          fields:
+            - { name: Linked, type: RouteWriteOutcome }
+            - { name: F1ReviewCandidate, type: AuthorLinkCandidate }
+            - { name: NoAuthorId, type: unit }
+        - kind: enum
+          name: EmbeddedCoverInspectionResult
+          fields:
+            - { name: Extracted, type: "{ revision: FileRevision, bytes: Vec<u8>, media_type: String }" }
+            - { name: VerifiedNoCover, type: "{ revision: FileRevision }" }
+            - { name: CouldNotInspect, type: "{ revision: FileRevision, error: InspectionError }" }
+            - { name: FileGone, type: unit }
+        - kind: struct
+          name: EmbeddedCoverInspectionRecord
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: library_item_id, type: LibraryItemId }
+            - { name: revision, type: FileRevision }
+            - { name: outcome, type: "Extracted | VerifiedNoCover | CouldNotInspect | FileGone" }
+            - { name: cover_candidate_id, type: "Option<i64>; points to retained materialized candidate, never stores cover bytes" }
+            - { name: sanitized_error_code, type: "Option<String>" }
+            - { name: inspected_at, type: "DateTime<Utc>" }
+        - kind: enum
+          name: CoverPlaceholderState
+          fields:
+            - { name: FormatNeeded, type: "{ candidates: Vec<CoverCandidate> }" }
+            - { name: NowhereToLook, type: unit }
+            - { name: Searching, type: unit }
+            - { name: NoCoverFound, type: unit }
+        - kind: struct
+          name: IdentityMigrationReport
+          fields:
+            - { name: source_schema_version, type: "u32; schema version of the frozen legacy-source snapshot used by rehearsal and pre-activation comparison" }
+            - { name: source_fingerprint, type: "[u8; 32]; fingerprint only of the frozen legacy-source domain, excluding staged and resolution rows" }
+            - { name: canonical_output_fingerprint, type: "[u8; 32]; rehearsal value on snapshot reports, recomputed fresh from the resolved graph on the activation report" }
+            - { name: mapped_route_count, type: u64 }
+            - { name: edition_count, type: u64 }
+            - { name: repair_cards, type: u64 }
+            - { name: group_cards, type: u64 }
+            - { name: field_cards, type: u64 }
+            - { name: contributor_cards, type: u64 }
+            - { name: index_ready, type: bool }
+            - { name: trivially_empty, type: bool }
+            - { name: legacy_work_count, type: u64 }
+      functions:
+        - name: "IdentityRoadService::settle"
+          inputs:
+            - { name: request, type: IdentityRoadRequest }
+          output: "Result<IdentityRoadOutcome, IdentityRoadError>"
+          errors: [InvalidDoorEvidence, StaleGeneration, Database, ProviderBoundary]
+        - name: "IdentityRoadService::resolve_review"
+          inputs:
+            - { name: actor, type: ReviewActor }
+            - { name: command, type: ReviewResolutionCommand }
+          output: "Result<IdentityRoadOutcome, IdentityRoadError>"
+          errors: [NotFound, ReviewKindMismatch, UnauthorizedScope, StaleGeneration, InvalidResolution, Cancelled, Database]
+        - name: "WorkIdentityRepository::read_captured_identity"
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }]
+          output: "Result<CapturedIdentity, IdentityRepositoryError>"
+          errors: [NotFound, Database]
+        - name: "WorkIdentityRepository::commit_settlement"
+          inputs: [{ name: command, type: SettlementCommit }]
+          output: "Result<SettlementCommitOutcome, IdentityRepositoryError>"
+          errors: [StaleGeneration, RouteOwnershipCollision, KeyCollision, Database]
+        - name: "WorkIdentityRepository::resolve_conflict_atomically"
+          inputs: [{ name: command, type: ResolveIdentityConflictCommand }]
+          output: "Result<CapturedIdentity, IdentityRepositoryError>"
+          errors: [NotFound, StillAmbiguous, StaleGeneration, Database]
+        - name: "EditionRepository::apply_evidence"
+          inputs: [{ name: command, type: EditionEvidenceCommand }]
+          output: "Result<EditionEvidenceOutcome, EditionRepositoryError>"
+          errors: [ContradictoryEvidenceParked, RouteOwnershipCollision, Database]
+        - name: "IdentityCutoverService::rehearse"
+          inputs: [{ name: snapshot, type: SnapshotDatabase }, { name: cancel, type: CancellationToken }]
+          output: "Result<IdentityMigrationReport, IdentityMigrationError>"
+          errors: [NotSnapshot, SchemaMismatch, Cancelled, Database]
+        - name: "IdentityCutoverService::apply"
+          inputs: [{ name: approved_report, type: IdentityMigrationReport }, { name: cancel, type: CancellationToken }]
+          output: "Result<IdentityMigrationReport, IdentityMigrationError>; first Apply may stage typed rows/cards and return Blocked. Rerun Apply upserts/reuses staged rows by stable typed key, treats committed resolutions as authoritative, and never re-derives over or re-inserts either. Before zero-blocker activation it compares only source_schema_version plus legacy source_fingerprint with the approved report, then recomputes canonical_output_fingerprint fresh for the activation report."
+          errors: [RehearsalMismatch, Collision, Cancelled, Database]
+        - name: "IdentityCutoverService::ensure_authority_ready"
+          inputs: [{ name: cancel, type: CancellationToken }]
+          output: "Result<IdentityAuthorityReadiness, IdentityMigrationError>; Active for an existing marker, ActivatedFresh only after a transaction proves works and all legacy identity/review sources empty, CutoverRequired for any non-empty inactive database"
+          errors: [Collision, Cancelled, Database]
+        - name: "title_parts_from_provider"
+          inputs: [{ name: provider_title, type: String }, { name: structured_subtitle, type: "Option<String>" }]
+          output: IdentityTitleTuple
+          errors: [InvalidMainTitle]
+        - name: "evaluate_match"
+          inputs: [{ name: left, type: WorkIdentityEvidence }, { name: right, type: WorkIdentityEvidence }, { name: lost_match, type: LostMatchGuardSet }, { name: wrong_merge, type: WrongMergeGuardSet }]
+          output: "DirectionalMatchVerdicts"
+          errors: []
+        - name: "select_machine_subtitle"
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }, { name: editions, type: "Vec<Edition>" }, { name: defaults, type: "Vec<DefaultEdition>" }]
+          output: MachineSubtitleProjection
+          errors: []
+        - name: "select_covers_and_placeholders"
+          inputs: [{ name: identity, type: CapturedIdentity }, { name: _editions, type: "Vec<Edition>; retained by the ratified signature but intentionally unused" }, { name: candidates, type: "Vec<CoverCandidate>" }]
+          output: WorkCoverPresentation
+          errors: []
+
+  - name: livrarr-db
+    responsibility: "Own every SQL statement and migration; implement domain repositories for routes, editions, settlement, atomic transfers, projections, covers, reviews, merge/archive, and snapshot-gated activation."
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026]
+    dependencies: [livrarr-domain]
+    blocking_probes: []
+    public_api:
+      types:
+        - kind: struct
+          name: LegacyIdentityFixture
+          fields:
+            - { name: works_and_authors, type: "Vec<LegacyWorkFixture>" }
+            - { name: legacy_routes_ledgers_and_reviews, type: "LegacyIdentityRows" }
+            - { name: legacy_badge_route_matrix, type: "Vec<LegacyBadgeRouteCase>" }
+            - { name: monitoring_flags, type: "Vec<LegacyMonitoringFixture>" }
+        - kind: struct
+          name: PreCutoverIdentityTestDb
+          fields:
+            - { name: db, type: "SqliteDb; test-only access, marker guaranteed NotRun/inactive" }
+        - kind: struct
+          name: IdentityRouteRow
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: "Option<WorkId>" }
+            - { name: edition_id, type: "Option<EditionId>" }
+            - { name: provider, type: String }
+            - { name: kind, type: String }
+            - { name: route_value, type: String }
+            - { name: state, type: String }
+        - kind: struct
+          name: IdentityCutoverRun
+          fields:
+            - { name: id, type: i64 }
+            - { name: scope, type: "InstallationWide; contains no per-user payload" }
+            - { name: mode, type: "Rehearsal | Apply" }
+            - { name: branch, type: "Snapshot | TriviallyEmpty" }
+            - { name: source_fingerprint, type: "[u8; 32]" }
+            - { name: output_fingerprint, type: "[u8; 32]" }
+            - { name: status, type: "Running | Blocked | Ready | Activated | Failed" }
+            - { name: report, type: IdentityMigrationReport }
+      functions:
+        - name: "SqliteDb::commit_settlement"
+          inputs: [{ name: command, type: SettlementCommit }]
+          output: "Result<SettlementCommitOutcome, IdentityRepositoryError>"
+          errors: [StaleGeneration, RouteOwnershipCollision, KeyCollision, Database]
+        - name: "SqliteDb::transfer_route"
+          inputs: [{ name: command, type: TransferRouteCommand }]
+          output: "Result<CapturedIdentity, IdentityRepositoryError>"
+          errors: [NotFound, StillAmbiguous, AtomicRollback, Database]
+        - name: "SqliteDb::recompute_work_projections"
+          inputs: [{ name: work_id, type: WorkId }, { name: expected_generation, type: i64 }]
+          output: "Result<WorkProjectionSnapshot, IdentityRepositoryError>"
+          errors: [StaleGeneration, Database]
+        - name: "SqliteDb::record_embedded_cover_inspection"
+          inputs: [{ name: record, type: EmbeddedCoverInspectionRecord }]
+          output: "Result<(), IdentityRepositoryError>; upserts only the exact user/item/FileRevision key and never persists extracted bytes"
+          errors: [StaleGeneration, Database]
+        - name: "SqliteDb::read_embedded_cover_inspection"
+          inputs: [{ name: user_id, type: UserId }, { name: library_item_id, type: LibraryItemId }, { name: revision, type: FileRevision }]
+          output: "Result<Option<EmbeddedCoverInspectionRecord>, IdentityRepositoryError>"
+          errors: [Database]
+        - name: "SqliteDb::run_identity_cutover"
+          inputs: [{ name: mode, type: IdentityCutoverMode }, { name: approved_report, type: "Option<IdentityMigrationReport>" }]
+          output: "Result<IdentityMigrationReport, IdentityMigrationError>; Apply may commit only deterministic staged new rows/cards and return Blocked. A rerun idempotently upserts/revalidates those typed-key rows plus authoritative resolution records; it neither collides with its own rows nor recreates resolved cards. Activation checks approved source_schema_version and frozen legacy source_fingerprint, not the old canonical output, then records a freshly recomputed canonical_output_fingerprint before committing the marker/index."
+          errors: [NotSnapshot, RehearsalMismatch, Collision, Database]
+        - name: "SqliteDb::ensure_identity_authority_ready"
+          inputs: []
+          output: "Result<IdentityAuthorityReadiness, IdentityMigrationError>"
+          errors: [Collision, Database]
+        - name: "test_helpers::create_pre_cutover_identity_test_db"
+          inputs: [{ name: fixture, type: LegacyIdentityFixture }]
+          output: "PreCutoverIdentityTestDb; #[cfg(any(test, feature = \"test-helpers\"))], real single-connection SQLite :memory:, migrations 082/083 applied, marker inactive, readiness never called"
+          errors: [InvalidFixture, Database]
+
+  - name: livrarr-external-data
+    responsibility: "Fetch and normalize existing-provider work, edition, contributor-id, cover, text-signal, alias, and Goodreads work-id evidence; fail closed on every unsampled or drifting shape."
+    requirements: [REQ-003, REQ-004, REQ-005, REQ-006, REQ-011, REQ-013, REQ-014, REQ-025]
+    dependencies: [livrarr-domain, livrarr-http]
+    blocking_probes: [PROBE-ST006-A, PROBE-ST006-B, PROBE-ST006-C, PROBE-ST006-D, PROBE-ST006-E, PROBE-ST006-F]
+    public_api:
+      types:
+        - kind: struct
+          name: NormalizedWorkIdentityEvidence
+          fields:
+            - { name: provider, type: IdentityProvider }
+            - { name: work_routes, type: "Vec<ProviderRouteEvidence>" }
+            - { name: editions, type: "Vec<NormalizedEditionEvidence>" }
+            - { name: contributors, type: "Vec<ProviderContributorEvidence>" }
+            - { name: text_signals, type: "Vec<SampledTextSignal>" }
+            - { name: alias_proof, type: "Option<AliasEquivalenceProof>" }
+        - kind: enum
+          name: ProviderEvidenceError
+          fields:
+            - { name: NotConfigured, type: unit }
+            - { name: Retryable, type: String }
+            - { name: Permanent, type: String }
+            - { name: LayoutDrift, type: String }
+            - { name: ProbeBlocked, type: ProbeId }
+      functions:
+        - name: "IdentityProviderGateway::fetch_by_route"
+          inputs: [{ name: route, type: WorkRoute }, { name: priority, type: RequestPriority }]
+          output: "Result<NormalizedWorkIdentityEvidence, ProviderEvidenceError>"
+          errors: [NotConfigured, Retryable, Permanent, LayoutDrift, ProbeBlocked]
+        - name: "GoodreadsAdapter::capture_work_route_from_fetched_book_page"
+          inputs: [{ name: fetched_page, type: GoodreadsBookPage }]
+          output: "Result<Option<ProviderRouteEvidence>, ProviderEvidenceError>"
+          errors: [LayoutDrift, ProbeBlocked]
+
+  - name: livrarr-identity
+    responsibility: "Orchestrate route-aware deterministic identity decisions, conflict classification, P8 review/classification, and GR work-id capture using only domain traits and provider evidence; own no SQL and call no enrichment API."
+    requirements: [REQ-001, REQ-006, REQ-007, REQ-008, REQ-009, REQ-011, REQ-012, REQ-013, REQ-018, REQ-019, REQ-020, REQ-021, REQ-023, REQ-024, REQ-025]
+    dependencies: [livrarr-domain, livrarr-external-data, livrarr-http]
+    blocking_probes: [PROBE-ST006-E, PROBE-ST006-F]
+    public_api:
+      types:
+        - kind: struct
+          name: IdentityDecision
+          fields:
+            - { name: match_verdicts, type: DirectionalMatchVerdicts }
+            - { name: conflict, type: "Option<ParkedRouteCandidate>" }
+            - { name: text_verdict, type: TextIdentityVerdict }
+            - { name: settlement, type: "Decide | Review | Defer" }
+      functions:
+        - name: "IdentityEngine::decide"
+          inputs: [{ name: request, type: IdentityDecisionRequest }]
+          output: "Result<IdentityDecision, IdentityEngineError>"
+          errors: [ProbeBlocked, InvalidEvidence]
+        - name: "IdentityEngine::classify_route_conflict"
+          inputs: [{ name: existing, type: CapturedIdentity }, { name: candidate, type: ProviderRouteEvidence }]
+          output: "Option<IdentityConflictClass>"
+          errors: []
+
+  - name: livrarr-enrichment
+    responsibility: "Derive provider queries from the closed usable-route list, persist normalized work/edition facts through domain repository APIs, return captured route evidence to its livrarr-metadata caller, delete private title/cover recipes, and recompute subtitle/cover presentation without writing identity routes."
+    requirements: [REQ-003, REQ-004, REQ-005, REQ-006, REQ-010, REQ-012, REQ-013, REQ-014, REQ-016, REQ-017]
+    dependencies: [livrarr-domain, livrarr-external-data, livrarr-db, livrarr-http]
+    blocking_probes: [PROBE-ST006-B, PROBE-ST006-C]
+    public_api:
+      types:
+        - kind: struct
+          name: RouteEnrichmentPlan
+          fields:
+            - { name: usable_routes, type: "Vec<WorkRoute>" }
+            - { name: provider_calls, type: "Vec<RouteProviderCall>" }
+            - { name: manual_search_only, type: bool }
+        - kind: struct
+          name: WorkPresentationProjection
+          fields:
+            - { name: subtitle, type: MachineSubtitleProjection }
+            - { name: covers, type: WorkCoverPresentation }
+        - kind: struct
+          name: EnrichmentApplyOutcome
+          fields:
+            - { name: metadata_generation, type: i64 }
+            - { name: captured_route_evidence, type: "Vec<ProviderRouteEvidence>; includes readable Goodreads work id from the already-fetched book page" }
+            - { name: presentation, type: WorkPresentationProjection }
+      functions:
+        - name: "EnrichmentService::plan_from_routes"
+          inputs: [{ name: identity, type: CapturedIdentity }]
+          output: RouteEnrichmentPlan
+          errors: []
+        - name: "EnrichmentService::apply_provider_evidence"
+          inputs: [{ name: work_id, type: WorkId }, { name: evidence, type: NormalizedWorkIdentityEvidence }]
+          output: "Result<EnrichmentApplyOutcome, EnrichmentError>"
+          errors: [StaleGeneration, ProviderDrift, Database]
+
+  - name: livrarr-matching
+    responsibility: "Replace V5/V8 dedup and V7 fast-cover title comparisons with adapters over livrarr-domain matching primitives; own no independent sameness recipe."
+    requirements: [REQ-008, REQ-010]
+    dependencies: [livrarr-domain]
+    blocking_probes: []
+    public_api:
+      types: []
+      functions:
+        - name: "find_matching_work"
+          inputs: [{ name: authority_inputs, type: WorkMatchAuthorityInputs }]
+          output: "MatchAuthorityOutcome"
+          errors: []
+
+  - name: livrarr-metadata
+    responsibility: "Implement the single identity road, P5 door orchestration, Readarr precedence, group reconciliation/merge, author-route inheritance, review continuations, route-driven refresh, the enrichment/manual-refresh/convergence route-evidence handoff, and atomic presentation recomputation."
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-materialize]
+    blocking_probes: [PROBE-ST006-A, PROBE-ST006-B, PROBE-ST006-D, PROBE-ST006-E, PROBE-ST006-F]
+    public_api:
+      types:
+        - kind: struct
+          name: IdentityRoadServiceImpl
+          fields:
+            - { name: identity_engine, type: "generic livrarr-identity implementation" }
+            - { name: identity_repository, type: "generic WorkIdentityRepository" }
+            - { name: edition_repository, type: "generic EditionRepository" }
+            - { name: author_link_workflow, type: "generic AuthorLinkWorkflow" }
+        - kind: struct
+          name: CompleteGroupReconciliation
+          fields:
+            - { name: broad_main_author_candidates, type: "Vec<WorkId>" }
+            - { name: exact_tuple_author_group, type: "Vec<WorkId>" }
+            - { name: pairwise_outcomes, type: "Vec<PairwiseIdentityOutcome>" }
+            - { name: action, type: "AutoMerge | CommitDifferent | Review" }
+      functions:
+        - name: "IdentityRoadServiceImpl::settle"
+          inputs: [{ name: request, type: IdentityRoadRequest }]
+          output: "Result<IdentityRoadOutcome, IdentityRoadError>"
+          errors: [InvalidDoorEvidence, StaleGeneration, ProviderBoundary, Database]
+        - name: "IdentityRoadServiceImpl::reconcile_complete_group"
+          inputs: [{ name: candidate, type: ProposedWorkIdentity }]
+          output: "Result<CompleteGroupReconciliation, IdentityRoadError>"
+          errors: [ReviewRequired, ProbeBlocked, Database]
+        - name: "IdentityRoadServiceImpl::inherit_primary_author_route"
+          inputs: [{ name: settled_work, type: CapturedIdentity }, { name: author_evidence, type: "Option<ProviderAuthorRef>" }]
+          output: "Result<AuthorInheritanceOutcome, AuthorLinkError>; Linked when F1 guard agrees, F1ReviewCandidate when it rejects, NoAuthorId when absent/unreadable"
+          errors: [Database]
+        - name: "IdentityRoadServiceImpl::apply_captured_enrichment_routes"
+          inputs: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }, { name: trigger, type: "EnrichmentPass | ManualRefresh | ConvergenceVisit" }, { name: outcome, type: EnrichmentApplyOutcome }]
+          output: "Result<IdentityRoadOutcome, IdentityRoadError>; resubmits outcome.captured_route_evidence through settle with the named existing-work origin"
+          errors: [InvalidDoorEvidence, StaleGeneration, ProviderBoundary, Database]
+        - name: "IdentityRoadServiceImpl::resolve_review"
+          inputs: [{ name: actor, type: ReviewActor }, { name: command, type: ReviewResolutionCommand }]
+          output: "Result<IdentityRoadOutcome, IdentityRoadError>; validates card kind, scope, allowed action, and expected generation, then persists continuation plus actor audit atomically"
+          errors: [NotFound, ReviewKindMismatch, UnauthorizedScope, StaleGeneration, Cancelled, Database]
+
+  - name: livrarr-library
+    responsibility: "Inspect owned EPUB revisions in spawn_blocking, persist every four-way outcome by user/library item/FileRevision, and feed extracted cover evidence into the shared road without provider traffic. Before background inspection, read the durable record and suppress an unchanged CouldNotInspect retry; an explicit force or changed revision may retry. Persist the sanitized outcome and retained candidate reference in the same local workflow transaction before returning; extracted bytes flow to materialization and never into the inspection row."
+    requirements: [REQ-002, REQ-005, REQ-014, REQ-015, REQ-016, REQ-019]
+    dependencies: [livrarr-domain, livrarr-db]
+    blocking_probes: [PROBE-ST007-EPUB]
+    public_api:
+      types:
+        - kind: struct
+          name: EpubCoverInspector
+          fields:
+            - { name: max_uncompressed_bytes, type: u64 }
+            - { name: max_entries, type: u32 }
+      functions:
+        - name: "EmbeddedCoverInspector::inspect_revision"
+          inputs: [{ name: item, type: LibraryItem }, { name: revision, type: FileRevision }, { name: force, type: bool }]
+          output: "Result<EmbeddedCoverInspectionResult, InspectionServiceError>; reads the durable exact-revision record first, performs zero provider requests, and persists Extracted/VerifiedNoCover/CouldNotInspect/FileGone before return"
+          errors: [Database, Cancelled]
+
+  - name: livrarr-materialize
+    responsibility: "Write selected cover bytes and tags through the existing single save port; trust grades disappear, source labels survive, and tags read the primary author record's display name at write time."
+    requirements: [REQ-002, REQ-014, REQ-015, REQ-017, REQ-020, REQ-023]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-tagwrite]
+    blocking_probes: []
+    public_api:
+      types:
+        - kind: struct
+          name: MaterializeIdentityRequest
+          fields:
+            - { name: work_id, type: WorkId }
+            - { name: primary_author_display_name, type: String }
+            - { name: selected_covers, type: WorkCoverSelection }
+            - { name: tags, type: MaterializeTags }
+      functions:
+        - name: "MaterializeService::materialize"
+          inputs: [{ name: request, type: MaterializeRequest }]
+          output: "Result<MaterializeOutcome, MaterializeError>"
+          errors: [CoverDownload, TagWrite]
+
+  - name: livrarr-handlers
+    responsibility: "Expose narrow capability-bound HTTP doors and review/manual-search/cover actions; validate requests, call domain traits, and map outcomes without SQL or orchestration."
+    requirements: [REQ-002, REQ-007, REQ-012, REQ-013, REQ-016, REQ-017, REQ-018, REQ-019, REQ-021, REQ-022, REQ-023, REQ-024]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-matching, livrarr-jobs]
+    blocking_probes: []
+    public_api:
+      types:
+        - kind: trait
+          name: HasIdentityRoadService
+          fields:
+            - { name: identity_road_service, type: "&S where S: IdentityRoadService" }
+      functions:
+        - name: "identity_review::resolve"
+          inputs: [{ name: request, type: ReviewResolutionRequest }]
+          output: "Json<IdentityRoadOutcome>"
+          errors: [BadRequest, Conflict, NotFound, Internal]
+        - name: "work::manual_provider_search"
+          inputs: [{ name: _work_id, type: "WorkId; route path retained but not consumed by the ratified read-only candidate search" }, { name: query, type: TitleAuthorQuery }]
+          output: "Json<Vec<ProviderIdentityCandidate>>"
+          errors: [BadRequest, NotFound, ProviderUnavailable]
+
+  - name: livrarr-server
+    responsibility: "Compose concrete generic services, wire every server-owned machine door to the identity-road capability, run cancellation-aware convergence/probes, and invoke snapshot/apply cutover modes explicitly."
+    requirements: [REQ-006, REQ-013, REQ-015, REQ-018, REQ-019, REQ-025, REQ-026]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-library, livrarr-materialize, livrarr-jobs, livrarr-handlers]
+    blocking_probes: [PROBE-ST006-A, PROBE-ST006-B, PROBE-ST006-C, PROBE-ST006-D, PROBE-ST006-E, PROBE-ST006-F, PROBE-ST007-EPUB]
+    public_api:
+      types:
+        - kind: struct
+          name: IdentityLayerComposition
+          fields:
+            - { name: identity_road, type: "Arc<IdentityRoadServiceImpl<...>>" }
+            - { name: cutover, type: "Arc<IdentityCutoverServiceImpl<...>>" }
+            - { name: epub_inspector, type: "Arc<EpubCoverInspector>" }
+        - kind: enum
+          name: IdentityCutoverCliCommand
+          fields:
+            - { name: Rehearse, type: "{ snapshot: PathBuf }" }
+            - { name: ListReviews, type: unit }
+            - { name: ShowReview, type: "{ card_id: i64 }" }
+            - { name: ResolveReview, type: "{ card_id: i64, expected_generation: i64, action_file: PathBuf }" }
+            - { name: Apply, type: "{ approved_report: PathBuf }" }
+        - kind: enum
+          name: IdentityCutoverCliOutcome
+          fields:
+            - { name: Report, type: IdentityMigrationReport }
+            - { name: ReviewList, type: "Vec<CutoverReviewSummary>" }
+            - { name: ReviewDetail, type: CutoverReviewDetail }
+            - { name: ReviewResolved, type: IdentityRoadOutcome }
+      functions:
+        - name: "run_identity_convergence_tick"
+          inputs: [{ name: cancel, type: CancellationToken }]
+          output: "Result<IdentityConvergenceReport, JobError>"
+          errors: [Cancelled, Database]
+        - name: "run_identity_cutover_command"
+          inputs: [{ name: command, type: IdentityCutoverCliCommand }, { name: data_dir, type: PathBuf }, { name: cancel, type: CancellationToken }]
+          output: "Result<IdentityCutoverCliOutcome, IdentityCutoverCommandError>; list/show/resolve operate only under the local exclusive CutoverOperator actor and ResolveReview parses a kind-matched ReviewResolutionCommand before calling the shared road continuation"
+          errors: [NotSnapshot, RehearsalMismatch, ReviewKindMismatch, StaleGeneration, InvalidActionFile, Cancelled, Database]
+        - name: "ensure_identity_authority_ready_before_serve"
+          inputs: [{ name: db, type: SqliteDb }]
+          output: "Result<IdentityAuthorityReadiness, StartupError>; production-only wrapper called by init_database after migrations and before repositories/HTTP/jobs; delegates to SqliteDb::ensure_identity_authority_ready. create_test_db calls the DB method directly, so there is no livrarr-db -> livrarr-server call."
+          errors: [CutoverRequired, Database]
+
+  - name: livrarr-behavioral
+    responsibility: "Provide trait+impl+stub behavioral harnesses, six-door gate rows, direction-isolation fixtures, migration repeatability, atomic transfer, merge-field, cover, Readarr, and tree-wide edition-id comparison enumeration tests."
+    requirements: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026]
+    dependencies: [livrarr-domain, livrarr-http, livrarr-db, livrarr-matching, livrarr-external-data, livrarr-identity, livrarr-enrichment, livrarr-metadata, livrarr-library, livrarr-tagwrite, livrarr-materialize, livrarr-jobs, livrarr-handlers]
+    blocking_probes: [PROBE-ST006-A, PROBE-ST006-B, PROBE-ST006-C, PROBE-ST006-D, PROBE-ST006-E, PROBE-ST006-F, PROBE-ST007-EPUB]
+    public_api:
+      types:
+        - kind: struct
+          name: StubIdentityRoadService
+          fields:
+            - { name: requests, type: "Arc<Mutex<Vec<IdentityRoadRequest>>>" }
+            - { name: outcomes, type: "VecDeque<IdentityRoadOutcome>" }
+      functions: []
+
+  - name: frontend
+    responsibility: "Render the connectedness vocabulary, route/edition provenance, all review cards, one shared format-needed panel plus three slot states, source-only cover labels, manual search, and informational sibling state."
+    requirements: [REQ-002, REQ-007, REQ-012, REQ-013, REQ-014, REQ-016, REQ-017, REQ-019, REQ-021, REQ-022, REQ-023, REQ-024]
+    dependencies: []
+    blocking_probes: []
+    public_api:
+      types:
+        - kind: enum
+          name: IdentityBadge
+          fields:
+            - { name: userConfirmed, type: unit }
+            - { name: connected, type: unit }
+            - { name: notConnected, type: unit }
+        - kind: struct
+          name: WorkCoverUiState
+          fields:
+            - { name: formatNeeded, type: "FormatNeededPanel | null" }
+            - { name: ebook, type: CoverSlotUiState }
+            - { name: audiobook, type: CoverSlotUiState }
+      functions: []
+
+shared_types:
+  - kind: type-alias
+    name: EditionId
+    fields: [{ name: value, type: i64 }]
+  - kind: struct
+    name: RouteKey
+    fields: [{ name: provider, type: IdentityProvider }, { name: kind, type: RouteKind }, { name: value, type: String }]
+  - kind: struct
+    name: FileRevision
+    fields: [{ name: size_bytes, type: u64 }, { name: modified_ns, type: i128 }, { name: sha256, type: "[u8; 32]" }]
+  - kind: enum
+    name: ReviewKind
+    fields: [{ name: IdentityConflict, type: unit }, { name: PendingRoute, type: unit }, { name: GroupIdentity, type: unit }, { name: FieldResolution, type: unit }, { name: ContributorOrder, type: unit }, { name: EditionEvidence, type: unit }, { name: ImportIdentity, type: unit }, { name: MigrationRepair, type: unit }, { name: InvariantRepair, type: unit }]
+  - kind: enum
+    name: ReviewActor
+    fields: [{ name: AuthenticatedUser, type: "{ user_id: UserId }" }, { name: CutoverOperator, type: "{ installation_id: String, invocation_id: String }" }]
+  - kind: struct
+    name: DefaultEdition
+    fields: [{ name: user_id, type: UserId }, { name: work_id, type: WorkId }, { name: format, type: EditionFormat }, { name: edition_id, type: EditionId }, { name: provenance, type: EvidenceProvenance }]
+  - kind: struct
+    name: SourcedValue
+    fields: [{ name: value, type: T }, { name: provenance, type: EvidenceProvenance }, { name: observed_at, type: "DateTime<Utc>" }]
+  - kind: enum
+    name: EvidenceProvenance
+    fields: [{ name: User, type: unit }, { name: OwnedFile, type: unit }, { name: Provider, type: IdentityProvider }, { name: Migrated, type: unit }]
+
+domain_entities:
+  - Work
+  - Author
+  - LibraryItem
+  - CapturedIdentity
+  - IdentityStatus
+  - EnrichmentStatus
+  - IdentityConflict
+  - HistoryEvent
+  - AuthorRoute
+  - Edition
+  - WorkRoute
+
+amendments:
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Add Edition to the spine: a first-class record owned by exactly one Work, carrying format/language/subtitle/cover and edition-scoped routes; unknown format and absent language are valid."
+    reason: "identity-layer-rewrite REQ-005/026 makes edition ownership the single home for ISBN, ASIN, Goodreads book id, edition subtitle, and per-format cover evidence."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Add WorkRoute to the spine: a user-scoped provider route whose owner is exactly one Work or Edition, plural per provider, with active/retired audit lifecycle and a derived resolved Work projection."
+    reason: "identity-layer-rewrite REQ-001/007 replaces one-column provider anchors and prevents dual-writing edition ids at work scope."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Amend Work: own WorkId is the anchor; identity title tuple, ordered author-record contributors, alternative titles, subjects, bidirectional containment/canonical references, per-format defaults, and durable text distinction are work-level state; legacy author-name/provider-id scalar copies retire."
+    reason: "identity-layer-rewrite REQ-002/003/004/023/024 and P1/P2/P8 change the structural identity of a Work."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Amend CapturedIdentity from five scalar anchors plus copied title/author into the one-way identity contract of own WorkId, stable IdentityTitleTuple, primary AuthorId, active WorkRoute projection, connectedness status, and generation."
+    reason: "identity-layer-rewrite REQ-001/003/012/013/023 removes provider ids as anchors while preserving the identity-to-enrichment seam."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Amend IdentityStatus to exactly UserConfirmed, Connected, and NotConnected; conflicts and review queues are orthogonal records, and user-confirmed structurally requires a surviving route."
+    reason: "identity-layer-rewrite REQ-012 defines one connectedness vocabulary independent of route kind and enrichment eligibility."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Amend IdentityConflict to exactly three classes (same-provider work-id disagreement, cross-provider work-key disagreement, and cross-work route ownership), with parked candidate, accept/reject/different-work audited resolutions, explicit surviving route sets, and retired archives."
+    reason: "identity-layer-rewrite REQ-007 replaces veto/enforcement semantics with non-blocking, user-resolved route disputes."
+  - date: 2026-08-05
+    status: PO-adopted
+    change: "Amend AuthorRoute description to identify it as the author-scoped counterpart to WorkRoute; the two share route vocabulary but retain separate guarded writer policies."
+    reason: "The canonical AuthorRoute row reserved F2's works-side generalization; identity-layer-rewrite supplies it without weakening F1's author name-agreement guard."
+  - date: 2026-08-05
+    status: PM-owned-canonical-amendment
+    change: "Supersede the pre-F2 'Anchors are monotonic' invariant with: route identity is auditable and never silently mutated; established active routes may change owner/state only through audited resolution, audited merge, or user edit."
+    reason: "The active/retired lifecycle, cross-work transfer, and same-work merge union are deliberate F2 behavior. This IR records the matching amendment while the PM/PO own docs/canonical-model.yaml."
+  - date: 2026-08-05
+    status: PM-owned-canonical-amendment
+    change: "Amend 'One road' to 'One road per concern': every creation door settles through the single identity road and every enrichable metadata/cover/tag write funnels through the single enrichment pipeline."
+    reason: "The identity road and enrichment pipeline are separate first-class chokepoints. This IR records the matching amendment while the PM/PO own docs/canonical-model.yaml."
+  - date: 2026-08-05
+    status: PM-owned-architecture-amendment
+    change: "Supersede the pre-F2 confidence hierarchy with the binding P5 order: UserChoice, OwnedFile, ProviderIdentity, MinimumTitleAuthors, then visible unidentified/review; ISBN/ASIN/Goodreads book ids are edition-scoped lookup keys whose equality may confirm only inside the authority and whose inequality is no evidence."
+    reason: "X-F07's fix text identifies the missing IR supersession note. This row records the architect half while the PM/PO own the corresponding ARCHITECTURE.md Part 1 wording."
+  - date: 2026-08-08
+    status: PO-adopted
+    change: "Add ReviewKind::PendingRoute; add ReviewResolutionCommand::PendingRoute { card_id: i64, expected_generation: i64, action: Affirm { surviving_routes: Vec<RouteKey> } }; and add the PendingRoute row to pre_activation_review_cli.reachable_review_kinds."
+    reason: "B-DESIGN-004: no closed ReviewKind honestly represents a non-conflicting parked route candidate awaiting user affirmation; ratified by the PO for the AffirmPendingRoute door."
+
+dependency_graph:
+  - { source: livrarr-http, target: livrarr-domain }
+  - { source: livrarr-db, target: livrarr-domain }
+  - { source: livrarr-matching, target: livrarr-domain }
+  - { source: livrarr-external-data, target: livrarr-domain }
+  - { source: livrarr-external-data, target: livrarr-http }
+  - { source: livrarr-identity, target: livrarr-domain }
+  - { source: livrarr-identity, target: livrarr-external-data }
+  - { source: livrarr-identity, target: livrarr-http }
+  - { source: livrarr-enrichment, target: livrarr-domain }
+  - { source: livrarr-enrichment, target: livrarr-external-data }
+  - { source: livrarr-enrichment, target: livrarr-db }
+  - { source: livrarr-enrichment, target: livrarr-http }
+  - { source: livrarr-materialize, target: livrarr-domain }
+  - { source: livrarr-materialize, target: livrarr-http }
+  - { source: livrarr-materialize, target: livrarr-tagwrite }
+  - { source: livrarr-tagwrite, target: livrarr-domain }
+  - { source: livrarr-library, target: livrarr-domain }
+  - { source: livrarr-library, target: livrarr-db }
+  - { source: livrarr-metadata, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-http }
+  - { source: livrarr-metadata, target: livrarr-db }
+  - { source: livrarr-metadata, target: livrarr-matching }
+  - { source: livrarr-metadata, target: livrarr-external-data }
+  - { source: livrarr-metadata, target: livrarr-identity }
+  - { source: livrarr-metadata, target: livrarr-enrichment }
+  - { source: livrarr-metadata, target: livrarr-materialize }
+  - { source: livrarr-jobs, target: livrarr-domain }
+  - { source: livrarr-handlers, target: livrarr-domain }
+  - { source: livrarr-handlers, target: livrarr-http }
+  - { source: livrarr-handlers, target: livrarr-matching }
+  - { source: livrarr-handlers, target: livrarr-jobs }
+  - { source: livrarr-server, target: livrarr-domain }
+  - { source: livrarr-server, target: livrarr-http }
+  - { source: livrarr-server, target: livrarr-db }
+  - { source: livrarr-server, target: livrarr-matching }
+  - { source: livrarr-server, target: livrarr-external-data }
+  - { source: livrarr-server, target: livrarr-identity }
+  - { source: livrarr-server, target: livrarr-enrichment }
+  - { source: livrarr-server, target: livrarr-metadata }
+  - { source: livrarr-server, target: livrarr-library }
+  - { source: livrarr-server, target: livrarr-materialize }
+  - { source: livrarr-server, target: livrarr-jobs }
+  - { source: livrarr-server, target: livrarr-handlers }
+  - { source: livrarr-behavioral, target: livrarr-domain }
+  - { source: livrarr-behavioral, target: livrarr-http }
+  - { source: livrarr-behavioral, target: livrarr-db }
+  - { source: livrarr-behavioral, target: livrarr-matching }
+  - { source: livrarr-behavioral, target: livrarr-external-data }
+  - { source: livrarr-behavioral, target: livrarr-identity }
+  - { source: livrarr-behavioral, target: livrarr-enrichment }
+  - { source: livrarr-behavioral, target: livrarr-metadata }
+  - { source: livrarr-behavioral, target: livrarr-library }
+  - { source: livrarr-behavioral, target: livrarr-tagwrite }
+  - { source: livrarr-behavioral, target: livrarr-materialize }
+  - { source: livrarr-behavioral, target: livrarr-jobs }
+  - { source: livrarr-behavioral, target: livrarr-handlers }
+
+data_flow:
+  sources:
+    - { entity: Work, origin: user-input, description: "Explicit identity choice or minimum title plus at least one author through a human-watching door." }
+    - { entity: Work, origin: provider-evidence, description: "Provider work record through author/series monitor or a route-bearing door; no provider is required for existence." }
+    - { entity: Edition, origin: file, description: "Owned-file ISBN/ASIN, format/language, subtitle, and embedded EPUB cover; identifiers without direct format/language remain unknown/absent." }
+    - { entity: Edition, origin: http-api, description: "Normalized provider edition evidence after its capture probe; every edition attaches to exactly one Work." }
+    - { entity: WorkRoute, origin: user-input, description: "Explicit candidate pick or manual route action, top evidence in P5." }
+    - { entity: WorkRoute, origin: file, description: "Embedded ISBN/ASIN attached to an edition and projected to its work." }
+    - { entity: WorkRoute, origin: http-api, description: "Provider work/edition id from an already-fetched payload; GR work id capture adds no request." }
+    - { entity: IdentityConflict, origin: identity-authority, description: "Exactly one of conflict classes A/B/C; candidate parks while uncontested evidence continues." }
+    - { entity: EmbeddedCoverInspectionRecord, origin: file, description: "A four-way local inspection outcome tied to one user, library item, and exact FileRevision; extracted bytes are materialized separately." }
+    - { entity: CapturedIdentity, origin: db-read, description: "Own WorkId, tuple, primary AuthorId, active route projection, badge, and generation read through the repository." }
+  sinks:
+    - { entity: WorkRoute, destination: sqlite, description: "identity_routes active/retired rows, one owner per id, with audit archive and per-user uniqueness." }
+    - { entity: Edition, destination: sqlite, description: "Edition facts/defaults/covers and attached route ownership." }
+    - { entity: IdentityConflict, destination: review-ui, description: "Pending candidate with accept/reject/different-work actions and explicit surviving route set." }
+    - { entity: EmbeddedCoverInspectionRecord, destination: sqlite, description: "embedded_cover_inspections durably distinguishes extracted, verified absence, inspection failure, and file-gone for the exact revision; no cover bytes are stored." }
+    - { entity: CapturedIdentity, destination: enrichment, description: "Only the route/status/title/author identity contract crosses to enrichment; no raw metadata payload." }
+    - { entity: Work, destination: http-api, description: "Title main, rendered subtitle, author-record contributor display, connectedness badge, routes, editions, and cover state." }
+    - { entity: Work, destination: filesystem, description: "Selected cover artifacts and tags carrying the primary author record's current display name at write time." }
+    - { entity: HistoryEvent, destination: sqlite, description: "Append-only audited identity resolution, route transfer/retirement, review resolution, merge/archive, and cutover facts." }
+  invariant_durability_sweep:
+    entries:
+      - { invariant: I01, subject: "own WorkId and nonempty contributors", durable_home: "works plus work_contributors" }
+      - { invariant: I02, subject: "exactly-one route owner and edition-to-work projection", durable_home: "identity_routes XOR owner columns plus editions" }
+      - { invariant: I03, subject: "per-user active route uniqueness and collision parking", durable_home: "identity_routes unique constraint plus identity_conflicts_v2/identity_route_archives" }
+      - { invariant: I04, subject: "closed usable route kinds", durable_home: "RouteKind code-level closed enum/predicate; Undeclared rows remain stored in identity_routes but are ineligible, so no additional durable policy row is required" }
+      - { invariant: I05, subject: "connectedness derives from active routes and confirmation provenance", durable_home: "works.identity_status projection plus identity_routes provenance; recomputation asserts agreement" }
+      - { invariant: I06, subject: "captured title tuple is separate from display projection/defaults", durable_home: "works normalized identity tuple columns plus machine_subtitle_projections and work_default_editions" }
+      - { invariant: I07, subject: "edition-id equality confirm-only and inequality no-evidence", durable_home: "pure matching contract and typed route scope; no independent runtime state" }
+      - { invariant: I08, subject: "lost-match/wrong-merge guard separation", durable_home: "disjoint typed configuration and behavioral fixtures; no migration-082 table" }
+      - { invariant: I09, subject: "ST006-E whose-text probe gate", durable_home: "accepted probe artifact/registry and opaque SampledTextSignal construction; not runtime database state" }
+      - { invariant: I10, subject: "ST006-F alias proof gate", durable_home: "accepted probe artifact/registry and opaque AliasEquivalenceProof construction; not runtime database state" }
+      - { invariant: I11, subject: "six-door settle chokepoint", durable_home: "compile-time wiring plus behavioral door matrix; settlement/audit outcomes persist through identity_audit_events" }
+      - { invariant: I12, subject: "primary author is contributor ordinal zero", durable_home: "work_contributors" }
+      - { invariant: I13, subject: "works.primary_author_id projection equality", durable_home: "works.primary_author_id plus work_contributors, transactionally asserted" }
+      - { invariant: I14, subject: "user scope on every migration-082 type/table", durable_home: "the 20-row schema inventory and 22-row persisted-type audit in this IR plus schema constraints" }
+      - { invariant: I15, subject: "legal crate dependency graph and sibling seam", durable_home: "dependency graph and contract rules; no runtime data" }
+      - { invariant: I16, subject: "handler compile wall", durable_home: "module contract and compile-time dependency checks; no runtime data" }
+      - { invariant: I17, subject: "cover rank/default/fallback", durable_home: "edition_cover_candidates, work_cover_selections, and work_default_editions" }
+      - { invariant: I18, subject: "four-way local inspection outcome by FileRevision", durable_home: "embedded_cover_inspections and EmbeddedCoverInspectionRecord; candidate bytes remain outside the row" }
+      - { invariant: I19, subject: "repeatable snapshot/trivially-empty activation and blocker zero", durable_home: "identity_cutover_runs, identity_cutover_reports, identity_review_cards, identity_conflicts_v2, and final index" }
+      - { invariant: I20, subject: "one read/write authority event and no post-marker legacy consumers", durable_home: "_livrarr_meta authority marker, cutover run/audit rows, and enumerated startup/consumer guards" }
+    completeness: "All twenty IR invariants were swept. Every fact requiring runtime durability has a named schema/type home; policy, dependency, probe-capability, and compile-wall invariants are deliberately enforced by code/artifacts/tests and do not invent database state. The only r2 gap was I18, closed by embedded_cover_inspections."
+  state_machines:
+    - entity: IdentityStatus
+      states: [NotConnected, Connected, UserConfirmed]
+      transitions:
+        - { from: NotConnected, to: Connected, trigger: "first active route without user-confirmation provenance" }
+        - { from: NotConnected, to: UserConfirmed, trigger: "explicit user choice creates/attaches the first surviving route" }
+        - { from: Connected, to: UserConfirmed, trigger: "user confirms an active route" }
+        - { from: UserConfirmed, to: Connected, trigger: "audited user action retires confirmed provenance while another active route survives" }
+        - { from: Connected, to: NotConnected, trigger: "audited removal/transfer retires the last active route" }
+        - { from: UserConfirmed, to: NotConnected, trigger: "audited removal/transfer retires the last active route" }
+        - { from: UserConfirmed, to: NotConnected, trigger: "invariant repair observes zero routes; emits repair card" }
+    - entity: WorkRoute
+      states: [CandidateParked, Active, Retired, Rejected]
+      transitions:
+        - { from: CandidateParked, to: Active, trigger: "accept/different-work resolution atomically selects owner and surviving set" }
+        - { from: CandidateParked, to: Rejected, trigger: "reject resolution" }
+        - { from: Active, to: Retired, trigger: "audited displacement, transfer, removal, or same-work merge" }
+        - { from: Retired, to: Active, trigger: "never; a later observation is a new candidate subject to archive suppression" }
+    - entity: Edition
+      states: [ActiveUnknown, ActiveKnown, EvidenceReview, Archived]
+      transitions:
+        - { from: ActiveUnknown, to: ActiveKnown, trigger: "direct payload/file evidence or explicit user format assignment" }
+        - { from: ActiveUnknown, to: EvidenceReview, trigger: "contradictory direct format/language evidence" }
+        - { from: ActiveKnown, to: EvidenceReview, trigger: "contradictory direct format/language evidence" }
+        - { from: EvidenceReview, to: ActiveUnknown, trigger: "resolution retains unknown/absent" }
+        - { from: EvidenceReview, to: ActiveKnown, trigger: "resolution chooses direct evidence" }
+        - { from: EvidenceReview, to: Archived, trigger: "audited resolution discards the only candidate evidence and the route-less shell has no retained facts" }
+        - { from: ActiveUnknown, to: Archived, trigger: "last route transferred from otherwise-empty shell" }
+        - { from: ActiveKnown, to: Archived, trigger: "audited same-work merge/explicit archival; facts retained" }
+    - entity: IdentityConflict
+      states: [Pending, Accepted, Rejected, DifferentWork]
+      transitions:
+        - { from: Pending, to: Accepted, trigger: "audited accept naming surviving routes and target edition when needed" }
+        - { from: Pending, to: Rejected, trigger: "audited reject; current graph intact" }
+        - { from: Pending, to: DifferentWork, trigger: "audited ownership choice naming winner and surviving routes" }
+    - entity: SubtitleOverride
+      states: [Automatic, UserValue, UserAbsent]
+      transitions:
+        - { from: Automatic, to: UserValue, trigger: "explicit value edit; updates tuple and re-keys" }
+        - { from: Automatic, to: UserAbsent, trigger: "explicit absence edit; updates tuple and re-keys" }
+        - { from: UserValue, to: UserValue, trigger: "another explicit value edit" }
+        - { from: UserValue, to: UserAbsent, trigger: "explicit absence edit" }
+        - { from: UserValue, to: Automatic, trigger: "reset display override only; tuple unchanged" }
+        - { from: UserAbsent, to: UserValue, trigger: "explicit value edit" }
+        - { from: UserAbsent, to: Automatic, trigger: "reset display override only; tuple unchanged" }
+    - entity: EmbeddedCoverInspectionResult
+      states: [Uninspected, Extracted, VerifiedNoCover, CouldNotInspect, FileGone]
+      transitions:
+        - { from: Uninspected, to: Extracted, trigger: "inspect readable revision with embedded cover" }
+        - { from: Uninspected, to: VerifiedNoCover, trigger: "inspect readable revision without cover" }
+        - { from: Uninspected, to: CouldNotInspect, trigger: "malformed/encrypted/unreadable revision" }
+        - { from: Uninspected, to: FileGone, trigger: "file disappears before or during its first inspection" }
+        - { from: CouldNotInspect, to: Extracted, trigger: "changed revision or explicit retry succeeds with cover" }
+        - { from: CouldNotInspect, to: VerifiedNoCover, trigger: "changed revision or explicit retry verifies absence" }
+        - { from: CouldNotInspect, to: CouldNotInspect, trigger: "changed revision or explicit retry still fails; record refreshes" }
+        - { from: Extracted, to: Extracted, trigger: "new file revision is inspected and contains a cover; replace the prior revision outcome" }
+        - { from: Extracted, to: VerifiedNoCover, trigger: "new file revision is inspected and verifies absence" }
+        - { from: Extracted, to: CouldNotInspect, trigger: "new file revision is malformed/encrypted/unreadable" }
+        - { from: VerifiedNoCover, to: Extracted, trigger: "new file revision is inspected and now contains a cover" }
+        - { from: VerifiedNoCover, to: VerifiedNoCover, trigger: "new file revision is inspected and again verifies absence" }
+        - { from: VerifiedNoCover, to: CouldNotInspect, trigger: "new file revision is malformed/encrypted/unreadable" }
+        - { from: Extracted, to: FileGone, trigger: "file removal" }
+        - { from: VerifiedNoCover, to: FileGone, trigger: "file removal" }
+        - { from: CouldNotInspect, to: FileGone, trigger: "file removal" }
+        - { from: FileGone, to: Extracted, trigger: "replacement/new revision appears and inspection finds a cover" }
+        - { from: FileGone, to: VerifiedNoCover, trigger: "replacement/new revision appears and inspection verifies absence" }
+        - { from: FileGone, to: CouldNotInspect, trigger: "replacement/new revision appears but is malformed/encrypted/unreadable" }
+    - entity: IdentityCutoverRun
+      states: [NotRun, Rehearsed, Blocked, Ready, Activated, Failed]
+      transitions:
+        - { from: NotRun, to: Rehearsed, trigger: "first snapshot run" }
+        - { from: NotRun, to: Activated, trigger: "shared startup guard proves a fresh/test database transactionally empty, records trivially-empty rehearsal, and immediately creates the new authority" }
+        - { from: Rehearsed, to: Ready, trigger: "second identical run, zero unresolved cards" }
+        - { from: Rehearsed, to: Blocked, trigger: "repair/group/field/contributor card exists" }
+        - { from: Blocked, to: Blocked, trigger: "rerun Apply idempotently revalidates staged typed-key rows and authoritative committed resolutions but one or more cards remain" }
+        - { from: Blocked, to: Ready, trigger: "all cards resolved, staged-state revalidation passes, and approved schema/legacy-source fingerprint still match" }
+        - { from: Ready, to: Activated, trigger: "exclusive live apply creates final unique index" }
+        - { from: NotRun, to: Failed, trigger: "schema/input/database failure" }
+        - { from: Rehearsed, to: Failed, trigger: "non-repeatable output" }
+        - { from: Blocked, to: Failed, trigger: "staged-state/resolution revalidation, source-schema/fingerprint comparison, or database operation fails" }
+        - { from: Ready, to: Failed, trigger: "exclusive apply fails and its transaction rolls back before marker/index commit" }
+        - { from: Failed, to: NotRun, trigger: "explicit operator retry after correcting the reported failure; immutable prior run remains audited" }
+  transition_class_sweep:
+    IdentityStatus: "All externally caused projection changes are explicit: first/last route, user confirmation, confirmed-provenance retirement, and invariant repair. Added the ordinary UserConfirmed -> NotConnected last-route edge."
+    WorkRoute: "Candidate accept/reject and active audited retirement cover every allowed external lifecycle change. Retired/Rejected are immutable; a later observation creates a new CandidateParked row rather than reactivating either."
+    Edition: "Direct evidence, contradictory evidence, review resolution, empty-shell transfer, and audited archival are explicit. Added the review-to-archive edge; Archived is immutable and later evidence creates/reuses an active edition only through explicit co-edition proof."
+    IdentityConflict: "Pending has exactly the three audited exits. Accepted/Rejected/DifferentWork are immutable audit outcomes; retries are idempotent against the same resolved action."
+    SubtitleOverride: "Every value-changing user action and reset is explicit. Repeating the same value/absence is an idempotent write, not a state change."
+    EmbeddedCoverInspectionResult: "Every initial, revision-change, explicit-retry, removal, and replacement outcome is explicit. Added new-revision edges from both success outcomes, pre-first-inspection removal, and replacement edges from FileGone."
+    IdentityCutoverRun: "Snapshot, blocked staging, idempotent Blocked -> Blocked revalidation with remaining cards, authoritative-resolution advancement to Ready, trivially-empty activation, apply/revalidation failure, and explicit operator retry are explicit. Activated is immutable."
+  invariants:
+    - "Every Work has an own WorkId anchor and at least one WorkContributor; zero provider routes is valid."
+    - "An identity_routes row has exactly one owner: Work or Edition. Edition ownership resolves through exactly one Edition.work_id; no edition id is stored or written again at work scope."
+    - "Within one user, one active (provider, kind, provider_scoped_id) resolves to at most one Work. A collision parks class C and changes no owner."
+    - "The usable enrichment kinds are closed: OpenLibraryWork, GoodreadsWork, HardcoverWork, Isbn13Edition, AsinEdition, GoodreadsBookEdition."
+    - "IdentityStatus is derived from active routes and user-confirmation provenance; conflict/review state never changes the connectedness vocabulary."
+    - "IdentityTitleTuple is captured from P5-winning evidence. Machine subtitle projection, defaults, monitoring, and provider refresh never mutate it or its uniqueness key."
+    - "Edition-id inequality is no evidence. Edition-id equality can confirm only inside the matching authority or migration mapping and can never be required."
+    - "LostMatchGuardSet and WrongMergeGuardSet expose disjoint configuration/state; direction-specific fixtures prove tuning one cannot change the other."
+    - "Before accepted PROBE-ST006-E, every whose-text classification returns ReviewRequired. No title keyword or LLM produces a match/class."
+    - "Before accepted PROBE-ST006-F, every same-provider work-id disagreement is conflict class A."
+    - "All six doors call one IdentityRoadService::settle entry and satisfy the typed door evidence matrix. Threading evidence into a WorkCandidate without that call is not wiring."
+    - "The primary author is the first stored contributor at reference, uniqueness, tags, matching, and F1 inheritance; roles and incoming provider order never choose it."
+    - "For every Work, works.primary_author_id equals the sole work_contributors row at ordinal zero. It is a derived indexed projection, never a second authority; contributor/order/projection changes and v2 key collision checks commit or roll back together."
+    - "Every migration-082 user-scoped table/type carries user_id and every query filters by it. Only installation-wide cutover run/report rows omit user_id, and they contain fingerprints/counts rather than per-user identity payload."
+    - "livrarr-identity has no livrarr-db edge; livrarr-identity and livrarr-enrichment are non-dependent siblings; route/edition SQL lives only in livrarr-db behind domain traits."
+    - "livrarr-handlers keeps the compile wall and contains no business orchestration or SQL."
+    - "Cover rank is user slot choice, owned-file same-format, default same-format edition, then another same-format edition; audiobook may explicitly fall back to selected ebook. Unknown format fills no slot."
+    - "CouldNotInspect and VerifiedNoCover are distinct durable outcomes tied to FileRevision; an unchanged failure receives no background retry and every local inspection makes zero provider requests."
+    - "Migration never edits 001-081. A non-empty database rehearses twice on copied real-library snapshots; a transactionally empty fresh/test database records the trivially-empty branch. Both create idx_works_identity_v2 only as the final activation write after zero unresolved cards/collisions."
+    - "The authority marker is the shared read/write cutover event. A non-empty inactive database cannot bind HTTP or start jobs; after commit, every listed legacy uniqueness reader/writer is disabled and all production identity operations use the new road/index."

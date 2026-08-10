@@ -1,0 +1,390 @@
+metadata:
+  feature: identity-layer-rewrite
+  spec_ref: /mnt/opt/livrarr/spec-identity-layer-rewrite.md
+  ir_ref: /mnt/opt/livrarr/ir-v1-identity-layer-rewrite.yaml
+  version: 3
+  review_fold: "architecture r2 folded into verified r1 baseline; seven fresh dispositions at build/reviews/identity-layer-rewrite/FOLD-ARCH-R2.md"
+
+module_dependency:
+  - id: DEP-001
+    source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-server
+    rationale: "Preserve the canonical compile wall. Identity handlers validate, call narrow domain capabilities, and map outcomes only."
+  - id: DEP-002
+    source: livrarr-domain
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "All identity vocabulary, deterministic policy, and service/repository traits remain foundation types."
+  - id: DEP-003
+    source: livrarr-db
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "livrarr-db implements domain repositories and owns SQL; it depends only on livrarr-domain."
+  - id: DEP-004
+    source: livrarr-external-data
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "Provider parsing/transport is substrate and may know only livrarr-domain plus livrarr-http."
+  - id: DEP-005
+    source: livrarr-identity
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "Identity remains DB-free and is a non-dependent sibling of enrichment. Persistence is through domain traits wired by the composition root."
+  - id: DEP-006
+    source: livrarr-enrichment
+    forbidden_targets:
+      - livrarr-identity
+      - livrarr-matching
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "Enrichment consumes routes and writes normalized metadata through allowed domain/DB seams; it never invokes or mutates identity policy."
+  - id: DEP-007
+    source: livrarr-library
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "The EPUB inspector is local file infrastructure over domain/db only and makes zero provider calls. Its caller brokers extracted evidence; cover bytes are written through the existing cover/materialization gate, so livrarr-library has no materialize consumer."
+  - id: DEP-008
+    source: livrarr-materialize
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "Materialize remains DB-free pure I/O over caller-resolved cover/tag requests."
+  - id: DEP-009
+    source: livrarr-jobs
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-handlers
+      - livrarr-server
+    rationale: "livrarr-jobs stays a compile-wall-safe domain-only trigger surface; concrete ticks live in livrarr-server."
+
+forbidden_pattern:
+  # ST-001 candidate — PO adopts or rejects at gate
+  - id: FP-ST-001
+    pattern: "structural: any same-work decision requires equal work subtitles, treats a one-sided subtitle as Different, or reads an edition/display subtitle as a work-level identity veto"
+    description: "Bare and subtitled representations may be the same work; subtitle projection is display-only and edition subtitle is edition truth."
+    severity: P0
+    rationale: "ST-001, REQ-003, and AC-003."
+  - id: FP-ST-001-EDITION-TRUTH
+    pattern: "structural: an Edition subtitle or explicit subtitle absence is populated, backfilled, repaired, or overwritten from Work.IdentityTitleTuple, Work display subtitle, MachineSubtitleProjection, or rendered subtitle rather than direct edition/file/provider/user evidence"
+    description: "Edition subtitle truth flows into the selected work display projection; work-level tuple/display state never flows back into an Edition."
+    severity: P0
+    rationale: "ST-001's storage-direction Forbid, REQ-003, and AC-003."
+  # ST-002 candidate — PO adopts or rejects at gate
+  - id: FP-ST-002
+    pattern: "structural: a Goodreads book id is typed or compared as a work id, a stored legacy gr_key migrates as GoodreadsWork, or a second request is issued solely to learn a work id already present in a fetched book page"
+    description: "Goodreads book numbers are edition ids; work id capture must reuse the existing page response at zero extra requests."
+    severity: P0
+    rationale: "ST-002, REQ-006, and REQ-026."
+  # ST-003 candidate — PO adopts or rejects at gate
+  - id: FP-ST-003
+    pattern: "structural: GoogleBooks, Audible, or Audnexus is required to produce a work-scoped route; or a provider author array is flattened to one bare string before contributor/role normalization"
+    description: "Volume/production-only providers have no work-id route, and provider contributors are ordered/role-bearing evidence."
+    severity: P0
+    rationale: "ST-003, REQ-001, REQ-004, and REQ-023."
+  # ST-004 candidate — PO adopts or rejects at gate
+  - id: FP-ST-004
+    pattern: "structural: one provider-id scalar/slot per work or multiple distinct edition-id routes on one work raise a conflict"
+    description: "Routes are plural per provider and multiple edition ids on one work are normal; uniqueness is per user over the full typed route key and resolved work ownership."
+    severity: P0
+    rationale: "ST-004, REQ-001, and REQ-007."
+  - id: FP-ST-004-UNIQUE-INDEX
+    pattern: '(?:\bCREATE\s+UNIQUE\s+INDEX\b[^;]*\bON\s+[A-Za-z_][A-Za-z0-9_]*\s*\(\s*(?:user_id\s*,\s*)?(?:work_id\s*,\s*provider|provider\s*,\s*work_id)\s*\)|\bUNIQUE\s*\(\s*(?:user_id\s*,\s*)?(?:work_id\s*,\s*provider|provider\s*,\s*work_id)\s*\))'
+    description: "Detect CREATE UNIQUE INDEX and inline UNIQUE idioms when they enforce one provider slot per work; inline prose is intentionally kept in FP-ST-004 instead of spliced into this regex."
+    severity: P0
+    rationale: "ST-004, REQ-001/007, and the live migration SQL index idiom."
+  # ST-005 candidate — PO adopts or rejects at gate
+  - id: FP-ST-005
+    pattern: "structural: provider subtitle storage or title splitting compares the parsed embedded tail with the structured subtitle to choose/validate either value, or stores a structured subtitle without the identity normalization authority"
+    description: "Stored main always comes from the title parse; structured subtitle wins when present without textual comparison to the embedded tail."
+    severity: P0
+    rationale: "ST-005, REQ-003, and AC-003."
+  # ST-006 candidate — PO adopts or rejects at gate
+  - id: FP-ST-006
+    pattern: "structural: production behavior branches on OL role labels, HC work/default/reference shapes, GR editions pagination, HC/GR author-id layout, whose-text signals, or provider alias/canonical equivalence without accepting the corresponding PROBE-ST006-A..F artifact"
+    description: "Every unsampled shape is fail-closed behind its named early code-stage capture probe. Role-based primary selection remains forbidden even after capture without a new spec amendment."
+    severity: P0
+    rationale: "ST-006, REQ-004, REQ-011, REQ-023, and REQ-025."
+  # ST-007 candidate — PO adopts or rejects at gate
+  - id: FP-ST-007
+    pattern: "structural: EPUB inspection assumes a cover exists, maps a malformed/encrypted/unreadable revision to VerifiedNoCover, or retries an unchanged CouldNotInspect revision from a background cover pass"
+    description: "Embedded cover, verified absence, and inspection failure are separate outcomes; failure retries only on changed revision or explicit user retry."
+    severity: P0
+    rationale: "ST-007, REQ-015, and AC-012."
+  # REQ-009/P6 candidate — PO adopts or rejects at gate; paired with AC-007 tree-wide enumeration
+  - id: FP-REQ009
+    pattern: "structural: ISBN, ASIN, Goodreads book id, or any RouteScope::Edition value is required to agree, allowed to veto on disagreement, or consumed as same-work comparison evidence outside identity_matching::id_verdict confirm arm and the REQ-026 migration mapping"
+    description: "Edition ids are lookup keys everywhere else. Equality may only confirm; inequality is no evidence. The behavioral gate enumerates every comparison site tree-wide."
+    severity: P0
+    rationale: "P6, REQ-009, and AC-007."
+  - id: FP-001
+    pattern: "structural: INSERT, UPDATE, or DELETE of identity_routes, editions, work_contributors, work_relationships, identity review/archive tables, or identity tuple/key columns outside livrarr-db and numbered migrations"
+    description: "Route and edition storage writers live in livrarr-db behind livrarr-domain traits; no crate owns ad-hoc SQL."
+    severity: P0
+    rationale: "Packet hard constraint, canonical no-SQL rule, and REQ-001/005/024."
+  - id: FP-002
+    pattern: "structural: a production Work creation or identity re-key commit does not pass through livrarr-metadata::identity_road::IdentityRoadServiceImpl::settle or its resolve_review continuation"
+    description: "All six doors and all review continuations share one road-entry chokepoint. Constructing or passing a WorkCandidate alone is not convergence proof."
+    severity: P0
+    rationale: "REQ-018/019 and PA-009."
+  - id: FP-003
+    pattern: "structural: a door accepts IdentityEvidenceBundle without validating its DoorKind Always/Conditional/Never/minimum-only matrix"
+    description: "Typed door evidence constructors must reject missing Always evidence, Never injection, and an invalid minimum-only combination."
+    severity: P0
+    rationale: "REQ-018 and AC-015."
+  - id: FP-004
+    pattern: "structural: identity_routes stores both work_id and edition_id, stores neither, or copies an edition-owned route into a second work-owned row/projection table"
+    description: "Every route has exactly one owner and edition projection is a join through editions.work_id, never a dual write."
+    severity: P0
+    rationale: "REQ-001/005/007 and AC-001/004/006."
+  - id: FP-005
+    pattern: "structural: automatic enrichment eligibility is derived from IdentityStatus badge text or any open-ended route-kind predicate"
+    description: "Eligibility uses the closed declared usable-kind list; connected undeclared routes remain manual-search-only."
+    severity: P0
+    rationale: "REQ-012/013 and AC-010."
+  - id: FP-006
+    pattern: "structural: identity/enrichment/provider failure handling deletes, retires, transfers, downgrades, or changes ownership of an active route without an audited user resolution"
+    description: "Fetch failure, parse drift, and provider outage preserve route ownership and committed state under every route-kind policy."
+    severity: P0
+    rationale: "REQ-006/007/013 and the IR per-route failure policy."
+  - id: FP-007
+    pattern: "structural: same-provider work-id disagreement is accepted as alias/canonical equivalence without an opaque AliasEquivalenceProof constructed from accepted PROBE-ST006-F evidence"
+    description: "Until alias shapes are sampled, every same-provider work-id disagreement is conflict class A."
+    severity: P0
+    rationale: "REQ-007 and ST-006(f)."
+  - id: FP-008
+    pattern: "structural: a title keyword, LLM result, raw provider label, or unsampled signal produces SameText/DifferentText, abridgement, translation, adaptation, study-guide, or omnibus classification"
+    description: "Only SampledTextSignal from accepted PROBE-ST006-E can select a P8 automatic arm; otherwise classification is ReviewRequired."
+    severity: P0
+    rationale: "P8/P9, REQ-011/024, and AC-009/021."
+  - id: FP-009
+    pattern: "structural: one threshold/configuration field is read by both LostMatchGuardSet and WrongMergeGuardSet outcome code"
+    description: "The two failure directions have independently tunable named guard sets and non-interference tests."
+    severity: P0
+    rationale: "P3, REQ-008, and AC-007."
+  - id: FP-010
+    pattern: "structural: private title sameness recipe in list import dedup, discovery display dedup, or fast Hardcover cover search instead of a livrarr-domain identity_matching verdict"
+    description: "V5, V7, and V8 conform to the one matching authority."
+    severity: P0
+    rationale: "REQ-010 and AC-008."
+  - id: FP-011
+    pattern: '\b(should_reject_cover|CoverTrust|cover_trust|audiobook_cover_trust)\b'
+    exclude:
+      # verify.py passes this value to grep --exclude, whose glob matches the
+      # basename rather than the repository-relative path. Numbered migration
+      # history remains immutable, including the required retirement migration.
+      - "0*.sql"
+    description: "The V6 substring junk list and cover trust-grade vocabulary/storage are retired; selection uses format rank and UI shows source only."
+    severity: P0
+    rationale: "REQ-010/014/017 and AC-008/011/014."
+  - id: FP-012
+    pattern: "structural: an EditionFormat or edition language is inferred from ISBN/ASIN kind, provider name alone, cover similarity, title similarity, or sibling edition fields"
+    description: "Only direct provider/file evidence or an explicit user choice resolves format/language; otherwise unknown/absent remains valid."
+    severity: P0
+    rationale: "REQ-005/026 and AC-004/023."
+  - id: FP-013
+    pattern: "structural: an unknown-format edition becomes a per-format default or fills an ebook/audiobook cover slot"
+    description: "Unknown covers remain retained and enter the one work-scoped format-needed panel only while a target slot is uncovered."
+    severity: P0
+    rationale: "REQ-005/014/016/026."
+  - id: FP-014
+    pattern: "structural: cover placeholder state creates one FormatNeeded panel per slot or treats manual provider search as a cover retry"
+    description: "There is at most one work-scoped format-needed panel; nowhere-to-look is independently evaluated per uncovered slot and manual search finds routes."
+    severity: P0
+    rationale: "REQ-016 and AC-013."
+  - id: FP-015
+    pattern: "structural: a machine subtitle projection, edition/default/monitoring change, or reset-to-automatic writes IdentityTitleTuple, normalized identity key, text distinction, or merge state"
+    description: "Machine subtitle is display-only. Reset removes only the override; explicit title edits alone update tuple and re-key."
+    severity: P0
+    rationale: "REQ-003/024 and AC-003/009/023."
+  - id: FP-016
+    pattern: "structural: provider contributor array position, role label, or newly arriving lower AuthorId displaces a surviving primary author"
+    description: "Primary is the first stored contributor; co-created ordering uses the total pre-id tuple, unresolved ties review, and a surviving primary stays first."
+    severity: P0
+    rationale: "REQ-023 and AC-020."
+  - id: FP-017
+    pattern: "structural: work-settle author inheritance calls an independent author matcher, attaches to a non-primary contributor, or falls back when provider author id is absent/unreadable"
+    description: "Inheritance uses only F1 guard_author_route for the primary author; no id means no link and no fallback."
+    severity: P0
+    rationale: "REQ-025 and AC-022."
+  - id: FP-018
+    pattern: "structural: a re-key/create query checks only the exact proposed unique key or only a common-distinction pair rather than the complete main/author candidate set and complete tuple/primary group"
+    description: "Broad same-main/primary candidates reach the authority; exact tuple/primary groups enumerate every text distinction and every proposed cohort pair."
+    severity: P0
+    rationale: "REQ-024 and AC-020/021."
+  - id: FP-019
+    pattern: "structural: a same-work merge chooses a conflicting user-set singular, differing present machine canonical pointer/default, or user-vs-user cover/title value by provider priority, lowest id, first arrival, or non-null COALESCE"
+    description: "Field-resolution cards protect singular conflicts; only fields with a requirement-defined total derivation recompute automatically."
+    severity: P0
+    rationale: "REQ-024 merge policy and AC-021."
+  - id: FP-020
+    pattern: "structural: route or edition transfer qualifies a target edition by title, subtitle, format, language, cover, arrival order, or any evidence other than direct co-edition proof or explicit user target"
+    description: "Zero qualifying target creates a provisional edition, one selects it, several stay pending; transfer is atomic and moves only the contested id."
+    severity: P0
+    rationale: "REQ-007/026 and AC-006/023."
+  - id: FP-021
+    pattern: "structural: Readarr identity selection uses filename/release-name matching, embedded title/author to select an existing work, attaches any file before a flagged identity resolves, or evaluates minimum title/author before valid embedded identifiers"
+    description: "Readarr follows the binding identifier-first precedence and keeps every flagged import unattached."
+    severity: P0
+    rationale: "REQ-019 and AC-016."
+  - id: FP-022
+    pattern: "structural: a human-watching dedup hit silently discards the user's pick or attaches a file/row to a different work without a visible review choice"
+    description: "Manual import, import review, and list-import review/add always flag to the watching human."
+    severity: P0
+    rationale: "P4, REQ-021, and AC-018."
+  - id: FP-023
+    pattern: "structural: sibling identity panel offers clear, remove, reset, detach, replace, or warning/threat copy implying confirmation changes sibling routes/files"
+    description: "The sibling panel is informational only. Exact literal copy remains PO-pending and cannot be invented in code."
+    severity: P1
+    rationale: "REQ-022, AC-019, and BLOCKED-arch.md."
+  - id: FP-024
+    pattern: "structural: new identity migration edits files 001_*.sql through 081_*.sql; applies legacy retirement before the cutover marker; creates idx_works_identity_v2 with any repair/group/field/contributor card or collision unresolved; activates a non-empty database without two byte-identical approved snapshot rehearsals; or activates a fresh/test database without transactionally proving works and every legacy identity/review source empty"
+    description: "Applied migrations are immutable; non-empty migration is snapshot-first, empty databases activate through the shared startup guard, and the new unique index is the final activation write."
+    severity: P0
+    rationale: "REQ-026 and AC-023."
+  - id: FP-025
+    pattern: "structural: identity migration generates text distinction from randomness, arrival order, display state, subtitle projection, provider keyword, or unstable row enumeration"
+    description: "Non-common distinctions are deterministically bound to stable own WorkId and repeat byte-identically."
+    severity: P0
+    rationale: "REQ-024/026 and AC-021/023."
+  - id: FP-026
+    pattern: "structural: production code reads works.ol_key, works.gr_key, works.hc_key, works.isbn_13, works.asin, work_identity_anchors, or external_ids as identity authority after the identity-layer cutover marker"
+    description: "The committed identity-layer marker is the shared read/write event. All consumers read WorkRoute/Edition repositories after it; a non-empty inactive database cannot serve."
+    severity: P0
+    rationale: "REQ-001/006/010/013/026."
+  - id: FP-027
+    pattern: "structural: production code writes works.ol_key, works.gr_key, works.hc_key, works.isbn_13, works.asin, work_identity_anchors, external_ids, or works.author_name after the identity-layer cutover marker"
+    description: "FP-026 and FP-027 key on the same committed marker. New routes, editions, and author-record contributors are the only post-marker identity writers; the new binary refuses serving before the marker on non-empty databases."
+    severity: P0
+    rationale: "REQ-001/023/026."
+  - id: FP-028
+    pattern: "structural: IdentityStatus contains Pending, Confirmed, Provisional, Conflict, NeedsReview, or NotFound after cutover, or UserConfirmed is persisted with zero active routes"
+    description: "Badge vocabulary is exactly UserConfirmed/Connected/NotConnected; conflicts/reviews are separate and a broken user-confirmed invariant falls back with repair review."
+    severity: P0
+    rationale: "REQ-012 and AC-010/023."
+  - id: FP-029
+    pattern: "structural: a new or changed identity-layer async trait uses async-trait, #[async_trait], Box<dyn Service>, or dyn service/repository dispatch instead of trait_variant::make(Send)"
+    description: "New/changed identity-layer async traits use trait_variant::make(Send) and generic/enum dispatch, never async-trait or dyn traits."
+    severity: P1
+    rationale: "Binding project coding convention 8."
+  - id: FP-030
+    pattern: "structural: identity-layer code adds the time crate or uses time-crate date/time types instead of chrono"
+    description: "Identity-layer date/time code uses chrono; do not add the time crate."
+    severity: P1
+    rationale: "Binding project coding convention 11."
+  - id: FP-031
+    pattern: "structural: EPUB inspection, archive traversal, XML parsing, image decoding, hashing, encoding, provider parsing, or serialization is hand-written instead of using an approved established library"
+    description: "Use zip, quick-xml, image, sha2, serde, and existing provider adapters; bound archive sizes and run blocking file I/O in spawn_blocking."
+    severity: P0
+    rationale: "Packet ecosystem rule, REQ-015, and project coding convention 10."
+  - id: FP-032
+    pattern: "structural: livrarr-enrichment calls livrarr-identity, writes identity_routes/IdentityStatus, or constructs an identity conflict resolution"
+    description: "Identity and enrichment are non-dependent siblings. Enrichment may emit normalized evidence/outcomes; the metadata identity road owns identity mutation."
+    severity: P0
+    rationale: "Canonical one-way identity seam and packet hard constraint."
+  - id: FP-033
+    pattern: "structural: an inactive-marker cutover review card can be resolved only through an HTTP handler; a pre-activation resolver bypasses IdentityRoadService::resolve_review, accepts an action not matched to the stored ReviewKind/generation, binds a network listener, runs alongside the normal server/jobs, or lacks a durable CutoverOperator audit"
+    description: "Every pre-marker card class is reachable through the local exclusive list/show/resolve CLI and the exact shared road continuation; normal serving stays stopped until final Apply."
+    severity: P0
+    rationale: "Architecture r2 F01, REQ-024/026, and the single-container maintenance-window activation contract. PO-RATIFY."
+  - id: FP-034
+    pattern: "structural: after the identity authority marker is active, startup invokes backfill_normalized_identity, the author normalization/backfill sibling, backfill_identity_key_recompute, backfill_work_identity_ledger, clear_subtitle_rule_deadends, or any sibling pass that writes/deletes legacy identity columns, works.author_name, work_identity_anchors, or external_ids"
+    description: "The startup marker guard permanently skips every enumerated legacy identity writer 9b through 9e after activation; infrastructure/version checks remain separate."
+    severity: P0
+    rationale: "Architecture r2 F04, FP-027, REQ-026, and AC-023."
+  - id: FP-035
+    pattern: "structural: an EPUB embedded-cover inspection outcome is kept only in memory/logs, is not keyed by user plus library item plus exact FileRevision, conflates CouldNotInspect with VerifiedNoCover, stores extracted cover bytes in the inspection row, or background-retries an unchanged durable CouldNotInspect outcome"
+    description: "Every four-way local inspection outcome has a durable scoped home; unchanged failures suppress background retries and cover bytes remain at the materialization boundary."
+    severity: P0
+    rationale: "Architecture r2 F05, REQ-015, AC-012, and invariant I18."

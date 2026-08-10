@@ -1,0 +1,1739 @@
+metadata:
+  feature: identity-layer-rewrite
+  stage: v2-operational
+  version: 4
+  spec_ref: /mnt/opt/livrarr/spec-identity-layer-rewrite.md
+  ir_v1_ref: /mnt/opt/livrarr/ir-v1-identity-layer-rewrite.yaml
+  contract_ref: /mnt/opt/livrarr/contract-identity-layer-rewrite.yaml
+  architecture_status: closed-and-po-ratified
+  structural_content_policy: "IR v4 is authoritative for components, types, signatures, dependencies, tables, invariants, state machines, migration inventory, and error lists. This artifact supplies only operational design and cites structural selectors instead of redeclaring them."
+  escalation_ref: /mnt/opt/livrarr/build/reviews/identity-layer-rewrite/BLOCKED-design.md
+  review_fold:
+    round: r3
+    sources:
+      - build/reviews/identity-layer-rewrite/PACKET-FOLD-DESIGN-R3-RATIFY.md
+    disposition_ref: build/reviews/identity-layer-rewrite/FOLD-DESIGN-R3-RATIFY.md
+    prior_rounds:
+      - round: r2
+        sources:
+          - build/reviews/identity-layer-rewrite/REVIEW-DESIGN-anthropic-r2.md
+          - build/reviews/identity-layer-rewrite/REVIEW-DESIGN-xai-r2.md
+        disposition_ref: build/reviews/identity-layer-rewrite/FOLD-DESIGN-R2.md
+      - round: r1
+        sources:
+          - build/reviews/identity-layer-rewrite/REVIEW-DESIGN-anthropic-r1.md
+          - build/reviews/identity-layer-rewrite/REVIEW-DESIGN-xai-r1.md
+        disposition_ref: build/reviews/identity-layer-rewrite/FOLD-DESIGN-R1.md
+
+structural_references:
+  module_set: "ir-v1-identity-layer-rewrite.yaml#/modules"
+  door_evidence_contract: "ir-v1-identity-layer-rewrite.yaml#/door_evidence_contract"
+  route_capture_handoff: "ir-v1-identity-layer-rewrite.yaml#/route_capture_handoff"
+  merge_policy: "ir-v1-identity-layer-rewrite.yaml#/merge_field_policy"
+  migration_plan: "ir-v1-identity-layer-rewrite.yaml#/migration_plan"
+  shared_types: "ir-v1-identity-layer-rewrite.yaml#/shared_types"
+  dependency_graph: "ir-v1-identity-layer-rewrite.yaml#/dependency_graph"
+
+operational_decisions:
+  - key: single_writer
+    value: "Every create, dedup, adopt, normalized match, and database race-loser continuation submits one IdentityRoadRequest; only the repository transaction reached through commit_settlement may mutate identity state."
+    rationale: "The current preflight-and-additive-merge path at crates/livrarr-metadata/src/work_service.rs:281-308 is a second non-generation writer and is absorbed rather than retained."
+  - key: interactive_card_origination
+    value: "WorkUpdateRekey and ManualWorkMerge enter the HumanWatching settle class from a coherent snapshot G. If complete-group reconciliation requires an audited choice, that call includes one typed GroupIdentity card draft in its sole SettlementCommit, advances generation exactly once, and returns ReviewPending; the handler may then issue the matching ReviewResolutionCommand only with the returned card_id and expected_generation G+1. AffirmPendingRoute uses the same mint-then-resolve shape with the PO-ratified ReviewKind::PendingRoute (2026-08-08)."
+    rationale: "A closed ReviewResolutionCommand cannot address a card-less continuation, and commit_settlement is the only permitted card-origination writer."
+  - key: p4_human_machine_split
+    value: "Human-watching doors surface a possible duplicate or disagreement before attachment; machine doors decide only authority-certain evidence and otherwise defer or park."
+    rationale: "P4 and the ratified per-door evidence matrix distinguish flag from decide without creating a second road."
+  - key: probe_capabilities
+    value: "Raw unsampled provider or EPUB shapes are not decision inputs. Only opaque capability values constructed by accepted probe registries may unlock their corresponding branches."
+    rationale: "This makes every ST-006(a-f) and ST-007 default fail closed and lets code-stage probe artifacts slot in without changing signatures."
+  - key: sibling_panel_copy
+    value: "The sibling panel is informational and has no identity, route, file, or confirmation mutation action. Frozen by PO 2026-08-08: Confirming this book's identity affects only this book. Other books by this author stay exactly as they are."
+    rationale: "REQ-022 binds behavior while FP-023 forbids invented copy."
+  - key: feature_scoped_library_boundary
+    value: "For this feature, livrarr-library emits local inspection evidence through domain/db seams and has no materialization dependency; the pre-existing canonical S1 materialization road remains intact."
+    rationale: "DEP-007 is feature-scoped and does not amend or retire canonical S1."
+
+doors:
+  - door: DirectAdd
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /work -> work::add validates request and builds DirectAdd evidence -> IdentityRoadServiceImpl::settle -> commit_settlement"
+    traced: "work::add"
+    current_entry: "crates/livrarr-handlers/src/work.rs::add"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:171-272; local resolve, seed_add_box, add_fast, spawned completion, then interactive refresh"
+  - door: ManualImport
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /manualimport/import -> manual_import::import builds user-choice plus owned-file evidence -> settle before any file attachment"
+    traced: "manual_import::import"
+    current_entry: "crates/livrarr-handlers/src/manual_import.rs::import"
+    current_evidence: "crates/livrarr-handlers/src/manual_import.rs:844-970 and :1136-1261; existing-work short circuit or resolve_identity, seed_manual_import, WorkService::add, delayed refresh"
+  - door: ListImport
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /listimport/confirm -> ListServiceImpl::confirm builds conditional review choice/provider/minimum evidence -> settle per selected row"
+    traced: "ListServiceImpl::confirm"
+    current_entry: "crates/livrarr-metadata/src/list_service.rs::ListServiceImpl::confirm"
+    current_evidence: "crates/livrarr-handlers/src/list_import.rs:52-68 and crates/livrarr-metadata/src/list_service.rs:280-507; resolve_candidate_from_row, seed_list_import, WorkService::add"
+  - door: AuthorMonitor
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "HTTP or scheduled trigger -> AuthorMonitorWorkflowImpl::run_monitor -> mandatory provider identity bundle -> settle for each eligible monitored work"
+    traced: "AuthorMonitorWorkflowImpl::run_monitor"
+    current_entry: "crates/livrarr-metadata/src/author_monitor_workflow.rs::run_monitor"
+    current_evidence: "crates/livrarr-metadata/src/author_monitor_workflow.rs:240-252 and :555-597; seed_author_monitor stamps identity and WorkService::add is followed by converge_work"
+  - door: SeriesMonitor
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "series monitor/promote trigger -> SeriesQueryServiceImpl::run_series_monitor_worker -> conditional provider route or valid minimum -> settle"
+    traced: "SeriesQueryServiceImpl::run_series_monitor_worker"
+    current_entry: "crates/livrarr-metadata/src/series_query_service/service.rs::run_series_monitor_worker"
+    current_evidence: "crates/livrarr-metadata/src/series_query_service/service.rs:870-1112; seed_series_monitor stamps Pending, WorkService::add, then converge_work"
+  - door: ReadarrImport
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /import/readarr/start -> LiveReadarrImportWorkflow::start -> identifier-first owned-file bundle -> settle before work/file attachment"
+    traced: "LiveReadarrImportWorkflow::start"
+    current_entry: "crates/livrarr-server/src/readarr_import_workflow.rs::LiveReadarrImportWorkflow::start"
+    current_evidence: "crates/livrarr-server/src/readarr_import_workflow.rs:734-847 and :1994-2328; seed_readarr_import stamps Pending, batch dedup, WorkService::add, then converge_work"
+  - door: EnrichmentPass
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "metadata invokes enrichment -> receives EnrichmentApplyOutcome -> apply_captured_enrichment_routes submits every captured route with EnrichmentPass origin -> settle"
+    traced: "IdentityRoadServiceImpl::apply_captured_enrichment_routes"
+    current_entry: "crates/livrarr-enrichment/src/lib.rs::EnrichmentServiceImpl::enrich_work"
+    current_evidence: "crates/livrarr-enrichment/src/lib.rs:567-977 and crates/livrarr-db/src/api/work.rs:337-358; current enrichment payload has no identity-route write field"
+  - door: ManualRefresh
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /work/{id}/refresh -> WorkServiceImpl::refresh -> provider evidence application -> captured-route handoff with ManualRefresh origin -> settle inline"
+    traced: "WorkServiceImpl::refresh"
+    current_entry: "crates/livrarr-handlers/src/work.rs::refresh"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:617-633 and crates/livrarr-metadata/src/work_service.rs:1641-1783; current refresh re-chases identity before enrichment"
+  - door: ConvergenceVisit
+    surface_kind: job
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "convergence_tick -> converge_work -> enrichment outcome -> captured-route handoff with ConvergenceVisit origin -> settle before checkpoint"
+    traced: "converge_work"
+    current_entry: "crates/livrarr-server/src/jobs/convergence.rs::convergence_tick"
+    current_evidence: "crates/livrarr-server/src/jobs/convergence.rs:27-123 and crates/livrarr-metadata/src/convergence_service.rs:25-199; current visit calls settle_identity then run_unified_enrichment"
+  - door: HttpReviewResolve
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::resolve_review"
+    wiring: "POST /identity-review/{card}/resolve -> identity_review::resolve authenticates actor and parses typed command -> resolve_review"
+    traced: "identity_review::resolve"
+    current_entry: "crates/livrarr-handlers/src/identity_review.rs::resolve"
+    current_evidence: "crates/livrarr-handlers/src/identity_review.rs:111-174; current handler coherently reads generation/candidates, claims apply, and records typed history"
+  - door: CutoverCliReviewResolve
+    surface_kind: cli
+    road_entry: "IdentityRoadServiceImpl::resolve_review"
+    wiring: "livrarr identity-cutover resolve -> exclusive one-shot run_identity_cutover_command -> typed kind/generation/action parse -> resolve_review with CutoverOperator"
+    traced: "run_identity_cutover_command"
+    current_entry: "crates/livrarr-server/src/main.rs::main"
+    current_evidence: "crates/livrarr-server/src/main.rs:38-55; current Cli is a flat clap Parser and has no subcommand field"
+  - door: WorkUpdateRekey
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    resolution_continuation: "IdentityRoadServiceImpl::resolve_review"
+    review_kind: GroupIdentity
+    wiring: "PUT /work/{id} -> work::update separates presentation-only fields from identity-title/contributor edits -> HumanWatching settle-class reconciliation from snapshot G -> the one SettlementCommit either settles directly or mints a typed GroupIdentity card and advances to G+1 -> inline chosen action uses returned card_id + expected_generation G+1 through resolve_review"
+    traced: "work::update"
+    current_entry: "crates/livrarr-handlers/src/work.rs::update"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:447-517 and crates/livrarr-metadata/src/work_service.rs:1448-1510; current title/author edit recomputes and writes the legacy normalized key directly"
+  - door: ManualWorkMerge
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    resolution_continuation: "IdentityRoadServiceImpl::resolve_review"
+    review_kind: GroupIdentity
+    wiring: "GET preview remains read-only -> POST /work/{id}/merge/{loser_id} -> HumanWatching settle-class complete-group reconciliation from snapshot G -> the one SettlementCommit either settles authority-certain state or mints the GroupIdentity card and advances to G+1 -> inline attach/merge uses its returned card_id + expected_generation G+1 through resolve_review"
+    traced: "work::merge"
+    current_entry: "crates/livrarr-handlers/src/work.rs::merge"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:560-616 and crates/livrarr-metadata/src/work_service.rs:1932-2084; current merge chooses fields and calls a private database merge"
+  - door: AffirmPendingRoute
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::settle"
+    resolution_continuation: "IdentityRoadServiceImpl::resolve_review"
+    review_kind: PendingRoute
+    wiring: "POST /work/{id}/pending-anchors/{anchor_type}/affirm -> HumanWatching settle-class continuation from snapshot G -> the one SettlementCommit mints the PO-ratified PendingRoute card without activating the candidate and advances to G+1 -> affirmation uses its returned card_id + expected_generation G+1 through resolve_review"
+    traced: "work::affirm_pending_anchor"
+    current_entry: "crates/livrarr-handlers/src/work.rs::affirm_pending_anchor"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:992-1088; current handler reads generation then calls a private claimed anchor writer and refreshes"
+  - door: RetryAllIncomplete
+    surface_kind: workflow
+    road_entry: "IdentityRoadServiceImpl::settle"
+    wiring: "POST /work/retry-incomplete -> handler one-shot -> retry_all_incomplete -> converge_work per incomplete Work -> captured-route handoff with ConvergenceVisit origin -> settle"
+    traced: "retry_all_incomplete"
+    current_entry: "crates/livrarr-handlers/src/work.rs::retry_all_incomplete"
+    current_evidence: "crates/livrarr-handlers/src/work.rs:746-799 and crates/livrarr-metadata/src/convergence_service.rs:235-339; current pending arm calls settle_identity directly before bulk refresh"
+  - door: LegacyIdentityConflictResolve
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::resolve_review"
+    wiring: "POST /identity-conflict/{id}/resolve -> identity_conflicts::resolve authenticates and maps the existing action to typed IdentityConflict resolution -> resolve_review"
+    traced: "identity_conflicts::resolve"
+    current_entry: "crates/livrarr-handlers/src/identity_conflicts.rs::resolve"
+    current_evidence: "crates/livrarr-server/src/router.rs:560-562 and crates/livrarr-handlers/src/identity_conflicts.rs:119-133; current handler calls the legacy conflict service directly"
+  - door: LegacyIdentityConflictDismiss
+    surface_kind: handler
+    road_entry: "IdentityRoadServiceImpl::resolve_review"
+    wiring: "POST /identity-conflict/{id}/dismiss -> identity_conflicts::dismiss authenticates and maps dismissal to typed IdentityConflict Reject -> resolve_review"
+    traced: "identity_conflicts::dismiss"
+    current_entry: "crates/livrarr-handlers/src/identity_conflicts.rs::dismiss"
+    current_evidence: "crates/livrarr-server/src/router.rs:564-566 and crates/livrarr-handlers/src/identity_conflicts.rs:136-146; current handler calls the legacy dismiss writer directly"
+
+merge_field_disposition:
+  policy_ref: "ir-v1-identity-layer-rewrite.yaml#/merge_field_policy"
+  completeness_basis:
+    current_work: "crates/livrarr-domain/src/entities.rs:388-438"
+    current_library_item: "crates/livrarr-domain/src/entities.rs:483-499"
+    edition_authority: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/types[name=Edition]"
+  rules:
+    - { entity: Work, field: id, disposition: "Keep the selected survivor's stable WorkId; archive every loser id and never reuse it." }
+    - { entity: Work, field: user_id, disposition: "Require equality with the caller and every cohort member; reject cross-user reconciliation." }
+    - { entity: Work, field: title, disposition: "Map to the selected IdentityTitleTuple main plus its display projection; user/user or differing machine singulars create FieldResolution review." }
+    - { entity: Work, field: sort_title, disposition: "Recompute deterministically from the settled display title; never choose a survivor by this derived field." }
+    - { entity: Work, field: subtitle, disposition: "Treat as legacy work-level tuple/display evidence during cutover; preserve explicit provenance, never copy it into an Edition, and resolve singular conflict under the v4 title policy." }
+    - { entity: Work, field: original_title, disposition: "Preserve equal or sole present evidence; user evidence wins machine, otherwise differing present values require FieldResolution review." }
+    - { entity: Work, field: author_name, disposition: "Map to ordered Author-record contributors and retire the scalar as authority; tags/display read the primary Author record at use time." }
+    - { entity: Work, field: author_id, disposition: "Map to contributor ordinal zero and the derived primary_author_id projection; conflicting partition/order requires ContributorOrder review." }
+    - { entity: Work, field: description, disposition: "Apply the v4 user-beats-machine singular rule; no provider priority or non-null coalescing resolves disagreement." }
+    - { entity: Work, field: year, disposition: "Apply the v4 user-beats-machine singular rule; differing machine values park unless a ratified total derivation exists." }
+    - { entity: Work, field: series_id, disposition: "Preserve as an explicit local relationship to the survivor; conflicting local relations remain reviewable and never select identity." }
+    - { entity: Work, field: series_name, disposition: "Apply the v4 singular rule independently from series_id; it does not select survivor identity." }
+    - { entity: Work, field: series_position, disposition: "Apply the v4 singular rule and preserve explicit user absence/value; it can inform volume veto but cannot overwrite the identity tuple." }
+    - { entity: Work, field: genres, disposition: "Union into sourced subjects by taxonomy and normalized value while retaining exact spellings and provenance." }
+    - { entity: Work, field: language, disposition: "Apply the v4 singular rule; do not infer from route kind, provider name, cover, or sibling edition." }
+    - { entity: Work, field: page_count, disposition: "Apply the v4 user-beats-machine singular rule; differing present machine values review." }
+    - { entity: Work, field: duration_seconds, disposition: "Apply the v4 user-beats-machine singular rule independently of LibraryItem duration facts." }
+    - { entity: Work, field: publisher, disposition: "Apply the v4 user-beats-machine singular rule; preserve provenance." }
+    - { entity: Work, field: publish_date, disposition: "Apply the v4 user-beats-machine singular rule; preserve exact sourced value." }
+    - { entity: Work, field: ol_key, disposition: "Migrate a nonblank value to an OpenLibrary work-scoped typed route; blank sentinels create no route." }
+    - { entity: Work, field: hc_key, disposition: "Migrate a nonblank value to a Hardcover work-scoped typed route; collisions park rather than overwrite ownership." }
+    - { entity: Work, field: gr_key, disposition: "Treat the legacy value as Goodreads book/edition evidence, attach it to an Edition, and capture a work route only from an already-fetched readable page." }
+    - { entity: Work, field: isbn_13, disposition: "Move to an edition-owned ISBN route; create or select an Edition without inferring format/language, and never copy the route back to work scope." }
+    - { entity: Work, field: asin, disposition: "Move to an edition-owned ASIN route; retain Unknown format/absent language unless direct evidence exists." }
+    - { entity: Work, field: narrator, disposition: "Treat the entire sourced vector as the v4 narrator singular: user value/absence wins; differing machine vectors require review." }
+    - { entity: Work, field: narration_type, disposition: "Apply the v4 singular rule; never infer it from provider or format alone." }
+    - { entity: Work, field: abridged, disposition: "Preserve explicit user evidence; an automatic classification requires an opaque accepted sampled-text capability, otherwise review." }
+    - { entity: Work, field: rating, disposition: "Apply the v4 singular rule and preserve source; rating never participates in identity." }
+    - { entity: Work, field: rating_count, disposition: "Apply the v4 singular rule and preserve source; count never participates in identity." }
+    - { entity: Work, field: enrichment_status, disposition: "Recompute from preserved enrichment outcomes after settlement; never choose content or a survivor." }
+    - { entity: Work, field: identity_status, disposition: "Derive from the surviving active-route set and user-confirmation provenance; a zero-route confirmed invariant emits repair review and falls back." }
+    - { entity: Work, field: enriched_at, disposition: "Recompute/advance with the post-merge enrichment outcome; it never selects content." }
+    - { entity: Work, field: enrichment_source, disposition: "Recompute from the applied normalized evidence set; preserve observations separately and do not use first arrival." }
+    - { entity: Work, field: cover_url, disposition: "Convert to a retained cover candidate and recompute the ebook selection by source/format rank; do not copy a selected URL as authority." }
+    - { entity: Work, field: cover_manual, disposition: "Map true to explicit user-choice provenance at rank zero; false supplies no trust grade." }
+    - { entity: Work, field: cover_source, disposition: "Preserve as the visible source label/provenance on the candidate and selection." }
+    - { entity: Work, field: legacy_ebook_trust_grade_column, source: "entities.rs:426", disposition: "Remove from domain/storage/DTO/gates; it contributes no migrated selection authority." }
+    - { entity: Work, field: cover_width, disposition: "Preserve measured dimensions on the retained candidate; recompute selected dimensions from the winner." }
+    - { entity: Work, field: cover_height, disposition: "Preserve measured dimensions on the retained candidate; recompute selected dimensions from the winner." }
+    - { entity: Work, field: audiobook_cover_url, disposition: "Convert to a retained audiobook cover candidate and recompute that slot; explicit ebook fallback remains a separate selection fact." }
+    - { entity: Work, field: audiobook_cover_source, disposition: "Preserve as visible source/provenance on the candidate and selected slot." }
+    - { entity: Work, field: legacy_audiobook_trust_grade_column, source: "entities.rs:431", disposition: "Remove from domain/storage/DTO/gates; it contributes no migrated selection authority." }
+    - { entity: Work, field: audiobook_cover_width, disposition: "Preserve measured dimensions on the candidate; recompute the selected dimensions." }
+    - { entity: Work, field: audiobook_cover_height, disposition: "Preserve measured dimensions on the candidate; recompute the selected dimensions." }
+    - { entity: Work, field: monitor_ebook, disposition: "OR-combine independently across the cohort." }
+    - { entity: Work, field: monitor_audiobook, disposition: "OR-combine independently across the cohort." }
+    - { entity: Work, field: import_id, disposition: "Move every nonblank value to the lossless import-origin collection; no first-arrival winner." }
+    - { entity: Work, field: added_at, disposition: "Retain the earliest fact timestamp and preserve every original Added audit event." }
+    - { entity: LibraryItem, field: id, disposition: "Preserve each file record id; LibraryItems are reparented, not merged by arrival." }
+    - { entity: LibraryItem, field: user_id, disposition: "Require caller scope on every read/write and reject cross-user reparenting." }
+    - { entity: LibraryItem, field: work_id, disposition: "Repoint to the survivor only inside the settlement transaction; a human-watching conflict remains unattached until resolution." }
+    - { entity: LibraryItem, field: root_folder_id, disposition: "Preserve the file's collection/root ownership unchanged." }
+    - { entity: LibraryItem, field: path, disposition: "Preserve exact path; any destination/path collision creates explicit import/file review and drops no file." }
+    - { entity: LibraryItem, field: media_type, disposition: "Preserve direct file classification; it does not infer Edition format without direct evidence." }
+    - { entity: LibraryItem, field: file_size, disposition: "Preserve as a file fact and include it in FileRevision; never select work identity." }
+    - { entity: LibraryItem, field: import_id, disposition: "Preserve and union its origin record with the survivor's import history." }
+    - { entity: LibraryItem, field: imported_at, disposition: "Preserve per item; do not replace with Work.added_at." }
+    - { entity: LibraryItem, field: tag_status, disposition: "Preserve per item and recompute only through the existing tag/materialization road." }
+    - { entity: LibraryItem, field: tagged_at_generation, disposition: "Preserve per item; later tag writes advance against the settled work generation." }
+    - { entity: LibraryItem, field: duration_seconds, disposition: "Preserve direct file measurement independently from the Work-level singular." }
+    - { entity: LibraryItem, field: chapter_scan_status, disposition: "Preserve per file; identity settlement does not reinterpret scan state." }
+    - { entity: Edition, field: id, disposition: "Preserve on reparent; merge two editions only with direct co-edition proof or explicit user target and archive the loser id." }
+    - { entity: Edition, field: user_id, disposition: "Require equality with caller and owner Work." }
+    - { entity: Edition, field: work_id, disposition: "Reparent whole edition atomically; a route transfer moves only the contested id unless co-edition proof exists." }
+    - { entity: Edition, field: format, disposition: "Use direct file/provider/user evidence only; conflicting direct values park, and Unknown remains valid/ineligible for defaults." }
+    - { entity: Edition, field: language, disposition: "Use direct edition/file/provider/user evidence only; conflicting present facts park and absence is valid." }
+    - { entity: Edition, field: subtitle, disposition: "Preserve direct edition evidence/explicit absence; never populate from Work tuple, rendered subtitle, or machine projection." }
+    - { entity: Edition, field: routes, disposition: "Union by typed key while keeping exactly one Edition owner; ownership collision parks class C." }
+    - { entity: Edition, field: covers, disposition: "Union every candidate and provenance; selection is recomputed and is not destructive filtering." }
+    - { entity: Edition, field: source_provider, disposition: "Preserve sourced provenance; conflicting machine values do not select identity or an arbitrary winner." }
+    - { entity: Edition, field: provider_edition_id, disposition: "Normalize into an edition-scoped typed route; equality can confirm only inside authority and inequality is no evidence." }
+    - { entity: Edition, field: state, disposition: "Retain Active unless an audited merge/empty-shell resolution archives it; archived rows never re-enter active scans." }
+    - { entity: NewAuthority, field: identity_title_main, disposition: "Apply the v4 title singular policy and re-key the complete group on the chosen value." }
+    - { entity: NewAuthority, field: identity_title_subtitle, disposition: "Apply the v4 title singular policy including explicit absence; one-sided subtitle is not a different-work veto." }
+    - { entity: NewAuthority, field: identity_title_volume, disposition: "Apply the v4 title singular policy; contradictory volume evidence remains a wrong-merge guard." }
+    - { entity: NewAuthority, field: subtitle_override_state, disposition: "UserValue/UserAbsent are protected singulars; Automatic means no override and reset changes display only." }
+    - { entity: NewAuthority, field: subtitle_override_value, disposition: "Resolve with override state; conflicting user values/absence park." }
+    - { entity: NewAuthority, field: machine_subtitle_projection, disposition: "Never merge stored value; recompute totally from selected direct edition evidence/defaults." }
+    - { entity: NewAuthority, field: machine_subtitle_provenance, disposition: "Recompute with the projection and never mutate tuple/key/review state." }
+    - { entity: NewAuthority, field: primary_author_id, disposition: "Retain surviving primary contributor or resolve complete ordering before re-key; projection equals ordinal zero." }
+    - { entity: NewAuthority, field: text_distinction, disposition: "Retain survivor distinction; only audited same-work merge retires loser distinctions and attach never mints one." }
+    - { entity: NewAuthority, field: canonical_work_pointer, disposition: "User evidence beats machine; conflicting user or different present machine pointers park." }
+    - { entity: NewAuthority, field: default_edition_per_format, disposition: "Resolve independently per known format; user evidence wins and Unknown is ineligible." }
+    - { entity: NewAuthority, field: ebook_cover_selection, disposition: "Recompute from retained candidates with user then owned-file then default/same-format ranking." }
+    - { entity: NewAuthority, field: audiobook_cover_selection, disposition: "Recompute independently; explicit fallback to selected ebook is allowed and recorded." }
+    - { entity: NewAuthority, field: merge_generation, disposition: "Advance from preserved enrichment results and never select content." }
+    - { entity: NewAuthority, field: identity_generation, disposition: "Advance only in the claimed settlement/review transaction; stale writers perform zero writes." }
+
+retirement_inventories:
+  legacy_cover_grade_sites:
+    - { id: RCG-01, site: "crates/livrarr-domain/src/enrichment_types.rs:43-61", role: "type definition and replacement policy", disposition: "delete the grade vocabulary and its policy method" }
+    - { id: RCG-02, site: "crates/livrarr-enrichment/src/cover_resolution.rs:15-30", role: "outcome/add-phase grade derivation", disposition: "delete derivation; emit source/provenance candidates" }
+    - { id: RCG-03, site: "crates/livrarr-enrichment/src/cover_resolution.rs:66-132", role: "cover-pick consultation", disposition: "replace grade preference with closed source/format ranking over retained candidates" }
+    - { id: RCG-04, site: "crates/livrarr-domain/src/entities.rs:426,431", role: "two Work storage fields", disposition: "remove both domain fields after cutover mapping; neither affects selection" }
+    - { id: RCG-05, site: "crates/livrarr-db/src/api/work.rs:100-121", role: "DB trait write parameters", disposition: "replace with selected candidate/source/dimensions contract" }
+    - { id: RCG-06, site: "crates/livrarr-db/src/sqlite_work.rs:630-703", role: "two DB writers and string mapping", disposition: "remove grade bindings; write selection source and dimensions only" }
+    - { id: RCG-07, site: "crates/livrarr-db/src/sqlite_work.rs:13-175", role: "row decoder", disposition: "stop decoding both legacy columns after authority activation" }
+    - { id: RCG-08, site: "crates/livrarr-metadata/src/cover_write_gate.rs:177-186,196-323,411", role: "gate consultation and user stamp", disposition: "use explicit user-choice provenance plus actual selected-file state; keep crash-safe slot protocol" }
+    - { id: RCG-09, site: "crates/livrarr-metadata/src/work_service.rs:3617-3648", role: "add-time derivation", disposition: "replace with candidate provenance/rank and retain no grade" }
+    - { id: RCG-10, site: "crates/livrarr-metadata/src/work_service.rs:3457", role: "post-enrichment gate input", disposition: "pass explicit user-choice/selected-source state instead of a grade-derived lock" }
+    - { id: RCG-11, site: "crates/livrarr-metadata/src/cover_provenance_backfill.rs:39-120", role: "legacy provenance backfill guard", disposition: "pre-marker input only; after activation skip permanently and use migrated provenance" }
+    - { id: RCG-12, site: "crates/livrarr-handlers/src/types/work.rs:209,214", role: "HTTP work DTO fields", disposition: "remove both grade properties; expose source labels and slot state only" }
+  v6_title_filter_sites:
+    - { id: V6-01, site: "crates/livrarr-enrichment/src/cover_resolution.rs:33-59", role: "legacy substring predicate and list", disposition: "delete; cover candidacy is not a private title-keyword identity classifier" }
+    - { id: V6-02, site: "crates/livrarr-enrichment/src/cover_resolution.rs:98", role: "provider cover resolver caller", disposition: "send every structurally valid candidate to the closed rank/format selector" }
+    - { id: V6-03, site: "crates/livrarr-metadata/src/cover_alternatives.rs:103", role: "internal alternatives caller", disposition: "remove substring rejection and retain provider source evidence for normal selection" }
+  legacy_identity_surface_sites:
+    - { id: LIS-01, site: "crates/livrarr-server/src/router.rs:297-299; crates/livrarr-handlers/src/work.rs:1174-1237; crates/livrarr-metadata/src/work_service.rs:2086-2248", role: "legacy provider-scalar identity preview", disposition: "retire the route, handler, service method, preview-token storage, and direct scalar assessment; manual provider search plus an explicit route choice enters the typed road" }
+    - { id: LIS-02, site: "crates/livrarr-server/src/router.rs:301-303; crates/livrarr-handlers/src/work.rs:1239-1293; crates/livrarr-metadata/src/work_service.rs:2250-2339", role: "legacy provider-scalar identity commit", disposition: "retire the route, handler, service method, and direct scalar writer; post-marker user route attachment is a typed UserChoice settlement" }
+    - { id: LIS-03, site: "crates/livrarr-server/src/router.rs:301-303; crates/livrarr-handlers/src/work.rs:1295-1341; crates/livrarr-metadata/src/work_service.rs:2341-2361", role: "legacy provider-scalar clear", disposition: "retire the route, handler, service method, and direct clear writer; audited route retirement/transfer is available only through the road review continuation" }
+    - { id: LIS-04, site: "crates/livrarr-server/src/router.rs:577-579; crates/livrarr-handlers/src/identity_review.rs:181-223", role: "legacy grey-park dismiss endpoint", disposition: "retire the route and direct dismiss writer; all retained typed card actions use the generic identity_review resolve entry and shared resolve_review continuation" }
+
+probe_gated_seams:
+  - { truth: ST-002, capability: "accepted CAPTURE-ST002-GR-WORK-REF registry entry", artifact: "build/probes/identity-layer-rewrite/ST002-gr-book-page-work-reference.json", fail_closed: "return ProbeBlocked and emit no GoodreadsWork evidence until the captured work-reference layout is registered" }
+  - { truth: ST-006-a, capability: "accepted PROBE-ST006-A normalized role evidence", fail_closed: "drop unreadable role shape; never choose primary from a raw label" }
+  - { truth: ST-006-b, capability: "accepted PROBE-ST006-B Hardcover work/default/reference DTO", fail_closed: "return ProbeBlocked and persist no shape-dependent facts" }
+  - { truth: ST-006-c, capability: "accepted PROBE-ST006-C Goodreads edition-page DTO", fail_closed: "omit enumeration while retaining route and normal cadence" }
+  - { truth: ST-006-d, capability: "accepted PROBE-ST006-D normalized provider author-id DTO", fail_closed: "omit author id and perform no fallback inheritance" }
+  - { truth: ST-006-e, capability: SampledTextSignal, fail_closed: "return ReviewRequired; no keyword, model result, or raw label selects a class" }
+  - { truth: ST-006-f, capability: AliasEquivalenceProof, fail_closed: "classify every same-provider work-id disagreement as class A" }
+  - { truth: ST-007, capability: "accepted PROBE-ST007-EPUB revision evidence", fail_closed: "persist CouldNotInspect separately; background retry only after revision change" }
+
+legacy_consumer_cutover:
+  startup_sequence_ref: "ir-v1-identity-layer-rewrite.yaml#/migration_plan/startup_legacy_identity_sequence"
+  category_dispositions_ref: "ir-v1-identity-layer-rewrite.yaml#/migration_plan/legacy_uniqueness_authority_cutover"
+  execution: "Implement the IR v4 category dispositions for all sixteen production/test-helper consumer groups. After an active marker, every identity-mutating startup category is skipped and every normalized-key/legacy-ledger selector is disabled; the ordinary test helper follows its specific remove-old-index/activate-new-authority disposition. No line-range resurvey changes those ratified categories."
+  surface_dispositions:
+    - { surface: "work::update title/contributor identity edit", disposition: "replace the direct normalized-key write with a HumanWatching settle-class reconcile/commit continuation from G; when a choice is required its one SettlementCommit mints GroupIdentity, advances to G+1, and the inline action then resolves the returned card id at expected_generation G+1; presentation-only edits remain nonidentity" }
+    - { surface: "preview_identity_edit / commit_identity_edit / clear_identity_slot", disposition: "retire LIS-01 through LIS-03 and remove their router registrations; no post-marker scalar or ledger writer survives" }
+    - { surface: "work::preview_merge / work::merge", disposition: "keep preview read-only; POST enters HumanWatching settle-class reconciliation, mints GroupIdentity only through commit_settlement when choice is required, then resolves that returned card through resolve_review under the exhaustive merge policy" }
+    - { surface: "work::affirm_pending_anchor", disposition: "use the PO-ratified PendingRoute kind; mint its card only through the settle-class commit from G and resolve the returned card id at expected_generation G+1 as user-confirmed; the private claimed anchor writer is removed" }
+    - { surface: "work::retry_all_incomplete", disposition: "classify each pass as ConvergenceVisit, reuse converge_work plus captured-route handoff, and delete the pre-refresh settle_identity side channel" }
+    - { surface: "legacy identity conflict resolve/dismiss and grey-park dismiss", disposition: "rewire conflict resolve/dismiss to resolve_review as typed resolve/reject; retire the old grey-park dismiss route under LIS-04" }
+    - { surface: "root_folder::scan / scan_path file-to-work link matching", disposition: "adapt the in-memory lookup at crates/livrarr-handlers/src/root_folder.rs:181,258,427,467 to the new authority's normalized main plus primary AuthorId lookup projection; it remains a nonidentity file-link selector and performs no identity write" }
+
+tdd_execution_policy:
+  - "Every door or workflow directive begins at the production handler/job/workflow/CLI listed in doors and observes the composed service/repository boundary; tests do not preinsert the outcome they are meant to prove."
+  - "Pure deterministic policy may be unit-tested through its declared public function, but the same behavior is also pinned by at least one real door integration."
+  - "SQLite state is created by real migrations and production settlement/cutover calls; fault tests may fail a boundary statement but may not fabricate a postcondition."
+  - "RED door_gate_work_update_rekey_mints_then_resolves: drive PUT /work/{id} with an identity-title change that needs a choice; trace one settle/commit from G that mints GroupIdentity and advances once, followed by one resolve_review using its returned card id and expected_generation G+1; an absent or no-longer-pending card returns NotFound and a generation mismatch returns StaleGeneration with zero writes."
+  - "RED door_gate_legacy_identity_preview_route_is_absent: route the former preview request and require no registered post-marker mutation surface."
+  - "RED door_gate_legacy_identity_commit_route_is_absent: route the former commit request and require no registered post-marker scalar writer."
+  - "RED door_gate_legacy_identity_clear_route_is_absent: route the former clear request and require no registered post-marker scalar writer."
+  - "RED door_gate_manual_merge_mints_then_resolves: drive preview then POST merge through one settle/commit from G that mints GroupIdentity when a choice is needed and advances once, then one resolve_review with the returned id and expected_generation G+1; absent or resolved card returns NotFound and mismatched generation returns StaleGeneration without mutation."
+  - "RED door_gate_pending_affirm_mints_then_resolves: drive the real affirm route through one settle/commit from G that mints the PO-ratified PendingRoute kind and advances once, then one resolve_review with its returned id and expected_generation G+1; absent or resolved card returns NotFound and mismatched generation returns StaleGeneration without mutation."
+  - "RED door_gate_retry_incomplete_uses_convergence_visit_settle_only: drive POST /work/retry-incomplete and fail on any direct legacy settle call."
+  - "RED door_gate_conflict_resolve_calls_resolve_review_once: drive the registered legacy resolve URL and trace the typed shared continuation."
+  - "RED door_gate_conflict_dismiss_calls_resolve_review_once: drive the registered legacy dismiss URL and trace typed Reject through the shared continuation."
+  - "RED door_gate_legacy_grey_dismiss_route_is_absent: route the former identity-review dismiss URL and require no registered direct writer."
+
+modules:
+  - name: livrarr-domain
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/dependencies"
+    module_invariants_ref: "ir-v1-identity-layer-rewrite.yaml#/data_flow/invariants"
+    capability_survey:
+      - capability: "Canonical title, contributor, identifier, and stored-key matching primitives"
+        existing_source: "crates/livrarr-domain/src/identity_matching.rs:161-668"
+        reuse_decision: wrap
+        rationale: "Keep one deterministic authority and extend it with typed route/guard inputs rather than another sameness recipe."
+      - capability: "Six door-specific WorkCandidate seed constructors over one private assembler"
+        existing_source: "crates/livrarr-domain/src/seed.rs:83-245"
+        reuse_decision: wrap
+        rationale: "Each existing door harvests through its established constructor, then converts the result into the ratified evidence bundle."
+      - capability: "F1 primary-author route proof guard"
+        existing_source: "crates/livrarr-domain/src/author_link.rs:418-459"
+        reuse_decision: reuse
+        rationale: "Work settlement inherits a provider author route only through the already-shipped author agreement proof."
+      - capability: "Bounded keyed concurrency primitive"
+        existing_source: "crates/livrarr-domain/src/keyed_mutex.rs:12-28"
+        reuse_decision: reuse
+        rationale: "Existing per-key capacity semantics remain the precedent for caller-owned locks; the identity repository still relies on durable generation claims."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/types"
+      functions:
+        - name: "IdentityRoadService::settle"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=IdentityRoadService::settle]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Accept only a typed IdentityRoadRequest whose user scope and origin are present."
+            - "Validate CreationDoor evidence against the Always/Conditional/Never/minimum-only matrix; return InvalidDoorEvidence before any provider or repository call on a mismatch."
+            - "For a MachineAlone existing-work request, admit only EnrichmentPass, ManualRefresh, or ConvergenceVisit evidence built from EnrichmentApplyOutcome.captured_route_evidence, with empty capture as an idempotent no-op. Separately admit only the named HumanWatching WorkUpdateRekey, ManualWorkMerge, or AffirmPendingRoute card-origination continuations; the last uses the PO-ratified PendingRoute kind. No other interactive or machine existing-work shape is legal."
+            - "Before any dedup, adopt, insert-race-winner, or captured-route decision can mutate an existing Work, obtain one coherent captured identity graph plus generation G and require the implementation to decide and reconcile only against that snapshot."
+            - "Dispatch through the composed generic implementation; ProviderBoundary is returned without changing committed identity when a provider adapter fails or drifts."
+            - "Require SettlementCommit.expected_generation = G and exactly one claim; map a lost claim to StaleGeneration with zero writes and never re-decide or resubmit the stale decision. Map repository failure to Database."
+            - "Return Settled, ReviewPending, Deferred, or Rejected exactly as the implementation reports. For a named interactive continuation requiring choice, ReviewPending contains the card id/kind minted only inside the sole SettlementCommit; because that commit advances coherent snapshot G exactly once, the subsequent resolve_review must pair the returned card id with expected_generation G+1."
+          call_annotations:
+            - { callee: validate_door_evidence, call: "validate origin/evidence matrix", type: NEW, target: "livrarr-metadata::identity_road::validate_door_evidence" }
+            - { callee: "IdentityRoadServiceImpl::settle", call: "dispatch composed implementation", type: NEW, target: "livrarr-metadata::identity_road::IdentityRoadServiceImpl" }
+            - { callee: "get_work_with_identity_generation", call: "existing generation precedent", type: EXISTING, target: "WorkIdentityRepository::get_work_with_identity_generation", evidence: "crates/livrarr-domain/src/services/work_identity.rs:348-359" }
+          preconditions:
+            security: ["request.user_id is the authenticated or installation-validated user scope"]
+          postconditions:
+            - "Every identity mutation is either one committed claimed transaction or zero writes."
+          forbidden_behaviors:
+            - "No evidence value is silently inserted to satisfy a door matrix cell."
+            - "No caller may persist a route, tuple, contributor, edition, badge, review, or audit outside the settlement transaction."
+          decisions:
+            - { key: dispatch, value: "generic or enum-dispatched Send trait", rationale: "Project traits are non-dyn and use trait_variant::make(Send)." }
+          tdd_directives:
+            - "RED identity_road_every_listed_settle_door_reaches_one_settle: drive every creation/capture/retry entry plus WorkUpdateRekey, ManualWorkMerge, and AffirmPendingRoute and assert one typed request reaches this trait."
+            - "RED identity_road_rejects_each_door_matrix_violation_before_side_effects: exercise missing Always, injected Never, and invalid minimum-only bundles."
+            - "RED identity_road_existing_paths_claim_their_predecision_snapshot: race dedup, adopt, insert-race winner, and captured-route paths; assert expected_generation is the snapshot generation and a lost claim never re-decides."
+            - "RED interactive_review_requires_freshly_minted_card: force edit/merge reconciliation from G to ReviewPending, assert one generation advance, then resolve only its returned card id at expected_generation G+1; absent or already-resolved card is NotFound and generation mismatch is StaleGeneration with zero writes."
+
+        - name: "IdentityRoadService::resolve_review"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=IdentityRoadService::resolve_review]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Load the card named by the typed command; return NotFound when no pending card exists in the actor's admitted scope."
+            - "Compare the command variant with stored ReviewKind; return ReviewKindMismatch before mutation on mismatch."
+            - "Validate AuthenticatedUser equality or the installation-checked CutoverOperator single-user scope; return UnauthorizedScope otherwise."
+            - "Check the command generation against the card and affected identity generation; return StaleGeneration with zero writes when either differs."
+            - "Validate the action against the stored allowed action set and complete evidence; return InvalidResolution for an arbitrary value, incomplete route set, or invalid target."
+            - "Check cancellation before claiming and immediately before commit; return Cancelled with the card still pending."
+            - "Delegate one atomic continuation and actor audit; map storage failure to Database and return the resulting IdentityRoadOutcome."
+          call_annotations:
+            - { callee: load_pending_review, call: "load card and generation", type: NEW, target: "WorkIdentityRepository::load_pending_review" }
+            - { callee: validate_review_action, call: "validate typed action", type: NEW, target: "livrarr-domain::review::validate_review_action" }
+            - { callee: "apply_review_candidate_claimed", call: "existing status/generation claim precedent", type: EXISTING, target: "WorkIdentityRepository::apply_review_candidate_claimed", evidence: "crates/livrarr-handlers/src/identity_review.rs:127-159" }
+            - { callee: is_cancelled, call: "observe cancellation", type: EXISTING, target: "tokio_util::sync::CancellationToken", evidence: "crates/livrarr-server/src/jobs/convergence.rs:44" }
+          preconditions:
+            security: ["ReviewActor was constructed only at the authenticated HTTP or exclusive cutover boundary."]
+          postconditions:
+            - "Success persists the resolution and actor audit atomically and advances generation once."
+          tdd_directives:
+            - "RED http_and_cli_resolve_share_exact_continuation: resolve the same fixture through each production entry and compare graph plus provenance."
+            - "RED review_kind_scope_generation_and_cancel_fail_closed: drive each failure through the real handler/CLI without injected repository state."
+
+        - name: "WorkIdentityRepository::read_captured_identity"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=WorkIdentityRepository::read_captured_identity]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Read Work, tuple, ordinal-zero primary contributor, active work/edition routes, derived status, and identity_generation under the caller user_id."
+            - "Return NotFound when the scoped Work does not exist; never reveal whether another user owns the id."
+            - "Return Database for query/decoding/invariant-read failure."
+            - "Assert the primary projection equals contributor ordinal zero and route owners resolve to this Work before returning CapturedIdentity."
+          call_annotations:
+            - { callee: "get_work_with_identity_generation", call: "coherent work/generation read precedent", type: EXISTING, target: "WorkIdentityRepository::get_work_with_identity_generation", evidence: "crates/livrarr-domain/src/services/work_identity.rs:348-359" }
+            - { callee: read_identity_graph, call: "aggregate scoped graph", type: NEW, target: "livrarr-db::SqliteDb::read_identity_graph" }
+          postconditions:
+            - "The returned aggregate is one coherent user-scoped generation snapshot."
+          tdd_directives:
+            - "RED read_captured_identity_projects_edition_routes_and_primary_ordinal: create via DirectAdd, read through the trait, and assert the aggregate."
+            - "RED read_captured_identity_cross_user_is_not_found: exercise the production repository with two users."
+
+        - name: "WorkIdentityRepository::commit_settlement"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=WorkIdentityRepository::commit_settlement]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Require a SettlementCommit produced by the road whose expected_generation is the G from the coherent pre-decision existing-work snapshot; delegate it to the sole SQL implementation."
+            - "Return StaleGeneration when the expected identity generation claim loses; the transaction performs zero writes."
+            - "Return RouteOwnershipCollision when a typed active route already resolves to another Work, leaving current ownership unchanged and parking through the caller's review continuation."
+            - "Return KeyCollision when the complete tuple/primary/distinction unique key collides after reconciliation."
+            - "Return Database for transaction/query/decoding failure and never expose a partial graph."
+            - "On success return the committed aggregate, audit id, and one advanced generation."
+          call_annotations:
+            - { callee: "SqliteDb::commit_identity_settlement", call: "sole repository implementation", type: NEW, target: "livrarr-db::SqliteDb::commit_identity_settlement" }
+            - { callee: complete_anchors, call: "existing generation-CAS precedent being superseded", type: EXISTING, target: "WorkIdentityRepository::complete_anchors", evidence: "crates/livrarr-domain/src/services/work_identity.rs:328-341" }
+          invariants:
+            - "No legacy additive anchor merge remains callable from production after cutover."
+          tdd_directives:
+            - "RED dedup_adopt_and_race_loser_commit_once_under_generation: drive all production short circuits and assert no out-of-transaction writer fires."
+            - "RED stale_route_and_key_collisions_rollback_whole_graph: race two real settle requests against SQLite."
+
+        - name: "WorkIdentityRepository::resolve_conflict_atomically"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=WorkIdentityRepository::resolve_conflict_atomically]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Load the pending conflict and affected graph under user scope; return NotFound for absent/already-resolved conflict."
+            - "Validate the complete surviving route set and edition target; return StillAmbiguous when zero/multiple eligible edition targets remain without explicit choice."
+            - "Claim the expected identity generation; return StaleGeneration with zero writes on loss."
+            - "Apply accept, reject, or different-work ownership, recompute both affected Work projections, archive displaced links, and append audit in one transaction."
+            - "Return Database for any storage failure and roll back every mutation."
+          call_annotations:
+            - { callee: apply_conflict_resolution_claimed, call: "existing generation plus open-status claim precedent", type: EXISTING, target: "SqliteDb::apply_conflict_resolution_claimed", evidence: "crates/livrarr-db/src/sqlite_identity_conflict.rs:229-461" }
+            - { callee: "SqliteDb::transfer_route", call: "atomic contested-route move", type: NEW, target: "livrarr-db::SqliteDb::transfer_route" }
+          postconditions:
+            - "Exactly one active owner remains for every surviving typed route."
+          tdd_directives:
+            - "RED conflict_accept_reject_and_different_work_are_atomic: resolve real HTTP cards and assert routes, projections, archives, and audit."
+            - "RED ambiguous_edition_target_stays_pending: use two directly eligible editions and omit explicit target."
+
+        - name: "EditionRepository::apply_evidence"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=EditionRepository::apply_evidence]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Normalize only direct user/file/provider edition evidence and retain Unknown format or absent language when no direct value exists."
+            - "Create or update the scoped Edition without copying Work tuple/display subtitle into it."
+            - "When direct format/language/subtitle evidence contradicts committed direct evidence, persist an EditionEvidence card and return ContradictoryEvidenceParked."
+            - "When an incoming typed edition route is actively owned by another Work, leave ownership unchanged and return RouteOwnershipCollision."
+            - "Return Database for storage failure; otherwise retain every cover/route candidate and return the applied evidence outcome."
+          call_annotations:
+            - { callee: normalize_isbn13, call: "normalize ISBN evidence", type: EXISTING, target: "livrarr_domain::normalization::normalize_isbn13", evidence: "crates/livrarr-matching/src/m1_embedded.rs:24-88" }
+            - { callee: normalize_language, call: "normalize direct language", type: EXISTING, target: "livrarr_domain::normalization::normalize_language", evidence: "crates/livrarr-matching/src/m1_embedded.rs:24-88" }
+            - { callee: upsert_edition_evidence, call: "persist direct evidence", type: NEW, target: "livrarr-db::edition::upsert_evidence" }
+          tdd_directives:
+            - "RED edition_evidence_unknown_absent_and_contradiction: drive ManualImport with real embedded metadata variants and inspect the persisted edition/card."
+            - "RED edition_subtitle_never_backflows_from_work: settle a subtitled Work with an edition lacking direct subtitle and assert absence."
+
+        - name: "IdentityCutoverService::rehearse"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=IdentityCutoverService::rehearse]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Reject a database path that is not an immutable copied snapshot with NotSnapshot before mapping."
+            - "Read schema version and return SchemaMismatch unless it is the approved pre-cutover schema plus 082/083 support."
+            - "Check cancellation between bounded mapping groups and return Cancelled without mutating the live database."
+            - "Run deterministic legacy-to-typed mapping, complete-group reconciliation, field/contributor review generation, and fingerprinting on the snapshot."
+            - "Return Database for SQLite/read/fingerprint persistence failure."
+            - "Emit a report whose bytes are identical for identical snapshot input and which never carries raw per-user identity payload."
+          call_annotations:
+            - { callee: "SqliteDb::run_identity_cutover", call: "snapshot rehearsal engine", type: NEW, target: "livrarr-db::SqliteDb::run_identity_cutover" }
+            - { callee: Sha256, call: "stable report fingerprints", type: LIBRARY, target: sha2, evidence: "workspace dependency 0.10" }
+            - { callee: is_cancelled, call: "bounded cancellation check", type: EXISTING, target: "tokio_util::sync::CancellationToken", evidence: "crates/livrarr-server/src/jobs/convergence.rs:44" }
+          preconditions:
+            domain_state: ["Normal server and jobs are not running against the snapshot process."]
+          tdd_directives:
+            - "RED cutover_rehearsal_two_copied_snapshots_are_byte_identical: invoke the real CLI Rehearse twice over cloned legacy fixtures."
+            - "RED cutover_rehearsal_rejects_live_or_schema_mismatch: exercise actual path/schema checks."
+
+        - name: "IdentityCutoverService::apply"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=IdentityCutoverService::apply]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Acquire the exclusive maintenance boundary before touching live state and reject an approved report whose schema/source fingerprint differs with RehearsalMismatch."
+            - "Check Cancelled before each bounded stage and before activation; cancellation may leave deterministic staged rows/cards committed but never the marker/index."
+            - "Idempotently upsert staged rows by typed key and treat committed resolution records as authoritative; an actual typed-key/generation divergence returns Collision."
+            - "If blocking cards remain, commit only staged rows/cards/audit and return the Blocked report without activation."
+            - "When zero blockers remain, re-enumerate complete groups, verify primary projection equality and every collision invariant, recompute canonical output fingerprint, and delegate the final activation transaction."
+            - "Return Database on any transaction/query failure; rollback the activation transaction and leave the marker inactive."
+          call_annotations:
+            - { callee: "SqliteDb::run_identity_cutover", call: "live staged apply and activation", type: NEW, target: "livrarr-db::SqliteDb::run_identity_cutover" }
+            - { callee: acquire_pid_lock, call: "existing exclusive process lock", type: EXISTING, target: "livrarr_db::pool::acquire_pid_lock", evidence: "crates/livrarr-server/src/main.rs:643" }
+            - { callee: Sha256, call: "resolved graph fingerprint", type: LIBRARY, target: sha2 }
+          invariants:
+            - "A first blocked Apply never flips authority or creates the final unique index."
+          tdd_directives:
+            - "RED apply_block_resolve_rerun_is_idempotent: drive Rehearse, Apply, CLI resolve, and Apply using a real pre-cutover fixture."
+            - "RED apply_source_fingerprint_mismatch_and_collision_never_activate: mutate each frozen input class and assert marker/index absence."
+
+        - name: "IdentityCutoverService::ensure_authority_ready"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=IdentityCutoverService::ensure_authority_ready]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Check Cancelled before delegation; return Cancelled without calling the database readiness method."
+            - "Delegate the inline marker read, scoped emptiness proof, trivial report, and activation transaction to the database implementation."
+            - "Return Active when the marker is committed."
+            - "For a transactionally empty database, let the database method record the deterministic trivially-empty rehearsal, activate, and return ActivatedFresh without an unreachable mid-delegation cancellation check."
+            - "For a nonempty inactive database, return CutoverRequired as the outcome without building repositories, HTTP, or jobs."
+            - "Return Collision when empty-branch invariant/index checks find conflicting rows, Cancelled before its final claim, or Database for storage failure."
+          call_annotations:
+            - { callee: "SqliteDb::ensure_identity_authority_ready", call: "readiness implementation", type: NEW, target: "livrarr-db::SqliteDb::ensure_identity_authority_ready" }
+            - { callee: is_cancelled, call: "pre-activation cancellation", type: EXISTING, target: "tokio_util::sync::CancellationToken", evidence: "crates/livrarr-server/src/jobs/convergence.rs:44" }
+          tdd_directives:
+            - "RED readiness_active_empty_and_nonempty_inactive_branches: exercise production startup and ordinary create_test_db with real SQLite state."
+            - "RED readiness_cancelled_before_empty_activation_leaves_no_marker_or_index: cancel through the real wrapper."
+
+        - name: title_parts_from_provider
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=title_parts_from_provider]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Parse provider_title once through parse_title; if normalized main is empty, return InvalidMainTitle."
+            - "Use parsed main and volume unconditionally."
+            - "If structured_subtitle is present, normalize and use it without comparing it with the parsed embedded tail; otherwise use the parsed tail."
+            - "Return the stable tuple with provider evidence provenance; do not write any Edition subtitle."
+          call_annotations:
+            - { callee: parse_title, call: "canonical title decomposition", type: EXISTING, target: "livrarr_domain::identity_matching::parse_title", evidence: "crates/livrarr-domain/src/identity_matching.rs:161" }
+            - { callee: collapse_whitespace, call: "existing normalization internals via parser", type: EXISTING, target: "livrarr_domain::title_cleanup::collapse_whitespace", evidence: "crates/livrarr-domain/src/title_cleanup.rs:111-113; crates/livrarr-domain/src/identity_matching.rs:161-166" }
+          postconditions:
+            - "Structured subtitle presence wins without textual validation against the embedded tail."
+          tdd_directives:
+            - "RED structured_subtitle_wins_without_tail_comparison: call the production parser with disagreeing structured/tail text."
+            - "RED empty_provider_main_is_invalid: exercise the public pure function."
+            - "RED manual_refresh_structured_subtitle_wins_through_real_door: drive POST /work/{id}/refresh with a provider title carrying an embedded tail that disagrees with structured subtitle, then assert the committed tuple uses parsed main plus structured subtitle."
+
+        - name: evaluate_match
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=evaluate_match]"
+          pseudocode:
+            - "Parse both identity titles with the canonical parser and compute title, author, and typed-route verdicts."
+            - "Apply WrongMergeGuardSet only to veto/hold unsafe sameness: main/volume/author/work-route contradictions and audited different-text evidence."
+            - "Apply LostMatchGuardSet only to recover allowed one-sided subtitle/shared-edition confirmation or an opaque SampledTextSignal."
+            - "Treat edition-route equality as confirm-only inside this authority and edition-route inequality as NoEvidence."
+            - "If a sampled-text capability is absent, produce ReviewRequired for every whose-text classification; if alias proof is absent, a same-provider work-id disagreement remains class A."
+            - "Return both directional verdicts without reading a configuration field from the other guard set."
+          call_annotations:
+            - { callee: parse_title, call: "parse identity titles", type: EXISTING, target: "livrarr_domain::identity_matching::parse_title", evidence: "crates/livrarr-domain/src/identity_matching.rs:161" }
+            - { callee: title_verdict_with_positions, call: "title/volume verdict", type: EXISTING, target: "livrarr_domain::identity_matching::title_verdict_with_positions", evidence: "crates/livrarr-domain/src/identity_matching.rs:226" }
+            - { callee: author_verdict, call: "contributor verdict", type: EXISTING, target: "livrarr_domain::identity_matching::author_verdict", evidence: "crates/livrarr-domain/src/identity_matching.rs:297" }
+            - { callee: id_verdict, call: "identifier verdict precedent", type: EXISTING, target: "livrarr_domain::identity_matching::id_verdict", evidence: "crates/livrarr-domain/src/identity_matching.rs:486" }
+          invariants:
+            - "Lost-match and wrong-merge guards have disjoint configuration/state and direction-isolation fixtures."
+          tdd_directives:
+            - "RED lost_match_tuning_cannot_change_wrong_merge_outcomes_and_reverse: table-drive the public function over each independently named field."
+            - "RED edition_inequality_abstains_and_equality_only_confirms_inside_authority: enumerate every typed route comparison arm."
+            - "RED opaque_probe_capabilities_are_required_for_text_and_alias_arms: compile/runtime tests prove raw strings cannot construct them."
+
+        - name: select_machine_subtitle
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=select_machine_subtitle]"
+          pseudocode:
+            - "Filter defaults to this user/work and known formats, then select the ratified edition/default source deterministically."
+            - "Read only direct Edition subtitle evidence, including explicit absence."
+            - "Return the selected value, edition id, provenance, and generation; if no eligible edition exists, return an absent projection."
+            - "Never write the identity tuple, normalized key, text distinction, merge state, or Edition."
+          call_annotations:
+            - { callee: sort_by_key, call: "deterministic edition/default order", type: STDLIB, target: "std::slice::sort_by_key" }
+            - { callee: select_default_edition, call: "choose eligible default", type: NEW, target: "livrarr-domain::presentation::select_default_edition" }
+          postconditions:
+            - "Projection is display-only and completely reproducible from edition/default authority."
+          tdd_directives:
+            - "RED machine_subtitle_recomputes_without_identity_mutation: change defaults through the production repository and compare tuple/key before and after."
+            - "RED selected_edition_explicit_absence_projects_absence: use real Edition evidence."
+
+        - name: select_covers_and_placeholders
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-domain]/public_api/functions[name=select_covers_and_placeholders]"
+          pseudocode:
+            - "Partition retained candidates by direct known format; Unknown candidates remain retained but fill no slot."
+            - "For each slot rank explicit user choice, owned-file same-format, default same-format edition, then another same-format edition; allow only an explicitly recorded audiobook-to-selected-ebook fallback."
+            - "Use source/provenance and file existence, not a legacy grade, for selection; retirement sites RCG-01, RCG-03, and RCG-04 are therefore removed."
+            - "Build at most one work-scoped FormatNeeded panel from Unknown candidates when at least one target slot is uncovered."
+            - "Evaluate NowhereToLook independently for each uncovered slot; manual provider search is a route search, not a cover retry."
+            - "Return selected source labels and placeholder states without discarding nonwinning candidates."
+          call_annotations:
+            - { callee: rank_index, call: "existing provider rank precedent", type: EXISTING, target: "livrarr_enrichment::cover_rank::rank_index", evidence: "crates/livrarr-enrichment/src/cover_rank.rs:77-90" }
+            - { callee: sort_by_key, call: "stable candidate rank", type: STDLIB, target: "std::slice::sort_by_key" }
+            - { callee: choose_format_candidate, call: "closed source/format selector", type: NEW, target: "livrarr-domain::presentation::choose_format_candidate" }
+          forbidden_behaviors:
+            - "No title substring list removes a candidate; V6-01, V6-02, and V6-03 are deleted."
+            - "No Unknown candidate becomes a default or slot winner."
+          tdd_directives:
+            - "RED cover_rank_user_file_default_same_format_then_other: drive real enrichment/local-cover candidates through presentation."
+            - "RED one_format_needed_panel_and_independent_nowhere_to_look: render the production Work detail state."
+
+  - name: livrarr-db
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/dependencies"
+    capability_survey:
+      - capability: "Generation-CAS identity completion with a single guarded transaction"
+        existing_source: "crates/livrarr-db/src/sqlite_work_identity.rs:1301-1434"
+        reuse_decision: wrap
+        rationale: "Expand the proven claim shape into the complete route/edition/contributor settlement transaction."
+      - capability: "Merge-generation CAS for normalized enrichment writes"
+        existing_source: "crates/livrarr-db/src/sqlite_work.rs:1123-1344"
+        reuse_decision: reuse
+        rationale: "Keep metadata and identity generations distinct while following the same zero-write stale-claim behavior."
+      - capability: "Inline _livrarr_meta read and transaction-scoped completion stamp"
+        existing_source: "crates/livrarr-db/src/pool.rs:418-450"
+        reuse_decision: wrap
+        rationale: "There is no shared marker helper; readiness and cutover use explicit SQL in their own transactions."
+      - capability: "Real single-connection migrated in-memory test database"
+        existing_source: "crates/livrarr-db/src/lib.rs:89-124"
+        reuse_decision: wrap
+        rationale: "Ordinary tests are flipped to activated authority; a separate constructor supplies intentional pre-cutover state."
+      - capability: "F1 user-scoped route/review schema precedent"
+        existing_source: "crates/livrarr-db/migrations/078_author_provider_linking_tables.sql:1-21"
+        reuse_decision: wrap
+        rationale: "Reuse the active/removed, provenance, candidate, progress, and audit shape while preserving work-specific typed routes."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/types"
+      functions:
+        - name: "SqliteDb::commit_identity_settlement"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::commit_identity_settlement]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Begin one SQLite transaction and read the caller-scoped Work generation plus complete current graph."
+            - "Issue the generation-guarded claim before any identity mutation; if rows_affected is zero, roll back and return StaleGeneration."
+            - "Apply the command's Work create/re-key, tuple, ordered contributors, editions, typed routes, relationships, review/archive rows, and audit within this transaction; this replaces every former additive anchor merge on dedup/adopt/race paths."
+            - "For each active route, enforce exactly one owner and per-user resolved Work uniqueness; return RouteOwnershipCollision and roll back on a conflicting owner."
+            - "Re-enumerate the complete tuple/primary cohort and enforce the final identity key; return KeyCollision and roll back on collision."
+            - "Recompute primary-author, connectedness, subtitle, and cover projections, advance identity_generation exactly once, and commit."
+            - "On SQL, decoding, constraint, or commit failure not classified above, roll back and return Database."
+          call_annotations:
+            - { callee: begin, call: "start SQLite transaction", type: LIBRARY, target: sqlx }
+            - { callee: complete_anchors, call: "existing generation-CAS precedent", type: EXISTING, target: "SqliteDb::complete_anchors", evidence: "crates/livrarr-db/src/sqlite_work_identity.rs:1301-1434" }
+            - { callee: insert_work_row, call: "existing single Work insert", type: EXISTING, target: "livrarr_db::sqlite_work::insert_work_row", evidence: "crates/livrarr-db/src/sqlite_work.rs:178-223" }
+            - { callee: recompute_work_projections_in_tx, call: "derive projections", type: NEW, target: "livrarr-db::identity::recompute_work_projections_in_tx" }
+          preconditions:
+            data_invariants: ["SettlementCommit contains the full desired mutation set and expected_generation G captured coherently before the decision/reconciliation it represents."]
+            security: ["Every query binds command.user_id; child keys include the same user scope."]
+          postconditions:
+            - "Success exposes no partially old/partially new identity graph."
+            - "No identity write exists outside this transaction after activation."
+          tdd_directives:
+            - "RED commit_settlement_absorbs_anchor_match_adopt_normalized_dedup_and_race_loser: drive all production branches and trace SQL writes."
+            - "RED commit_settlement_stale_route_key_and_database_failures_rollback: fault/race the real SQLite transaction at each phase."
+
+        - name: "SqliteDb::transfer_route"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::transfer_route]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Begin a user-scoped transaction and load the pending route plus source/target graph; return NotFound for absent or nonpending input."
+            - "For an edition route, accept only an explicit target Edition or exactly one target proven by direct co-edition evidence; return StillAmbiguous for zero/multiple implicit targets."
+            - "Move only the contested typed route, never infer an edition merge from title/subtitle/format/language/cover or arrival."
+            - "Recompute both Work projections, archive displaced ownership, resolve the card, and append audit in the same transaction."
+            - "If any mutation or invariant check fails, roll back all steps and return AtomicRollback; classify infrastructure/query failure as Database."
+          call_annotations:
+            - { callee: begin, call: "start transfer transaction", type: LIBRARY, target: sqlx }
+            - { callee: recompute_work_projections_in_tx, call: "recompute both owners", type: NEW, target: "livrarr-db::identity::recompute_work_projections_in_tx" }
+          decisions:
+            - { key: orchestration_direction, value: "WorkIdentityRepository::resolve_conflict_atomically is implemented by SqliteDb and delegates the contested-route move to SqliteDb::transfer_route; transfer_route never calls back into the domain method", rationale: "One transaction owner and one-way delegation prevent circular orchestration." }
+          postconditions:
+            - "The contested route has one active owner or remains parked; no intermediate dual/zero owner is visible."
+          tdd_directives:
+            - "RED transfer_route_zero_one_many_target_matrix: resolve real class-C cards over all target counts."
+            - "RED transfer_route_fault_each_statement_rolls_back: inject SQLite failures into the integration transaction."
+
+        - name: "SqliteDb::recompute_work_projections"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::recompute_work_projections]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Open a transaction, read the scoped identity graph, and claim expected_generation; return StaleGeneration with zero projection writes on loss."
+            - "Derive primary_author_id from contributor ordinal zero, IdentityStatus from active routes/provenance, machine subtitle from direct edition/default evidence, and cover selections from retained candidates."
+            - "Retirement sites RCG-04, RCG-05, RCG-06, and RCG-07 contribute no grade input; source labels and selected dimensions remain."
+            - "Write only derived projection rows/columns, assert equality invariants, advance generation, and commit."
+            - "Return Database and roll back on query, invariant-read, or commit failure."
+          call_annotations:
+            - { callee: "select_machine_subtitle", call: "derive display subtitle", type: NEW, target: "livrarr-domain::select_machine_subtitle" }
+            - { callee: "select_covers_and_placeholders", call: "derive cover presentation", type: NEW, target: "livrarr-domain::select_covers_and_placeholders" }
+            - { callee: begin, call: "transactional projection write", type: LIBRARY, target: sqlx }
+          tdd_directives:
+            - "RED projection_recompute_is_total_and_generation_claimed: settle routes/defaults/candidates through a production door and inspect all projections."
+            - "RED projection_recompute_has_no_legacy_grade_dependency: migrate contradictory legacy grade strings and assert identical source-ranked result."
+
+        - name: "SqliteDb::record_embedded_cover_inspection"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::record_embedded_cover_inspection]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Bind user_id, library_item_id, and the exact FileRevision tuple; verify the LibraryItem still has that scoped revision."
+            - "If the revision changed between inspection and record, return StaleGeneration without overwriting the newer revision outcome."
+            - "Upsert exactly one Extracted, VerifiedNoCover, CouldNotInspect, or FileGone record with sanitized error code/candidate reference and no cover bytes."
+            - "Return Database for query/constraint/commit failure."
+          call_annotations:
+            - { callee: query, call: "scoped revision upsert", type: LIBRARY, target: sqlx }
+            - { callee: Sha256, call: "FileRevision hash verification", type: LIBRARY, target: sha2 }
+          postconditions:
+            - "Every completed inspection has a durable exact-revision outcome."
+          tdd_directives:
+            - "RED inspection_record_four_outcomes_persist_by_exact_revision: drive the production inspector with real temporary EPUB fixtures."
+            - "RED inspection_record_revision_race_is_stale: replace the file between inspection and record."
+
+        - name: "SqliteDb::read_embedded_cover_inspection"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::read_embedded_cover_inspection]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Query by caller user_id, library_item_id, and every FileRevision component."
+            - "Return None when no exact record exists, including when only another revision/user exists."
+            - "Decode the four-way outcome and sanitized metadata; return Database on query or decode failure."
+          call_annotations:
+            - { callee: query_as, call: "exact scoped read", type: LIBRARY, target: sqlx }
+          tdd_directives:
+            - "RED inspection_read_never_reuses_other_revision_or_user: exercise real repository rows across both dimensions."
+
+        - name: "SqliteDb::run_identity_cutover"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::run_identity_cutover]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "For Rehearse, verify the handle is a copied snapshot; return NotSnapshot before mutation when it is live or mutable."
+            - "Map legacy values to stable typed keys in deterministic WorkId order, build all repair/group/field/contributor/import cards, and compute a source fingerprint."
+            - "For Apply, require an approved report and compare live source schema plus frozen legacy-source fingerprint; return RehearsalMismatch when either differs."
+            - "Upsert equal staged rows as no-ops, preserve committed operator resolutions as authority, and return Collision for actual typed-key/generation/invariant divergence."
+            - "When cards remain, commit staged rows/cards/audit only and return Blocked with marker/index absent."
+            - "When no cards remain, begin the activation transaction: inline-read the authority marker first; re-enumerate groups; verify route, primary, scope, and collision invariants; disable the category-listed legacy consumers; drop the two old Work identity indexes; write the active marker; create idx_works_identity_v2 as the final activation write; commit."
+            - "RCG-11 is pre-marker input only and is permanently skipped after the marker; legacy grade columns are cleanup data, not authority."
+            - "Return Database for any unclassified SQL, snapshot-copy, serialization, or commit failure; activation rollback removes both marker and final index."
+          call_annotations:
+            - { callee: query_scalar, call: "inline authority marker read", type: LIBRARY, target: sqlx, evidence: "crates/livrarr-db/src/pool.rs:418-424" }
+            - { callee: identity_key, call: "existing normalization precedent for legacy grouping", type: EXISTING, target: "livrarr_domain::identity_matching::identity_key", evidence: "crates/livrarr-domain/src/identity_matching.rs:569" }
+            - { callee: begin, call: "staging and activation transactions", type: LIBRARY, target: sqlx }
+            - { callee: Sha256, call: "source/canonical fingerprints", type: LIBRARY, target: sha2 }
+            - { callee: serialize, call: "deterministic report encoding", type: LIBRARY, target: serde }
+          invariants:
+            - "Migrations 001 through 081 are never edited."
+            - "The authority marker and final index are committed together; the index DDL is the final activation write."
+          decisions:
+            - { key: marker_order, value: "marker immediately before final index DDL", rationale: "Codifies ratified IR v4 index-final order; wording conflict is B-DESIGN-003." }
+          tdd_directives:
+            - "RED cutover_blocked_apply_commits_only_staging_then_rerun_reuses_rows: invoke real CLI Apply twice around real CLI resolutions."
+            - "RED cutover_activation_index_is_last_and_atomic: trace SQLite statements and fail final DDL to prove marker rollback."
+            - "RED cutover_total_legacy_mapping_and_consumer_categories: seed every v4 legacy category with create_pre_cutover_identity_test_db."
+
+        - name: "SqliteDb::ensure_identity_authority_ready"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=SqliteDb::ensure_identity_authority_ready]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Begin a transaction and inline-read the authority marker as the first statement; if active, roll back/read-only return Active."
+            - "Within the same transaction count works and every v4 legacy identity/review source; if any is nonempty, return CutoverRequired without a write."
+            - "For the empty branch, insert the deterministic trivially-empty run/report, verify no route/key/primary collision, and drop any old Work identity indexes."
+            - "Write the active marker immediately before creating idx_works_identity_v2; create that index as the final activation write and commit."
+            - "Return Collision for an unexpected invariant/index collision and Database for any other SQL/commit failure; rollback leaves neither marker nor index."
+          call_annotations:
+            - { callee: query_scalar, call: "inline marker-first read", type: LIBRARY, target: sqlx, evidence: "crates/livrarr-db/src/pool.rs:418-424" }
+            - { callee: begin, call: "empty proof and activation transaction", type: LIBRARY, target: sqlx }
+            - { callee: check_version_gate, call: "existing compatibility gate already run by caller", type: EXISTING, target: "livrarr_db::pool::check_version_gate", evidence: "crates/livrarr-server/src/main.rs:681" }
+          preconditions:
+            domain_state: ["Migrations 082/083 are installed; production caller has run the compatibility gate."]
+          postconditions:
+            - "An ordinary repository is returned only with active authority."
+          tdd_directives:
+            - "RED readiness_empty_activates_and_nonempty_requires_cutover: run the actual DB helper on both real in-memory histories."
+            - "RED readiness_index_failure_rolls_back_marker: force the final uniqueness collision."
+
+        - name: "test_helpers::create_pre_cutover_identity_test_db"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-db]/public_api/functions[name=test_helpers::create_pre_cutover_identity_test_db]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Under test/test-helpers cfg, create a single-connection SQLite memory database with foreign keys and production busy timeout."
+            - "Apply the historical schema plus migrations 082/083, but do not invoke readiness and do not create the new authority index."
+            - "Validate every fixture reference/scope/legacy shape before seeding; return InvalidFixture and discard the database on invalid input."
+            - "Seed the supplied legacy Work/author/route/review/attempt/monitoring rows through scoped SQL; return Database for migration or insert failure."
+            - "Read the marker and assert it is NotRun/inactive; never unset or roll back an Activated marker."
+            - "Return the opaque pre-cutover wrapper only to cutover/rehearsal tests."
+          call_annotations:
+            - { callee: SqlitePoolOptions, call: "single-connection memory pool", type: LIBRARY, target: sqlx, evidence: "crates/livrarr-db/src/lib.rs:89-104" }
+            - { callee: migrate, call: "apply migrations", type: LIBRARY, target: sqlx }
+            - { callee: validate_legacy_fixture, call: "validate fixture graph", type: NEW, target: "livrarr-db::test_helpers::validate_legacy_fixture" }
+          forbidden_behaviors:
+            - "This helper never calls readiness and is unavailable to production builds."
+          tdd_directives:
+            - "RED pre_cutover_fixture_covers_complete_groups_badges_reviews_and_attempts: build every v4 fixture category and run Rehearse."
+            - "RED pre_cutover_helper_cannot_clear_active_marker: attempt reuse after activation and require InvalidFixture."
+
+        - name: "test_helpers::create_test_db"
+          structural_ref: "existing helper plus ir-v1-identity-layer-rewrite.yaml#/migration_plan/activation_trigger_surface/test_and_fresh_startup"
+          pseudocode:
+            - "Create the existing single-connection SQLite memory pool, enable foreign keys/busy timeout, and run all migrations."
+            - "Remove the manual creation of the old Work normalized-identity index at crates/livrarr-db/src/lib.rs:107-108; retain the unrelated author index setup until its own authority changes."
+            - "Construct SqliteDb and immediately call SqliteDb::ensure_identity_authority_ready; the transactionally empty branch records the trivial rehearsal and activates the final Work identity index."
+            - "Return only the activated SqliteDb; migration/readiness failure remains a test setup failure at this established infallible helper boundary."
+          call_annotations:
+            - { callee: SqlitePoolOptions, call: "existing test pool", type: EXISTING, target: "livrarr_db::test_helpers::create_test_db", evidence: "crates/livrarr-db/src/lib.rs:89-124" }
+            - { callee: migrate, call: "apply migrations", type: LIBRARY, target: sqlx }
+            - { callee: "SqliteDb::ensure_identity_authority_ready", call: "activate empty authority", type: NEW, target: "livrarr-db::SqliteDb::ensure_identity_authority_ready" }
+          postconditions:
+            - "Every ordinary test starts on the same activated identity authority as a fresh production database."
+          tdd_directives:
+            - "RED ordinary_create_test_db_has_new_index_no_old_work_index_and_active_marker: call the public helper and inspect sqlite_master/meta."
+
+  - name: livrarr-external-data
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]/dependencies"
+    capability_survey:
+      - capability: "ProviderClient anchor acceptance and shared call-record boundary"
+        existing_source: "crates/livrarr-external-data/src/provider_client.rs:76-206"
+        reuse_decision: wrap
+        rationale: "Typed routes adapt to the existing provider transports and outbound accounting; no text-search fallback is added."
+      - capability: "Goodreads Next.js/Apollo detail parser with explicit drift behavior"
+        existing_source: "crates/livrarr-external-data/src/goodreads/parsers.rs:346-373,622-754"
+        reuse_decision: wrap
+        rationale: "Extend the already-fetched parse result with a work-route observation only after the matching capture probe."
+      - capability: "Existing OpenLibrary, Goodreads, and Hardcover transport helpers"
+        existing_source: "crates/livrarr-external-data/src/openlibrary.rs:51-468; crates/livrarr-external-data/src/goodreads/client.rs:229-293; crates/livrarr-external-data/src/hardcover.rs:65-139"
+        reuse_decision: reuse
+        rationale: "Keep established queues/adapters; no independent provider client is introduced."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]/public_api/types"
+      functions:
+        - name: "IdentityProviderGateway::fetch_by_route"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]/public_api/functions[name=IdentityProviderGateway::fetch_by_route]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Reject a provider without configured transport as NotConfigured before dispatch."
+            - "Map the closed usable RouteKind to the existing provider anchor query; undeclared/manual-only kinds return Permanent without a provider request."
+            - "Dispatch through ProviderClient::fetch_by_anchor and the shared outbound queue; map timeout/circuit/rate outcomes to Retryable while preserving route ownership."
+            - "Map a definitive provider-local miss/unsupported route to Permanent without retiring or downgrading the route."
+            - "Normalize only fields whose provider shapes are sampled; unreadable changed layout returns LayoutDrift with no normalized evidence."
+            - "For any ST-006(a-d) branch lacking its accepted probe registry capability, return ProbeBlocked and emit no shape-dependent value."
+            - "Return normalized work/edition/contributor/cover evidence and optional opaque sampled capabilities; never persist identity."
+          call_annotations:
+            - { callee: fetch_by_anchor, call: "existing anchor-only provider fetch", type: EXISTING, target: "livrarr_external_data::ProviderClient::fetch_by_anchor", evidence: "crates/livrarr-external-data/src/provider_client.rs:84-132" }
+            - { callee: anchor_kind_accepted, call: "existing provider/query acceptance", type: EXISTING, target: "livrarr_external_data::provider_client::anchor_kind_accepted", evidence: "crates/livrarr-external-data/src/provider_client.rs:184-206" }
+            - { callee: probe_registry_allows, call: "opaque probe capability lookup", type: NEW, target: "livrarr-external-data::probe_registry::allows" }
+          postconditions:
+            - "Every failure leaves active route ownership and committed Work/Edition state unchanged."
+          tdd_directives:
+            - "RED fetch_by_route_closed_kind_matrix_and_failure_policy: enter through real ManualRefresh for every declared/undeclared route and provider outcome."
+            - "RED unsampled_provider_shapes_return_probe_blocked_without_evidence: replay sanitized fixtures before registry acceptance."
+
+        - name: "GoodreadsAdapter::capture_work_route_from_fetched_book_page"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-external-data]/public_api/functions[name=GoodreadsAdapter::capture_work_route_from_fetched_book_page]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Consume only the Goodreads book page already fetched for the edition route; issue zero additional requests."
+            - "Require accepted registry entry CAPTURE-ST002-GR-WORK-REF backed by build/probes/identity-layer-rewrite/ST002-gr-book-page-work-reference.json for the page's work-reference layout; without it return ProbeBlocked and no route."
+            - "If the sampled work reference is present and parseable, normalize it as GoodreadsWork provider evidence; if sampled shape proves absence, return None."
+            - "If the sampled layout is present but unreadable or changed, return LayoutDrift and no route."
+            - "Never reinterpret the page/book id itself as a work id and never write the route here."
+          call_annotations:
+            - { callee: parse_detail_html, call: "existing detail-page dispatcher", type: EXISTING, target: "livrarr_external_data::goodreads::parsers::parse_detail_html", evidence: "crates/livrarr-external-data/src/goodreads/parsers.rs:346-373" }
+            - { callee: parse_apollo_work_reference, call: "probe-gated work reference extraction", type: NEW, target: "livrarr-external-data::goodreads::parse_apollo_work_reference" }
+          invariants:
+            - "Work-id capture adds no request and only returns evidence to the caller."
+            - "The work-reference parser arm is mechanically gated by CAPTURE-ST002-GR-WORK-REF; generic ST-002 prose cannot unlock it."
+          tdd_directives:
+            - "RED goodreads_work_route_capture_uses_same_fetched_response_and_zero_network: drive a real enrichment pass with a counting fetcher."
+            - "RED goodreads_book_id_never_becomes_work_route: replay distinct book/work fixture ids."
+
+  - name: livrarr-identity
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]/dependencies"
+    capability_survey:
+      - capability: "Generic settle_identity orchestration over resolver and repository traits"
+        existing_source: "crates/livrarr-identity/src/async_resolver.rs:125-283"
+        reuse_decision: wrap
+        rationale: "Preserve coherent pre-await read and claimed completion while replacing scalar anchors with typed graph decisions."
+      - capability: "LiveEnglishIdentityResolver provider fan-out and quorum"
+        existing_source: "crates/livrarr-identity/src/english_identity_resolver.rs:59-263,397-645"
+        reuse_decision: wrap
+        rationale: "Reuse provider concurrency/abstention mechanics behind the new route-aware engine."
+      - capability: "Domain matching functions consumed without a database dependency"
+        existing_source: "crates/livrarr-domain/src/identity_matching.rs:161-612"
+        reuse_decision: reuse
+        rationale: "The crate stays DB-free and shares no private matching recipe."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]/public_api/types"
+      functions:
+        - name: "IdentityEngine::decide"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]/public_api/functions[name=IdentityEngine::decide]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Validate request scope, route kinds, owner shapes, contributor evidence, and door-derived precedence; return InvalidEvidence for malformed, cross-user, or impossible evidence."
+            - "Order usable evidence as UserChoice, OwnedFile, ProviderIdentity, then MinimumTitleAuthors without discarding lower-ranked corroboration."
+            - "Call evaluate_match over complete candidates using disjoint lost-match/wrong-merge guard sets."
+            - "For raw whose-text or alias shapes without their opaque capability, return a Review decision; if a caller claims such a branch without registry capability, return ProbeBlocked."
+            - "Classify route disagreements; class A/C candidates park and uncontested evidence may continue."
+            - "For a human-watching possible duplicate/disagreement return Review; for a machine origin decide only authority-certain evidence and otherwise Review or Defer."
+            - "Return a deterministic decision containing no repository write."
+          call_annotations:
+            - { callee: evaluate_match, call: "directional matching authority", type: NEW, target: "livrarr-domain::evaluate_match" }
+            - { callee: "IdentityEngine::classify_route_conflict", call: "conflict class", type: NEW, target: "livrarr-identity::IdentityEngine::classify_route_conflict" }
+            - { callee: run_quorum, call: "existing resolver clustering precedent", type: EXISTING, target: "livrarr_identity::english_identity_resolver::run_quorum", evidence: "crates/livrarr-identity/src/english_identity_resolver.rs:397-507" }
+          forbidden_behaviors:
+            - "No raw string/label/model output can construct a sampled-text or alias capability."
+            - "No SQL or enrichment call is made."
+          tdd_directives:
+            - "RED identity_decide_p5_precedence_and_p4_flag_decide_matrix: drive all six production doors with conflicting evidence."
+            - "RED identity_decide_probe_blocked_and_invalid_evidence_are_distinct: use public typed constructors and real adapter outputs."
+
+        - name: "IdentityEngine::classify_route_conflict"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-identity]/public_api/functions[name=IdentityEngine::classify_route_conflict]"
+          pseudocode:
+            - "If the same provider work kind carries a different work id, return class A unless candidate includes an opaque accepted AliasEquivalenceProof that covers the exact ids."
+            - "If work-scoped routes from different providers contradict the work-key evidence rules, return class B."
+            - "If the complete typed route is active for another resolved Work in this user scope, return class C."
+            - "Treat plural distinct edition routes on one Work as normal; edition-id inequality returns no conflict."
+            - "Return None for duplicate/idempotent evidence or no defined conflict."
+          call_annotations:
+            - { callee: id_verdict, call: "existing work/edition id evidence precedent", type: EXISTING, target: "livrarr_domain::identity_matching::id_verdict", evidence: "crates/livrarr-domain/src/identity_matching.rs:486" }
+            - { callee: alias_proof_covers, call: "opaque proof membership", type: NEW, target: "livrarr-domain::AliasEquivalenceProof::covers" }
+          tdd_directives:
+            - "RED conflict_classifier_exact_a_b_c_and_plural_edition_nonconflict: table-drive typed route fixtures."
+            - "RED class_a_requires_opaque_alias_capability: prove raw provider ids cannot bypass the branch."
+
+  - name: livrarr-enrichment
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]/dependencies"
+    capability_survey:
+      - capability: "ProviderQueue scatter/gather with cache freshness and central outbound accounting"
+        existing_source: "crates/livrarr-enrichment/src/provider_queue.rs:268-480"
+        reuse_decision: wrap
+        rationale: "Derive its calls from typed routes while retaining queue, cache, breaker, and retry semantics."
+      - capability: "Deterministic MergeEngine chokepoint"
+        existing_source: "crates/livrarr-enrichment/src/merge_engine.rs:137-217"
+        reuse_decision: wrap
+        rationale: "Keep one metadata merge and remove private cover-title policy rather than adding another."
+      - capability: "Merge-generation CAS persistence"
+        existing_source: "crates/livrarr-db/src/sqlite_work.rs:1124-1344"
+        reuse_decision: reuse
+        rationale: "Metadata facts remain on their independent CAS and return captured route evidence to metadata."
+      - capability: "Closed provider cover rank tables"
+        existing_source: "crates/livrarr-enrichment/src/cover_rank.rs:16-90"
+        reuse_decision: wrap
+        rationale: "Adapt them to source/format selection after the legacy grade and substring policy retirements."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]/public_api/types"
+      functions:
+        - name: "EnrichmentService::plan_from_routes"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]/public_api/functions[name=EnrichmentService::plan_from_routes]"
+          pseudocode:
+            - "Filter identity.active_routes by the closed usable RouteKind list, projecting edition owners to their Work through the supplied CapturedIdentity."
+            - "Deduplicate provider calls by normalized typed query while retaining all source routes for provenance."
+            - "Build calls only for declared provider/kind mappings; an undeclared-only identity sets manual_search_only and schedules no automatic fetch."
+            - "Never derive eligibility from connectedness label text and never mutate identity."
+          call_annotations:
+            - { callee: anchor_kind_accepted, call: "existing provider/query acceptance precedent", type: EXISTING, target: "livrarr_external_data::provider_client::anchor_kind_accepted", evidence: "crates/livrarr-external-data/src/provider_client.rs:184-206" }
+            - { callee: HashSet, call: "deduplicate typed calls", type: STDLIB, target: "std::collections::HashSet" }
+          tdd_directives:
+            - "RED enrichment_plan_closed_route_kind_matrix: create routes through the real road then call the production service."
+            - "RED connected_undeclared_route_is_manual_only_without_provider_call: drive ManualRefresh with a counting queue."
+
+        - name: "EnrichmentService::apply_provider_evidence"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-enrichment]/public_api/functions[name=EnrichmentService::apply_provider_evidence]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Validate normalized evidence was produced for the requested typed route and sampled provider shape; return ProviderDrift and write nothing when provenance/shape mismatches."
+            - "Read metadata merge generation and apply Work/Edition metadata facts through existing repository APIs; return StaleGeneration on a lost metadata claim."
+            - "Retain all structurally valid cover candidates and apply source/format rank; delete V6-01 and replace both callers V6-02/V6-03 with normal candidate retention."
+            - "Remove RCG-02 and RCG-03 grade derivation/consultation; output source/provenance candidates and presentation instead."
+            - "If the already-fetched Goodreads book page yields a readable work route, append it to captured_route_evidence without a new request."
+            - "Return Database for repository failure; otherwise return applied metadata_generation, presentation, and captured route evidence to the metadata caller."
+            - "Never call identity or write route ownership/status."
+          call_annotations:
+            - { callee: merge, call: "existing deterministic metadata merge", type: EXISTING, target: "livrarr_enrichment::DefaultMergeEngine::merge", evidence: "crates/livrarr-enrichment/src/merge_engine.rs:206-217" }
+            - { callee: apply_enrichment_merge, call: "existing metadata CAS", type: EXISTING, target: "livrarr_db::SqliteDb::apply_enrichment_merge", evidence: "crates/livrarr-db/src/sqlite_work.rs:1124-1344" }
+            - { callee: "GoodreadsAdapter::capture_work_route_from_fetched_book_page", call: "zero-request route capture", type: NEW, target: "livrarr-external-data::GoodreadsAdapter::capture_work_route_from_fetched_book_page" }
+            - { callee: select_covers_and_placeholders, call: "source/format presentation", type: NEW, target: "livrarr-domain::select_covers_and_placeholders" }
+          tdd_directives:
+            - "RED enrichment_apply_returns_captured_route_then_metadata_broker_settles_it: drive real EnrichmentPass and inspect route after handoff."
+            - "RED enrichment_apply_provider_drift_and_stale_generation_write_nothing: race/alter real normalized payloads."
+            - "RED all_valid_cover_titles_survive_without_v6_filter_and_rank_normally: exercise both former production callers."
+
+  - name: livrarr-matching
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-matching]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-matching]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-matching]/dependencies"
+    capability_survey:
+      - capability: "Canonical livrarr-domain title/author/identifier verdict functions"
+        existing_source: "crates/livrarr-domain/src/identity_matching.rs:161-612"
+        reuse_decision: reuse
+        rationale: "V5/V8 adapters call the domain authority and own no local threshold or normalization."
+      - capability: "Existing embedded EPUB metadata extraction for manual-import matching"
+        existing_source: "crates/livrarr-matching/src/m1_embedded.rs:24-88"
+        reuse_decision: reuse
+        rationale: "Continue using the established rbook metadata path for matching; cover inspection is a separate bounded library adapter."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-matching]/public_api/types"
+      functions:
+        - name: find_matching_work
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-matching]/public_api/functions[name=find_matching_work]"
+          pseudocode:
+            - "Convert the caller's candidates into complete domain WorkIdentityEvidence without flattening ordered contributors to one bare string."
+            - "Call evaluate_match for every candidate using caller-supplied disjoint guard sets."
+            - "Reject wrong-merge vetoes, retain grey/review outcomes, and select only a unique authority-certain same-work result."
+            - "Treat edition-id inequality as abstention and equality as confirm-only through the authority result."
+            - "Return no match or review ambiguity rather than applying a private title threshold."
+          call_annotations:
+            - { callee: evaluate_match, call: "single matching authority", type: NEW, target: "livrarr-domain::evaluate_match" }
+            - { callee: parse_title, call: "existing title normalization", type: EXISTING, target: "livrarr_domain::identity_matching::parse_title", evidence: "crates/livrarr-domain/src/identity_matching.rs:161" }
+            - { callee: author_verdict, call: "existing contributor agreement", type: EXISTING, target: "livrarr_domain::identity_matching::author_verdict", evidence: "crates/livrarr-domain/src/identity_matching.rs:297" }
+          tdd_directives:
+            - "RED list_dedup_discovery_and_fast_cover_search_share_authority_outcomes: drive each production consumer over one fixture matrix."
+            - "RED no_private_threshold_or_edition_inequality_veto: enumerate source text and comparison sites."
+
+  - name: livrarr-metadata
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/dependencies"
+    capability_survey:
+      - capability: "WorkService add_fast plus awaited/spawned complete_add entry shapes"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:332-394,568-1286"
+        reuse_decision: wrap
+        rationale: "Preserve response/background timing where specified while moving all identity/create outcomes into the new road."
+      - capability: "Current single identity-and-enrichment decision method"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:2966-3057"
+        reuse_decision: wrap
+        rationale: "Split identity settlement from route-driven enrichment without duplicating the gate."
+      - capability: "Current non-generation preflight and additive anchor merge"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:281-308"
+        reuse_decision: rewrite
+        rationale: "Remove this writer; every anchor-match/adopt/dedup/race outcome becomes a SettlementCommit continuation."
+      - capability: "Manual refresh orchestration and convergence pass"
+        existing_source: "crates/livrarr-metadata/src/work_service.rs:1641-1783; crates/livrarr-metadata/src/convergence_service.rs:25-199"
+        reuse_decision: wrap
+        rationale: "Keep trigger/cadence behavior and add the captured-route handoff before completion/checkpoint."
+      - capability: "Cover save gate, recovery, and per-slot lock protocol"
+        existing_source: "crates/livrarr-metadata/src/cover_write_gate.rs:50-323; crates/livrarr-metadata/src/cover_write_gate_recovery.rs:43-101"
+        reuse_decision: wrap
+        rationale: "Keep crash-safe file commit and source-ranked selection while removing grade inputs."
+      - capability: "Author and series monitor production workflows"
+        existing_source: "crates/livrarr-metadata/src/author_monitor_workflow.rs:240-687; crates/livrarr-metadata/src/series_query_service/service.rs:870-1112"
+        reuse_decision: wrap
+        rationale: "Their current seed-and-add bodies become typed machine-door requests without changing trigger surfaces."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/types"
+      functions:
+        - name: "IdentityRoadServiceImpl::settle"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/functions[name=IdentityRoadServiceImpl::settle]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Validate request user scope, origin, interaction, and the complete door matrix before I/O; return InvalidDoorEvidence for a missing Always value, injected Never value, route-bearing minimum-only mix, or missing existing_work_id."
+            - "For MachineAlone existing_work_id, accept settle only from EnrichmentPass, ManualRefresh, or ConvergenceVisit bundles built from EnrichmentApplyOutcome.captured_route_evidence and return the unchanged identity on empty capture. For HumanWatching existing_work_id, accept only WorkUpdateRekey, ManualWorkMerge, or AffirmPendingRoute card origination; the last mints the PO-ratified PendingRoute kind. Reject every other machine or interactive existing-work shape as InvalidDoorEvidence."
+            - "Normalize the evidence bundle once and preserve every source/provenance. Resolve broad candidate ids read-only, then before decide or reconcile on any existing-work path load a coherent CapturedIdentity graph plus identity generation G for each dedup, adopt, captured-route, or selected survivor target."
+            - "Ask IdentityEngine::decide using P5 precedence plus the P4 human/machine split only against those coherent snapshots; no later generation read may become the decision's expected value."
+            - "If provider normalization/fetch required for this request returns a boundary failure, return ProviderBoundary and preserve committed identity."
+            - "For Review/Defer/Reject, construct the typed unattached or existing-work review/defer outcome and include any reconciliation-returned typed card draft in the single SettlementCommit; no helper persists a card. A HumanWatching edit/merge choice may continue only by passing that commit's returned GroupIdentity card id plus expected_generation G+1 to resolve_review."
+            - "For Decide, query the broad same-main/primary candidate set and exact complete tuple/primary cohort; call reconcile_complete_group against the captured snapshots before choosing create, existing survivor, or Review."
+            - "Convert new create, anchor match, anchorless adopt, normalized dedup, and insert race-loser into one SettlementCommit containing the full desired graph and expected_generation = G for its existing target. If an insert race reveals a winner not in the prior snapshot, discard the pre-race choice, snapshot that winner, and decide/reconcile once against the new snapshot before building its commit."
+            - "Call commit_settlement exactly once for that decision. On StaleGeneration return immediately with zero writes; never re-read to re-decide, rebuild, or resubmit the stale decision. Map repository failure to Database."
+            - "After a successful settlement, call inherit_primary_author_route only for readable primary-author provider evidence and return the committed road outcome."
+          call_annotations:
+            - { callee: validate_door_evidence, call: "typed evidence matrix", type: NEW, target: "livrarr-metadata::identity_road::validate_door_evidence" }
+            - { callee: "IdentityEngine::decide", call: "deterministic decision", type: NEW, target: "livrarr-identity::IdentityEngine::decide" }
+            - { callee: identity_key, call: "existing normalized candidate query key", type: EXISTING, target: "livrarr_domain::identity_matching::identity_key", evidence: "crates/livrarr-domain/src/identity_matching.rs:569" }
+            - { callee: find_by_normalized_match, call: "legacy exact-key dedup precedent being superseded; not invoked by settle", type: EXISTING, target: "livrarr_db::SqliteDb::find_by_normalized_match", evidence: "crates/livrarr-db/src/sqlite_work.rs:988-1039" }
+            - { callee: read_captured_identity, call: "coherent existing-work graph and generation snapshot before decision", type: NEW, target: "livrarr-domain::WorkIdentityRepository::read_captured_identity" }
+            - { callee: "IdentityRoadServiceImpl::reconcile_complete_group", call: "whole-group decision", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::reconcile_complete_group" }
+            - { callee: "WorkIdentityRepository::commit_settlement", call: "sole identity transaction", type: NEW, target: "livrarr-domain::WorkIdentityRepository::commit_settlement" }
+            - { callee: "IdentityRoadServiceImpl::inherit_primary_author_route", call: "guarded F1 inheritance", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::inherit_primary_author_route" }
+          preconditions:
+            data_invariants: ["CreationDoor evidence was built at its real production entry; MachineAlone existing-work evidence is a captured-route bundle from EnrichmentPass, ManualRefresh, or ConvergenceVisit and empty capture is a no-op; HumanWatching existing-work card origination is exactly WorkUpdateRekey, ManualWorkMerge, or AffirmPendingRoute using the ratified PendingRoute kind; every inline resolution uses the settlement-returned card id and expected_generation G+1 after the sole commit advances snapshot G exactly once."]
+            security: ["request.user_id came from AuthContext or the installation-validated exclusive process."]
+          postconditions:
+            - "Every settled identity path has exactly one claimed repository commit."
+            - "Every human-watching duplicate remains visible and no machine ambiguity is silently absorbed."
+          forbidden_behaviors:
+            - "No call to the former preflight/additive anchor merge survives."
+            - "No WorkCandidate threading alone counts as road wiring."
+          tdd_directives:
+            - "RED all_listed_settle_doors_call_settle_and_commit_once: instrument the real composed road and drive every settle door in the inventory."
+            - "RED dedup_adopt_race_loser_have_no_second_writer: enumerate current short circuits and assert only commit_settlement changes identity tables."
+            - "RED existing_work_paths_use_predecision_generation_and_never_resubmit_stale: race dedup, adopt, insert-race winner, and each capture origin while recording snapshot G and commit expected_generation."
+            - "RED p4_human_flags_machine_decides_only_certain: table-drive identical evidence through each real door class."
+            - "RED interactive_card_origination_is_one_commit_then_typed_resolution: drive edit/merge Review branches from snapshot G; assert one SettlementCommit creates the card and advances once, resolve_review consumes its returned id at expected_generation G+1, and missing/resolved cards return NotFound without a synthetic insert."
+
+        - name: "IdentityRoadServiceImpl::reconcile_complete_group"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/functions[name=IdentityRoadServiceImpl::reconcile_complete_group]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Query every same normalized-main plus primary-author candidate, not only the proposed exact key."
+            - "Enumerate the complete exact tuple/primary cohort across every text distinction and the full proposed cohort pair matrix."
+            - "Evaluate each pair with evaluate_match and exclude archived routes/losers while honoring audited DifferentFromAll relations."
+            - "If any required whose-text or alias branch lacks its opaque probe capability, return ProbeBlocked rather than classify."
+            - "AutoMerge only when every required pair is authority-certain Same/Agree, no work-route contradiction survives, and every singular disposition in merge_field_disposition resolves totally."
+            - "If field, contributor order, different-text, canonical pointer/default, edition target, or other singular conflict remains, encode the declared ReviewRequired condition by building the appropriate typed card content entirely in memory and returning it inside the Review action; do not persist it or return a bare error without the card."
+            - "Return Database for cohort/relation query failure; otherwise return AutoMerge, CommitDifferent, or Review action with complete evidence and optional typed card draft for settle to commit."
+          call_annotations:
+            - { callee: identity_key, call: "candidate key", type: EXISTING, target: "livrarr_domain::identity_matching::identity_key", evidence: "crates/livrarr-domain/src/identity_matching.rs:569" }
+            - { callee: evaluate_match, call: "pairwise authority", type: NEW, target: "livrarr-domain::evaluate_match" }
+            - { callee: load_complete_identity_group, call: "broad and exact cohort reads", type: NEW, target: "WorkIdentityRepository::load_complete_identity_group" }
+            - { callee: resolve_merge_fields, call: "exhaustive field disposition", type: NEW, target: "livrarr-metadata::merge::resolve_merge_fields" }
+          invariants:
+            - "No exact-key-only query or arbitrary provider/non-null/arrival winner can authorize merge."
+            - "This pure orchestration step has no card or identity writer; settle persists its Review card draft only through commit_settlement."
+          tdd_directives:
+            - "RED complete_group_enumerates_broad_candidates_all_distinctions_and_all_pairs: seed a real multi-member cohort and inspect decisions."
+            - "RED every_singular_field_conflict_has_disposition_or_card: generate one conflict per merge_field_disposition row."
+            - "RED reconcile_review_card_is_unpersisted_until_settlement_commit: stop between reconciliation and commit, assert no card row, then commit once and assert one card."
+
+        - name: "IdentityRoadServiceImpl::inherit_primary_author_route"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/functions[name=IdentityRoadServiceImpl::inherit_primary_author_route]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Read the settled Work's contributor ordinal zero and its full current associated-name snapshot."
+            - "If author_evidence is absent or its provider author id is unreadable, return NoAuthorId without search, fallback, or nonprimary attachment."
+            - "Call guard_author_route with only the primary author names and settled Work evidence."
+            - "On Agreed, submit evidence to AuthorLinkWorkflow and return Linked; on Rejected/non-Latin review evidence return F1ReviewCandidate; on nonauthorial/dropped evidence return NoAuthorId."
+            - "Return Database when author/contributor snapshot or workflow persistence fails."
+          call_annotations:
+            - { callee: guard_author_route, call: "F1 author proof", type: EXISTING, target: "livrarr_domain::author_link::guard_author_route", evidence: "crates/livrarr-domain/src/author_link.rs:418-459" }
+            - { callee: submit_evidence, call: "existing F1 workflow", type: EXISTING, target: "AuthorLinkWorkflow::submit_evidence", evidence: "crates/livrarr-domain/src/services/author_link.rs:51-78" }
+          forbidden_behaviors:
+            - "No independent author matcher, role-based primary choice, nonprimary attachment, or absent-id fallback."
+          tdd_directives:
+            - "RED author_inheritance_primary_only_agree_review_absent_matrix: settle through real provider doors and inspect F1 route/candidate state."
+
+        - name: "IdentityRoadServiceImpl::apply_captured_enrichment_routes"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/functions[name=IdentityRoadServiceImpl::apply_captured_enrichment_routes]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Accept only trigger EnrichmentPass, ManualRefresh, or ConvergenceVisit plus the caller's user/work and completed EnrichmentApplyOutcome."
+            - "If captured_route_evidence is empty, return the existing settled identity unchanged without calling settle."
+            - "For every nonempty typed route, build one existing-work IdentityEvidenceBundle with ProviderIdentity provenance and never copy metadata payload fields into identity."
+            - "Call IdentityRoadServiceImpl::settle inline with the exact trigger origin before the parent workflow reports complete/checkpoints."
+            - "Return InvalidDoorEvidence for malformed/empty ids or scope mismatch, StaleGeneration on a lost claim, ProviderBoundary for invalid adapter provenance, and Database for repository failure."
+            - "Preserve the sibling seam: enrichment returns evidence and neither imports this module nor writes identity."
+          call_annotations:
+            - { callee: normalize_provider_route, call: "typed captured route normalization", type: NEW, target: "livrarr-metadata::identity_road::normalize_provider_route" }
+            - { callee: "IdentityRoadServiceImpl::settle", call: "existing-work road entry", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::settle" }
+            - { callee: fetch_by_anchor, call: "evidence came from existing provider transport", type: EXISTING, target: "livrarr_external_data::ProviderClient::fetch_by_anchor", evidence: "crates/livrarr-external-data/src/provider_client.rs:84-132" }
+          postconditions:
+            - "A parent enrichment/refresh/convergence completion never checkpoints captured route evidence that has not entered settle."
+          tdd_directives:
+            - "RED all_three_capture_triggers_call_settle_before_completion: drive real EnrichmentPass, ManualRefresh, and ConvergenceVisit with readable Goodreads work evidence."
+            - "RED empty_capture_is_idempotent_and_sibling_safe: assert no identity call and no enrichment-to-identity dependency."
+
+        - name: "IdentityRoadServiceImpl::resolve_review"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-metadata]/public_api/functions[name=IdentityRoadServiceImpl::resolve_review]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Load pending card by id; return NotFound for absent/resolved card."
+            - "Require command variant and allowed action to match stored ReviewKind; return ReviewKindMismatch for kind/action mismatch."
+            - "Validate AuthenticatedUser row scope or installation-checked CutoverOperator scope; return UnauthorizedScope otherwise."
+            - "Compare card and identity generations; return StaleGeneration without mutation on mismatch."
+            - "Check cancellation before claim and precommit; return Cancelled leaving the card pending."
+            - "Translate the valid action into a SettlementCommit or atomic conflict transfer, include EvidenceProvenance::User and actor audit, and execute one repository transaction."
+            - "Return Database for repository/audit failure; otherwise return the same continuation outcome to HTTP or CLI."
+          call_annotations:
+            - { callee: "WorkIdentityRepository::resolve_conflict_atomically", call: "conflict continuation", type: NEW, target: "livrarr-domain::WorkIdentityRepository::resolve_conflict_atomically" }
+            - { callee: "WorkIdentityRepository::commit_settlement", call: "other review continuations", type: NEW, target: "livrarr-domain::WorkIdentityRepository::commit_settlement" }
+            - { callee: apply_review_candidate_claimed, call: "existing claim precedent", type: EXISTING, target: "WorkIdentityRepository::apply_review_candidate_claimed", evidence: "crates/livrarr-handlers/src/identity_review.rs:127-159" }
+            - { callee: is_cancelled, call: "cancellation boundary", type: EXISTING, target: "tokio_util::sync::CancellationToken", evidence: "crates/livrarr-server/src/jobs/convergence.rs:44" }
+          tdd_directives:
+            - "RED resolve_every_review_kind_through_http_and_cli_same_graph: enumerate the nine v4 ReviewKinds, including PO-ratified PendingRoute, using production entries."
+            - "RED resolve_scope_kind_generation_cancel_database_errors_leave_pending: exercise each branch against real storage."
+
+        - name: "ListServiceImpl::confirm"
+          structural_ref: "door_evidence_contract/doors[door=ListImport] plus crates/livrarr-metadata/src/list_service.rs:280-507"
+          pseudocode:
+            - "Load the selected preview rows and caller language/import context through the current ListService workflow."
+            - "For each row, preserve today's conditional user choice, optional provider identity, and valid title-plus-contributor minimum; owned-file evidence is Never and any injection is invalid."
+            - "Build the ListImport evidence bundle through seed_list_import-derived normalized fields, with HumanWatching only for a review/add confirmation."
+            - "Call IdentityRoadServiceImpl::settle for each row instead of WorkService::add. A possible duplicate or disagreement returns visible ReviewPending; a machine continuation may settle only authority-certain evidence."
+            - "Record import tags/bookkeeping only after the road outcome names a settled Work; resolver/provider failure may produce a minimum work or deferred/review outcome according to the closed matrix, never a private identity write."
+          call_annotations:
+            - { callee: seed_list_import, call: "existing list door normalization", type: EXISTING, target: "livrarr_domain::seed::seed_list_import", evidence: "crates/livrarr-domain/src/seed.rs:152-176" }
+            - { callee: resolve_identity, call: "current provider-resolution harvest", type: EXISTING, target: "WorkService::resolve_identity", evidence: "crates/livrarr-metadata/src/list_service.rs:75-93" }
+            - { callee: "IdentityRoadServiceImpl::settle", call: "ListImport road call", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::settle" }
+            - { callee: tag_work_with_import, call: "existing DB-trait post-settle bookkeeping", type: EXISTING, target: "ListImportDb::tag_work_with_import", evidence: "crates/livrarr-db/src/api/list_import.rs:143-149; crates/livrarr-db/src/sqlite_list_import.rs:328-341; call at crates/livrarr-metadata/src/list_service.rs:414-417" }
+          tdd_directives:
+            - "RED list_confirm_real_rows_call_settle_and_flag_human_duplicates: drive POST /listimport/confirm through router."
+            - "RED list_confirm_rejects_owned_file_injection_and_preserves_minimum_fallback: exercise real request/preview parsing."
+
+        - name: "AuthorMonitorWorkflowImpl::run_monitor"
+          structural_ref: "door_evidence_contract/doors[door=AuthorMonitor] plus crates/livrarr-metadata/src/author_monitor_workflow.rs:240-687"
+          pseudocode:
+            - "Keep the existing single-flight guard, cancellation, bibliography fetch, junk screen, and monitor_new_items gate."
+            - "For each eligible new work, require the harvested provider work route; user choice, owned file, and minimum-only evidence are Never."
+            - "Build AuthorMonitor provider identity evidence from the existing seed_author_monitor-normalized title/contributors/language and mark interaction MachineAlone."
+            - "Call IdentityRoadServiceImpl::settle instead of stamping Confirmed plus WorkService::add; invalid/missing provider evidence defers and creates no Work."
+            - "On Settled, schedule the existing converge_work top-up; do not run the interactive refresh pattern."
+          call_annotations:
+            - { callee: seed_author_monitor, call: "existing author-monitor seed normalization", type: EXISTING, target: "livrarr_domain::seed::seed_author_monitor", evidence: "crates/livrarr-domain/src/seed.rs:177-197" }
+            - { callee: "IdentityRoadServiceImpl::settle", call: "AuthorMonitor road call", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::settle" }
+            - { callee: converge_work, call: "existing background top-up", type: EXISTING, target: "livrarr_metadata::convergence_service::converge_work", evidence: "crates/livrarr-metadata/src/author_monitor_workflow.rs:595-597" }
+          tdd_directives:
+            - "RED author_monitor_http_and_job_triggers_share_mandatory_provider_settle: drive both production triggers."
+            - "RED author_monitor_missing_provider_route_defers_without_work: replay eligible bibliography entry lacking a route."
+
+        - name: "SeriesQueryServiceImpl::run_series_monitor_worker"
+          structural_ref: "door_evidence_contract/doors[door=SeriesMonitor] plus crates/livrarr-metadata/src/series_query_service/service.rs:870-1112"
+          pseudocode:
+            - "Keep existing cancellation, roster fetch, existing-work link, monitoring flags, and trigger behavior."
+            - "For an unmatched roster entry, build conditional provider identity when a monitored id is present; otherwise include only a valid title-plus-contributor minimum. User choice and owned file are Never."
+            - "Use seed_series_monitor to normalize door fields, mark MachineAlone, and call IdentityRoadServiceImpl::settle instead of stamping Pending plus WorkService::add."
+            - "A provider-backed authority-certain result settles; a valid minimum may create a zero-route NotConnected Work; ambiguity defers/reviews and no id is synthesized."
+            - "After Settled, schedule existing converge_work top-up; do not switch to interactive refresh."
+          call_annotations:
+            - { callee: seed_series_monitor, call: "existing series seed normalization", type: EXISTING, target: "livrarr_domain::seed::seed_series_monitor", evidence: "crates/livrarr-domain/src/seed.rs:198-223" }
+            - { callee: fetch_series_roster_pages, call: "existing roster fetch", type: EXISTING, target: "livrarr_metadata::series_query_service::fetch_series_roster_pages", evidence: "definition crates/livrarr-metadata/src/series_query_service/gr_fetch.rs:44-48; call crates/livrarr-metadata/src/series_query_service/service.rs:895-896" }
+            - { callee: "IdentityRoadServiceImpl::settle", call: "SeriesMonitor road call", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::settle" }
+            - { callee: converge_work, call: "existing machine top-up", type: EXISTING, target: "livrarr_metadata::convergence_service::converge_work", evidence: "crates/livrarr-metadata/src/series_query_service/service.rs:1080-1084" }
+          tdd_directives:
+            - "RED series_monitor_present_route_and_minimum_only_both_enter_settle: drive monitor/promote production triggers."
+            - "RED series_monitor_never_invents_provider_or_owned_file_evidence: inspect recorded requests."
+
+        - name: "WorkServiceImpl::refresh"
+          structural_ref: "route_capture_handoff/triggers[trigger=ManualRefresh] plus crates/livrarr-metadata/src/work_service.rs:1641-1783"
+          pseudocode:
+            - "Acquire the existing per-work refresh lock and reset manual-refresh suppression/retry state."
+            - "Read CapturedIdentity and plan only closed usable routes; preserve active routes on every provider failure."
+            - "Run route-driven enrichment with manual priority/freshness through the existing pipeline."
+            - "Before returning, call apply_captured_enrichment_routes with ManualRefresh for every captured route; surface ReviewPending/conflict rather than hiding it."
+            - "Apply presentation/materialization after identity handoff using source-ranked selections; retirement sites RCG-09 and RCG-10 no longer derive/pass grade state."
+            - "Chain the DirectAdd/ManualImport delayed interactive top-up to this function only after their initial settle; Author/Series/Readarr keep converge_work."
+          call_annotations:
+            - { callee: reset_for_manual_refresh, call: "existing retry reset", type: EXISTING, target: "EnrichmentWorkflow::reset_for_manual_refresh", evidence: "crates/livrarr-metadata/src/work_service.rs:1655-1665" }
+            - { callee: run_unified_enrichment, call: "existing enrichment/materialization pipeline", type: EXISTING, target: "WorkServiceImpl::run_unified_enrichment", evidence: "crates/livrarr-metadata/src/work_service.rs:1754-1769" }
+            - { callee: "IdentityRoadServiceImpl::apply_captured_enrichment_routes", call: "ManualRefresh route handoff", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::apply_captured_enrichment_routes" }
+            - { callee: run_cover_write_gate, call: "existing crash-safe slot commit", type: EXISTING, target: "livrarr_metadata::cover_write_gate::run_cover_write_gate", evidence: "crates/livrarr-metadata/src/cover_write_gate.rs:196-323" }
+          tdd_directives:
+            - "RED manual_refresh_captured_route_settles_inline_before_response: drive POST /work/{id}/refresh with a readable provider route."
+            - "RED two_topup_patterns_remain_exact: trace DirectAdd/ManualImport refresh versus Author/Series/Readarr convergence."
+
+        - name: converge_work
+          structural_ref: "route_capture_handoff/triggers[trigger=ConvergenceVisit] plus crates/livrarr-metadata/src/convergence_service.rs:25-199"
+          pseudocode:
+            - "Preserve current due-work, terminalization, attempt threshold, and cancellation behavior, but read the new CapturedIdentity/closed route plan."
+            - "For a chaseable route, run route-driven enrichment under background priority and normal cadence; route/provider failure never mutates ownership."
+            - "Call apply_captured_enrichment_routes with ConvergenceVisit for every captured route before updating attempts or returning the visit outcome."
+            - "If settlement returns review/conflict, checkpoint the visible terminal/review outcome; otherwise recompute completeness and next cadence."
+            - "Never run a standalone identity sweep or retry an unchanged local inspection failure."
+          call_annotations:
+            - { callee: converge_outcome, call: "existing convergence outcome function", type: EXISTING, target: "livrarr_metadata::convergence_service::converge_outcome", evidence: "crates/livrarr-metadata/src/convergence_service.rs:201-233" }
+            - { callee: run_unified_enrichment, call: "existing background enrichment", type: EXISTING, target: "WorkServiceImpl::run_unified_enrichment", evidence: "crates/livrarr-metadata/src/convergence_service.rs:140-150" }
+            - { callee: "IdentityRoadServiceImpl::apply_captured_enrichment_routes", call: "ConvergenceVisit route handoff", type: NEW, target: "livrarr-metadata::IdentityRoadServiceImpl::apply_captured_enrichment_routes" }
+          tdd_directives:
+            - "RED convergence_captured_route_settles_before_attempt_checkpoint: drive the registered convergence job over a due Work."
+            - "RED convergence_provider_failure_preserves_route_and_normal_cadence: exercise breaker/miss/drift outcomes."
+
+        - name: retry_all_incomplete
+          structural_ref: "crates/livrarr-metadata/src/convergence_service.rs:235-339 plus route_capture_handoff/triggers[trigger=ConvergenceVisit]"
+          pseudocode:
+            - "List the caller's incomplete Works with the existing bounded one-shot bulk guard; isolate each Work failure and never turn the action into a recurring retry loop."
+            - "For every selected Work invoke converge_work as origin class ConvergenceVisit, regardless of the HTTP action that started the bulk pass."
+            - "Let converge_work perform route-driven enrichment and submit only nonempty EnrichmentApplyOutcome.captured_route_evidence through apply_captured_enrichment_routes before checkpointing."
+            - "Delete the current pre-refresh settle_identity call and ConflictSource::ManualRetry side channel; a Pending badge alone is not new evidence and cannot trigger an independent settle."
+            - "Count recovered/still-incomplete outcomes after each production convergence visit and return the summary; one Work error does not abort later Works."
+          call_annotations:
+            - { callee: list_works, call: "existing user-scoped bulk source", type: EXISTING, target: "WorkDb::list_works", evidence: "crates/livrarr-metadata/src/convergence_service.rs:268-285" }
+            - { callee: converge_work, call: "ConvergenceVisit production continuation", type: NEW, target: "livrarr-metadata::converge_work" }
+            - { callee: settle_identity, call: "legacy pre-refresh side channel being superseded; not invoked", type: EXISTING, target: "livrarr_identity::async_resolver::settle_identity", evidence: "crates/livrarr-metadata/src/convergence_service.rs:290-313" }
+          forbidden_behaviors:
+            - "No Pending-only or ManualRetry call invokes settle outside a nonempty captured-route ConvergenceVisit handoff."
+          tdd_directives:
+            - "RED retry_incomplete_real_handler_uses_convergence_visit_and_no_side_channel_settle: drive POST /work/retry-incomplete over Pending, Failed, and Unenriched Works."
+            - "RED retry_incomplete_empty_capture_is_noop_and_per_work_failure_isolated: use the production one-shot and inspect later visits/checkpoints."
+
+  - name: livrarr-library
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-library]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-library]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-library]/dependencies"
+    capability_survey:
+      - capability: "Existing local import workflow with per-work KeyedMutex and injected boundaries"
+        existing_source: "crates/livrarr-library/src/import_workflow.rs:50-101"
+        reuse_decision: wrap
+        rationale: "The inspector stays local/domain+db and hands bytes/evidence to its caller; it does not acquire a provider or materialization dependency."
+      - capability: "Existing embedded EPUB metadata read adapter"
+        existing_source: "crates/livrarr-matching/src/m1_embedded.rs:24-88"
+        reuse_decision: wrap
+        rationale: "Use as a read-path precedent while the cover inspector uses approved bounded ZIP/XML/image primitives."
+      - capability: "Workspace-pinned archive, XML, hashing, and image libraries"
+        existing_source: "Cargo.toml:23-58"
+        reuse_decision: reuse
+        rationale: "No archive/XML/image/hash parser is hand-written."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-library]/public_api/types"
+      functions:
+        - name: "EmbeddedCoverInspector::inspect_revision"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-library]/public_api/functions[name=EmbeddedCoverInspector::inspect_revision]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Read the exact user/library-item/FileRevision durable inspection record before opening the file."
+            - "If an unchanged record is Extracted, VerifiedNoCover, or FileGone, return it idempotently; if it is CouldNotInspect and force is false, suppress the background retry and return it."
+            - "Check cancellation before scheduling and after the blocking task; return Cancelled without inventing an outcome if cancelled before an inspection result exists."
+            - "Run bounded file access in spawn_blocking. Enforce maximum archive entries/uncompressed bytes, parse container/OPF with zip and quick-xml, decode candidate bytes with image, and hash FileRevision with sha2."
+            - "Until the accepted ST-007 capture capability admits a real shape, map any unrecognized/malformed/encrypted/unreadable shape to CouldNotInspect; never assume a cover or VerifiedNoCover."
+            - "Map disappearance before/during read to FileGone, a sampled readable no-cover shape to VerifiedNoCover, and sampled readable cover bytes to Extracted. Make zero provider requests."
+            - "Persist the sanitized four-way exact-revision record through SqliteDb::record_embedded_cover_inspection before returning; bytes stay only in Extracted and never in the record."
+            - "Return Database for durable read/write failure; a changed revision or force=true may inspect again."
+          call_annotations:
+            - { callee: "SqliteDb::read_embedded_cover_inspection", call: "durable read-first suppression", type: NEW, target: "livrarr-db::SqliteDb::read_embedded_cover_inspection" }
+            - { callee: spawn_blocking, call: "bounded blocking file work", type: LIBRARY, target: tokio }
+            - { callee: ZipArchive, call: "bounded EPUB archive read", type: LIBRARY, target: zip }
+            - { callee: Reader, call: "container/OPF XML parse", type: LIBRARY, target: quick-xml }
+            - { callee: load_from_memory, call: "cover-byte validation", type: LIBRARY, target: image }
+            - { callee: Sha256, call: "revision hash", type: LIBRARY, target: sha2 }
+            - { callee: "SqliteDb::record_embedded_cover_inspection", call: "persist exact outcome", type: NEW, target: "livrarr-db::SqliteDb::record_embedded_cover_inspection" }
+          invariants:
+            - "This feature creates no livrarr-library to livrarr-materialize edge; the caller brokers extracted bytes."
+            - "Unchanged CouldNotInspect is retried only by explicit force, never a background pass."
+          tdd_directives:
+            - "RED inspector_real_epub_cover_absence_malformed_and_filegone_are_distinct: invoke production inspector over bounded temporary revisions."
+            - "RED inspector_unchanged_failure_suppressed_changed_or_forced_retries: count blocking opens through the real service."
+            - "RED inspector_zero_provider_calls_and_no_bytes_in_row: compose the production dependencies and inspect outbound/DB records."
+
+  - name: livrarr-materialize
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-materialize]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-materialize]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-materialize]/dependencies"
+    capability_survey:
+      - capability: "Existing single DB-free cover-and-tag save port"
+        existing_source: "crates/livrarr-materialize/src/lib.rs:215-330"
+        reuse_decision: wrap
+        rationale: "Retain its fetch/decode/write isolation and drive it with source-ranked selections."
+      - capability: "Existing cover download/decode using SSRF-safe HttpFetcher and spawn_blocking"
+        existing_source: "crates/livrarr-materialize/src/lib.rs:65-130"
+        reuse_decision: reuse
+        rationale: "Keep one bounded download/decode path and existing error classes."
+      - capability: "Existing tagwrite batch port"
+        existing_source: "crates/livrarr-materialize/src/lib.rs:8-14"
+        reuse_decision: reuse
+        rationale: "Tags continue through the one tag writer with caller-resolved primary Author display name."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-materialize]/public_api/types"
+      functions:
+        - name: "MaterializeService::materialize"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-materialize]/public_api/functions[name=MaterializeService::materialize]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "If request.changed is false, return the existing skipped outcome without download/tag work."
+            - "For each selected slot, honor explicit user-choice provenance and actual committed file state, not a legacy grade; retirement site RCG-08 keeps its lock/recovery protocol but removes grade consultation/stamping."
+            - "Use prefetched extracted bytes when supplied or fetch/decode the selected URL through the existing SSRF-safe boundary; map failure to CoverDownload while leaving settled identity/metadata committed."
+            - "Atomically write selected cover bytes and dimensions using the existing save protocol and source label."
+            - "Build tags using the primary Author record's current display name, never a copied Work author scalar, then call write_tags_batch; map failure to TagWrite."
+            - "Return both successful and failed materialization details without a database dependency."
+          call_annotations:
+            - { callee: fetch_and_decode_cover, call: "existing cover fetch/decode", type: EXISTING, target: "livrarr_materialize::fetch_and_decode_cover", evidence: "crates/livrarr-materialize/src/lib.rs:65-130" }
+            - { callee: write_tags_batch, call: "existing tag save port", type: EXISTING, target: "livrarr_tagwrite::write_tags_batch", evidence: "crates/livrarr-materialize/src/lib.rs:8-14" }
+            - { callee: try_exists, call: "actual selected file state", type: LIBRARY, target: tokio }
+          forbidden_behaviors:
+            - "No identity, edition, route, repository, or provider-selection decision occurs in this DB-free leaf."
+          tdd_directives:
+            - "RED materialize_selected_sources_and_primary_author_display: drive real enrichment/local candidate selection and inspect cover/tags."
+            - "RED materialize_cover_and_tag_failures_are_independent_and_typed: invoke the production service with failing fetcher/writer fixtures."
+
+  - name: livrarr-handlers
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]/dependencies"
+    capability_survey:
+      - capability: "Narrow Has* handler capability bounds and compile wall"
+        existing_source: "crates/livrarr-handlers/src/context.rs; wiki/insights.md:18-31"
+        reuse_decision: reuse
+        rationale: "Identity handlers depend on a domain service capability and contain no SQL/business orchestration."
+      - capability: "Current DirectAdd request validation, seed construction, and response-path spawn"
+        existing_source: "crates/livrarr-handlers/src/work.rs:171-272"
+        reuse_decision: wrap
+        rationale: "Keep the HTTP contract/background timing and replace identity/add wiring with a typed road request."
+      - capability: "Current ManualImport loop, history, and delayed refresh"
+        existing_source: "crates/livrarr-handlers/src/manual_import.rs:844-970,978-1261"
+        reuse_decision: wrap
+        rationale: "Keep file/import mechanics while moving the human identity choice ahead of attachment."
+      - capability: "Current claimed review handler"
+        existing_source: "crates/livrarr-handlers/src/identity_review.rs:111-174"
+        reuse_decision: wrap
+        rationale: "Retain authentication/status mapping and route all review kinds to the shared continuation."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]/public_api/types"
+      functions:
+        - name: "identity_review::resolve"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]/public_api/functions[name=identity_review::resolve]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Deserialize one typed ReviewResolutionRequest and validate required card/generation/action fields; map malformed or action-shape input to BadRequest."
+            - "Construct ReviewActor::AuthenticatedUser from AuthContext only and call IdentityRoadService::resolve_review; do not call repositories directly."
+            - "Map StaleGeneration/already-resolved/invalid action to Conflict, missing scoped card to NotFound, and repository/provider failures to Internal."
+            - "Return the road outcome and invalidate/poll the affected review/work queries; history/audit is owned by the road transaction."
+          call_annotations:
+            - { callee: deserialize, call: "typed request parse", type: LIBRARY, target: serde }
+            - { callee: "IdentityRoadService::resolve_review", call: "shared review continuation", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: apply_review_candidate_claimed, call: "existing handler claim being replaced", type: EXISTING, target: "WorkIdentityRepository::apply_review_candidate_claimed", evidence: "crates/livrarr-handlers/src/identity_review.rs:127-159" }
+          preconditions:
+            security: ["AuthContext supplies the only HTTP actor identity."]
+          tdd_directives:
+            - "RED http_review_all_kinds_map_bad_conflict_notfound_internal: drive registered Axum routes with real service/storage."
+            - "RED handler_compile_wall_has_only_identity_road_capability: compile dependency test plus route integration."
+
+        - name: "identity_conflicts::resolve"
+          structural_ref: "crates/livrarr-handlers/src/identity_conflicts.rs:119-133 and legacy surface disposition"
+          pseudocode:
+            - "Authenticate the caller and deserialize the existing conflict action/notes; malformed action input returns BadRequest before a service call."
+            - "Load only the scoped typed IdentityConflict card summary needed to supply card id and expected generation; missing scope maps to NotFound."
+            - "Translate the legacy action to the matching typed IdentityConflict resolution with its complete surviving-route/target fields and call IdentityRoadService::resolve_review exactly once."
+            - "Map stale/already-resolved or incomplete target data to Conflict and repository failure to Internal; return the shared road outcome on success."
+            - "Do not call the legacy IdentityConflictService writer or a repository from the handler."
+          call_annotations:
+            - { callee: deserialize, call: "existing JSON action parse", type: LIBRARY, target: serde }
+            - { callee: "IdentityRoadService::resolve_review", call: "typed conflict continuation", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: resolve, call: "legacy direct service writer being superseded; not invoked", type: EXISTING, target: "IdentityConflictService::resolve", evidence: "crates/livrarr-handlers/src/identity_conflicts.rs:119-133" }
+          tdd_directives:
+            - "RED legacy_conflict_resolve_route_calls_shared_continuation_once_and_no_legacy_writer: drive POST /identity-conflict/{id}/resolve through the router."
+
+        - name: "identity_conflicts::dismiss"
+          structural_ref: "crates/livrarr-handlers/src/identity_conflicts.rs:136-146 and legacy surface disposition"
+          pseudocode:
+            - "Authenticate the caller and load the scoped pending IdentityConflict card plus expected generation; missing scope maps to NotFound."
+            - "Translate dismissal to the typed IdentityConflict Reject action preserving the exact current surviving route set, then call IdentityRoadService::resolve_review exactly once."
+            - "Map stale/already-resolved state to Conflict and repository failure to Internal; return NoContent only after the shared continuation commits the audit."
+            - "Do not call the legacy dismiss writer and do not leave an unaudited closed card."
+          call_annotations:
+            - { callee: "IdentityRoadService::resolve_review", call: "typed Reject continuation", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: dismiss, call: "legacy direct service writer being superseded; not invoked", type: EXISTING, target: "IdentityConflictService::dismiss", evidence: "crates/livrarr-handlers/src/identity_conflicts.rs:136-146" }
+          tdd_directives:
+            - "RED legacy_conflict_dismiss_route_maps_to_reject_and_calls_shared_continuation_once: drive the registered POST route and inspect route set plus audit."
+
+        - name: "work::manual_provider_search"
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-handlers]/public_api/functions[name=work::manual_provider_search]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Validate nonblank bounded title plus at least one contributor; map invalid query to BadRequest."
+            - "Read the scoped Work through the narrow service; map absence to NotFound."
+            - "Call the existing discovery/provider search without changing identity; map unavailable configured providers to ProviderUnavailable."
+            - "Return normalized provider identity candidates for a later explicit user choice; manual search is not a cover retry and never autoattaches a route."
+          call_annotations:
+            - { callee: lookup_filtered, call: "existing discovery search", type: EXISTING, target: "DiscoveryService::lookup_filtered", evidence: "crates/livrarr-domain/src/services/discovery.rs:8-13" }
+            - { callee: pick_best_candidate, call: "existing shared hit picker in provider layer", type: EXISTING, target: "livrarr_domain::identity_matching::pick_best_candidate", evidence: "crates/livrarr-domain/src/identity_matching.rs:369" }
+          tdd_directives:
+            - "RED manual_provider_search_returns_candidates_without_identity_or_cover_mutation: drive the real HTTP endpoint and inspect DB/outbound calls."
+
+        - name: "work::add"
+          structural_ref: "door_evidence_contract/doors[door=DirectAdd] plus crates/livrarr-handlers/src/work.rs:171-272"
+          pseudocode:
+            - "Validate request/auth/default language and preserve today's explicit candidate/user cover choice; DirectAdd evidence is UserChoice Always, OwnedFile Never, provider identity conditional, and minimum conditional."
+            - "Use resolve_identity_local only to sanitize the request's own harvested values with zero network, and seed_add_box to preserve established door normalization."
+            - "Convert the seed/request into a HumanWatching DirectAdd IdentityRoadRequest and call IdentityRoadService::settle inline; do not call add_fast as an identity/create writer."
+            - "On possible duplicate/disagreement return visible review/flag outcome rather than discarding the user's pick or attaching elsewhere. A zero-provider explicit title+author choice may settle a valid zero-route Work."
+            - "Preserve the response-path contract: return the settled/review outcome promptly; when a Work was newly settled, spawn enrichment completion and only after it completes schedule the existing five-second interactive refresh."
+            - "Retirement site RCG-12 removes legacy grade fields from Work DTOs; expose selected cover source/slot state only."
+          call_annotations:
+            - { callee: resolve_identity_local, call: "existing zero-network harvest sanitizer", type: EXISTING, target: "WorkService::resolve_identity_local", evidence: "crates/livrarr-handlers/src/work.rs:205-220" }
+            - { callee: seed_add_box, call: "existing DirectAdd seed normalization", type: EXISTING, target: "livrarr_domain::seed::seed_add_box", evidence: "crates/livrarr-domain/src/seed.rs:102-127" }
+            - { callee: "IdentityRoadService::settle", call: "DirectAdd road call", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: spawn, call: "existing response-path background continuation", type: LIBRARY, target: tokio, evidence: "crates/livrarr-handlers/src/work.rs:257-272" }
+            - { callee: refresh, call: "existing interactive top-up", type: EXISTING, target: "WorkService::refresh", evidence: "crates/livrarr-handlers/src/work.rs:268-272" }
+          tdd_directives:
+            - "RED post_work_real_route_calls_settle_with_exact_directadd_matrix: exercise router/handler and inspect recorded request."
+            - "RED directadd_dedup_flags_user_and_background_refresh_waits_for_completion: race the actual spawned continuation."
+
+        - name: "work::update"
+          structural_ref: "crates/livrarr-handlers/src/work.rs:447-517 plus ir-v1-identity-layer-rewrite.yaml#/reconciliation_policy"
+          pseudocode:
+            - "Validate the authenticated request exactly as the current handler does; null/blank required identity fields return BadRequest and perform no mutation."
+            - "Separate monitoring/series presentation changes from identity-title or primary-contributor changes; the former may use the existing scoped nonidentity update only when no identity authority field is written."
+            - "For an identity edit, load a coherent CapturedIdentity and generation, construct the exact HumanWatching WorkUpdateRekey proposal, and call IdentityRoadService::settle once rather than WorkService::update's direct normalized-key writer."
+            - "The settle-class continuation runs complete-group reconciliation from coherent snapshot G. It either commits an authority-certain result directly or includes one typed GroupIdentity card draft in its sole SettlementCommit, advances to G+1, and returns ReviewPending with that card's id/kind; no handler/helper inserts a card."
+            - "When the request supplies the audited cohort choice, build GroupIdentity ReviewResolutionCommand from only that returned id and expected_generation G+1 and call resolve_review once. An absent or no-longer-pending card returns NotFound, a generation mismatch returns StaleGeneration, cancellation preserves the old key, and every failure writes nothing."
+            - "Return the road-named Work/review result; no legacy normalized key, copied author name, route scalar, or primary projection is written by the handler/service shortcut."
+          call_annotations:
+            - { callee: update, call: "existing nonidentity field update retained only for presentation/monitor fields", type: EXISTING, target: "WorkService::update", evidence: "crates/livrarr-metadata/src/work_service.rs:1448-1510" }
+            - { callee: read_captured_identity, call: "coherent edit basis", type: NEW, target: "livrarr-domain::WorkIdentityRepository::read_captured_identity" }
+            - { callee: "IdentityRoadService::settle", call: "HumanWatching edit/re-key card origination", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: "IdentityRoadService::resolve_review", call: "freshly minted GroupIdentity resolution", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+          tdd_directives:
+            - "RED work_update_identity_edit_mints_then_resolves_group_card: drive PUT /work/{id} into empty, merge, and review cohorts; a review cohort uses one settle commit from G then one resolve of the returned GroupIdentity id at expected_generation G+1."
+            - "RED work_update_missing_resolved_or_generation_stale_card_fails_closed: remove/resolve the minted card or alter its generation before inline resolve and assert NotFound or StaleGeneration respectively with the old key unchanged."
+            - "RED work_update_monitor_only_does_not_touch_identity_generation_or_key: drive the real handler and compare identity graph bytes."
+
+        - name: "work::merge"
+          structural_ref: "crates/livrarr-handlers/src/work.rs:560-616 plus ir-v1-identity-layer-rewrite.yaml#/merge_field_policy"
+          pseudocode:
+            - "Keep preview_merge read-only and scoped, but derive its conflicts from the exhaustive merge-field disposition and current complete-group evidence."
+            - "On POST, authenticate both Works, reject self/cross-user/stale preview input, and translate the proposed survivor/choices into the HumanWatching ManualWorkMerge settle-class continuation."
+            - "Call IdentityRoadService::settle once from coherent snapshot G. Authority-certain reconciliation may commit directly; when the explicit choice requires audit, the sole SettlementCommit mints one GroupIdentity card, advances to G+1, and returns its id/kind without a side-channel writer."
+            - "Build the attach-or-merge ReviewResolutionCommand only from that returned card id and expected_generation G+1 and call resolve_review once; it revalidates every singular choice and commits plural unions, archive, projections, history audit, and loser retirement atomically. Missing/already-resolved card is NotFound and generation mismatch is StaleGeneration with zero resolution writes."
+            - "Only after the identity transaction succeeds may the existing best-effort file reorganization run; its warning cannot reverse or duplicate the merge."
+            - "Do not call the legacy WorkService::merge_works database merge path."
+          call_annotations:
+            - { callee: preview_merge_works, call: "existing scoped read-only preview precedent", type: EXISTING, target: "WorkService::preview_merge_works", evidence: "crates/livrarr-metadata/src/work_service.rs:1932-1967" }
+            - { callee: merge_works, call: "legacy direct merge writer being superseded; not invoked", type: EXISTING, target: "WorkService::merge_works", evidence: "crates/livrarr-metadata/src/work_service.rs:1969-2084" }
+            - { callee: "IdentityRoadService::settle", call: "HumanWatching merge card origination", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: "IdentityRoadService::resolve_review", call: "freshly minted GroupIdentity attach-or-merge", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: reorganize_work_files, call: "existing postcommit best-effort file move", type: EXISTING, target: "ImportService::reorganize_work_files", evidence: "crates/livrarr-handlers/src/work.rs:601-605" }
+          tdd_directives:
+            - "RED manual_merge_preview_then_post_mints_then_resolves_group_card: drive both registered routes from snapshot G and assert one settle commit creates GroupIdentity and advances once before one resolve uses its returned id at expected_generation G+1."
+            - "RED manual_merge_missing_resolved_or_generation_stale_card_fails_closed: remove/resolve the card or alter generation between mint and resolve; assert NotFound or StaleGeneration respectively and no loser/archive mutation."
+            - "RED manual_merge_field_review_and_file_warning_do_not_escape_atomic_identity_commit: force each boundary through production services."
+
+        - name: "work::affirm_pending_anchor"
+          structural_ref: "crates/livrarr-handlers/src/work.rs:992-1088 and ir-v1-identity-layer-rewrite.yaml#/identity_conflict_policy"
+          pseudocode:
+            - "Authenticate and load the scoped pending typed route candidate plus coherent identity generation; missing or already-settled candidate returns NotFound or Conflict without mutation."
+            - "Use ReviewKind::PendingRoute and its matching ReviewResolutionCommand exactly as ratified by the PO on 2026-08-08 for B-DESIGN-004; do not relabel the non-conflicting parked candidate as IdentityConflict, GroupIdentity, EditionEvidence, or repair."
+            - "Translate the user's affirmation into a HumanWatching AffirmPendingRoute settle-class continuation from coherent snapshot G with EvidenceProvenance::User and the complete surviving route set. Its one SettlementCommit mints the typed PendingRoute card without activating the candidate, advances to G+1, and returns card id/kind; no helper inserts it."
+            - "Build the PendingRoute affirmation command only from that returned id and expected_generation G+1 and call resolve_review once. An absent or no-longer-pending card returns NotFound, a generation mismatch returns StaleGeneration, and success alone attaches the route, derives UserConfirmed/Connected, and audits the actor."
+            - "After success only, schedule the existing interactive refresh; remove the direct affirm_anchor_claimed writer."
+          call_annotations:
+            - { callee: read_anchors_with_generation, call: "existing coherent pending-candidate read precedent", type: EXISTING, target: "WorkIdentityRepository::read_anchors_with_generation", evidence: "crates/livrarr-handlers/src/work.rs:1014-1021" }
+            - { callee: "IdentityRoadService::settle", call: "PO-ratified PendingRoute card origination", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: "IdentityRoadService::resolve_review", call: "freshly minted PendingRoute affirmation", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: affirm_anchor_claimed, call: "legacy private writer being superseded; not invoked", type: EXISTING, target: "WorkIdentityRepository::affirm_anchor_claimed", evidence: "crates/livrarr-handlers/src/work.rs:1038-1061" }
+            - { callee: refresh, call: "existing postcommit interactive top-up", type: EXISTING, target: "WorkService::refresh", evidence: "crates/livrarr-handlers/src/work.rs:1076-1086" }
+          tdd_directives:
+            - "RED pending_affirm_maps_only_to_po_ratified_pending_route_kind: the design/code gate rejects implementation that maps the candidate to any other ReviewKind."
+            - "RED pending_affirm_mints_then_resolves_with_user_provenance: drive the registered handler from snapshot G; assert one settle commit mints PendingRoute and advances once, then one resolve consumes its returned id at expected_generation G+1."
+            - "RED pending_affirm_missing_resolved_or_generation_stale_card_has_zero_writes_and_no_refresh: remove/resolve the card or alter generation and assert NotFound or StaleGeneration respectively."
+
+        - name: "manual_import::import"
+          structural_ref: "door_evidence_contract/doors[door=ManualImport] plus crates/livrarr-handlers/src/manual_import.rs:844-1261"
+          pseudocode:
+            - "Keep admin validation, file scan, root/media config, per-item history, and import result isolation."
+            - "For each item, re-read embedded metadata and build ManualImport evidence: UserChoice Always, OwnedFile Always, ProviderIdentity conditional, Minimum conditional, with user evidence above file above provider."
+            - "Use seed_manual_import normalization and call IdentityRoadService::settle before any file attach, including an in-memory existing-work match; remove that current identity-bypass short circuit."
+            - "On ReviewPending/conflict, leave the file unattached and return the visible choice. On Settled, attach/import only to the road-named Work and record typed history."
+            - "After successful attachment, retain the delayed interactive refresh top-up; do not replace it with the monitor/import convergence pattern."
+          call_annotations:
+            - { callee: extract_and_reconcile, call: "existing embedded file harvest", type: EXISTING, target: "MatchingService::extract_and_reconcile", evidence: "crates/livrarr-handlers/src/manual_import.rs:1172-1183" }
+            - { callee: seed_manual_import, call: "existing ManualImport seed normalization", type: EXISTING, target: "livrarr_domain::seed::seed_manual_import", evidence: "crates/livrarr-domain/src/seed.rs:128-151" }
+            - { callee: "IdentityRoadService::settle", call: "ManualImport road call", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: refresh, call: "existing delayed interactive top-up", type: EXISTING, target: "WorkService::refresh", evidence: "crates/livrarr-handlers/src/manual_import.rs:959-968" }
+          tdd_directives:
+            - "RED manualimport_real_route_settles_before_every_attachment_including_existing_match: drive POST /manualimport/import."
+            - "RED manualimport_user_file_provider_precedence_and_flagged_unattached: use conflicting real scan/candidate fixtures."
+
+  - name: livrarr-server
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/dependencies"
+    capability_survey:
+      - capability: "Existing clap Parser and main composition root"
+        existing_source: "crates/livrarr-server/src/main.rs:8,38-55"
+        reuse_decision: wrap
+        rationale: "Attach an optional derive subcommand to the current binary; the empty livrarr-cli crate is not a second entry."
+      - capability: "Existing PID/database exclusion and numbered startup sequence"
+        existing_source: "crates/livrarr-server/src/main.rs:635-746"
+        reuse_decision: wrap
+        rationale: "Cutover one-shot uses the same exclusion while normal startup inserts readiness immediately after compatibility check."
+      - capability: "Existing convergence job with per-user/per-work failure isolation"
+        existing_source: "crates/livrarr-server/src/jobs/convergence.rs:27-123"
+        reuse_decision: wrap
+        rationale: "Keep cadence/isolation and call metadata's new convergence continuation."
+      - capability: "Existing Readarr origin validation, single-flight runner, and two-pass Work processing"
+        existing_source: "crates/livrarr-server/src/readarr_import_workflow.rs:734-847,1872-2328"
+        reuse_decision: wrap
+        rationale: "Preserve import lifecycle while replacing seed/add identity mutation with identifier-first road calls."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/public_api/types"
+      functions:
+        - name: run_identity_convergence_tick
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/public_api/functions[name=run_identity_convergence_tick]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "If cancellation is already requested, return Cancelled before listing work."
+            - "Reuse configured convergence enablement/cadence, list users, and list due Works through existing DB APIs."
+            - "For each due Work call metadata converge_work, which performs the ConvergenceVisit captured-route handoff before checkpoint."
+            - "Check cancellation between users/Works and return Cancelled after already-committed per-Work transactions remain valid."
+            - "Isolate individual Work errors by rescheduling through existing cadence; return Database only when the tick cannot perform its controlling user/due/checkpoint DB operation."
+          call_annotations:
+            - { callee: list_convergence_due, call: "existing due query", type: EXISTING, target: "WorkDb::list_convergence_due", evidence: "crates/livrarr-db/src/api/work.rs:274-284" }
+            - { callee: converge_work, call: "metadata visit", type: NEW, target: "livrarr-metadata::converge_work" }
+            - { callee: set_next_convergence_at, call: "existing checkpoint/backoff", type: EXISTING, target: "WorkDb::set_next_convergence_at", evidence: "crates/livrarr-server/src/jobs/convergence.rs:69-123" }
+            - { callee: is_cancelled, call: "cooperative cancellation", type: EXISTING, target: "tokio_util::sync::CancellationToken", evidence: "crates/livrarr-server/src/jobs/convergence.rs:44" }
+          tdd_directives:
+            - "RED registered_convergence_tick_calls_metadata_handoff_before_checkpoint: run the real job over a due fixture with captured route."
+            - "RED convergence_tick_cancel_and_database_control_errors_are_typed_while_work_failure_isolated: use the production runner."
+
+        - name: run_identity_cutover_command
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/public_api/functions[name=run_identity_cutover_command]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "Extend current Cli with an optional field annotated #[command(subcommand)] and derive Subcommand for the ratified identity-cutover command tree; when absent, follow normal serve startup unchanged."
+            - "For any identity-cutover command, ensure the data directory and acquire the same PID/database exclusive lock before opening cutover state; do not call normal AppState/router/job construction."
+            - "Rehearse requires the supplied copied snapshot and maps snapshot validation failure to NotSnapshot."
+            - "ListReviews and ShowReview read only unresolved typed cards under a CutoverOperator built from installation_id plus invocation_id."
+            - "ResolveReview reads the action file with a bounded local read, parses exactly one ReviewResolutionCommand with serde_json, and returns InvalidActionFile for unreadable/malformed/extra-action data."
+            - "For ResolveReview, compare the stored ReviewKind and expected generation before calling IdentityRoadService::resolve_review; map mismatches to ReviewKindMismatch or StaleGeneration."
+            - "Apply loads the approved report and calls cutover apply; map source schema/fingerprint divergence to RehearsalMismatch."
+            - "Check cancellation before each mutating service call and return Cancelled without marker activation; map storage/lock/report persistence failure to Database."
+            - "Print only aggregate report/card data allowed by the typed outcome, release the exclusive lock, and exit the process path without binding a listener or starting jobs."
+          call_annotations:
+            - { callee: parse, call: "existing CLI parse", type: EXISTING, target: "clap::Parser::parse", evidence: "crates/livrarr-server/src/main.rs:8,55" }
+            - { callee: Subcommand, call: "derive nested cutover command", type: LIBRARY, target: clap }
+            - { callee: acquire_pid_lock, call: "existing process exclusion", type: EXISTING, target: "livrarr_db::pool::acquire_pid_lock", evidence: "crates/livrarr-server/src/main.rs:643" }
+            - { callee: from_slice, call: "typed local action/report parse", type: LIBRARY, target: serde_json }
+            - { callee: "IdentityCutoverService::rehearse", call: "snapshot rehearsal", type: NEW, target: "livrarr-domain::IdentityCutoverService::rehearse" }
+            - { callee: "IdentityCutoverService::apply", call: "live staged apply", type: NEW, target: "livrarr-domain::IdentityCutoverService::apply" }
+            - { callee: "IdentityRoadService::resolve_review", call: "shared pre-marker continuation", type: NEW, target: "livrarr-domain::IdentityRoadService::resolve_review" }
+            - { callee: release_pid_lock, call: "existing exclusion release", type: EXISTING, target: "livrarr_db::pool::release_pid_lock", evidence: "crates/livrarr-server/src/main.rs:643-746" }
+          invariants:
+            - "The one-shot cutover path constructs no HTTP router/listener and starts no job or background normal service."
+            - "Every pre-marker mutation uses a durable CutoverOperator audit and the same review continuation as HTTP."
+          tdd_directives:
+            - "RED clap_real_binary_parses_rehearse_list_show_resolve_apply_and_default_serve: invoke the compiled binary command tree."
+            - "RED cutover_subcommands_hold_exclusive_lock_and_never_bind_http_or_start_jobs: run against a real temp data directory with probes."
+            - "RED cutover_error_matrix_not_snapshot_report_kind_generation_action_cancel_database: exercise every declared error through the binary."
+
+        - name: ensure_identity_authority_ready_before_serve
+          signature_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-server]/public_api/functions[name=ensure_identity_authority_ready_before_serve]"
+          error_contract_ref: "same selector /errors"
+          pseudocode:
+            - "In init_database, after migrations and check_version_gate, call this wrapper before any legacy identity pass, repository/AppState construction, HTTP bind, or job start."
+            - "Delegate directly to SqliteDb::ensure_identity_authority_ready; do not duplicate SQL or call back into server from livrarr-db."
+            - "If readiness is Active or ActivatedFresh, permanently skip legacy identity-mutating startup categories 9b through 9e and continue startup."
+            - "If readiness reports nonempty inactive state, return CutoverRequired and exit after releasing the PID lock without building normal services."
+            - "Map DB readiness/marker/index failure to Database."
+          call_annotations:
+            - { callee: check_version_gate, call: "existing preceding compatibility gate", type: EXISTING, target: "livrarr_db::pool::check_version_gate", evidence: "crates/livrarr-server/src/main.rs:681" }
+            - { callee: "SqliteDb::ensure_identity_authority_ready", call: "DB readiness authority", type: NEW, target: "livrarr-db::SqliteDb::ensure_identity_authority_ready" }
+            - { callee: release_pid_lock, call: "startup failure cleanup", type: EXISTING, target: "livrarr_db::pool::release_pid_lock", evidence: "crates/livrarr-server/src/main.rs:635-746" }
+          postconditions:
+            - "No nonempty inactive database can bind HTTP or start jobs."
+          tdd_directives:
+            - "RED production_startup_active_empty_and_nonempty_inactive_boundaries: invoke init_database/main with real temp data directories."
+            - "RED active_startup_skips_every_category_9b_through_9e_legacy_writer: trace all v4 consumer-category dispositions."
+
+        - name: "LiveReadarrImportWorkflow::start"
+          structural_ref: "door_evidence_contract/doors[door=ReadarrImport] plus crates/livrarr-server/src/readarr_import_workflow.rs:734-847,1994-2328"
+          pseudocode:
+            - "Keep origin/credential validation, process-global single-flight claim, import record, progress, cancellation/recovery, and two-pass same-input grouping."
+            - "For each Readarr book, inspect valid embedded ISBN/ASIN first, then conditional provider evidence, then valid title-plus-contributor minimum; use seed_readarr_import only for established normalization/source fields."
+            - "Build MachineAlone ReadarrImport evidence with OwnedFile Always, UserChoice Never, and call IdentityRoadService::settle before creating/attaching a Work or file."
+            - "Branch 1 — at least one valid identifier resolves and every provider result agrees on one identity: settle that identity and every valid edition route even when embedded title/author is absent, invalid, or disagreeing."
+            - "Branch 2 — valid identifiers resolve to conflicting identifier/provider identities: park a REQ-007 IdentityConflict card, not ImportIdentity, keep every file unattached, and allow only accept, reject, or different-work audited exits."
+            - "Branch 3 — identifiers exist, no provider hit, and readable files agree on a valid minimum: create the minimum-founded connected Work and persist every valid embedded edition route. A definitive no-hit schedules no convergence retry; only a provider-outage variant attaches exactly one idempotent retry to the identical persisted state."
+            - "Branch 4 — identifiers exist, no provider hit, and the minimum is missing/invalid, metadata is unreadable/malformed, or files disagree: park one unattached ImportIdentity card and no Work. A definitive no-hit schedules no retry; only a provider-outage variant retains one idempotent retry that may later settle an agreeing hit."
+            - "Branch 5 — no valid identifiers and readable files agree on a valid minimum: park the conditional minimum-only ImportIdentity card with no Work/file attachment; explicit confirmation may create the NotConnected minimum Work and then attach embedded cover."
+            - "Branch 6 — no valid identifiers and the minimum is missing/invalid, metadata is unreadable/malformed, or files disagree: park one unattached ImportIdentity card and no Work."
+            - "Never select an existing Work from filename/release name or embedded title/author alone; every nonconflict card exits only by corrected retry, later resolving identifier hit where applicable, explicit identity/minimum choice, or cancellation."
+            - "After Settled, perform the existing import attach and schedule converge_work top-up; do not use the interactive refresh pattern."
+          call_annotations:
+            - { callee: connect_readarr, call: "existing origin/protocol verification", type: EXISTING, target: "LiveReadarrImportWorkflow::connect_readarr", evidence: "crates/livrarr-server/src/readarr_import_workflow.rs:739-745" }
+            - { callee: seed_readarr_import, call: "existing Readarr normalization", type: EXISTING, target: "livrarr_domain::seed::seed_readarr_import", evidence: "crates/livrarr-domain/src/seed.rs:224-254" }
+            - { callee: "IdentityRoadService::settle", call: "ReadarrImport road call", type: NEW, target: "livrarr-domain::IdentityRoadService::settle" }
+            - { callee: spawn, call: "existing runner lifecycle", type: LIBRARY, target: tokio, evidence: "crates/livrarr-server/src/readarr_import_workflow.rs:806-847" }
+            - { callee: converge_work, call: "existing machine top-up", type: EXISTING, target: "WorkService::converge_work", evidence: "crates/livrarr-server/src/readarr_import_workflow.rs:2255-2257" }
+          tdd_directives:
+            - "RED readarr_all_six_precedence_branches_and_review_kinds: drive POST /import/readarr/start through the real runner and assert IdentityConflict only for resolving identity conflict, ImportIdentity for ambiguous/minimum arms, and no flagged attachment."
+            - "RED readarr_definitive_miss_has_no_retry_and_only_outage_has_one_idempotent_retry: exercise valid and invalid minimum variants and compare identical persisted state where applicable."
+            - "RED readarr_settled_result_uses_convergence_not_refresh: inspect scheduled production calls."
+
+  - name: livrarr-behavioral
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-behavioral]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-behavioral]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-behavioral]/dependencies"
+    capability_survey:
+      - capability: "Existing three-layer six-door wiring regression matrix"
+        existing_source: "tests/behavioral/test_door_gate.rs; docs/design-door-gate.md"
+        reuse_decision: wrap
+        rationale: "Extend B1-B8 to assert actual IdentityRoadService calls for creation, dedup, adopt, and race continuations."
+      - capability: "Existing trait+impl+stub test architecture"
+        existing_source: "wiki/insights.md:18-31"
+        reuse_decision: reuse
+        rationale: "Add a recording StubIdentityRoadService and keep real SQLite integration for persistence/activation."
+      - capability: "Existing cross-user and real SQLite persistence suites"
+        existing_source: "tests/behavioral/cross_user_isolation_tests.rs; crates/livrarr-db/src/lib.rs:89-124"
+        reuse_decision: reuse
+        rationale: "Exercise user scope and transactional claims at the real repository boundary."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=livrarr-behavioral]/public_api/types"
+
+  - name: frontend
+    structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=frontend]"
+    responsibility_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=frontend]/responsibility"
+    dependencies_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=frontend]/dependencies"
+    capability_survey:
+      - capability: "Existing identity review/conflict page and query invalidation"
+        existing_source: "frontend/src/pages/review/ReviewPage.tsx; frontend/src/api/index.ts"
+        reuse_decision: wrap
+        rationale: "Extend the current review route/query surface to all typed cards and shared resolution endpoint."
+      - capability: "Existing Work identity badge/detail panel"
+        existing_source: "frontend/src/pages/work-detail/components/BookInformationTab.tsx"
+        reuse_decision: rewrite
+        rationale: "Replace scalar anchor/legacy grade presentation with route, edition, connectedness, source, and informational sibling state."
+      - capability: "Existing TanStack Query server-state layer"
+        existing_source: "frontend/src/api/index.ts"
+        reuse_decision: reuse
+        rationale: "Review/work detail mutations invalidate the established query cache rather than duplicating client authority."
+    public_api:
+      types_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=frontend]/public_api/types"
+      functions:
+        - name: "IdentitySiblingPanel::render"
+          structural_ref: "spec-identity-layer-rewrite.md#/REQ-022 and ir-v1 frontend responsibility"
+          pseudocode:
+            - "Render the current Work plus informational sibling Works/editions/routes using server-provided identity relationships."
+            - "Show no clear, remove, reset, detach, replace, or confirmation-changing action; clicking a sibling may navigate to details only."
+            - "Render the PO-frozen 2026-08-08 literal exactly: Confirming this book's identity affects only this book. Other books by this author stay exactly as they are."
+            - "Never imply that confirmation changes sibling routes or files and never issue a mutation from this panel."
+          call_annotations:
+            - { callee: useQuery, call: "read sibling state", type: LIBRARY, target: "@tanstack/react-query" }
+            - { callee: PageContent, call: "existing page layout", type: EXISTING, target: "frontend::components::PageContent", evidence: "frontend/src/components/Page/PageContent.tsx:4" }
+          forbidden_behaviors:
+            - "No sibling-panel explanatory copy may differ from the PO-frozen literal: Confirming this book's identity affects only this book. Other books by this author stay exactly as they are."
+          tdd_directives:
+            - "RED ac019_sibling_panel_is_informational_and_copy_is_exact: render the production Work detail route, assert the exact literal 'Confirming this book's identity affects only this book. Other books by this author stay exactly as they are.', and assert no mutation controls/network mutations."
+
+        - name: "WorkCoverState::render"
+          structural_ref: "ir-v1-identity-layer-rewrite.yaml#/modules[name=frontend]/public_api/types[name=WorkCoverUiState]"
+          pseudocode:
+            - "Render source-only labels for selected ebook/audiobook covers; retirement site RCG-12 removes both legacy grade DTO properties/types."
+            - "Render exactly one work-scoped FormatNeeded panel when supplied, plus independent ebook and audiobook Searching/NoCoverFound/NowhereToLook/selected states."
+            - "Unknown-format candidates appear only in the shared panel and never as a selected/default slot."
+            - "Manual provider search navigates to route search and is not labeled or invoked as a cover retry."
+          call_annotations:
+            - { callee: BookCover, call: "existing selected-cover display", type: EXISTING, target: "frontend::components::BookCover", evidence: "frontend/src/components/BookCover.tsx:28" }
+            - { callee: useQuery, call: "read Work presentation", type: LIBRARY, target: "@tanstack/react-query" }
+          tdd_directives:
+            - "RED cover_ui_one_shared_panel_three_slot_states_and_source_only_labels: render production Work detail DTO matrices."
