@@ -207,6 +207,9 @@ fn scatter(
         outcomes,
         merge_eligible: true,
         deferred: false,
+        provider_chase_attempted: true,
+        search_provider_identity: Vec::new(),
+        search_route_proposals: Vec::new(),
     }
 }
 
@@ -391,16 +394,10 @@ async fn unconfigured_provider_is_skipped_remaining_providers_save_the_work() {
         saved.description,
         Some("A provider description".to_string())
     );
-    // N2/S2: cover fields no longer persist via the generic field merge this
-    // direct enrich_work() call exercises — only the cover-write gate (one
-    // layer up, in run_unified_enrichment) commits cover_url/source/trust/
-    // dims. The merge's resolved pick is still observable on the in-memory
-    // result, which is what this test (about provider skip behavior, not
-    // the cover gate) actually needs to prove.
-    assert_eq!(
-        result.cover_resolution.as_ref().map(|r| r.url.as_str()),
-        Some("https://covers.example.test/ebook.jpg")
-    );
+    // The remaining provider still saves its non-cover data. Round 15 keeps
+    // Goodreads payload parsing intact but excludes its cover at candidate
+    // assembly, so a GR-only scatter has no in-memory cover resolution.
+    assert!(result.cover_resolution.is_none());
 }
 
 #[tokio::test]

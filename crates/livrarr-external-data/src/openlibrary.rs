@@ -352,6 +352,84 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
     term: &str,
     lang: &str,
 ) -> Result<Vec<LookupResult>, String> {
+    search_openlibrary_with_options(
+        http,
+        "https://openlibrary.org",
+        term,
+        lang,
+        RequestPriority::Normal,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+}
+
+/// Search OpenLibrary with caller-owned transport settings. Interactive
+/// discovery uses this entry point so its queue priority and request-only
+/// timeout remain explicit and testable.
+pub async fn search_openlibrary_with_options<H: HttpFetcher + Send + Sync>(
+    http: &H,
+    base_url: &str,
+    term: &str,
+    lang: &str,
+    priority: RequestPriority,
+    timeout: std::time::Duration,
+) -> Result<Vec<LookupResult>, String> {
+    let hits = search_openlibrary_identity_hits_with_options(
+        http, base_url, term, lang, priority, timeout, 50,
+    )
+    .await?;
+    Ok(hits
+        .into_iter()
+        .map(|hit| LookupResult {
+            ol_key: Some(hit.ol_key),
+            title: hit.title,
+            author_name: hit.author_name,
+            author_ol_key: hit.author_ol_key,
+            year: hit.year,
+            cover_url: hit.cover_url,
+            description: None,
+            series_name: None,
+            series_position: None,
+            source: Some("openlibrary".to_string()),
+            source_type: Some("openlibrary".to_string()),
+            language: Some(lang.to_string()),
+            detail_url: None,
+            rating: None,
+            isbn_13: hit.isbns.first().cloned(),
+            candidate_id: None,
+            hc_key: None,
+            gr_key: None,
+            asin: hit.amazon_ids.first().cloned(),
+        })
+        .collect())
+}
+
+/// Rich `search.json` document used by REQ-027. All edition identifiers in
+/// the selected document are retained so corroboration never depends on which
+/// array element happened to be first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenLibraryIdentitySearchHit {
+    pub ol_key: String,
+    pub title: String,
+    pub author_name: String,
+    pub author_ol_key: Option<String>,
+    pub year: Option<i32>,
+    pub cover_url: Option<String>,
+    pub isbns: Vec<String>,
+    pub amazon_ids: Vec<String>,
+}
+
+/// The single OpenLibrary search transport/parser authority shared by
+/// interactive discovery and the bounded machine route-finding leg.
+pub async fn search_openlibrary_identity_hits_with_options<H: HttpFetcher + Send + Sync>(
+    http: &H,
+    base_url: &str,
+    term: &str,
+    lang: &str,
+    priority: RequestPriority,
+    timeout: std::time::Duration,
+    limit: u32,
+) -> Result<Vec<OpenLibraryIdentitySearchHit>, String> {
     let lang_param = if lang != "en" {
         let ol_lang = iso639_1_to_3(lang);
         format!("&language={}", urlencoding::encode(ol_lang))
@@ -359,7 +437,8 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
         String::new()
     };
     let url = format!(
-        "https://openlibrary.org/search.json?q={}&limit=50&fields=key,title,author_name,author_key,first_publish_year,cover_i{lang_param}",
+        "{}/search.json?q={}&limit={limit}&fields=key,title,author_name,author_key,first_publish_year,cover_i,isbn,id_amazon{lang_param}",
+        base_url.trim_end_matches('/'),
         urlencoding::encode(term)
     );
 
@@ -368,12 +447,12 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
         method: HttpMethod::Get,
         headers: vec![],
         body: None,
-        timeout: std::time::Duration::from_secs(10),
+        timeout,
         rate_bucket: RateBucket::OpenLibrary,
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: false,
         user_agent: UserAgentProfile::Server,
-        priority: RequestPriority::Normal,
+        priority,
     };
 
     let resp = http
@@ -441,26 +520,27 @@ pub async fn search_openlibrary<H: HttpFetcher + Send + Sync>(
                 .and_then(|c| c.as_i64())
                 .map(|c| format!("https://covers.openlibrary.org/b/id/{c}-L.jpg"));
 
-            Some(LookupResult {
-                ol_key: Some(ol_key),
+            let strings = |field: &str| {
+                doc.get(field)
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            };
+
+            Some(OpenLibraryIdentitySearchHit {
+                ol_key,
                 title: title.to_string(),
                 author_name,
                 author_ol_key,
                 year,
                 cover_url,
-                description: None,
-                series_name: None,
-                series_position: None,
-                source: Some("openlibrary".to_string()),
-                source_type: Some("openlibrary".to_string()),
-                language: Some(lang.to_string()),
-                detail_url: None,
-                rating: None,
-                isbn_13: None,
-                candidate_id: None,
-                hc_key: None,
-                gr_key: None,
-                asin: None,
+                isbns: strings("isbn"),
+                amazon_ids: strings("id_amazon"),
             })
         })
         .collect();

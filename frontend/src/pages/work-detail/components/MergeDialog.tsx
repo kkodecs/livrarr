@@ -75,6 +75,13 @@ export function MergeDialog({
       });
     },
     onSuccess: (result) => {
+      if ("cardId" in result) {
+        toast.success("Merge needs review — open Needs Review to finish it");
+        queryClient.invalidateQueries({ queryKey: ["identity-review-cards"] });
+        queryClient.invalidateQueries({ queryKey: ["works"] });
+        close();
+        return;
+      }
       toast.success(
         result.warnings.length > 0
           ? `Merged, with ${result.warnings.length} file warning(s)`

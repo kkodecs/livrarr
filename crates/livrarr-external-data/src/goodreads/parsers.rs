@@ -8,7 +8,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::client::GOODREADS_BASE_URL;
+use super::client::{extract_gr_key, GOODREADS_BASE_URL};
 
 // =============================================================================
 // Types
@@ -31,6 +31,10 @@ pub struct GoodreadsSearchResult {
     pub rating: Option<String>,
     pub series_name: Option<String>,
     pub series_position: Option<f64>,
+    /// IDs carried directly by the autocomplete response. REQ-027 consumes
+    /// these without issuing a request merely to learn them again.
+    pub book_id: Option<String>,
+    pub work_id: Option<String>,
 }
 
 /// Detailed metadata extracted from a Goodreads book detail page.
@@ -40,12 +44,15 @@ pub struct GoodreadsDetailResult {
     pub title: Option<String>,
     pub author: Option<String>,
     pub isbn: Option<String>,
+    pub asin: Option<String>,
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
     pub page_count: Option<i32>,
     pub language: Option<String>,
     pub cover_url: Option<String>,
     pub book_format: Option<String>,
+    /// Goodreads Work legacy id from the Book -> Work Apollo reference.
+    pub work_id: Option<String>,
     // Regex fields (secondary)
     pub description: Option<String>,
     pub genres: Vec<String>,
@@ -192,12 +199,15 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
             title: clean_title,
             title_bare: None,
             author,
-            detail_url,
+            detail_url: detail_url.clone(),
             cover_url,
             year,
             rating,
             series_name,
             series_position,
+            book_id: extract_gr_key(&detail_url)
+                .and_then(|key| key.split('.').next().map(str::to_string)),
+            work_id: None,
         });
     }
 
@@ -226,6 +236,10 @@ struct AutocompleteEntry {
     avg_rating: Option<StringOrNumber>,
     #[serde(default)]
     author: Option<AutocompleteAuthor>,
+    #[serde(default)]
+    book_id: Option<StringOrNumber>,
+    #[serde(default)]
+    work_id: Option<StringOrNumber>,
 }
 
 /// `avgRating` arrives as a string on most entries ("4.30") but as a bare JSON
@@ -323,6 +337,14 @@ pub fn parse_autocomplete_json_checked(
                     .filter(|r| !r.trim().is_empty() && r != "0.00"),
                 series_name,
                 series_position,
+                book_id: e.book_id.map(|value| match value {
+                    StringOrNumber::S(value) => value,
+                    StringOrNumber::N(value) => value.to_string(),
+                }),
+                work_id: e.work_id.map(|value| match value {
+                    StringOrNumber::S(value) => value,
+                    StringOrNumber::N(value) => value.to_string(),
+                }),
             })
         })
         .collect())
@@ -398,6 +420,8 @@ struct ApolloBookDetails {
     #[serde(default)]
     isbn13: Option<String>,
     #[serde(default)]
+    asin: Option<String>,
+    #[serde(default)]
     format: Option<String>,
     #[serde(default)]
     num_pages: Option<StringOrInt>,
@@ -471,6 +495,8 @@ struct ApolloWorkStats {
 
 #[derive(serde::Deserialize)]
 struct ApolloWork {
+    #[serde(default, rename = "legacyId")]
+    legacy_id: Option<StringOrInt>,
     #[serde(default)]
     details: Option<ApolloWorkDetails>,
     #[serde(default)]
@@ -709,6 +735,7 @@ fn parse_detail_next_data(html: &str) -> Option<GoodreadsDetailResult> {
     let isbn = details
         .and_then(|d| d.isbn13.clone())
         .or_else(|| details.and_then(|d| d.isbn.clone()));
+    let asin = details.and_then(|d| d.asin.clone());
     let page_count = details
         .and_then(|d| d.num_pages.as_ref())
         .and_then(|p| p.clone().into_string().parse::<i32>().ok());
@@ -735,17 +762,24 @@ fn parse_detail_next_data(html: &str) -> Option<GoodreadsDetailResult> {
         .and_then(|t| t.clone().into_string().parse::<i64>().ok())
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|dt| dt.format("%Y-%m-%d").to_string());
+    let work_id = work
+        .as_ref()
+        .and_then(|candidate| candidate.legacy_id.clone())
+        .map(StringOrInt::into_string)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()));
 
     Some(GoodreadsDetailResult {
         title: book.title,
         author,
         isbn,
+        asin,
         rating,
         rating_count,
         page_count,
         language,
         cover_url: book.image_url,
         book_format,
+        work_id,
         description,
         genres,
         series_name,
@@ -797,6 +831,10 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
 
         let isbn = book
             .get("isbn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let asin = book
+            .get("asin")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -853,6 +891,7 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
         let carried_nothing = title.is_none()
             && author.is_none()
             && isbn.is_none()
+            && asin.is_none()
             && rating.is_none()
             && rating_count.is_none()
             && page_count.is_none()
@@ -871,12 +910,14 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
             title,
             author,
             isbn,
+            asin,
             rating,
             rating_count,
             page_count,
             language,
             cover_url,
             book_format,
+            work_id: None,
             description,
             genres,
             series_name,
@@ -889,12 +930,14 @@ fn parse_detail_html_legacy(html: &str) -> Option<GoodreadsDetailResult> {
             title: None,
             author: None,
             isbn: None,
+            asin: None,
             rating: None,
             rating_count: None,
             page_count: None,
             language: None,
             cover_url: None,
             book_format: None,
+            work_id: None,
             description,
             genres,
             series_name,
@@ -1554,14 +1597,11 @@ fn series_book_from_blob(
     book: SeriesPageBook,
     page_series: Option<&str>,
 ) -> Option<GoodreadsSeriesBook> {
-    let Some(gr_key) = book
+    let gr_key = book
         .book_id
         .map(StringOrInt::into_string)
         .filter(|k| !k.trim().is_empty())
-    else {
-        tracing::warn!("GR series page: entry has no bookId — dropping this entry only");
-        return None;
-    };
+        .unwrap_or_default();
 
     let decorated = book.title.unwrap_or_default();
     let position = RE_TITLE_SERIES.captures(&decorated).and_then(|caps| {
@@ -2321,6 +2361,14 @@ mod tests {
         let result = parse_detail_html(html).expect("title must survive a malformed details field");
         assert_eq!(result.title.as_deref(), Some("Resilient Title"));
         assert!(result.isbn.is_none());
+    }
+
+    #[test]
+    fn detail_next_data_extracts_book_to_work_legacy_id_without_promoting_book_id() {
+        let html = r#"<html><body><script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"apolloState":{"ROOT_QUERY":{"getBookByLegacyId({\"legacyId\":\"77\"})":{"__ref":"Book:kca://book/77"}},"Book:kca://book/77":{"title":"Bridge Book","work":{"__ref":"Work:kca://work/900"}},"Work:kca://work/900":{"legacyId":"900"}}}}}</script></body></html>"#;
+        let result = parse_detail_html(html).expect("Book page with a resolved Work entity");
+        assert_eq!(result.work_id.as_deref(), Some("900"));
+        assert_ne!(result.work_id.as_deref(), Some("77"));
     }
 
     // =========================================================================

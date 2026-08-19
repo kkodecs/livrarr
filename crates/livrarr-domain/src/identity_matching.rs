@@ -415,6 +415,104 @@ pub fn pick_best_candidate(
     best.map(|(idx, ..)| idx)
 }
 
+/// One provider-native work candidate presented to the bounded machine search
+/// fallback. The provider work id participates in ambiguity detection; it is
+/// not identity evidence by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchFallbackCandidate<'a> {
+    pub title: &'a str,
+    pub author: &'a str,
+    pub provider_work_id: &'a str,
+}
+
+/// Typed outcome for REQ-027's search-fallback bar. Consumers may route the
+/// selected candidate, but must not reimplement the title/author tier logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFallbackDecision {
+    AutoLink { candidate_index: usize },
+    Propose { candidate_index: usize },
+    Abstain,
+}
+
+impl SearchFallbackDecision {
+    pub fn candidate_index(self) -> Option<usize> {
+        match self {
+            Self::AutoLink { candidate_index } | Self::Propose { candidate_index } => {
+                Some(candidate_index)
+            }
+            Self::Abstain => None,
+        }
+    }
+}
+
+/// Classify the authority-selected search candidate as an automatic link, a
+/// human proposal, or an honest miss (REQ-027 v9).
+///
+/// `accept_grey` deliberately mirrors [`pick_best_candidate`]. The production
+/// REQ-027 caller passes `false` (Same-tier only); callers that explicitly use
+/// the authority's grey picker still receive a typed `Propose`, never an
+/// automatic link. Candidates without a provider work id cannot propose a
+/// route and are excluded before picking.
+pub fn classify_search_fallback(
+    seed_title: &str,
+    seed_author: &str,
+    candidates: &[SearchFallbackCandidate<'_>],
+    accept_grey: bool,
+) -> SearchFallbackDecision {
+    let routable: Vec<(usize, String, String)> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| !candidate.provider_work_id.trim().is_empty())
+        .map(|(index, candidate)| {
+            (
+                index,
+                candidate.title.to_string(),
+                candidate.author.to_string(),
+            )
+        })
+        .collect();
+    let picker_inputs: Vec<(String, String)> = routable
+        .iter()
+        .map(|(_, title, author)| (title.clone(), author.clone()))
+        .collect();
+    let Some(routable_index) =
+        pick_best_candidate(seed_title, seed_author, &picker_inputs, accept_grey)
+    else {
+        return SearchFallbackDecision::Abstain;
+    };
+    let candidate_index = routable[routable_index].0;
+    let winner = candidates[candidate_index];
+    let seed_title = parse_title(seed_title);
+    let seed_authors = [seed_author.to_string()];
+    let winner_title = title_verdict(&seed_title, &parse_title(winner.title));
+    let winner_author = author_verdict(
+        &seed_authors,
+        std::slice::from_ref(&winner.author.to_string()),
+    );
+    let winner_is_decisive =
+        winner_title == TitleVerdict::Same && winner_author == AuthorVerdict::Agree;
+    if !winner_is_decisive {
+        return SearchFallbackDecision::Propose { candidate_index };
+    }
+
+    let winner_work_id = winner.provider_work_id.trim();
+    let has_distinct_decisive_candidate = candidates.iter().enumerate().any(|(index, other)| {
+        index != candidate_index
+            && !other.provider_work_id.trim().is_empty()
+            && other.provider_work_id.trim() != winner_work_id
+            && title_verdict(&seed_title, &parse_title(other.title)) == TitleVerdict::Same
+            && author_verdict(
+                &seed_authors,
+                std::slice::from_ref(&other.author.to_string()),
+            ) == AuthorVerdict::Agree
+    });
+    if has_distinct_decisive_candidate {
+        SearchFallbackDecision::Propose { candidate_index }
+    } else {
+        SearchFallbackDecision::AutoLink { candidate_index }
+    }
+}
+
 /// Exactly-one-unambiguous-match author adoption gate (author-dedup).
 ///
 /// `Some(i)` iff `candidate` adoption-matches `stored[i]` and nothing else.
@@ -620,10 +718,35 @@ pub fn identity_key_flat(title: &str, author: &str) -> (String, String) {
     );
     let flat_title = joined
         .split_whitespace()
-        .filter(|t| !matches!(*t, "a" | "an" | "the"))
+        .filter(|token| !is_identity_article(token))
         .collect::<Vec<_>>()
         .join(" ");
     (flat_title, canonical_author_key(author))
+}
+
+/// Canonical identity-article vocabulary. The scan key deliberately drops
+/// these tokens everywhere because flattening erases segment boundaries;
+/// stored tuples and matching consume the same vocabulary through
+/// [`strip_leading_identity_article`] and drop only the first token.
+const IDENTITY_ARTICLES: &[&str] = &["a", "an", "the"];
+
+fn is_identity_article(token: &str) -> bool {
+    IDENTITY_ARTICLES.contains(&token)
+}
+
+/// Strip one leading identity article from an already-normalized main title.
+/// A title consisting only of the article is preserved. This is the single
+/// authority used by both cleaned-main matching and stored v2 tuple creation.
+pub fn strip_leading_identity_article(normalized_main: &str) -> &str {
+    let Some(first) = normalized_main.split_whitespace().next() else {
+        return normalized_main;
+    };
+    let remainder = normalized_main[first.len()..].trim_start();
+    if !remainder.is_empty() && is_identity_article(first) {
+        remainder
+    } else {
+        normalized_main
+    }
 }
 
 /// Sorted, deduplicated volume numbers of a parsed title, rendered as bare
@@ -770,14 +893,12 @@ fn canonical_phrase(s: &str) -> String {
     }
     let stripped = text_norm::strip_combining_marks(s);
     let lower = stripped.to_lowercase();
-    let mut tokens: Vec<&str> = lower
+    let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
-    if tokens.len() > 1 && matches!(tokens[0], "a" | "an" | "the") {
-        tokens.remove(0);
-    }
-    tokens.join(" ")
+    let normalized = tokens.join(" ");
+    strip_leading_identity_article(&normalized).to_string()
 }
 
 /// Split at the first unambiguous separator: a colon, a spaced dash, or an
@@ -2448,6 +2569,80 @@ mod tests {
         assert_eq!(
             pick_best_candidate("World War Z", "Max Brooks", &candidates, true),
             Some(1)
+        );
+    }
+
+    fn search_candidate<'a>(
+        title: &'a str,
+        author: &'a str,
+        provider_work_id: &'a str,
+    ) -> SearchFallbackCandidate<'a> {
+        SearchFallbackCandidate {
+            title,
+            author,
+            provider_work_id,
+        }
+    }
+
+    #[test]
+    fn search_fallback_same_agree_single_work_is_auto_link() {
+        let candidates = [search_candidate("Dune", "Frank Herbert", "OL1W")];
+        assert_eq!(
+            classify_search_fallback("Dune", "Frank Herbert", &candidates, false),
+            SearchFallbackDecision::AutoLink { candidate_index: 0 }
+        );
+    }
+
+    #[test]
+    fn search_fallback_author_abstain_is_proposal() {
+        let candidates = [search_candidate("Dune", "", "OL1W")];
+        assert_eq!(
+            classify_search_fallback("Dune", "Frank Herbert", &candidates, false),
+            SearchFallbackDecision::Propose { candidate_index: 0 }
+        );
+    }
+
+    #[test]
+    fn search_fallback_distinct_decisive_work_ids_are_proposal() {
+        let candidates = [
+            search_candidate("Dune", "Frank Herbert", "OL1W"),
+            search_candidate("Dune", "Frank Herbert", "OL2W"),
+            // A duplicate representation of the winner does not create the
+            // distinct-work ambiguity by itself.
+            search_candidate("Dune", "Frank Herbert", "OL1W"),
+        ];
+        assert_eq!(
+            classify_search_fallback("Dune", "Frank Herbert", &candidates, false),
+            SearchFallbackDecision::Propose { candidate_index: 0 }
+        );
+    }
+
+    #[test]
+    fn search_fallback_grey_can_only_propose_when_explicitly_enabled() {
+        let candidates = [search_candidate(
+            "World War Z: An Oral History of the Zombie War",
+            "Max Brooks",
+            "GR1",
+        )];
+        assert_eq!(
+            classify_search_fallback("World War Z", "Max Brooks", &candidates, false),
+            SearchFallbackDecision::Abstain
+        );
+        assert_eq!(
+            classify_search_fallback("World War Z", "Max Brooks", &candidates, true),
+            SearchFallbackDecision::Propose { candidate_index: 0 }
+        );
+    }
+
+    #[test]
+    fn search_fallback_ignores_candidates_without_route_ids() {
+        let candidates = [
+            search_candidate("Dune", "Frank Herbert", ""),
+            search_candidate("Dune", "Frank Herbert", "OL2W"),
+        ];
+        assert_eq!(
+            classify_search_fallback("Dune", "Frank Herbert", &candidates, false),
+            SearchFallbackDecision::AutoLink { candidate_index: 1 }
         );
     }
 

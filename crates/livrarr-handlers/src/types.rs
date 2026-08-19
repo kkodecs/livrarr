@@ -16,6 +16,7 @@ pub mod double_option {
 pub mod config;
 pub mod download_client;
 pub mod history;
+pub mod identity_layer;
 pub mod indexer;
 pub mod notification;
 pub mod pagination;

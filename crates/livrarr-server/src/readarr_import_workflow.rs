@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{record_history, ConfigDb, CreateImportDbRequest, ReadarrOriginDb, WorkDb};
+use livrarr_domain::identity_layer::IdentityRoadService;
 use livrarr_domain::identity_matching::{identity_key, unambiguous_author_match};
 use livrarr_domain::readarr::*;
 use livrarr_domain::services::{
@@ -22,7 +23,8 @@ use livrarr_domain::{
 use livrarr_http::fetcher::HttpFetcherImpl;
 
 use crate::readarr_client::{
-    self, RdAuthor, RdBook, RdBookFile, RdRootFolder, ReadarrClient, ReadarrConnectError,
+    self, select_edition as select_readarr_edition, RdAuthor, RdBook, RdBookFile, RdEdition,
+    RdRootFolder, ReadarrClient, ReadarrConnectError,
 };
 use crate::readarr_import_service::ReadarrImportService;
 use crate::state::{LiveWorkService, ReadarrImportServiceImpl};
@@ -37,6 +39,84 @@ use crate::state::{LiveWorkService, ReadarrImportServiceImpl};
 /// what's behind it.
 fn readarr_rejected() -> ServiceError {
     ServiceError::Internal(ReadarrConnectError.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadarrProviderDisposition {
+    Agree,
+    Conflict,
+    DefinitiveMiss,
+    Outage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadarrIdentityBranch {
+    ResolvingIdentifiersAgree,
+    ResolvingIdentifiersConflict,
+    IdentifiersMissValidMinimum,
+    IdentifiersMissInvalidMinimum,
+    NoIdentifiersValidMinimum,
+    NoIdentifiersInvalidMinimum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadarrIdentityPlan {
+    pub branch: ReadarrIdentityBranch,
+    pub review_kind: Option<livrarr_domain::identity_layer::ReviewKind>,
+    pub retry_count: u8,
+    pub attach_allowed: bool,
+    pub convergence_after_settle: bool,
+}
+
+/// Closed six-branch Readarr precedence table. The runner uses this before
+/// submitting evidence; tests can observe the same production decision
+/// without standing up a network Readarr instance.
+pub fn plan_readarr_identity(
+    has_valid_identifier: bool,
+    provider: ReadarrProviderDisposition,
+    has_valid_minimum: bool,
+) -> ReadarrIdentityPlan {
+    use livrarr_domain::identity_layer::ReviewKind;
+    let branch = match (has_valid_identifier, provider, has_valid_minimum) {
+        (true, ReadarrProviderDisposition::Agree, _) => {
+            ReadarrIdentityBranch::ResolvingIdentifiersAgree
+        }
+        (true, ReadarrProviderDisposition::Conflict, _) => {
+            ReadarrIdentityBranch::ResolvingIdentifiersConflict
+        }
+        (true, _, true) => ReadarrIdentityBranch::IdentifiersMissValidMinimum,
+        (true, _, false) => ReadarrIdentityBranch::IdentifiersMissInvalidMinimum,
+        (false, _, true) => ReadarrIdentityBranch::NoIdentifiersValidMinimum,
+        (false, _, false) => ReadarrIdentityBranch::NoIdentifiersInvalidMinimum,
+    };
+    let review_kind = match branch {
+        ReadarrIdentityBranch::ResolvingIdentifiersConflict => Some(ReviewKind::IdentityConflict),
+        ReadarrIdentityBranch::IdentifiersMissInvalidMinimum
+        | ReadarrIdentityBranch::NoIdentifiersValidMinimum
+        | ReadarrIdentityBranch::NoIdentifiersInvalidMinimum => Some(ReviewKind::ImportIdentity),
+        ReadarrIdentityBranch::ResolvingIdentifiersAgree
+        | ReadarrIdentityBranch::IdentifiersMissValidMinimum => None,
+    };
+    let retry_count = u8::from(matches!(provider, ReadarrProviderDisposition::Outage));
+    ReadarrIdentityPlan {
+        branch,
+        review_kind,
+        retry_count,
+        attach_allowed: review_kind.is_none(),
+        convergence_after_settle: review_kind.is_none(),
+    }
+}
+
+pub async fn submit_readarr_identity<R>(
+    road: &R,
+    request: livrarr_domain::identity_layer::IdentityRoadRequest,
+) -> Result<livrarr_domain::identity_layer::IdentityRoadOutcome, String>
+where
+    R: IdentityRoadService + Send + Sync,
+{
+    road.settle(request)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 // =============================================================================
@@ -58,6 +138,7 @@ pub struct LiveReadarrImportWorkflow {
     work_service: Arc<LiveWorkService>,
     db: SqliteDb,
     import_workflow: Arc<crate::state::LiveImportWorkflow>,
+    identity_road: Option<Arc<crate::identity_layer::AppIdentityRoad>>,
 }
 
 impl LiveReadarrImportWorkflow {
@@ -80,7 +161,76 @@ impl LiveReadarrImportWorkflow {
             work_service,
             db,
             import_workflow,
+            identity_road: None,
         }
+    }
+
+    pub fn with_identity_road(
+        mut self,
+        identity_road: Arc<crate::identity_layer::AppIdentityRoad>,
+    ) -> Self {
+        self.identity_road = Some(identity_road);
+        self
+    }
+
+    /// Drive one real `ImportRunner::process_works` item in behavioral tests
+    /// without starting a whole Readarr HTTP import. The caller supplies the
+    /// decoded Readarr records; production prep still owns cover extraction,
+    /// source-data construction, settlement, convergence, and the cover gate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn process_single_work_item_for_tests(
+        &self,
+        import_id: &str,
+        user_id: i64,
+        book: readarr_client::RdBook,
+        author: readarr_client::RdAuthor,
+        author_id: i64,
+    ) -> Result<i64, String> {
+        let request = ReadarrImportRequest {
+            url: "https://readarr.item-path.test".to_string(),
+            api_key: "fixture-key".to_string(),
+            readarr_root_folder_id: 1,
+            livrarr_root_folder_id: 1,
+            files_only: false,
+            container_path: None,
+            host_path: None,
+        };
+        let client = ReadarrClient::new_approved(
+            request.url.clone(),
+            "https://readarr.item-path.test".to_string(),
+            request.api_key.clone(),
+            self.http_fetcher.clone(),
+        );
+        let mut runner = ImportRunner::new(
+            client,
+            self.readarr_import_service.clone(),
+            self.readarr_import_progress.clone(),
+            import_id,
+            user_id,
+            request,
+            self.work_service.clone(),
+            "en".to_string(),
+            self.import_workflow.clone(),
+            self.identity_road.clone(),
+        );
+        runner.author_map_rd.insert(author.id, author_id);
+        let author_map = HashMap::from([(author.id, &author)]);
+        let editions_by_book = HashMap::new();
+        let book_files_by_book = HashMap::new();
+        runner
+            .process_works(
+                &[&book],
+                &editions_by_book,
+                &author_map,
+                &book_files_by_book,
+                "",
+            )
+            .await?;
+        runner
+            .work_map_rd
+            .get(&book.id)
+            .copied()
+            .ok_or_else(|| "Readarr process_works item did not produce a Work".to_string())
     }
 
     /// Establish and protocol-verify a Readarr client from a raw,
@@ -139,10 +289,15 @@ async fn connect_readarr_verified(
     api_key: &str,
 ) -> Result<ReadarrClient, ReadarrConnectError> {
     let (base, origin) = readarr_client::normalize_readarr_base(url)?;
-    if !origin_is_permitted(db, &origin).await {
+    let approved = matches!(db.is_readarr_origin_approved(&origin).await, Ok(true));
+    if !approved && livrarr_http::ssrf::validate_url(&origin).await.is_err() {
         return Err(ReadarrConnectError);
     }
-    let client = ReadarrClient::new(base, origin, api_key.to_string(), http_fetcher.clone());
+    let client = if approved {
+        ReadarrClient::new_approved(base, origin, api_key.to_string(), http_fetcher.clone())
+    } else {
+        ReadarrClient::new(base, origin, api_key.to_string(), http_fetcher.clone())
+    };
     client.verify_protocol().await?;
     Ok(client)
 }
@@ -518,6 +673,47 @@ mod origin_trust_tests {
     }
 
     #[tokio::test]
+    async fn approved_private_hostname_connects_through_the_trusted_transport() {
+        let db = create_test_db().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, readarr_status_ok()).await.unwrap();
+        });
+
+        let hostname = "round8-readarr.internal.test";
+        let base = format!("http://{hostname}:{}", address.port());
+        let origin = livrarr_http::normalized_origin(&base).unwrap();
+        db.create_readarr_origin(&origin).await.unwrap();
+        let fetcher = HttpFetcherImpl::new()
+            .unwrap()
+            .with_readarr_test_dns(hostname, address)
+            .unwrap();
+
+        let result = connect_readarr_verified(&db, &fetcher, &base, "any-key").await;
+        assert!(
+            result.is_ok(),
+            "an approved hostname resolving to private infrastructure must connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn unapproved_private_hostname_stays_refused() {
+        let db = create_test_db().await;
+        let result = connect_readarr_verified(
+            &db,
+            &HttpFetcherImpl::new().unwrap(),
+            "http://localhost:8787",
+            "any-key",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unapproved hostname resolving to loopback must remain refused"
+        );
+    }
+
+    #[tokio::test]
     async fn healthy_but_unapproved_private_target_is_still_rejected() {
         let db = create_test_db().await;
         // A real, healthy, correctly-shaped Readarr stub — but NOT approved.
@@ -801,6 +997,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
         let readarr_import_progress = self.readarr_import_progress.clone();
         let work_service = self.work_service.clone();
         let import_workflow = self.import_workflow.clone();
+        let identity_road = self.identity_road.clone();
         let id = import_id.clone();
 
         tokio::spawn(async move {
@@ -830,6 +1027,7 @@ impl ReadarrImportWorkflow for LiveReadarrImportWorkflow {
                 work_service,
                 default_language,
                 import_workflow,
+                identity_road,
             );
             if let Err(e) = runner.run().await {
                 error!(import_id = %id, "Readarr import failed: {e}");
@@ -1295,6 +1493,38 @@ async fn fetch_all_readarr_data(client: &ReadarrClient) -> Result<ReadarrData, S
     })
 }
 
+/// Fetch editions only for the books selected by the import plan. A failed
+/// edition request degrades that one book to the historical no-edition path;
+/// it never aborts the batch.
+async fn fetch_readarr_editions(
+    client: &ReadarrClient,
+    active_book_ids: &[i64],
+) -> HashMap<i64, Vec<RdEdition>> {
+    let results: Vec<(i64, Result<Vec<RdEdition>, ReadarrConnectError>)> = stream::iter(
+        active_book_ids
+            .iter()
+            .copied()
+            .map(|book_id| async move { (book_id, client.editions(book_id).await) }),
+    )
+    .buffer_unordered(10)
+    .collect()
+    .await;
+
+    let mut editions_by_book = HashMap::with_capacity(results.len());
+    for (book_id, result) in results {
+        match result {
+            Ok(editions) => {
+                editions_by_book.insert(book_id, editions);
+            }
+            Err(_) => warn!(
+                operation = "readarr_import.fetch_editions",
+                book_id, "Readarr edition fetch failed; continuing without edition evidence"
+            ),
+        }
+    }
+    editions_by_book
+}
+
 // =============================================================================
 // ImportPlanner — shared logic for preview and the plan phase of import
 // =============================================================================
@@ -1306,6 +1536,62 @@ struct ImportPlanner<'a> {
     books: &'a [RdBook],
     files_only: bool,
     user_id: i64,
+}
+
+fn readarr_book_is_existing(
+    book: &RdBook,
+    author_name: &str,
+    existing_works: &[livrarr_domain::Work],
+) -> bool {
+    let edition = book.monitored_edition();
+    let isbn = edition
+        .and_then(|candidate| candidate.isbn13.as_deref())
+        .filter(|value| !value.is_empty());
+    let asin = edition
+        .and_then(|candidate| candidate.asin.as_deref())
+        .filter(|value| !value.is_empty());
+    let year = book.release_date.as_deref().and_then(extract_year);
+    let title = book.title.as_deref().unwrap_or("");
+    let (norm_title, norm_author) = identity_key(title, author_name);
+    // Activated F2 Works deliberately do not mirror route IDs into the legacy
+    // ISBN/ASIN scalar columns. Preserve the same normalized identity fallback
+    // the import door uses before consulting those optional scalar fast paths.
+    if existing_works.iter().any(|work| {
+        let (work_title, work_author) = identity_key(&work.title, &work.author_name);
+        work_author == norm_author && work_title == norm_title && work.year == year
+    }) {
+        return true;
+    }
+
+    if let Some(isbn) = isbn {
+        existing_works
+            .iter()
+            .any(|work| work.isbn_13.as_deref() == Some(isbn))
+    } else if let Some(asin) = asin {
+        existing_works
+            .iter()
+            .any(|work| work.asin.as_deref() == Some(asin))
+    } else {
+        false
+    }
+}
+
+fn planned_readarr_edition_book_ids(
+    active_books: &[&RdBook],
+    author_map: &HashMap<i64, &RdAuthor>,
+    existing_works: &[livrarr_domain::Work],
+) -> Vec<i64> {
+    active_books
+        .iter()
+        .filter(|book| {
+            let author_name = author_map
+                .get(&book.author_id)
+                .and_then(|author| author.author_name.as_deref())
+                .unwrap_or("");
+            !readarr_book_is_existing(book, author_name, existing_works)
+        })
+        .map(|book| book.id)
+        .collect()
 }
 
 impl<'a> ImportPlanner<'a> {
@@ -1425,34 +1711,13 @@ impl<'a> ImportPlanner<'a> {
         title: &str,
         existing_works: &[livrarr_domain::Work],
     ) -> bool {
-        let edition = book.monitored_edition();
-        let isbn = edition
-            .and_then(|e| e.isbn13.as_deref())
-            .filter(|s| !s.is_empty());
-        let asin = edition
-            .and_then(|e| e.asin.as_deref())
-            .filter(|s| !s.is_empty());
-        let year = book.release_date.as_deref().and_then(extract_year);
-        // REQ-014: `norm_author` (the parameter) is already an identity_key
-        // author component (computed by the caller); pair it with the
-        // title-only component here rather than re-deriving both — the
-        // caller's precomputed `norm_author` stays authoritative.
-        let norm_title = identity_key(title, "").0;
-
-        if let Some(isbn_val) = isbn {
-            existing_works
-                .iter()
-                .any(|w| w.isbn_13.as_deref() == Some(isbn_val))
-        } else if let Some(asin_val) = asin {
-            existing_works
-                .iter()
-                .any(|w| w.asin.as_deref() == Some(asin_val))
-        } else {
-            existing_works.iter().any(|w| {
-                let (w_norm_title, w_norm_author) = identity_key(&w.title, &w.author_name);
-                w_norm_author == norm_author && w_norm_title == norm_title && w.year == year
-            })
-        }
+        let _ = (norm_author, title);
+        let author_name = self
+            .author_map
+            .get(&book.author_id)
+            .and_then(|author| author.author_name.as_deref())
+            .unwrap_or("");
+        readarr_book_is_existing(book, author_name, existing_works)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1579,6 +1844,7 @@ struct ImportRunner {
     work_service: Arc<LiveWorkService>,
     default_language: String,
     import_workflow: Arc<crate::state::LiveImportWorkflow>,
+    identity_road: Option<Arc<crate::identity_layer::AppIdentityRoad>>,
     author_map_rd: HashMap<i64, i64>,
     work_map_rd: HashMap<i64, i64>,
     authors_created: i64,
@@ -1834,6 +2100,119 @@ async fn resolve_readarr_author_route(
     }
 }
 
+fn readarr_provider_identity(
+    rd_book: &RdBook,
+    edition: Option<&RdEdition>,
+    core: &livrarr_domain::identity_layer::ProviderWorkIdentityCore,
+) -> Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence> {
+    use livrarr_domain::identity_layer::{
+        IdentityProvider, ProviderIdentityEvidence, RouteKey, RouteKind,
+    };
+
+    let mut evidence = Vec::new();
+    if let Some(value) = rd_book
+        .foreign_book_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        evidence.push(ProviderIdentityEvidence {
+            provider: IdentityProvider::Goodreads,
+            route: RouteKey {
+                provider: IdentityProvider::Goodreads,
+                kind: RouteKind::GoodreadsBookEdition,
+                value: value.to_string(),
+            },
+            work_core: Some(core.clone()),
+            provenance: Default::default(),
+        });
+    }
+    if let Some(value) = edition
+        .and_then(|candidate| candidate.isbn13.as_deref())
+        .filter(|value| !value.trim().is_empty())
+    {
+        evidence.push(ProviderIdentityEvidence {
+            provider: IdentityProvider::IsbnRegistry,
+            route: RouteKey {
+                provider: IdentityProvider::IsbnRegistry,
+                kind: RouteKind::Isbn13Edition,
+                value: value.to_string(),
+            },
+            work_core: Some(core.clone()),
+            provenance: Default::default(),
+        });
+    }
+    if let Some(value) = edition
+        .and_then(|candidate| candidate.asin.as_deref())
+        .filter(|value| !value.trim().is_empty())
+    {
+        evidence.push(ProviderIdentityEvidence {
+            provider: IdentityProvider::Amazon,
+            route: RouteKey {
+                provider: IdentityProvider::Amazon,
+                kind: RouteKind::AsinEdition,
+                value: value.to_string(),
+            },
+            work_core: Some(core.clone()),
+            provenance: Default::default(),
+        });
+    }
+    evidence
+}
+
+fn readarr_creation_evidence(
+    rd_book: &RdBook,
+    edition: Option<&RdEdition>,
+    author_id: i64,
+    files: &[&RdBookFile],
+) -> livrarr_domain::identity_layer::IdentityEvidenceBundle {
+    let title = rd_book.title.as_deref().unwrap_or("").trim();
+    let parsed_title = livrarr_domain::identity_matching::parse_title(title);
+    let identity_title = livrarr_domain::identity_layer::IdentityTitleTuple {
+        main: title.to_string(),
+        subtitle: parsed_title.subtitle.clone(),
+        volume: parsed_title
+            .series_markers
+            .first()
+            .map(|marker| marker.number.to_string()),
+        normalized_main: parsed_title.main,
+        normalized_subtitle: parsed_title.subtitle.unwrap_or_default(),
+        normalized_volume: parsed_title
+            .series_markers
+            .first()
+            .map(|marker| marker.number.to_string())
+            .unwrap_or_default(),
+        provenance: livrarr_domain::identity_layer::EvidenceProvenance::Migrated,
+    };
+    let core = livrarr_domain::identity_layer::ProviderWorkIdentityCore {
+        identity_title,
+        primary_author_id: author_id,
+    };
+    let provider_identity = readarr_provider_identity(rd_book, edition, &core);
+    let owned_files = files
+        .iter()
+        .map(|file| livrarr_domain::identity_layer::OwnedFileEvidence {
+            library_item_id: file.id,
+            file_revision: livrarr_domain::identity_layer::FileRevision {
+                size_bytes: file.size.max(0) as u64,
+                modified_ns: 0,
+                sha256: [0; 32],
+            },
+        })
+        .collect::<Vec<_>>();
+    let minimum = (!owned_files.is_empty() || provider_identity.is_empty()).then(|| {
+        livrarr_domain::identity_layer::MinimumWorkEvidence {
+            title: title.to_string(),
+            authors: vec![author_id],
+        }
+    });
+    livrarr_domain::identity_layer::IdentityEvidenceBundle {
+        user_choice: None,
+        owned_files,
+        provider_identity,
+        minimum,
+    }
+}
+
 impl ImportRunner {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1846,6 +2225,7 @@ impl ImportRunner {
         work_service: Arc<LiveWorkService>,
         default_language: String,
         import_workflow: Arc<crate::state::LiveImportWorkflow>,
+        identity_road: Option<Arc<crate::identity_layer::AppIdentityRoad>>,
     ) -> Self {
         Self {
             client,
@@ -1857,6 +2237,7 @@ impl ImportRunner {
             work_service,
             default_language,
             import_workflow,
+            identity_road,
             author_map_rd: HashMap::new(),
             work_map_rd: HashMap::new(),
             authors_created: 0,
@@ -1910,6 +2291,17 @@ impl ImportRunner {
             .iter()
             .filter(|b| active_book_ids.contains(&b.id))
             .collect();
+        // Plan the create set before the paced edition endpoint. Existing
+        // works still participate in file attachment below, but do not need a
+        // second metadata fetch merely to be recognized again.
+        let existing_works = self
+            .readarr_import_service
+            .list_works(self.user_id)
+            .await
+            .map_err(|error| format!("list works for Readarr edition plan: {error}"))?;
+        let edition_book_ids =
+            planned_readarr_edition_book_ids(&active_books, &author_map, &existing_works);
+        let editions_by_book = fetch_readarr_editions(&self.client, &edition_book_ids).await;
 
         {
             let mut prog = self.progress().lock().await;
@@ -1927,11 +2319,23 @@ impl ImportRunner {
             .await?;
         self.process_works(
             &active_books,
+            &editions_by_book,
             &author_map,
             &book_files_by_book,
             &livrarr_root.path,
         )
         .await?;
+        // The author batch is the parent half of the Readarr creation unit.
+        // Compensate immediately after all child settlements: only authors
+        // created by this import, still carrying zero works and zero user
+        // data, are eligible for deletion. This closes the former
+        // authors-before-failing-work residue window.
+        let rolled_back_authors = self
+            .readarr_import_service
+            .delete_orphan_authors_by_import(&self.import_id)
+            .await
+            .map_err(|error| format!("rollback failed Readarr authors: {error}"))?;
+        self.authors_created = self.authors_created.saturating_sub(rolled_back_authors);
         self.process_files(
             &data.book_files,
             &active_book_ids,
@@ -1995,6 +2399,7 @@ impl ImportRunner {
     async fn process_works(
         &mut self,
         active_books: &[&RdBook],
+        editions_by_book: &HashMap<i64, Vec<RdEdition>>,
         author_map: &HashMap<i64, &RdAuthor>,
         book_files_by_book: &HashMap<i64, Vec<&RdBookFile>>,
         _livrarr_root_path: &str,
@@ -2015,6 +2420,7 @@ impl ImportRunner {
             rd_book_id: i64,
             title: String,
             candidate: livrarr_domain::identity::WorkCandidate,
+            road_request: livrarr_domain::identity_layer::IdentityRoadRequest,
         }
         let mut preps: Vec<Prep> = Vec::with_capacity(active_books.len());
         let mut skip_errors: Vec<String> = Vec::new();
@@ -2030,8 +2436,14 @@ impl ImportRunner {
                 skip_errors.push(format!("Book '{title}': skipped (no author)"));
                 continue;
             }
+            let Some(author_id) = self.author_map_rd.get(&rd_book.author_id).copied() else {
+                skip_errors.push(format!("Book '{title}': skipped (author was not imported)"));
+                continue;
+            };
 
-            let edition = rd_book.monitored_edition();
+            let edition = editions_by_book
+                .get(&rd_book.id)
+                .and_then(|editions| select_readarr_edition(editions));
             let isbn = edition
                 .and_then(|e| e.isbn13.as_deref())
                 .filter(|s| !s.is_empty())
@@ -2133,8 +2545,8 @@ impl ImportRunner {
 
             let source_data = SourceProviderData {
                 description,
-                isbn,
-                asin,
+                isbn: isbn.clone(),
+                asin: asin.clone(),
                 publisher,
                 genres,
                 page_count,
@@ -2171,10 +2583,27 @@ impl ImportRunner {
                 self.import_id.clone(),
             );
 
+            let source_files = book_files_by_book
+                .get(&rd_book.id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let road_request = livrarr_domain::identity_layer::IdentityRoadRequest {
+                user_id: self.user_id,
+                origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                    livrarr_domain::identity_layer::DoorKind::ReadarrImport,
+                ),
+                evidence: readarr_creation_evidence(rd_book, edition, author_id, &source_files),
+                interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::MachineAlone,
+                existing_work_id: None,
+            };
+
             preps.push(Prep {
                 rd_book_id: rd_book.id,
                 title: title.to_string(),
                 candidate,
+                road_request,
             });
         }
 
@@ -2233,6 +2662,7 @@ impl ImportRunner {
         }
         let user_id = self.user_id;
         let work_service = self.work_service.clone();
+        let identity_road = self.identity_road.clone();
         // Cloned up front (like `work_service` above) so each item's async
         // block can bump progress the moment its own add() settles, instead
         // of all progress movement waiting for `.collect()` below. The works
@@ -2246,32 +2676,105 @@ impl ImportRunner {
                 let ws = work_service.clone();
                 let progress = progress.clone();
                 let secondaries_by_primary = secondaries_by_primary.clone();
+                let identity_road = identity_road.clone();
                 async move {
-                    let outcome = match ws.add(user_id, p.candidate).await {
-                        Ok(result) => {
-                            if result.created {
-                                let ws2 = ws.clone();
-                                let (uid, wid) = (user_id, result.work.id);
-                                tokio::spawn(async move {
-                                    let _ = ws2.converge_work(uid, wid, 3).await;
-                                });
+                    let road_result = if let Some(road) = identity_road.as_ref() {
+                        submit_readarr_identity(road.as_ref(), p.road_request)
+                            .await
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let outcome = match road_result {
+                        Ok(Some(
+                            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                                work_id,
+                                created,
+                                ..
+                            },
+                        )) => {
+                            let road = identity_road.clone().expect("configured road branch");
+                            let source_provider_data = p.candidate.source_provider_data.clone();
+                            use livrarr_domain::identity_layer::IdentityRoadService as _;
+                            if let Ok(mut pass) = ws
+                                .converge_work_with_handoff(
+                                    user_id,
+                                    work_id,
+                                    3,
+                                    source_provider_data,
+                                )
+                                .await
+                            {
+                                if let Some(handoff) = pass.route_handoff.take() {
+                                    let _ = road
+                                        .apply_captured_route_handoff(
+                                            user_id,
+                                            work_id,
+                                            livrarr_domain::identity_layer::IdentityRoadOrigin::ConvergenceVisit,
+                                            handoff,
+                                        )
+                                        .await;
+                                }
                             }
                             AddOutcome {
                                 rd_book_id: p.rd_book_id,
-                                work_id: Some(result.work.id),
-                                was_created: result.created,
+                                work_id: Some(work_id),
+                                was_created: created,
                                 error: None,
                             }
                         }
-                        Err(e) => {
-                            warn!(title = %p.title, "Failed to create work: {e}");
-                            AddOutcome {
-                                rd_book_id: p.rd_book_id,
-                                work_id: None,
-                                was_created: false,
-                                error: Some(format!("Work '{}': {e}", p.title)),
+                        Ok(Some(
+                            livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+                                review_id,
+                                ..
+                            },
+                        )) => AddOutcome {
+                            rd_book_id: p.rd_book_id,
+                            work_id: None,
+                            was_created: false,
+                            error: Some(format!("Work '{}': identity review {review_id}", p.title)),
+                        },
+                        Ok(Some(other)) => AddOutcome {
+                            rd_book_id: p.rd_book_id,
+                            work_id: None,
+                            was_created: false,
+                            error: Some(format!(
+                                "Work '{}': identity did not settle ({other:?})",
+                                p.title
+                            )),
+                        },
+                        Err(error) => AddOutcome {
+                            rd_book_id: p.rd_book_id,
+                            work_id: None,
+                            was_created: false,
+                            error: Some(format!("Work '{}': {error}", p.title)),
+                        },
+                        Ok(None) => match ws.add(user_id, p.candidate).await {
+                            Ok(result) => {
+                                if result.created {
+                                    let ws2 = ws.clone();
+                                    let (uid, wid) = (user_id, result.work.id);
+                                    tokio::spawn(async move {
+                                        let _ = ws2.converge_work(uid, wid, 3).await;
+                                    });
+                                }
+                                AddOutcome {
+                                    rd_book_id: p.rd_book_id,
+                                    work_id: Some(result.work.id),
+                                    was_created: result.created,
+                                    error: None,
+                                }
                             }
-                        }
+                            Err(e) => {
+                                warn!(title = %p.title, "Failed to create work: {e}");
+                                AddOutcome {
+                                    rd_book_id: p.rd_book_id,
+                                    work_id: None,
+                                    was_created: false,
+                                    error: Some(format!("Work '{}': {e}", p.title)),
+                                }
+                            }
+                        },
                     };
                     // Bump progress for this item now, right as it settles.
                     // The lock is taken only across this brief update — never
@@ -2783,6 +3286,411 @@ mod process_works_progress_tests {
             progress.lock().await.errors.len(),
             1,
             "the one erroring item's message must still be recorded"
+        );
+    }
+}
+
+// =============================================================================
+// Round 9: Readarr editions live on /edition, not embedded in /book
+// =============================================================================
+
+#[cfg(test)]
+mod round9_readarr_edition_tests {
+    use super::*;
+    use livrarr_db::test_helpers::create_activated_test_db;
+    use livrarr_db::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb, WorkDb};
+    use livrarr_domain::identity_layer::{
+        IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadRequest, WorkIdentityRepository,
+    };
+    use livrarr_domain::services::{AuthorLinkWorkflow, FetchResponse};
+    use livrarr_domain::{AuthorLinkError, AuthorLinkTrigger, UserRole};
+    use livrarr_http::fetcher::ScriptedTransportOutcome;
+    use livrarr_identity::identity_layer::DeterministicIdentityEngine;
+    use livrarr_metadata::identity_road::IdentityRoadServiceImpl;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    struct NoopAuthorLinkWorkflow;
+
+    impl AuthorLinkWorkflow for NoopAuthorLinkWorkflow {
+        async fn enqueue(
+            &self,
+            _user_id: i64,
+            _author_id: i64,
+            _trigger: AuthorLinkTrigger,
+        ) -> Result<(), AuthorLinkError> {
+            Ok(())
+        }
+
+        async fn submit_evidence(
+            &self,
+            _user_id: i64,
+            _author_id: i64,
+            _evidence: livrarr_domain::AgreedAuthorRouteEvidence,
+        ) -> Result<livrarr_domain::RouteWriteOutcome, AuthorLinkError> {
+            panic!("round-9 fixture carries no provider-author evidence")
+        }
+
+        async fn record_readarr_rejection(
+            &self,
+            _user_id: i64,
+            _author_id: i64,
+            _rejected: livrarr_domain::RejectedAuthorRouteEvidence,
+        ) -> Result<livrarr_domain::AuthorLinkCandidate, AuthorLinkError> {
+            panic!("round-9 fixture carries no rejected author evidence")
+        }
+
+        async fn run_due(
+            &self,
+            _batch_size: u32,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<livrarr_domain::AuthorSweepTickSummary, AuthorLinkError> {
+            panic!("round-9 fixture does not run the author-link sweep")
+        }
+    }
+
+    fn fetch_response(status: u16, body: serde_json::Value) -> ScriptedTransportOutcome {
+        ScriptedTransportOutcome::Response {
+            delay: std::time::Duration::ZERO,
+            response: FetchResponse {
+                status,
+                headers: Vec::new(),
+                body: serde_json::to_vec(&body).expect("serialize Readarr fixture"),
+            },
+        }
+    }
+
+    fn road_request(
+        user_id: i64,
+        author_id: i64,
+        book: &RdBook,
+        edition: Option<&readarr_client::RdEdition>,
+    ) -> IdentityRoadRequest {
+        let display_title = book.title.clone().expect("fixture title");
+        let identity_title = livrarr_domain::identity_layer::IdentityTitleTuple {
+            main: display_title.clone(),
+            subtitle: None,
+            volume: None,
+            normalized_main: display_title.to_ascii_lowercase(),
+            normalized_subtitle: String::new(),
+            normalized_volume: String::new(),
+            provenance: livrarr_domain::identity_layer::EvidenceProvenance::Migrated,
+        };
+        let core = livrarr_domain::identity_layer::ProviderWorkIdentityCore {
+            identity_title,
+            primary_author_id: author_id,
+        };
+        IdentityRoadRequest {
+            user_id,
+            origin: IdentityRoadOrigin::CreationDoor(
+                livrarr_domain::identity_layer::DoorKind::ReadarrImport,
+            ),
+            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                user_choice: None,
+                owned_files: vec![livrarr_domain::identity_layer::OwnedFileEvidence {
+                    library_item_id: 7001,
+                    file_revision: livrarr_domain::identity_layer::FileRevision {
+                        size_bytes: 42,
+                        modified_ns: 0,
+                        sha256: [0; 32],
+                    },
+                }],
+                provider_identity: readarr_provider_identity(book, edition, &core),
+                minimum: Some(livrarr_domain::identity_layer::MinimumWorkEvidence {
+                    title: display_title,
+                    authors: vec![author_id],
+                }),
+            },
+            interaction: IdentityRoadInteraction::MachineAlone,
+            existing_work_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_backed_fileless_readarr_producer_creates_with_edition_route() {
+        let db = create_activated_test_db().await;
+        let user = db
+            .create_user(CreateUserDbRequest {
+                username: "round10-fileless-readarr".to_string(),
+                password_hash: "unused".to_string(),
+                role: UserRole::Admin,
+                api_key_hash: "unused-round10-fileless".to_string(),
+            })
+            .await
+            .expect("seed fileless Readarr user");
+        let (author, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user.id,
+                name: "Wanted Author".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("seed fileless Readarr author");
+        let book: RdBook = serde_json::from_value(serde_json::json!({
+            "id": 77,
+            "title": "Wanted Without A File",
+            "authorId": 10,
+            "foreignBookId": "70077",
+            "editions": null
+        }))
+        .expect("decode real Readarr book shape");
+        let evidence = readarr_creation_evidence(&book, None, author.id, &[]);
+        assert!(evidence.owned_files.is_empty());
+        assert_eq!(evidence.provider_identity.len(), 1);
+        assert!(evidence.minimum.is_none());
+
+        let road = IdentityRoadServiceImpl {
+            identity_engine: DeterministicIdentityEngine,
+            identity_repository: db.clone(),
+            edition_repository: db.clone(),
+            author_link_workflow: NoopAuthorLinkWorkflow,
+        };
+        let outcome = road
+            .settle(IdentityRoadRequest {
+                user_id: user.id,
+                origin: IdentityRoadOrigin::CreationDoor(
+                    livrarr_domain::identity_layer::DoorKind::ReadarrImport,
+                ),
+                evidence,
+                interaction: IdentityRoadInteraction::MachineAlone,
+                existing_work_id: None,
+            })
+            .await
+            .expect("provider-backed fileless producer must settle");
+        let livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+            work_id,
+            created: true,
+            ..
+        } = outcome
+        else {
+            panic!("fileless wanted-book producer must create")
+        };
+        let captured = db
+            .read_captured_identity(user.id, work_id)
+            .await
+            .expect("read fileless wanted-book graph");
+        assert!(captured.active_routes.iter().any(|route| {
+            route.kind == livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition
+                && route.provider_scoped_id == "70077"
+        }));
+        assert_eq!(captured.identity_generation, 1);
+        let audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_audit_events \
+              WHERE user_id=?1 AND work_id=?2 AND event_kind='settlement'",
+        )
+        .bind(user.id)
+        .bind(work_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("count fileless Readarr settlement audit");
+        assert_eq!(audits, 1);
+    }
+
+    #[test]
+    fn wanted_and_files_modes_plan_editions_only_for_creates() {
+        let author: RdAuthor = serde_json::from_value(serde_json::json!({
+            "id": 10,
+            "authorName": "Edition Plan Author"
+        }))
+        .expect("decode Readarr author");
+        let existing_book: RdBook = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "title": "Already Here",
+            "authorId": 10,
+            "foreignBookId": "71001",
+            "releaseDate": "2024-01-01",
+            "editions": [{
+                "id": 101,
+                "bookId": 1,
+                "monitored": true,
+                "isbn13": "9780306406157"
+            }]
+        }))
+        .expect("decode existing Readarr book");
+        let new_book: RdBook = serde_json::from_value(serde_json::json!({
+            "id": 2,
+            "title": "Needs Creation",
+            "authorId": 10,
+            "foreignBookId": "71002",
+            "releaseDate": "2025-01-01",
+            "editions": null
+        }))
+        .expect("decode new Readarr book");
+        let authors = HashMap::from([(10, &author)]);
+        let existing = vec![livrarr_domain::Work {
+            title: "Already Here".to_string(),
+            author_name: "Edition Plan Author".to_string(),
+            year: Some(2024),
+            ..Default::default()
+        }];
+
+        let wanted_active = vec![&existing_book, &new_book];
+        assert_eq!(
+            planned_readarr_edition_book_ids(&wanted_active, &authors, &existing),
+            vec![2],
+            "wanted mode must not pace through editions for an existing F2 work whose route scalars stay NULL"
+        );
+        let files_active = vec![&new_book];
+        assert_eq!(
+            planned_readarr_edition_book_ids(&files_active, &authors, &existing),
+            vec![2],
+            "files mode uses the same create-only edition plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_edition_endpoint_adds_isbn_route_and_rerun_updates_existing_work() {
+        let requested = StdArc::new(StdMutex::new(Vec::<String>::new()));
+        let requested_by_transport = requested.clone();
+        let fetcher = livrarr_http::fetcher::HttpFetcherImpl::new()
+            .expect("Readarr fixture fetcher")
+            .with_scripted_transport(move |request| {
+                requested_by_transport
+                    .lock()
+                    .expect("request recorder")
+                    .push(request.url.clone());
+                if request.url.ends_with("/api/v1/book") {
+                    return fetch_response(
+                        200,
+                        serde_json::json!([
+                            {"id": 1, "title": "Endpoint Truth", "authorId": 10, "foreignBookId": "70001", "editions": null},
+                            {"id": 2, "title": "Failure Isolated", "authorId": 10, "foreignBookId": "70002", "editions": null},
+                            {"id": 3, "title": "Not Imported", "authorId": 10, "foreignBookId": "70003", "editions": null},
+                            {"id": 4, "title": "Genuinely No Editions", "authorId": 10, "foreignBookId": "70004", "editions": null}
+                        ]),
+                    );
+                }
+                if request.url.ends_with("/api/v1/edition?bookId=1") {
+                    return fetch_response(
+                        200,
+                        serde_json::json!([
+                            {"id": 101, "bookId": 1, "monitored": false},
+                            {"id": 102, "bookId": 1, "isbn13": "9780306406157", "asin": "B00ROUND90", "monitored": false}
+                        ]),
+                    );
+                }
+                if request.url.ends_with("/api/v1/edition?bookId=2") {
+                    return fetch_response(503, serde_json::json!({"error": "fixture failure"}));
+                }
+                fetch_response(200, serde_json::json!([]))
+            });
+        let client = readarr_client::ReadarrClient::new_approved(
+            "https://readarr.round9.test".to_string(),
+            "https://readarr.round9.test".to_string(),
+            "fixture-key".to_string(),
+            fetcher,
+        );
+
+        let books = client.books().await.expect("real-shape book list");
+        assert!(
+            books.iter().all(|book| book.editions.is_none()),
+            "the regression fixture must never smuggle editions into /book"
+        );
+        let fetched =
+            fetch_readarr_editions(&client, &[books[0].id, books[1].id, books[3].id]).await;
+        assert!(fetched.contains_key(&1));
+        assert!(
+            !fetched.contains_key(&2),
+            "one edition-fetch failure must degrade to no edition for that book"
+        );
+        assert!(
+            fetched.get(&4).is_some_and(Vec::is_empty),
+            "a genuine zero-edition response must preserve the historical no-edition path"
+        );
+        let selected = select_readarr_edition(fetched.get(&1).expect("book 1 editions"))
+            .expect("ISBN-bearing fallback edition");
+        assert_eq!(
+            selected.id, 102,
+            "no monitored edition: prefer one with ISBN-13"
+        );
+        {
+            let requested = requested.lock().expect("request recorder");
+            assert!(requested.iter().any(|url| url.ends_with("bookId=1")));
+            assert!(requested.iter().any(|url| url.ends_with("bookId=2")));
+            assert!(requested.iter().any(|url| url.ends_with("bookId=4")));
+            assert!(
+                requested.iter().all(|url| !url.ends_with("bookId=3")),
+                "books outside the active import set must not get edition requests"
+            );
+        }
+
+        let db = create_activated_test_db().await;
+        let user = db
+            .create_user(CreateUserDbRequest {
+                username: "round9-readarr".to_string(),
+                password_hash: "unused".to_string(),
+                role: UserRole::Admin,
+                api_key_hash: "unused-round9".to_string(),
+            })
+            .await
+            .expect("seed round-9 user");
+        let (author, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id: user.id,
+                name: "Endpoint Author".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("seed round-9 author");
+        let road = IdentityRoadServiceImpl {
+            identity_engine: DeterministicIdentityEngine,
+            identity_repository: db.clone(),
+            edition_repository: db.clone(),
+            author_link_workflow: NoopAuthorLinkWorkflow,
+        };
+
+        let first = road
+            .settle(road_request(user.id, author.id, &books[0], None))
+            .await
+            .expect("first import with only the embedded-null book payload");
+        let livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+            work_id,
+            created: true,
+            ..
+        } = first
+        else {
+            panic!("first Readarr import must create one work")
+        };
+
+        let rerun = road
+            .settle(road_request(user.id, author.id, &books[0], Some(selected)))
+            .await
+            .expect("re-run with separately fetched edition evidence");
+        assert!(matches!(
+            rerun,
+            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                work_id: existing,
+                created: false,
+                ..
+            } if existing == work_id
+        ));
+
+        let captured = db
+            .read_captured_identity(user.id, work_id)
+            .await
+            .expect("read recovered work identity");
+        assert!(captured.active_routes.iter().any(|route| {
+            route.kind == livrarr_domain::identity_layer::RouteKind::Isbn13Edition
+                && route.provider_scoped_id == "9780306406157"
+        }));
+        assert!(captured.active_routes.iter().any(|route| {
+            route.kind == livrarr_domain::identity_layer::RouteKind::AsinEdition
+                && route.provider_scoped_id == "B00ROUND90"
+        }));
+        assert_eq!(
+            db.list_works(user.id)
+                .await
+                .expect("list recovered works")
+                .len(),
+            1,
+            "the recovery import must fold evidence onto the existing work"
         );
     }
 }

@@ -2,7 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::context::{HasAuthorService, HasSeriesQueryService};
+use crate::context::{HasAuthorService, HasIdentityLayerRepository, HasSeriesQueryService};
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
 use crate::types::series::{
@@ -50,7 +50,7 @@ pub async fn list_all<S: HasSeriesQueryService>(
     Ok(Json(results))
 }
 
-pub async fn get_detail<S: HasSeriesQueryService>(
+pub async fn get_detail<S: HasSeriesQueryService + HasIdentityLayerRepository>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -60,7 +60,7 @@ pub async fn get_detail<S: HasSeriesQueryService>(
         .get_detail(ctx.user.id, id)
         .await?;
 
-    let works = view
+    let mut works: Vec<_> = view
         .works
         .iter()
         .map(|sw| {
@@ -82,6 +82,7 @@ pub async fn get_detail<S: HasSeriesQueryService>(
             detail
         })
         .collect();
+    crate::work::project_work_identity_presentations(&state, ctx.user.id, &mut works).await?;
 
     let is_stub = livrarr_domain::is_series_stub_key(&view.gr_key);
     Ok(Json(SeriesDetailResponse {
@@ -399,7 +400,7 @@ pub async fn promote_series<S: HasSeriesQueryService>(
 
 /// GET /series/{id}/books — full-roster expansion (REQ-010): persisted GR
 /// roster merged with the library's linked works. Display-only road.
-pub async fn series_books<S: HasSeriesQueryService>(
+pub async fn series_books<S: HasSeriesQueryService + HasIdentityLayerRepository>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -410,6 +411,16 @@ pub async fn series_books<S: HasSeriesQueryService>(
         .series_query_service()
         .series_books(ctx.user.id, id)
         .await?;
+    let work_ids: Vec<_> = view
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            SeriesBookRow::InLibrary { entry, .. } => Some(entry.work.id),
+            SeriesBookRow::Missing { .. } => None,
+        })
+        .collect();
+    let identity_presentations =
+        crate::work::read_work_identity_presentations(&state, ctx.user.id, &work_ids).await?;
 
     let rows = view
         .rows
@@ -417,6 +428,9 @@ pub async fn series_books<S: HasSeriesQueryService>(
         .map(|row| match row {
             SeriesBookRow::InLibrary { position, entry } => {
                 let mut detail = work_to_detail(&entry.work);
+                if let Some(presentation) = identity_presentations.get(&detail.id) {
+                    crate::types::work::apply_work_identity_presentation(&mut detail, presentation);
+                }
                 detail.library_items = entry
                     .library_items
                     .iter()

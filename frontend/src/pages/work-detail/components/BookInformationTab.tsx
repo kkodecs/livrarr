@@ -1,16 +1,20 @@
-import { useState } from "react";
-import { Pencil, RefreshCw, Wand2, X } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+import { Link } from "react-router";
+import { BookCover } from "@/components/BookCover";
+import { HelpTip } from "@/components/HelpTip";
 import { cn } from "@/utils/cn";
 import { formatRelativeDate, formatDuration } from "@/utils/format";
 import type {
+  CoverSourceLabel,
+  CoverSlotUiState,
   WorkDetailResponse,
+  WorkCoverUiState,
   EnrichmentStatus,
+  IdentitySiblingPresentation,
   IdentityStatus,
-  IdentitySlot,
 } from "@/types/api";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
 import { MetadataRow } from "./MetadataRow";
-import { IdentityEditModal, slotLabel, useClearIdentitySlot } from "./IdentityEditModal";
 
 // Identity state machine (REQ-014) — "which book is this?". The section header
 // supplies the context a bare floating badge lacks.
@@ -37,7 +41,6 @@ export function BookInformationTab({
   work,
   onRefresh,
   refreshing,
-  onMergeWorks,
 }: {
   work: WorkDetailResponse;
   onRefresh: () => void;
@@ -47,43 +50,7 @@ export function BookInformationTab({
   const identity = IDENTITY_BADGE[work.identityStatus];
   const details = DETAILS_BADGE[work.enrichmentStatus];
   const missing = <span className="text-zinc-600">—</span>;
-  // null = closed; { slot: null } = the slot-free Fix-match road.
-  const [editing, setEditing] = useState<{ slot: IdentitySlot | null } | null>(null);
-  const clearSlot = useClearIdentitySlot(work.id);
-
-  // Per-slot value + affordances (design r4 §Slot roster): pencil on the
-  // editable rows (GR/OL/ASIN), clear (×) on every populated slot; the HC row
-  // is clear-only (internal id — nothing a user could paste); the ISBN row
-  // lives in Details, input via Fix match only.
-  const identityValue = (slot: IdentitySlot, value: string | null, editable: boolean) => (
-    <span className="inline-flex items-center gap-1.5">
-      {value ? <span>{value}</span> : missing}
-      {editable && (
-        <button
-          onClick={() => setEditing({ slot })}
-          className="text-muted transition-colors hover:text-zinc-200"
-          title={`Fix the ${slotLabel(slot)} identifier`}
-          aria-label={`Edit ${slotLabel(slot)}`}
-        >
-          <Pencil size={12} />
-        </button>
-      )}
-      {value && (
-        <button
-          onClick={() => {
-            if (window.confirm(`Clear the ${slotLabel(slot)} identifier "${value}"?`)) {
-              clearSlot.mutate(slot);
-            }
-          }}
-          className="text-muted transition-colors hover:text-red-300"
-          title={`Clear the ${slotLabel(slot)} identifier`}
-          aria-label={`Clear ${slotLabel(slot)}`}
-        >
-          <X size={12} />
-        </button>
-      )}
-    </span>
-  );
+  const identityValue = (value: string | null) => value || missing;
 
   return (
     <div className="max-w-2xl">
@@ -92,14 +59,6 @@ export function BookInformationTab({
         <div className="flex items-center justify-between gap-4">
           <h3 className="text-sm font-medium text-zinc-100">Identity</h3>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setEditing({ slot: null })}
-              className="btn-secondary inline-flex items-center gap-1.5 text-xs"
-              title="Paste any identifier or provider URL to fix the match"
-            >
-              <Wand2 size={12} />
-              Fix match
-            </button>
             <button
               onClick={onRefresh}
               disabled={refreshing}
@@ -117,11 +76,12 @@ export function BookInformationTab({
             Re-matching is paused until the open identity conflict is reviewed.
           </p>
         )}
+        <IdentitySiblingPanel siblings={work.identitySiblings} />
         <dl className="mt-4">
-          <MetadataRow label="Open Library" value={identityValue("ol_work", work.olKey, true)} />
-          <MetadataRow label="Hardcover" value={identityValue("hc_work", work.hcKey, false)} />
-          <MetadataRow label="Goodreads" value={identityValue("gr_work", work.grKey, true)} />
-          <MetadataRow label="ASIN" value={identityValue("asin", work.asin, true)} />
+          <MetadataRow label="Open Library" value={identityValue(work.olKey)} />
+          <MetadataRow label="Hardcover" value={identityValue(work.hcKey)} />
+          <MetadataRow label="Goodreads" value={identityValue(work.grKey)} />
+          <MetadataRow label="ASIN" value={identityValue(work.asin)} />
         </dl>
       </section>
 
@@ -130,10 +90,9 @@ export function BookInformationTab({
         <h3 className="text-sm font-medium text-zinc-100">Details</h3>
         <p className="mt-0.5 mb-3 text-xs text-muted">What we know about it — series, genres, publisher, cover.</p>
         <StatusBadge tone={details.tone} label={details.label} tip={details.tip} />
+        <WorkCoverState work={work} state={work.coverUiState} />
         <dl className="mt-4">
-          {/* ISBN doctrine (r4): edition evidence, not identity — read-only
-              here with a one-click clear; corrections go through Fix match. */}
-          <MetadataRow label="ISBN-13" value={identityValue("isbn_13", work.isbn13, false)} />
+          <MetadataRow label="ISBN-13" value={identityValue(work.isbn13)} />
           {work.originalTitle && <MetadataRow label="Original title" value={work.originalTitle} />}
           <MetadataRow label="Year" value={work.year} />
           {(work.seriesName || work.enriching) && (
@@ -185,14 +144,134 @@ export function BookInformationTab({
         </p>
       </section>
 
-      {editing && (
-        <IdentityEditModal
-          workId={work.id}
-          slot={editing.slot}
-          onClose={() => setEditing(null)}
-          onMergeWorks={onMergeWorks}
-        />
+    </div>
+  );
+}
+
+function IdentitySiblingPanel({
+  siblings,
+}: {
+  siblings: IdentitySiblingPresentation[];
+}) {
+  return (
+    <div
+      data-testid="identity-sibling-panel"
+      className="mt-4 rounded-lg border border-border bg-zinc-900/40 p-3"
+    >
+      <div className="flex items-center gap-1.5">
+        <h4 className="text-xs font-medium text-zinc-200">Other books by this author</h4>
+        <HelpTip text="This list is informational. Open a book to change that book on its own page." />
+      </div>
+      <p className="mt-1 text-xs text-muted">
+        Confirming this book's identity affects only this book. Other books by this author stay exactly as they are.
+      </p>
+      {siblings.length > 0 ? (
+        <ul className="mt-2 divide-y divide-border/60">
+          {siblings.map((sibling) => (
+            <li key={sibling.workId}>
+              <Link
+                data-sibling-affordance
+                to={`/work/${sibling.workId}?tab=metadata`}
+                className="block py-2 text-xs transition-colors hover:text-zinc-100"
+              >
+                <span className="block font-medium text-zinc-200">{sibling.title}</span>
+                <span className="text-muted">
+                  {[sibling.authorName, sibling.edition, sibling.route]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-zinc-600">No related library books to show.</p>
       )}
+    </div>
+  );
+}
+
+function WorkCoverState({
+  work,
+  state,
+}: {
+  work: WorkDetailResponse;
+  state: WorkCoverUiState;
+}) {
+  const sourceLabels: Record<CoverSourceLabel, string> = {
+    Provider: "Provider",
+    "Your file": "Your file",
+    Yours: "Yours",
+  };
+  const renderSlot = (label: string, slot: CoverSlotUiState, audiobook: boolean) => {
+    let content;
+    if (slot.state === "Selected") {
+      content = (
+        <div className="mt-2 flex items-center gap-3">
+          <BookCover
+            workId={work.id}
+            title={work.title}
+            authorName={work.authorName}
+            mediaType={audiobook ? "audiobook" : undefined}
+            coverVersion={
+              audiobook
+                ? (work.audiobookCoverMtime ?? work.coverMtime ?? undefined)
+                : (work.coverMtime ?? undefined)
+            }
+            className={audiobook ? "h-16 w-16" : "h-16 w-11"}
+          />
+          <p className="text-xs text-zinc-300">
+            Source: <span className="font-medium">{sourceLabels[slot.source]}</span>
+          </p>
+        </div>
+      );
+    } else if (slot.state === "Searching") {
+      content = <p className="mt-2 text-xs text-blue-300">Searching for a cover</p>;
+    } else if (slot.state === "NoCoverFound") {
+      content = <p className="mt-2 text-xs text-amber-300">No cover found</p>;
+    } else if (slot.state === "NowhereToLook") {
+      content = <p className="mt-2 text-xs text-muted">Nowhere to look</p>;
+    }
+
+    return (
+      <div data-cover-slot={audiobook ? "audiobook" : "ebook"} data-cover-state={slot.state}>
+        <p className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</p>
+        {content}
+      </div>
+    );
+  };
+
+  return (
+    <div data-testid="work-cover-state" className="mt-4 rounded-lg border border-border p-3">
+      <div className="flex items-center gap-1.5">
+        <h4 className="text-xs font-medium text-zinc-200">Covers</h4>
+        <HelpTip text="Cover sources describe where the image came from. They do not grade the book's identity." />
+      </div>
+      {state.formatNeeded && (
+        <div
+          data-cover-panel="FormatNeeded"
+          className="mt-3 rounded-md border border-amber-800/50 bg-amber-950/20 p-3"
+        >
+          <p className="text-xs font-medium text-amber-200">Cover found — format needed</p>
+          <p className="mt-1 text-xs text-muted">
+            Choose the edition format before these covers can fill a format slot.
+          </p>
+          <ul className="mt-2 flex flex-wrap gap-2">
+            {state.formatNeeded.candidates.map((candidate) => (
+              <li
+                key={candidate.id}
+                className="rounded border border-border bg-zinc-900 px-2 py-1 text-xs text-zinc-300"
+              >
+                Source: {sourceLabels[candidate.source]}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {renderSlot("Ebook", state.ebook, false)}
+        {renderSlot("Audiobook", state.audiobook, true)}
+      </div>
     </div>
   );
 }

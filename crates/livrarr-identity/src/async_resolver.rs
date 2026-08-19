@@ -112,6 +112,32 @@ fn seed_from_work(work: &Work) -> WorkSeed {
     }
 }
 
+/// Capture the provider fan-out result for the F2 road without performing any
+/// legacy scalar-anchor, badge, generation, conflict, or review write.
+/// Ambiguous/conflicting results carry no routes across this seam; the next
+/// convergence visit may retry them. Resolved and transient-unresolved
+/// captures must still pass the shared title/author match gate.
+pub async fn capture_identity_routes<R: EnglishIdentityResolver>(
+    resolver: &R,
+    user_id: UserId,
+    work: &Work,
+    mode: IdentityMode,
+) -> Result<Option<CapturedIdentity>, WorkIdentityError> {
+    let tier = match mode {
+        IdentityMode::Interactive => LatencyTier::Interactive,
+        IdentityMode::Background => LatencyTier::Background,
+    };
+    let resolution = resolver
+        .resolve(user_id, &seed_from_work(work), tier)
+        .await?;
+    let captured = match resolution {
+        Resolution::Resolved { identity, .. } => identity,
+        Resolution::Unresolved { captured, .. } => captured,
+        Resolution::NeedsConfirmation { .. } | Resolution::Conflict { .. } => return Ok(None),
+    };
+    Ok(flm_match(work, &captured).then_some(captured))
+}
+
 /// The one identity authority (REQ-001): resolve a work's identity, map the
 /// verdict × current badge to a final `IdentityStatus` monotonically (REQ-003/004),
 /// perform the badge + anchor writes itself (REQ-008), and return an audit

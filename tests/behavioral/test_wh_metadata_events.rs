@@ -115,6 +115,9 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 identity_not_found: false,
                 changed,
                 attempted: true,
+                captured_provider_identity: Vec::new(),
+                captured_route_proposals: Vec::new(),
+                provider_chase_attempted: false,
             }),
             ScriptedOutcome::MergeDeferred => Ok(EnrichmentResult {
                 enrichment_status: EnrichmentStatus::Unenriched,
@@ -134,6 +137,9 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 identity_not_found: false,
                 changed: false,
                 attempted: true,
+                captured_provider_identity: Vec::new(),
+                captured_route_proposals: Vec::new(),
+                provider_chase_attempted: false,
             }),
             ScriptedOutcome::NoAttempt => Ok(EnrichmentResult {
                 enrichment_status: EnrichmentStatus::Unenriched,
@@ -150,6 +156,9 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 identity_not_found: false,
                 changed: false,
                 attempted: false,
+                captured_provider_identity: Vec::new(),
+                captured_route_proposals: Vec::new(),
+                provider_chase_attempted: false,
             }),
         }
     }

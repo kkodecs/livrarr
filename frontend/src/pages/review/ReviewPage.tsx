@@ -2,11 +2,12 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Sparkles } from "lucide-react";
+import { AlertTriangle, ExternalLink, Sparkles } from "lucide-react";
 import {
   listIdentityReview,
-  resolveIdentityReview,
-  dismissIdentityReview,
+  listIdentityReviewCards,
+  resolveIdentityReviewCard,
+  dismissIdentityReviewCard,
   listIdentityConflicts,
   resolveIdentityConflict,
   dismissIdentityConflict,
@@ -25,6 +26,7 @@ import type {
   IdentityReviewCandidate,
   IdentityConflictSummary,
   ConflictResolutionAction,
+  IdentityReviewCard,
 } from "@/types/api";
 
 // Friendly source name for a candidate's contributing providers; falls back
@@ -73,25 +75,22 @@ const CONFLICT_ACTIONS: {
 ];
 
 function ExistingWorkLabel({ workId }: { workId: number }) {
-  const { data } = useQuery({
+  const { data, isPending, isError } = useQuery({
     queryKey: ["work", String(workId)],
     queryFn: () => getWork(workId),
   });
+  const label = isPending ? "Loading…" : isError ? "this book" : data?.title || "this book";
   return (
     <Link to={`/work/${workId}`} className="font-medium text-zinc-100 hover:underline">
-      {data?.title ?? `Work #${workId}`}
+      {label}
     </Link>
   );
 }
 
 function CandidateRow({
   candidate,
-  onChoose,
-  disabled,
 }: {
   candidate: IdentityReviewCandidate;
-  onChoose: () => void;
-  disabled: boolean;
 }) {
   const pct = Math.round(candidate.titleJaccard * 100);
   return (
@@ -116,43 +115,11 @@ function CandidateRow({
           <HelpTip text="This candidate's identity is already used by another work in your library. Choosing it does not merge the two works." />
         </span>
       )}
-      <button
-        onClick={onChoose}
-        disabled={disabled}
-        className="rounded bg-brand px-3 py-1 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
-      >
-        Choose
-      </button>
     </li>
   );
 }
 
 function ParkedWorkCard({ park }: { park: IdentityReviewPark }) {
-  const queryClient = useQueryClient();
-
-  const resolve = useMutation({
-    mutationFn: (candidateId: string) =>
-      resolveIdentityReview(park.workId, { candidateId }),
-    onSuccess: () => {
-      toast.success(`Matched "${park.title}"`);
-      queryClient.invalidateQueries({ queryKey: ["identity-review"] });
-      queryClient.invalidateQueries({ queryKey: ["works"] });
-    },
-    onError: () => toast.error("Could not apply that match"),
-  });
-
-  const dismiss = useMutation({
-    mutationFn: () => dismissIdentityReview(park.workId),
-    onSuccess: () => {
-      toast.success(`Dismissed — "${park.title}" stands alone`);
-      queryClient.invalidateQueries({ queryKey: ["identity-review"] });
-      queryClient.invalidateQueries({ queryKey: ["works"] });
-    },
-    onError: () => toast.error("Could not dismiss"),
-  });
-
-  const isPending = resolve.isPending || dismiss.isPending;
-
   return (
     <div className="rounded-lg border border-amber-900/40 bg-zinc-900/60 px-4 py-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -167,13 +134,6 @@ function ParkedWorkCard({ park }: { park: IdentityReviewPark }) {
           <span className="text-sm text-muted">by {park.authorName}</span>
           <HelpTip text="We found possible matches for this book but weren't confident enough to pick automatically. Choose the right one below, or dismiss if none of them match." />
         </div>
-        <button
-          onClick={() => dismiss.mutate()}
-          disabled={isPending}
-          className="text-xs text-muted hover:text-red-400 disabled:opacity-50"
-        >
-          None of these — dismiss
-        </button>
       </div>
       {park.candidates.length === 0 ? (
         <p className="mt-2 text-sm text-muted">
@@ -182,12 +142,7 @@ function ParkedWorkCard({ park }: { park: IdentityReviewPark }) {
       ) : (
         <ul className="mt-2 flex flex-col gap-0.5">
           {park.candidates.map((c) => (
-            <CandidateRow
-              key={c.candidateId}
-              candidate={c}
-              disabled={isPending}
-              onChoose={() => resolve.mutate(c.candidateId)}
-            />
+            <CandidateRow key={c.candidateId} candidate={c} />
           ))}
         </ul>
       )}
@@ -258,6 +213,172 @@ function ConflictCard({ conflict }: { conflict: IdentityConflictSummary }) {
   );
 }
 
+function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
+  const queryClient = useQueryClient();
+  const group = card.payload.GroupIdentity;
+  const pendingRoute = card.payload.PendingRoute;
+  const workTitle = card.workTitle?.trim() || "Book awaiting review";
+  const workAuthor = card.workAuthor?.trim() || "Unknown author";
+  const routePresentation = pendingRoute
+    ? pendingRoutePresentation(
+        pendingRoute.candidate.route.provider,
+        pendingRoute.candidate.route.value,
+      )
+    : null;
+  const canResolve =
+    card.workId != null &&
+    ((card.kind === "GroupIdentity" && group != null) ||
+      (card.kind === "PendingRoute" && pendingRoute != null));
+
+  const resolve = useMutation({
+    mutationFn: () => {
+      if (card.workId == null) throw new Error("Review card is not attached to a work");
+      if (card.kind === "GroupIdentity" && group != null) {
+        const action =
+          group.work_ids.length > 1
+            ? { AttachOrMerge: { anchor: card.workId } }
+            : "DifferentFromAll";
+        return resolveIdentityReviewCard(card.id, {
+          GroupIdentity: {
+            card_id: card.id,
+            expected_generation: card.generation,
+            action,
+          },
+        });
+      }
+      if (card.kind === "PendingRoute" && pendingRoute != null) {
+        return resolveIdentityReviewCard(card.id, {
+          PendingRoute: {
+            card_id: card.id,
+            expected_generation: card.generation,
+            action: { Affirm: { surviving_routes: [] } },
+          },
+        });
+      }
+      throw new Error("This review kind is not actionable here yet");
+    },
+    onSuccess: () => {
+      toast.success(card.kind === "GroupIdentity" ? "Merge completed" : "Book linked");
+      queryClient.invalidateQueries({ queryKey: ["identity-review-cards"] });
+      queryClient.invalidateQueries({ queryKey: ["works"] });
+      if (card.workId != null) {
+        queryClient.invalidateQueries({ queryKey: ["work", String(card.workId)] });
+      }
+    },
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Could not resolve the review card",
+      ),
+  });
+  const dismiss = useMutation({
+    mutationFn: () => dismissIdentityReviewCard(card.id),
+    onSuccess: () => {
+      toast.success("Review dismissed");
+      queryClient.invalidateQueries({ queryKey: ["identity-review-cards"] });
+    },
+    onError: () => toast.error("Could not dismiss the review card"),
+  });
+  const pending = resolve.isPending || dismiss.isPending;
+
+  return (
+    <div className="rounded-lg border border-amber-900/40 bg-zinc-900/60 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <Sparkles size={15} className="mt-1 shrink-0 text-amber-400" />
+          <div className="min-w-0">
+            <p className="font-medium text-zinc-100">
+              {card.workId != null ? (
+                <Link to={`/work/${card.workId}`} className="hover:underline">
+                  {workTitle}
+                </Link>
+              ) : (
+                workTitle
+              )}
+            </p>
+            <p className="text-sm text-muted">by {workAuthor}</p>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => dismiss.mutate()}
+          disabled={pending}
+          className="text-xs text-muted hover:text-red-400 disabled:opacity-50"
+        >
+          Dismiss
+        </button>
+      </div>
+      {pendingRoute ? (
+        <div className="mt-3 text-sm">
+          <p className="font-medium text-zinc-200">
+            Possible {routePresentation?.providerName ?? "catalog"} match
+          </p>
+          <p className="mt-1 text-muted">
+            Livrarr found a possible catalog entry for this book. Check it before linking.
+          </p>
+          {routePresentation && (
+            <a
+              href={routePresentation.verifyUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-brand hover:underline"
+            >
+              Verify on {routePresentation.providerName}
+              <ExternalLink size={13} aria-hidden="true" />
+            </a>
+          )}
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-muted">
+          {card.kind === "GroupIdentity"
+            ? `Review the proposed grouping${group ? ` of ${group.work_ids.length} books` : ""}.`
+            : "This book's identity needs your review."}
+        </p>
+      )}
+      {canResolve && (
+        <span className="mt-3 inline-flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => resolve.mutate()}
+            disabled={pending}
+            className="rounded bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
+          >
+            {card.kind === "GroupIdentity" ? "Confirm Merge" : "Link it"}
+          </button>
+          {pendingRoute && (
+            <HelpTip text="Link this book to the provider entry after you have checked the match." />
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function pendingRoutePresentation(provider: unknown, routeValue: string) {
+  if (typeof provider !== "string") return null;
+  const providerName =
+    provider === "OpenLibrary"
+      ? "Open Library"
+      : provider === "Goodreads"
+        ? "Goodreads"
+        : provider === "Hardcover"
+          ? "Hardcover"
+          : null;
+  if (!providerName) return null;
+
+  const externalId =
+    provider === "OpenLibrary"
+      ? routeValue.replace(/^\/?works\//, "")
+      : routeValue.replace(/^\/?work\//, "");
+  const encodedId = encodeURIComponent(externalId);
+  const verifyUrl =
+    provider === "OpenLibrary"
+      ? `https://openlibrary.org/works/${encodedId}`
+      : provider === "Goodreads"
+        ? `https://www.goodreads.com/work/${encodedId}`
+        : `https://hardcover.app/book/${encodedId}`;
+  return { providerName, verifyUrl };
+}
+
 /**
  * The books half of the page: the two work-identity queries, exactly as
  * before. Its loading and error states are its own, so a books outage leaves
@@ -275,6 +396,16 @@ function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) 
   });
 
   const {
+    data: typedCards,
+    isLoading: typedCardsLoading,
+    error: typedCardsError,
+    refetch: refetchTypedCards,
+  } = useQuery({
+    queryKey: ["identity-review-cards"],
+    queryFn: listIdentityReviewCards,
+  });
+
+  const {
     data: conflicts,
     isLoading: conflictsLoading,
     error: conflictsError,
@@ -286,14 +417,21 @@ function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) 
 
   const parkList = parks ?? [];
   const conflictList = conflicts ?? [];
-  const settled = !parksLoading && !conflictsLoading;
-  const failed = parksError != null || conflictsError != null;
+  const typedCardList = typedCards ?? [];
+  const settled = !parksLoading && !conflictsLoading && !typedCardsLoading;
+  const failed = parksError != null || conflictsError != null || typedCardsError != null;
 
   useEffect(() => {
-    onEmpty(settled && !failed && parkList.length === 0 && conflictList.length === 0);
-  }, [onEmpty, settled, failed, parkList.length, conflictList.length]);
+    onEmpty(
+      settled &&
+        !failed &&
+        parkList.length === 0 &&
+        conflictList.length === 0 &&
+        typedCardList.length === 0,
+    );
+  }, [onEmpty, settled, failed, parkList.length, conflictList.length, typedCardList.length]);
 
-  if (parksLoading || conflictsLoading) return <PageLoading />;
+  if (parksLoading || conflictsLoading || typedCardsLoading) return <PageLoading />;
   if (parksError) {
     return <ErrorState error={parksError} onRetry={() => refetchParks()} />;
   }
@@ -302,9 +440,24 @@ function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) 
       <ErrorState error={conflictsError} onRetry={() => refetchConflicts()} />
     );
   }
+  if (typedCardsError) {
+    return <ErrorState error={typedCardsError} onRetry={() => refetchTypedCards()} />;
+  }
 
   return (
     <>
+      {typedCardList.length > 0 && (
+        <section>
+          <h2 className="mb-2 text-sm font-semibold text-zinc-100">
+            Identity Decisions ({typedCardList.length})
+          </h2>
+          <div className="flex flex-col gap-3">
+            {typedCardList.map((card) => (
+              <TypedIdentityReviewCard key={card.id} card={card} />
+            ))}
+          </div>
+        </section>
+      )}
       {parkList.length > 0 && (
         <section>
           <h2 className="mb-2 text-sm font-semibold text-zinc-100">

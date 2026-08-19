@@ -1,7 +1,9 @@
 use livrarr_domain::services::{MergeFieldChoice, MergeableField};
 use livrarr_domain::{
-    identity::CandidateId, AuthorId, CoverTrust, EnrichmentStatus, IdentityStatus, LibraryItemId,
-    MediaType, NarrationType, Work, WorkId,
+    identity::CandidateId,
+    identity_layer::{CapturedIdentity, IdentityProvider},
+    AuthorId, EnrichmentStatus, IdentityStatus, LibraryItemId, MediaType, NarrationType, Work,
+    WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +153,14 @@ pub struct AddWorkResponse {
 pub struct RefreshWorkResponse {
     pub work: WorkDetailResponse,
     pub messages: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<RefreshFailureReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefreshFailureReason {
+    ProviderUnavailable,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -205,14 +215,13 @@ pub struct WorkDetailResponse {
     pub identity_status: IdentityStatus,
     pub enriched_at: Option<String>,
     pub enrichment_source: Option<String>,
+    pub cover_url: Option<String>,
     pub cover_manual: bool,
     pub cover_source: Option<String>,
-    pub cover_trust: CoverTrust,
     pub cover_width: i32,
     pub cover_height: i32,
     pub audiobook_cover_url: Option<String>,
     pub audiobook_cover_source: Option<String>,
-    pub audiobook_cover_trust: CoverTrust,
     pub audiobook_cover_width: i32,
     pub audiobook_cover_height: i32,
     pub monitor_ebook: bool,
@@ -234,6 +243,58 @@ pub struct WorkDetailResponse {
     /// `derive_badge_in_tx` maintain.
     #[serde(default)]
     pub parked_by_conflicts: bool,
+    /// Siblings are always emitted. An empty list is authoritative, not an
+    /// older-server omission that the frontend must guess around.
+    pub identity_siblings: Vec<IdentitySiblingPresentation>,
+    pub cover_ui_state: WorkCoverUiState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentitySiblingPresentation {
+    pub work_id: WorkId,
+    pub title: String,
+    pub author_name: String,
+    pub edition: Option<String>,
+    pub route: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CoverSourceLabel {
+    Provider,
+    #[serde(rename = "Your file")]
+    YourFile,
+    Yours,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state")]
+pub enum CoverSlotUiState {
+    Selected { source: CoverSourceLabel },
+    Searching,
+    NoCoverFound,
+    NowhereToLook,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatNeededCover {
+    pub id: String,
+    pub source: CoverSourceLabel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatNeededCoverState {
+    pub candidates: Vec<FormatNeededCover>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCoverUiState {
+    pub format_needed: Option<FormatNeededCoverState>,
+    pub ebook: CoverSlotUiState,
+    pub audiobook: CoverSlotUiState,
 }
 
 /// Convert a domain `Work` into a `WorkDetailResponse` (with empty `library_items`).
@@ -289,28 +350,32 @@ pub fn work_to_detail_with_cover_mtime(
         duration_seconds: w.duration_seconds,
         publisher: w.publisher.clone(),
         publish_date: w.publish_date.clone(),
-        ol_key: w.ol_key.clone(),
-        hc_key: w.hc_key.clone(),
-        gr_key: w.gr_key.clone(),
-        isbn_13: w.isbn_13.clone(),
-        asin: w.asin.clone(),
+        // Identity-v2 freezes the legacy scalar columns. Every persisted Work
+        // surface overlays these conservative placeholders from active routes.
+        ol_key: None,
+        hc_key: None,
+        gr_key: None,
+        isbn_13: None,
+        asin: None,
         narrator: w.narrator.clone(),
         narration_type: w.narration_type,
         abridged: w.abridged,
         rating: w.rating,
         rating_count: w.rating_count,
         enrichment_status: w.enrichment_status,
-        identity_status: w.identity_status,
+        // The retired badge is deliberately not copied into presentation.
+        // Every persisted Work surface overlays the F2 projection before it
+        // returns; Pending is the conservative construction-time placeholder.
+        identity_status: IdentityStatus::Pending,
         enriched_at: w.enriched_at.map(|d| d.to_rfc3339()),
         enrichment_source: w.enrichment_source.clone(),
+        cover_url: w.cover_url.clone(),
         cover_manual: w.cover_manual,
         cover_source: w.cover_source.clone(),
-        cover_trust: w.cover_trust,
         cover_width: w.cover_width,
         cover_height: w.cover_height,
         audiobook_cover_url: w.audiobook_cover_url.clone(),
         audiobook_cover_source: w.audiobook_cover_source.clone(),
-        audiobook_cover_trust: w.audiobook_cover_trust,
         audiobook_cover_width: w.audiobook_cover_width,
         audiobook_cover_height: w.audiobook_cover_height,
         monitor_ebook: w.monitor_ebook,
@@ -320,7 +385,147 @@ pub fn work_to_detail_with_cover_mtime(
         cover_mtime,
         audiobook_cover_mtime,
         enriching: false,
-        parked_by_conflicts: w.identity_status == IdentityStatus::Conflict,
+        parked_by_conflicts: false,
+        identity_siblings: Vec::new(),
+        cover_ui_state: work_cover_ui_state(w, false),
+    }
+}
+
+/// Apply the identity-authority portion of a work-detail response after the
+/// base Work/file view has been produced.
+pub fn apply_identity_presentation(
+    detail: &mut WorkDetailResponse,
+    work: &Work,
+    captured: &CapturedIdentity,
+    siblings: Vec<CapturedIdentity>,
+    author_name: String,
+) {
+    apply_identity_status_projection(detail, captured.status);
+    apply_identifier_projection(
+        detail,
+        &livrarr_domain::identity_layer::project_work_identifiers(&captured.active_routes),
+    );
+    detail.identity_siblings = siblings
+        .into_iter()
+        .filter(|sibling| sibling.own_work_id != captured.own_work_id)
+        .map(|sibling| IdentitySiblingPresentation {
+            work_id: sibling.own_work_id,
+            title: sibling.identity_title.main,
+            author_name: author_name.clone(),
+            edition: sibling.identity_title.volume,
+            route: sibling
+                .active_routes
+                .first()
+                .map(|route| provider_display_name(&route.provider)),
+        })
+        .collect();
+    detail.cover_ui_state = work_cover_ui_state(work, !captured.active_routes.is_empty());
+}
+
+pub fn apply_identifier_projection(
+    detail: &mut WorkDetailResponse,
+    identifiers: &livrarr_domain::identity_layer::WorkIdentifierProjection,
+) {
+    detail.ol_key = identifiers.ol_key.clone();
+    detail.hc_key = identifiers.hc_key.clone();
+    detail.gr_key = identifiers.gr_key.clone();
+    detail.isbn_13 = identifiers.isbn_13.clone();
+    detail.asin = identifiers.asin.clone();
+}
+
+pub fn apply_work_identity_presentation(
+    detail: &mut WorkDetailResponse,
+    presentation: &livrarr_domain::identity_layer::WorkIdentityPresentation,
+) {
+    apply_identity_status_projection(detail, presentation.status);
+    apply_identifier_projection(detail, &presentation.identifiers);
+}
+
+/// Temporary DTO compatibility projection. The legacy column is frozen after
+/// F2 activation; API surfaces derive the old two-value badge vocabulary from
+/// the authoritative three-state projection instead of rendering that frozen
+/// storage. Conflicts/reviews remain orthogonal F2 records.
+pub fn apply_identity_status_projection(
+    detail: &mut WorkDetailResponse,
+    status: livrarr_domain::identity_layer::IdentityStatus,
+) {
+    detail.identity_status = match status {
+        livrarr_domain::identity_layer::IdentityStatus::UserConfirmed
+        | livrarr_domain::identity_layer::IdentityStatus::Connected => IdentityStatus::Confirmed,
+        livrarr_domain::identity_layer::IdentityStatus::NotConnected => IdentityStatus::Pending,
+    };
+}
+
+fn provider_display_name(provider: &IdentityProvider) -> String {
+    match provider {
+        IdentityProvider::OpenLibrary => "Open Library".to_string(),
+        IdentityProvider::Goodreads => "Goodreads".to_string(),
+        IdentityProvider::Hardcover => "Hardcover".to_string(),
+        IdentityProvider::IsbnRegistry => "ISBN".to_string(),
+        IdentityProvider::Amazon => "Amazon".to_string(),
+        IdentityProvider::Other(name) => name.clone(),
+    }
+}
+
+fn work_cover_ui_state(work: &Work, has_routes: bool) -> WorkCoverUiState {
+    let unresolved = || {
+        if work.enrichment_status == EnrichmentStatus::Unenriched {
+            CoverSlotUiState::Searching
+        } else if has_routes {
+            CoverSlotUiState::NoCoverFound
+        } else {
+            CoverSlotUiState::NowhereToLook
+        }
+    };
+    let ebook = if work.cover_source.is_some() || work.cover_width > 0 || work.cover_height > 0 {
+        CoverSlotUiState::Selected {
+            source: if work.cover_manual {
+                CoverSourceLabel::Yours
+            } else {
+                CoverSourceLabel::Provider
+            },
+        }
+    } else {
+        unresolved()
+    };
+    let audiobook = if work.audiobook_cover_url.is_some()
+        || work.audiobook_cover_source.is_some()
+        || work.audiobook_cover_width > 0
+        || work.audiobook_cover_height > 0
+    {
+        CoverSlotUiState::Selected {
+            source: CoverSourceLabel::Provider,
+        }
+    } else {
+        unresolved()
+    };
+    let format_needed = match (&ebook, &audiobook) {
+        (CoverSlotUiState::Selected { source }, CoverSlotUiState::Searching)
+        | (CoverSlotUiState::Selected { source }, CoverSlotUiState::NoCoverFound)
+        | (CoverSlotUiState::Selected { source }, CoverSlotUiState::NowhereToLook) => {
+            Some(FormatNeededCoverState {
+                candidates: vec![FormatNeededCover {
+                    id: format!("work-{}-ebook-cover", work.id),
+                    source: source.clone(),
+                }],
+            })
+        }
+        (CoverSlotUiState::Searching, CoverSlotUiState::Selected { source })
+        | (CoverSlotUiState::NoCoverFound, CoverSlotUiState::Selected { source })
+        | (CoverSlotUiState::NowhereToLook, CoverSlotUiState::Selected { source }) => {
+            Some(FormatNeededCoverState {
+                candidates: vec![FormatNeededCover {
+                    id: format!("work-{}-audiobook-cover", work.id),
+                    source: source.clone(),
+                }],
+            })
+        }
+        _ => None,
+    };
+    WorkCoverUiState {
+        format_needed,
+        ebook,
+        audiobook,
     }
 }
 

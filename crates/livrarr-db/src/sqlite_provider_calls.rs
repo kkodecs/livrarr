@@ -57,7 +57,9 @@ impl ProviderCallRecordDb for SqliteDb {
         if batch.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         for rec in &batch {
             sqlx::query(
                 "INSERT INTO provider_call_records \
@@ -152,7 +154,9 @@ impl ProviderCallRecordDb for SqliteDb {
     }
 
     async fn evict_call_records(&self, policy: RetentionPolicy) -> Result<u64, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let cutoff = (Utc::now() - Duration::days(i64::from(policy.max_age_days))).to_rfc3339();
         let by_age = sqlx::query(
             "DELETE FROM provider_call_records WHERE datetime(started_at) < datetime(?)",

@@ -130,7 +130,9 @@ impl crate::ProvenanceDb for SqliteDb {
         }
 
         let now = Utc::now().to_rfc3339();
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         for req in reqs {
             let field_str = to_str(req.field);
@@ -230,7 +232,9 @@ impl crate::ProvenanceDb for SqliteDb {
             return Err(DbError::NotFound { entity: "work" });
         }
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         for field in fields {
             let field_str = to_str(field);

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use livrarr_db::record_history;
 use livrarr_domain::history_events;
+use livrarr_domain::identity_layer::WorkIdentityRepository;
 use livrarr_domain::services::{ImportIoService, TagService, TagSyncItemResult};
 use livrarr_domain::{LibraryItem, Work};
 
@@ -84,7 +85,7 @@ pub async fn tag_sync_single_item(
 
 impl<I: ImportIoService + Send + Sync> LiveTagService<I> {
     async fn retag_pass(&self, work: &Work, items: &[LibraryItem]) -> Vec<TagSyncItemResult> {
-        let tag_metadata = build_tag_metadata(work);
+        let tag_metadata = build_tag_metadata(work, route_isbn(&self.db, work).await);
         let cover_data = read_cover_bytes(&self.data_dir, work.user_id, work.id).await;
 
         let mut results: Vec<TagSyncItemResult> = Vec::with_capacity(items.len());
@@ -286,7 +287,10 @@ fn item_failure(library_item_id: i64, error: String) -> TagSyncItemResult {
     }
 }
 
-pub(crate) fn build_tag_metadata(work: &Work) -> livrarr_tagwrite::TagMetadata {
+pub(crate) fn build_tag_metadata(
+    work: &Work,
+    route_isbn: Option<String>,
+) -> livrarr_tagwrite::TagMetadata {
     livrarr_tagwrite::TagMetadata {
         title: work.title.clone(),
         subtitle: work.subtitle.clone(),
@@ -296,10 +300,34 @@ pub(crate) fn build_tag_metadata(work: &Work) -> livrarr_tagwrite::TagMetadata {
         genre: work.genres.clone(),
         description: work.description.clone(),
         publisher: work.publisher.clone(),
-        isbn: work.isbn_13.clone(),
+        isbn: route_isbn,
         language: work.language.clone(),
         series_name: work.series_name.clone(),
         series_position: work.series_position,
+    }
+}
+
+pub(crate) async fn route_isbn<R: WorkIdentityRepository>(
+    repository: &R,
+    work: &Work,
+) -> Option<String> {
+    match repository
+        .read_identity_presentations(work.user_id, &[work.id])
+        .await
+    {
+        Ok(presentations) => presentations
+            .into_iter()
+            .next()
+            .and_then(|presentation| presentation.identifiers.isbn_13),
+        Err(error) => {
+            tracing::warn!(
+                user_id = work.user_id,
+                work_id = work.id,
+                cause = %error,
+                "tag metadata identity projection failed"
+            );
+            None
+        }
     }
 }
 

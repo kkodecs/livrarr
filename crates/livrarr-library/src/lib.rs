@@ -2,6 +2,7 @@ pub mod bookmark_service;
 pub mod chapter_service;
 pub mod cross_format_service;
 pub mod file_service;
+pub mod identity_layer;
 pub mod import_workflow;
 
 use livrarr_domain::{DbError, GrabStatus, MediaType, RootFolderId, UserId, WorkId};

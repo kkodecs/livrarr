@@ -105,6 +105,12 @@ pub struct RefreshWorkResult {
     pub messages: Vec<String>,
     pub taggable_items: Vec<LibraryItem>,
     pub merge_deferred: bool,
+    /// Derived from this pass's concrete provider outcomes, never inferred
+    /// from the persisted enrichment status.
+    pub provider_unavailable: bool,
+    /// Fresh provider identities found by this refresh, generation-bound for
+    /// the identity road. The handler consumes it inline before responding.
+    pub route_handoff: Option<crate::identity_layer::CapturedRouteHandoff>,
 }
 
 /// Outcome of a single user-triggered "retry all incomplete" sweep.
@@ -116,6 +122,9 @@ pub struct RetrySummary {
     pub recovered: usize,
     /// Works still incomplete after the pass (left for a later retry).
     pub still_incomplete: usize,
+    /// Non-serialized machine handoffs consumed by the Retry-All handler.
+    #[serde(skip)]
+    pub route_handoffs: Vec<(WorkId, crate::identity_layer::CapturedRouteHandoff)>,
 }
 
 // Dead: bulk refresh is implemented at the handler layer
@@ -214,7 +223,7 @@ pub enum MergeFieldChoice {
 }
 
 /// One explicit choice supplied to [`WorkService::merge_works`].
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeFieldChoiceEntry {
     pub field: MergeableField,
     pub choice: MergeFieldChoice,
@@ -297,6 +306,15 @@ pub enum ConvergeOutcome {
     Terminal,
 }
 
+#[derive(Debug, Clone)]
+pub struct ConvergencePass {
+    pub outcome: ConvergeOutcome,
+    pub route_handoff: Option<crate::identity_layer::CapturedRouteHandoff>,
+    /// True only when at least one provider anchor was actually dispatched or
+    /// served from the provider-response cache during this pass.
+    pub provider_chase_attempted: bool,
+}
+
 /// Surface that triggered a [`WorkService::refresh`] call. `Interactive` — a
 /// person is watching (existing behavior). `Bulk` — an unattended sweep;
 /// provider work rides the outbound queue at Low priority with background
@@ -347,11 +365,35 @@ pub trait WorkService: Send + Sync {
         user_id: UserId,
         candidate: crate::identity::WorkCandidate,
     ) -> Result<AddWorkResult, WorkServiceError>;
+    /// Resolve provider fan-out for a newly-created F2 work without writing
+    /// any legacy scalar anchor or badge. The composition root submits every
+    /// returned route to [`crate::identity_layer::IdentityRoadService`] in one
+    /// settlement before enrichment completion proceeds.
+    async fn capture_add_identity_routes(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        mode: crate::identity::IdentityMode,
+    ) -> Result<Vec<crate::identity_layer::ProviderIdentityEvidence>, WorkServiceError>;
+    /// Generation-bound, fresh-only form consumed by production composition.
+    /// Legacy/test services may keep the empty compatibility default.
+    fn capture_add_identity_route_handoff(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        mode: crate::identity::IdentityMode,
+    ) -> impl std::future::Future<
+        Output = Result<Option<crate::identity_layer::CapturedRouteHandoff>, WorkServiceError>,
+    > + Send {
+        let _ = (user_id, work_id, mode);
+        async move { Ok(None) }
+    }
     /// REQ-004/005 (responsiveness): the background half of [`Self::add`] —
     /// identity completion + enrichment + cover gates + materialize, wrapped in
     /// the enriching-registry guard so [`Self::is_enriching`] reads true for
     /// the duration. Absorbs its own failures (logged, never panics the
-    /// spawner); callers spawn-and-forget.
+    /// spawner) and returns only freshly captured route evidence for the
+    /// composition root to submit through the identity-road authority.
     async fn complete_add(
         &self,
         user_id: UserId,
@@ -360,7 +402,13 @@ pub trait WorkService: Send + Sync {
         candidate_id: Option<crate::identity::CandidateId>,
         mode: crate::identity::IdentityMode,
         source: crate::identity::ConflictSource,
-    );
+    ) -> Option<crate::identity_layer::CapturedRouteHandoff>;
+    /// Extend the in-memory enriching signal across a composition-owned
+    /// background chain (capture -> settlement -> completion -> top-up).
+    /// Implementations without such a registry may keep the no-op default.
+    fn begin_enriching(&self, _user_id: UserId, _work_id: WorkId) {}
+    /// Release one matching composition-owned enriching claim.
+    fn end_enriching(&self, _user_id: UserId, _work_id: WorkId) {}
     /// REQ-005 (responsiveness): true exactly while an enrichment run is
     /// executing for this work. In-memory signal — reads false after a server
     /// restart BY DESIGN (never stale-true; the convergence lane owns durable
@@ -450,6 +498,27 @@ pub trait WorkService: Send + Sync {
         work_id: WorkId,
         threshold: u32,
     ) -> Result<ConvergeOutcome, WorkServiceError>;
+
+    /// Route-authoritative convergence result. Implementations that do not
+    /// participate in F2 keep the compatibility default; production overrides
+    /// it and returns the fresh handoff plus honest chase accounting.
+    fn converge_work_with_handoff(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        threshold: u32,
+        source_provider_data: Option<SourceProviderData>,
+    ) -> impl std::future::Future<Output = Result<ConvergencePass, WorkServiceError>> + Send {
+        async move {
+            let outcome = self.converge_work(user_id, work_id, threshold).await?;
+            let _ = source_provider_data;
+            Ok(ConvergencePass {
+                outcome,
+                route_handoff: None,
+                provider_chase_attempted: false,
+            })
+        }
+    }
 
     /// Compute the merge plan for combining `loser_id` into `survivor_id`
     /// without applying anything (REQ-015 b). Both works must belong to

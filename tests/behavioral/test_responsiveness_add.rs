@@ -221,6 +221,9 @@ impl EnrichmentWorkflow for SleepingWorkflow {
             identity_not_found: false,
             changed: false,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -309,6 +312,9 @@ impl EnrichmentWorkflow for GatedWorkflow {
             identity_not_found: false,
             changed: false,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -388,6 +394,9 @@ impl EnrichmentWorkflow for RecordingPersistingWorkflow {
             identity_not_found: false,
             changed: false,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -933,6 +942,9 @@ impl livrarr_domain::services::EnrichmentWorkflow for RecordingDelayedWorkflow {
             identity_not_found: false,
             changed: false,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 

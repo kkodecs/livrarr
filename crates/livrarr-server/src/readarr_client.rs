@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    FetchError, FetchRequest, HttpMethod, RateBucket, UserAgentProfile,
+    FetchError, FetchRequest, HttpFetcher, HttpMethod, RateBucket, UserAgentProfile,
 };
 use livrarr_domain::RequestPriority;
 use livrarr_http::breaker::BreakerSignal;
@@ -79,6 +79,7 @@ pub struct ReadarrClient {
     origin: String,
     api_key: String,
     fetcher: HttpFetcherImpl,
+    approved_origin: bool,
     max_body_bytes: usize,
     timeout: Duration,
 }
@@ -90,8 +91,25 @@ impl ReadarrClient {
             origin,
             api_key,
             fetcher,
+            approved_origin: false,
             max_body_bytes: livrarr_http::MAX_RESPONSE_BODY_BYTES,
             timeout: READARR_TIMEOUT,
+        }
+    }
+
+    /// Construct a client for an origin explicitly approved by an
+    /// administrator. Approved origins use the trusted no-redirect transport
+    /// so intentionally private DNS answers remain reachable. Unapproved
+    /// origins continue to use the SSRF-safe no-redirect transport.
+    pub fn new_approved(
+        base: String,
+        origin: String,
+        api_key: String,
+        fetcher: HttpFetcherImpl,
+    ) -> Self {
+        Self {
+            approved_origin: true,
+            ..Self::new(base, origin, api_key, fetcher)
         }
     }
 
@@ -133,9 +151,14 @@ impl ReadarrClient {
         // No redirects, ever: avoids cross-origin X-Api-Key forwarding and a
         // trusted-initial redirect loop. Any 3xx falls through to the same
         // generic rejection as every other non-2xx status below. Routed via
-        // `fetch_readarr` (Unit B3 #3): the SSRF-safe client, so a
-        // DNS-rebind between admission and this connection is still caught.
-        let resp = self.fetcher.fetch_readarr(req).await?;
+        // Approved origins are an explicit administrator trust decision and
+        // therefore use the unrestricted no-redirect transport. Public,
+        // unapproved origins retain per-connection SSRF-safe resolution.
+        let resp = if self.approved_origin {
+            self.fetcher.fetch_no_redirect(req).await?
+        } else {
+            self.fetcher.fetch_readarr(req).await?
+        };
 
         // Unit B3 #17: Readarr IS breaker-tracked (`breaker::breaker_tracked`),
         // but `do_fetch`'s own auto-reporting only covers transport-level
@@ -185,6 +208,14 @@ impl ReadarrClient {
 
     pub async fn books(&self) -> Result<Vec<RdBook>, ReadarrConnectError> {
         self.get("/api/v1/book").await
+    }
+
+    /// Fetch the edition records for one Readarr book.
+    ///
+    /// Readarr's book payload can legitimately carry `editions: null`; the
+    /// identifiers needed by import live on this separate collection endpoint.
+    pub async fn editions(&self, book_id: i64) -> Result<Vec<RdEdition>, ReadarrConnectError> {
+        self.get(&format!("/api/v1/edition?bookId={book_id}")).await
     }
 
     pub async fn book_files_by_author(
@@ -252,14 +283,30 @@ pub struct RdBook {
 }
 
 impl RdBook {
-    /// Returns the monitored edition, or the first edition if none is monitored.
+    /// Select from a book-embedded edition list when one is present.
     pub fn monitored_edition(&self) -> Option<&RdEdition> {
-        let editions = self.editions.as_ref()?;
-        editions
-            .iter()
-            .find(|e| e.monitored.unwrap_or(false))
-            .or_else(|| editions.first())
+        select_edition(self.editions.as_deref()?)
     }
+}
+
+/// Select one edition for Readarr import metadata.
+///
+/// A monitored edition remains authoritative. When Readarr monitors none,
+/// prefer an ISBN-13-bearing edition, then an ASIN-bearing edition, before
+/// falling back to the first record. This keeps a usable enrichment anchor
+/// when the endpoint returns multiple unmonitored editions.
+pub fn select_edition(editions: &[RdEdition]) -> Option<&RdEdition> {
+    let present = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_some_and(|candidate| !candidate.trim().is_empty())
+    };
+    editions
+        .iter()
+        .find(|edition| edition.monitored.unwrap_or(false))
+        .or_else(|| editions.iter().find(|edition| present(&edition.isbn13)))
+        .or_else(|| editions.iter().find(|edition| present(&edition.asin)))
+        .or_else(|| editions.first())
 }
 
 #[derive(Debug, Deserialize)]

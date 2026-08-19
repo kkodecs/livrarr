@@ -101,7 +101,9 @@ impl DownloadClientDb for SqliteDb {
 
         // Run clear-default + insert in one transaction so we never leave the DB
         // with a default cleared but no replacement inserted.
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // Auto-promote: if no other enabled client of this type, set as default.
         let existing_count: i64 = sqlx::query_scalar(
@@ -198,7 +200,9 @@ impl DownloadClientDb for SqliteDb {
 
         // Run clear-default + update in one transaction so a partial failure
         // cannot leave the defaults row set inconsistently.
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // If promoting to default, clear other defaults for this client_type.
         if is_default && !was_default {

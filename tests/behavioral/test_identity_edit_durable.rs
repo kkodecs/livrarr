@@ -318,10 +318,10 @@ async fn set_identity_status_advances_generation_same_statement() {
     );
 }
 
-/// REQ-IDs: AC-10 (manual-refresh recovery half), design §Writer coverage
-/// Directive: reset_for_manual_refresh bumps generation when its CASE recovers NotFound.
+/// Post-cutover writer coverage: manual refresh must not read, rewrite, or
+/// advance the retired legacy status/generation pair.
 #[tokio::test]
-async fn reset_for_manual_refresh_notfound_recovery_advances_generation() {
+async fn reset_for_manual_refresh_freezes_legacy_notfound_and_generation() {
     let db = create_test_db().await;
     let user = create_test_user(&db).await;
     let work = create_work(&db, user, "Bump Reset").await;
@@ -346,15 +346,9 @@ async fn reset_for_manual_refresh_notfound_recovery_advances_generation() {
         .fetch_one(db.pool())
         .await
         .expect("status read");
-    assert_eq!(
-        status, "confirmed",
-        "anchored not_found recovers to confirmed"
-    );
+    assert_eq!(status, "not_found", "the retired badge remains frozen");
     let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "the recovering CASE must bump ({before} -> {after})"
-    );
+    assert_eq!(after, before, "refresh is not an identity settlement");
 }
 
 /// REQ-IDs: design §Writer coverage (review dismiss is claimed)

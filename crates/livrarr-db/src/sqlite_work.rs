@@ -138,28 +138,10 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
             .try_get::<bool, _>("cover_manual")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         cover_source: row.try_get("cover_source").unwrap_or(None),
-        cover_trust: row
-            .try_get::<String, _>("cover_trust")
-            .ok()
-            .map(|s| match s.as_str() {
-                "user" => livrarr_domain::CoverTrust::User,
-                "validated" => livrarr_domain::CoverTrust::Validated,
-                _ => livrarr_domain::CoverTrust::Unvalidated,
-            })
-            .unwrap_or_default(),
         cover_width: row.try_get("cover_width").unwrap_or(0),
         cover_height: row.try_get("cover_height").unwrap_or(0),
         audiobook_cover_url: row.try_get("audiobook_cover_url").unwrap_or(None),
         audiobook_cover_source: row.try_get("audiobook_cover_source").unwrap_or(None),
-        audiobook_cover_trust: row
-            .try_get::<String, _>("audiobook_cover_trust")
-            .ok()
-            .map(|s| match s.as_str() {
-                "user" => livrarr_domain::CoverTrust::User,
-                "validated" => livrarr_domain::CoverTrust::Validated,
-                _ => livrarr_domain::CoverTrust::Unvalidated,
-            })
-            .unwrap_or_default(),
         audiobook_cover_width: row.try_get("audiobook_cover_width").unwrap_or(0),
         audiobook_cover_height: row.try_get("audiobook_cover_height").unwrap_or(0),
         monitor_ebook: row
@@ -175,11 +157,16 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
     })
 }
 
-/// The single works INSERT (ON CONFLICT DO NOTHING) — shared by `create_work`
-/// and `create_work_with_anchor` so the row shape has one authority. Returns
-/// the new row id, or None when the (user_id, normalized_title,
-/// normalized_author) row already exists. Runs on the caller's connection so
-/// the caller controls transaction scope.
+/// The single legacy works INSERT — shared by `create_work` and
+/// `create_work_with_anchor` so the row shape has one authority. Returns the
+/// new row id, or None when the legacy normalized tuple already exists.
+///
+/// Do not name the retired `(user_id, normalized_title, normalized_author)`
+/// UNIQUE target here. Identity-v2 activation deliberately drops that index,
+/// and SQLite rejects a named `ON CONFLICT` target while preparing the
+/// statement even when no conflict occurs. The guarded SELECT remains valid
+/// on both schema generations; production creation doors use the v2 identity
+/// road, while compatibility callers can no longer hit dead SQL.
 async fn insert_work_row(
     conn: &mut sqlx::SqliteConnection,
     req: &CreateWorkDbRequest,
@@ -190,8 +177,10 @@ async fn insert_work_row(
          author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
          language, import_id, series_id, series_name, series_position, \
          monitor_ebook, monitor_audiobook, isbn_13, asin, description, cover_manual) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(user_id, normalized_title, normalized_author) DO NOTHING",
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? \
+          WHERE NOT EXISTS (SELECT 1 FROM works \
+                             WHERE user_id = ? AND normalized_title = ? \
+                               AND normalized_author = ?)",
     )
     .bind(req.user_id)
     .bind(&req.title)
@@ -215,6 +204,9 @@ async fn insert_work_row(
     .bind(&req.asin)
     .bind(&req.description)
     .bind(req.cover_manual)
+    .bind(req.user_id)
+    .bind(&req.normalized_title)
+    .bind(&req.normalized_author)
     .execute(&mut *conn)
     .await
     .map_err(map_db_err)?;
@@ -634,24 +626,17 @@ impl WorkDb for SqliteDb {
         work_id: WorkId,
         cover_url: Option<&str>,
         cover_source: &str,
-        cover_trust: livrarr_domain::CoverTrust,
+        cover_manual: bool,
         cover_width: i32,
         cover_height: i32,
     ) -> Result<(), DbError> {
-        let trust_str = match cover_trust {
-            livrarr_domain::CoverTrust::User => "user",
-            livrarr_domain::CoverTrust::Validated => "validated",
-            livrarr_domain::CoverTrust::Unvalidated => "unvalidated",
-        };
-        let cover_manual = cover_trust == livrarr_domain::CoverTrust::User;
         let result = sqlx::query(
-            "UPDATE works SET cover_url = ?, cover_source = ?, cover_trust = ?, \
+            "UPDATE works SET cover_url = ?, cover_source = ?, \
              cover_width = ?, cover_height = ?, cover_manual = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(absolute_http_cover_url(cover_url))
         .bind(cover_source)
-        .bind(trust_str)
         .bind(cover_width)
         .bind(cover_height)
         .bind(cover_manual)
@@ -673,23 +658,18 @@ impl WorkDb for SqliteDb {
         work_id: WorkId,
         audiobook_cover_url: Option<&str>,
         audiobook_cover_source: &str,
-        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_manual: bool,
         audiobook_cover_width: i32,
         audiobook_cover_height: i32,
     ) -> Result<(), DbError> {
-        let trust_str = match audiobook_cover_trust {
-            livrarr_domain::CoverTrust::User => "user",
-            livrarr_domain::CoverTrust::Validated => "validated",
-            livrarr_domain::CoverTrust::Unvalidated => "unvalidated",
-        };
         let result = sqlx::query(
             "UPDATE works SET audiobook_cover_url = ?, audiobook_cover_source = ?, \
-             audiobook_cover_trust = ?, audiobook_cover_width = ?, audiobook_cover_height = ? \
+             audiobook_cover_manual = ?, audiobook_cover_width = ?, audiobook_cover_height = ? \
              WHERE id = ? AND user_id = ?",
         )
         .bind(absolute_http_cover_url(audiobook_cover_url))
         .bind(audiobook_cover_source)
-        .bind(trust_str)
+        .bind(audiobook_cover_manual)
         .bind(audiobook_cover_width)
         .bind(audiobook_cover_height)
         .bind(work_id)
@@ -701,6 +681,20 @@ impl WorkDb for SqliteDb {
             return Err(DbError::NotFound { entity: "work" });
         }
         Ok(())
+    }
+
+    async fn get_audiobook_cover_manual(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<bool, DbError> {
+        sqlx::query_scalar("SELECT audiobook_cover_manual FROM works WHERE id = ? AND user_id = ?")
+            .bind(work_id)
+            .bind(user_id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_db_err)?
+            .ok_or(DbError::NotFound { entity: "work" })
     }
 
     async fn update_cover_dimensions(
@@ -761,7 +755,9 @@ impl WorkDb for SqliteDb {
             });
         }
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // First statement: advance both works' identity generations in one
         // UPDATE, requiring two rows before any repoint/delete. Doubles as
@@ -1125,7 +1121,9 @@ impl WorkDb for SqliteDb {
         &self,
         req: ApplyEnrichmentMergeRequest,
     ) -> Result<ApplyMergeOutcome, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // CAS check: read current merge_generation.
         let current_gen: i64 =
@@ -1184,8 +1182,8 @@ impl WorkDb for SqliteDb {
             // track. REQ-009: None/empty language never clobbers a populated
             // value (COALESCE + empty-filtered bind).
             //
-            // S2 binding invariant: cover_url/cover_source/cover_trust/dims
-            // (and the audiobook twins) are NOT written here — cover DB
+            // S2 binding invariant: cover URL/source/dimensions (and the
+            // audiobook twins) are NOT written here — cover DB
             // fields update only via the cover-write gate's atomic commit
             // (`update_cover_metadata`/`update_audiobook_cover_metadata`) at
             // an accepted swap or initial save, or at phase-1 create. Writing
@@ -1349,14 +1347,36 @@ impl WorkDb for SqliteDb {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), DbError> {
+        let identity_v2_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
+                            WHERE key='identity_authority_v2' AND value='active')",
+        )
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
         // Recovering a terminal `not_found` identity (the LLM rejected all payloads):
         // a manual refresh re-derives identity from the work's anchors so it can
         // re-resolve + re-enrich. Other identity states are left untouched — an open
         // `conflict` is a data dispute a refresh must not silently clear, and
         // confirmed/provisional/pending already re-enrich on their own. Clearing
         // next_convergence_at re-derives the work as due-now for the background loop.
-        let result = sqlx::query(
-            "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
+        let result = if identity_v2_active {
+            // Post-marker identity is frozen: refresh resets enrichment and
+            // provider retry state only. It neither reads nor writes the
+            // retired badge and never bumps identity_generation off-road.
+            sqlx::query(
+                "UPDATE works SET enrichment_status='pending', enriched_at=NULL, \
+                        merge_generation=merge_generation+1, next_convergence_at=NULL \
+                  WHERE id=?1 AND user_id=?2",
+            )
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?
+        } else {
+            sqlx::query(
+                "UPDATE works SET enrichment_status = 'pending', enriched_at = NULL, \
              merge_generation = merge_generation + 1, \
              next_convergence_at = NULL, \
              identity_generation = identity_generation + \
@@ -1368,12 +1388,13 @@ impl WorkDb for SqliteDb {
                  ELSE identity_status \
              END \
              WHERE id = ? AND user_id = ?",
-        )
-        .bind(work_id)
-        .bind(user_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_db_err)?;
+            )
+            .bind(work_id)
+            .bind(user_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_db_err)?
+        };
 
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "work" });
@@ -1397,14 +1418,52 @@ impl WorkDb for SqliteDb {
         threshold: u32,
         limit: i64,
     ) -> Result<Vec<WorkId>, DbError> {
-        // Branch (1) identity-pending and branch (2) enrichment-incomplete select
-        // independently; the chaseable-missing-anchor guard scopes ONLY branch (3)
-        // ID-chasing, so a fully-anchored work with failed enrichment is still
-        // selected via (2). A missing anchor is chaseable when it has neither an
-        // outstanding pending guess nor a dead-end at the configured threshold; a
-        // work is selected for ID-chasing if it has at least one such anchor.
+        // Before activation the three legacy branches retain their scalar-anchor
+        // semantics below. After activation, frozen works.* ID columns are never
+        // read as authority: connected Works with a Work route are due only for
+        // incomplete enrichment. UserConfirmed, Connected, and NotConnected Works
+        // without a Work route enter the bounded machine-chase arm; every such visit
+        // is capped by identity_provider_attempts for the current identity generation.
         let now_str = now.to_rfc3339();
+        let identity_v2_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
+                            WHERE key='identity_authority_v2' AND value='active')",
+        )
+        .fetch_one(self.pool())
+        .await
+        .map_err(map_db_err)?;
         let threshold = i64::from(threshold);
+        if identity_v2_active {
+            return sqlx::query_scalar(
+                "SELECT w.id FROM works w \
+                  WHERE w.user_id=?1 AND ( \
+                    (w.identity_status_v2 IN ('user_confirmed','connected') \
+                     AND w.enrichment_status NOT IN ('enriched','thin') \
+                     AND EXISTS (SELECT 1 FROM identity_routes wr \
+                                  WHERE wr.user_id=w.user_id AND wr.resolved_work_id=w.id \
+                                    AND wr.state='active' \
+                                    AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"'))) \
+                    OR (w.identity_status_v2 IN ('user_confirmed','connected','not_connected') \
+                        AND NOT EXISTS (SELECT 1 FROM identity_routes wr \
+                                         WHERE wr.user_id=w.user_id AND wr.resolved_work_id=w.id \
+                                           AND wr.state='active' \
+                                           AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"')) \
+                        AND (SELECT COUNT(*) FROM identity_provider_attempts ipa \
+                              WHERE ipa.user_id=w.user_id AND ipa.work_id=w.id \
+                                AND ipa.provider='livrarr-convergence' \
+                                AND ipa.route_kind='bridge-upgrade' \
+                                AND ipa.route_value=CAST(w.identity_generation AS TEXT)) < ?3) \
+                  ) AND (w.next_convergence_at IS NULL OR w.next_convergence_at<=?2) \
+                  ORDER BY w.added_at ASC LIMIT ?4",
+            )
+            .bind(user_id)
+            .bind(&now_str)
+            .bind(threshold)
+            .bind(limit)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_db_err);
+        }
         let ids: Vec<WorkId> = sqlx::query_scalar(
             "SELECT w.id FROM works w
              WHERE w.user_id = ?1
@@ -1620,7 +1679,9 @@ impl crate::WorkDbCreate for SqliteDb {
         anchor_setter: livrarr_domain::identity::AnchorSetter,
     ) -> Result<(Work, bool), DbError> {
         let now = Utc::now().to_rfc3339();
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let inserted = insert_work_row(&mut tx, &req, &now).await?;
 
         match inserted {

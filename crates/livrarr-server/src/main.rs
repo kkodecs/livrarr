@@ -5,13 +5,12 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use livrarr_db::{DownloadClientDb, IndexerDb};
 use livrarr_server::config::{AppConfig, LogFormat, LogLevel};
-use livrarr_server::router::build_router;
 use livrarr_server::state::AppState;
 
 /// Validate an LLM endpoint URL at startup (best-effort, non-fatal).
@@ -45,6 +44,41 @@ struct Cli {
     /// UI assets directory. Defaults to {data}/ui when not set.
     #[arg(long)]
     ui_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the exclusive pre-activation identity cutover tool.
+    IdentityCutover {
+        #[command(subcommand)]
+        command: IdentityCutoverSubcommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IdentityCutoverSubcommand {
+    Rehearse {
+        #[arg(long)]
+        snapshot: PathBuf,
+    },
+    List,
+    Show {
+        card_id: i64,
+    },
+    Resolve {
+        card_id: i64,
+        #[arg(long)]
+        expected_generation: i64,
+        #[arg(long)]
+        action_file: PathBuf,
+    },
+    Apply {
+        #[arg(long)]
+        approved_report: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -54,6 +88,47 @@ async fn main() {
 
     let cli = Cli::parse();
     let data_dir = cli.data;
+    if let Some(Command::IdentityCutover { command }) = cli.command {
+        let command = match command {
+            IdentityCutoverSubcommand::Rehearse { snapshot } => {
+                livrarr_server::identity_layer::IdentityCutoverCliCommand::Rehearse { snapshot }
+            }
+            IdentityCutoverSubcommand::List => {
+                livrarr_server::identity_layer::IdentityCutoverCliCommand::ListReviews
+            }
+            IdentityCutoverSubcommand::Show { card_id } => {
+                livrarr_server::identity_layer::IdentityCutoverCliCommand::ShowReview { card_id }
+            }
+            IdentityCutoverSubcommand::Resolve {
+                card_id,
+                expected_generation,
+                action_file,
+            } => livrarr_server::identity_layer::IdentityCutoverCliCommand::ResolveReview {
+                card_id,
+                expected_generation,
+                action_file,
+            },
+            IdentityCutoverSubcommand::Apply { approved_report } => {
+                livrarr_server::identity_layer::IdentityCutoverCliCommand::Apply { approved_report }
+            }
+        };
+        match livrarr_server::identity_layer::run_identity_cutover_command(
+            command,
+            data_dir,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        {
+            Ok(outcome) => {
+                println!("{outcome:?}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(2);
+            }
+        }
+    }
     let ui_dir = cli.ui_dir.unwrap_or_else(|| data_dir.join("ui"));
 
     ensure_data_dir(&data_dir);
@@ -62,6 +137,16 @@ async fn main() {
 
     // Construct AppState.
     let (db, auth_service) = build_db_and_auth(pool);
+    // The database initializer already performs this before legacy startup
+    // repairs. Re-reading the marker here keeps the composition-root boundary
+    // explicit immediately before HTTP/jobs are assembled.
+    if let Err(error) =
+        livrarr_server::identity_layer::ensure_identity_authority_ready_before_serve(db.clone())
+            .await
+    {
+        error!("identity authority composition gate failed: {error}");
+        std::process::exit(1);
+    }
     let (http_client, http_client_safe, http_fetcher, llm_http_client) = build_http_clients();
     let job_runner = livrarr_server::jobs::JobRunner::new();
     let (call_sink, call_sink_handle) = spawn_call_sink_service(&db, &job_runner);
@@ -206,48 +291,40 @@ async fn main() {
     // Add-Work handler's resolve() (AppState.identity_resolver) and the search
     // box's lookup_filtered (WorkService), so both route through the federated
     // fan-out and share one payload transport cache.
-    let identity_resolver_arc = Arc::new(
-        livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver {
-            clients: provider_clients.clone(),
-            cache: transport_cache.clone(),
-            config: {
-                let cfg = live_metadata_config.snapshot();
-                let gb_key_present = cfg
-                    .google_books_api_key
-                    .as_deref()
-                    .is_some_and(|s| !s.is_empty());
-                // Read once at startup, like every other credential/flag above
-                // (REQ-007/REQ-013) — a settings change here takes effect on
-                // the next restart, consistent with this whole block.
-                let default_language_source = {
-                    use livrarr_db::ConfigDb;
-                    db.get_default_language().await.unwrap_or_else(|e| {
-                        warn!("Failed to read default language at startup ({e}); using \"en\"");
-                        "en".to_string()
-                    })
-                };
-                livrarr_metadata::english_identity_resolver::ResolverConfig {
-                    gb_key_present,
-                    default_language_source,
-                    ..Default::default()
-                }
-            },
+    let identity_resolver_arc = livrarr_server::state::build_live_identity_resolver(
+        provider_clients.clone(),
+        transport_cache.clone(),
+        {
+            let cfg = live_metadata_config.snapshot();
+            let gb_key_present = cfg
+                .google_books_api_key
+                .as_deref()
+                .is_some_and(|s| !s.is_empty());
+            // Read once at startup, like every other credential/flag above
+            // (REQ-007/REQ-013) — a settings change here takes effect on
+            // the next restart, consistent with this whole block.
+            let default_language_source = {
+                use livrarr_db::ConfigDb;
+                db.get_default_language().await.unwrap_or_else(|e| {
+                    warn!("Failed to read default language at startup ({e}); using \"en\"");
+                    "en".to_string()
+                })
+            };
+            livrarr_metadata::english_identity_resolver::ResolverConfig {
+                gb_key_present,
+                default_language_source,
+                ..Default::default()
+            }
         },
     );
-    let work_service_arc: Arc<livrarr_server::state::LiveWorkService> = {
-        let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+    let work_service_arc: Arc<livrarr_server::state::LiveWorkService> =
+        Arc::new(livrarr_server::state::build_live_work_service(
+            svc_db.clone(),
             svc_enrichment.clone(),
-        );
-        Arc::new(
-            livrarr_metadata::work_service::WorkServiceImpl::new(
-                svc_db.clone(),
-                ew,
-                http_fetcher.clone(),
-                data_dir.clone(),
-            )
-            .with_resolver(identity_resolver_arc.clone()),
-        )
-    };
+            http_fetcher.clone(),
+            data_dir.clone(),
+            identity_resolver_arc.clone(),
+        ));
     let discovery_service_arc = Arc::new(
         livrarr_metadata::discovery_service::DiscoveryServiceImpl::new(
             svc_db.clone(),
@@ -271,6 +348,12 @@ async fn main() {
             data_dir_arc.clone(),
         ))
     };
+    let identity_road_arc = Arc::new(livrarr_server::identity_layer::build_live_identity_road(
+        svc_db.clone(),
+        http_fetcher.clone(),
+        http_client.clone(),
+        live_metadata_config.clone(),
+    ));
     let state = AppState {
         db,
         auth_service,
@@ -292,6 +375,7 @@ async fn main() {
         manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue,
         enrichment_service: enrichment_service.clone(),
+        identity_road: identity_road_arc.clone(),
 
         // --- Service layer (Phase 4) ---
         author_service: Arc::new(livrarr_metadata::author_service::AuthorServiceImpl::new(
@@ -317,7 +401,8 @@ async fn main() {
                     live_metadata_config.clone(),
                     llm_http_client.clone(),
                 ),
-            ),
+            )
+            .with_identity_road(identity_road_arc.clone()),
         ),
         work_service: work_service_arc.clone(),
         discovery_service: discovery_service_arc.clone(),
@@ -360,19 +445,18 @@ async fn main() {
             )
         },
         list_service: {
-            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
-                svc_enrichment.clone(),
-            );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+            let ws = livrarr_server::state::build_live_work_service(
                 svc_db.clone(),
-                ew,
+                svc_enrichment.clone(),
                 http_fetcher.clone(),
                 data_dir.clone(),
+                identity_resolver_arc.clone(),
             );
             Arc::new(livrarr_server::state::build_live_list_service(
                 svc_db.clone(),
                 ws,
                 http_fetcher.clone(),
+                identity_road_arc.clone(),
             ))
         },
         identity_conflict_service: Arc::new(
@@ -380,27 +464,26 @@ async fn main() {
                 svc_db.clone(),
             ),
         ),
-        identity_resolver: identity_resolver_arc,
+        identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
                 svc_enrichment.clone(),
             ),
         ),
         author_monitor_workflow: {
-            let ew = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
-                svc_enrichment.clone(),
-            );
-            let ws = livrarr_metadata::work_service::WorkServiceImpl::new(
+            let ws = livrarr_server::state::build_live_work_service(
                 svc_db.clone(),
-                ew,
+                svc_enrichment.clone(),
                 http_fetcher.clone(),
                 data_dir.clone(),
+                identity_resolver_arc.clone(),
             );
             Arc::new(
-                livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
+                livrarr_metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::with_identity_road(
                     Arc::new(svc_db.clone()),
                     Arc::new(ws),
                     Arc::new(http_fetcher.clone()),
+                    identity_road_arc.clone(),
                 ),
             )
         },
@@ -462,7 +545,8 @@ async fn main() {
                 work_service_arc.clone(),
                 svc_db.clone(),
                 import_workflow_arc.clone(),
-            ),
+            )
+            .with_identity_road(identity_road_arc.clone()),
         ),
         cover_service,
         preadd_cover_service: {
@@ -578,11 +662,18 @@ async fn main() {
         .await;
 
     // Step 13: Build router.
-    let app = build_router(state, ui_dir);
+    let app = livrarr_server::router::build_router(state, ui_dir);
 
     let (listener, addr) = bind_listener(&config).await;
 
-    run_startup_passes(&job_runner, &svc_db, &data_dir).await;
+    run_startup_passes(
+        &job_runner,
+        &svc_db,
+        svc_enrichment.clone(),
+        http_fetcher.clone(),
+        &data_dir,
+    )
+    .await;
 
     info!("Listening on {addr}");
 
@@ -677,60 +768,122 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     }
     info!("Database migrations complete");
 
-    // Step 9: Version gate — verify DB compatibility.
+    // Step 9a: Version gate — verify DB compatibility before reading or
+    // changing the identity authority marker.
     if let Err(e) = livrarr_db::pool::check_version_gate(&pool).await {
         error!("{e}");
         livrarr_db::pool::release_pid_lock(data_dir);
         std::process::exit(1);
     }
 
-    // Step 9b: Backfill normalized identity columns and create UNIQUE index.
-    // Migration 038 adds columns with `__UNMIGRATED__` defaults; this hook
-    // computes real values, resolves duplicates, and creates the index.
-    if let Err(e) = livrarr_db::pool::backfill_normalized_identity(&pool).await {
-        error!("normalized identity backfill failed: {e}");
-        livrarr_db::pool::release_pid_lock(data_dir);
-        std::process::exit(1);
+    // Identity authority must be active before any category 9b, 9c, 9d, or
+    // 9e legacy writer is reachable. Active databases skip_legacy_writers;
+    // empty databases activate transactionally; non-empty inactive databases
+    // require the exclusive cutover command.
+    match livrarr_server::identity_layer::ensure_identity_authority_ready_before_serve(
+        livrarr_db::sqlite::SqliteDb::new(pool.clone()),
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(error) => {
+            error!("identity authority startup gate failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
     }
 
-    // Step 9b (authors): Backfill authors.normalized_name, merge duplicate
-    // author rows through the shared merge contract, and create the partial
-    // UNIQUE index (issue #175). Migration 077 adds the column only; the
-    // index arms here, after repair — same shape as Step 9b for works.
-    if let Err(e) = livrarr_db::pool::backfill_author_identity(&pool).await {
-        error!("author identity backfill failed: {e}");
-        livrarr_db::pool::release_pid_lock(data_dir);
-        std::process::exit(1);
+    // Runtime data policy heal: migrations 082-084 remain immutable. Exact
+    // Extracted provider parentheticals are repaired transactionally after F2
+    // activation; collision cohorts become ordinary GroupIdentity reviews.
+    match livrarr_db::pool::heal_identity_title_policy(&pool).await {
+        Ok(report) => info!(
+            healed = report.healed,
+            review_cards_minted = report.review_cards_minted,
+            blocked_cohorts = report.blocked_cohorts,
+            "identity title-policy heal complete"
+        ),
+        Err(error) => {
+            error!("identity title-policy heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
     }
 
-    // Step 9c: Recompute works.normalized_title/normalized_author via the
-    // identity_matching authority's identity_key recipe (REQ-014),
-    // superseding the retired normalize_for_matching. Idempotent — migration
-    // 069 seeds the generation marker this checks.
-    if let Err(e) = livrarr_db::pool::backfill_identity_key_recompute(&pool).await {
-        error!("identity-key recompute failed: {e}");
-        livrarr_db::pool::release_pid_lock(data_dir);
-        std::process::exit(1);
+    match livrarr_db::pool::heal_identity_sweep_findings(&pool).await {
+        Ok(report) => info!(
+            routes_reowned = report.routes_reowned,
+            editions_created = report.editions_created,
+            works_bumped = report.works_bumped,
+            invalid_cards_dismissed = report.invalid_cards_dismissed,
+            "identity seam-sweep heal complete"
+        ),
+        Err(error) => {
+            error!("identity seam-sweep heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
     }
 
-    // Step 9d: Complete the identity ledger from legacy works columns
-    // (identity-edit r4 §startup ledger completion). Runs before services or
-    // jobs exist, so no identity writer can race it and no generation bump is
-    // needed; the completion marker and rows commit atomically. Idempotent.
-    if let Err(e) = livrarr_db::backfill_work_identity_ledger(&pool).await {
-        error!("identity ledger backfill failed: {e}");
-        livrarr_db::pool::release_pid_lock(data_dir);
-        std::process::exit(1);
+    match livrarr_db::identity_layer::heal_identity_dedup_residue(&pool).await {
+        Ok(report) => info!(
+            orphans_folded = report.orphans_folded,
+            works_bumped = report.works_bumped,
+            invalid_cards_cancelled = report.invalid_cards_cancelled,
+            duplicate_cards_cancelled = report.duplicate_cards_cancelled,
+            "identity dedup-residue heal complete"
+        ),
+        Err(error) => {
+            error!("identity dedup-residue heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
     }
 
-    // Step 9e: One-time C5 repair for Goodreads work-anchor dead ends created
-    // before the subtitle trust rule changed. Its marker, dead-end deletion,
-    // and convergence-clock clearing are one transaction.
-    if let Err(e) = livrarr_db::pool::clear_subtitle_rule_deadends(&pool).await {
-        error!("subtitle-rule dead-end clear failed: {e}");
-        livrarr_db::pool::release_pid_lock(data_dir);
-        std::process::exit(1);
+    match livrarr_db::identity_layer::heal_identity_round10_residue(&pool).await {
+        Ok(report) => info!(
+            bridge_attempts_cleared = report.bridge_attempts_cleared,
+            dishonest_enriched_reclassified = report.dishonest_enriched_reclassified,
+            failed_readarr_authors_deleted = report.failed_readarr_authors_deleted,
+            "identity round-10 residue heal complete"
+        ),
+        Err(error) => {
+            error!("identity round-10 residue heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
     }
+
+    match livrarr_db::identity_layer::heal_identity_round11_attempt_residue(&pool).await {
+        Ok(report) => info!(
+            bridge_attempts_cleared = report.bridge_attempts_cleared,
+            "identity round-11 attempt re-heal complete"
+        ),
+        Err(error) => {
+            error!("identity round-11 attempt re-heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    }
+
+    match livrarr_db::identity_layer::heal_identity_round15_search_ledger(&pool).await {
+        Ok(report) => info!(
+            edition_only_works_reopened = report.edition_only_works_reopened,
+            edition_only_attempts_cleared = report.edition_only_attempts_cleared,
+            zero_route_works_reopened = report.zero_route_works_reopened,
+            zero_route_attempts_cleared = report.zero_route_attempts_cleared,
+            "identity round-15 search ledger reset complete"
+        ),
+        Err(error) => {
+            error!("identity round-15 search ledger reset failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    }
+
+    // Identity authority is active here. Legacy startup identity writers 9b
+    // through 9e are intentionally unreachable after activation; exclusive
+    // cutover owns any legacy preparation needed by a non-empty old library.
 
     // Step 10: Clean up old backups (keep 3).
     {
@@ -898,7 +1051,7 @@ fn build_enrichment_pipeline(
         max_attempts: 5,
     };
 
-    let mut builder = m::DefaultProviderQueueBuilder::new();
+    let mut builder = m::DefaultProviderQueueBuilder::new().with_identity_route_dispatch();
 
     // Audnexus — always available. URL is captured at startup; if you
     // want a custom audnexus_url to take effect live too, that's a
@@ -1054,12 +1207,14 @@ async fn bind_listener(config: &AppConfig) -> (TcpListener, String) {
 }
 
 /// Run the one-shot startup passes, in order: chapter backfill, the cover
-/// startup sequence (itself strictly ordered — layout migration, then gate
-/// recovery, then provenance backfill; see `livrarr_metadata::cover_startup`),
-/// then series backfill, then history backfill.
+/// startup sequence (layout migration, gate recovery, provenance backfill,
+/// then the marker-gated round-15 Goodreads repair), series backfill, and
+/// history backfill.
 async fn run_startup_passes(
     job_runner: &livrarr_server::jobs::JobRunner,
     svc_db: &livrarr_db::sqlite::SqliteDb,
+    enrichment: Arc<livrarr_server::state::LiveEnrichmentService>,
+    http: livrarr_http::fetcher::HttpFetcherImpl,
     data_dir: &std::path::Path,
 ) {
     job_runner
@@ -1069,18 +1224,17 @@ async fn run_startup_passes(
             livrarr_server::jobs::chapter_backfill::run_chapter_backfill(svc_db.clone()),
         )
         .await;
-    // Covers startup sequence — ONE pass because the passes inside it are
-    // order-dependent: the layout migration must settle the per-user
-    // directory tree before recovery converges pending cover writes against
-    // it, and the provenance backfill must only stamp rows recovery has
-    // finished healing. The sequencing itself lives in
-    // livrarr_metadata::cover_startup.
+    // ONE cover pass: layout and crash recovery must converge the filesystem
+    // before provenance is backfilled and the queued round-15 reselect clears
+    // and rematerializes machine-owned Goodreads slots.
     job_runner
         .spawn_startup_pass(
             "cover_startup",
             svc_db.clone(),
             livrarr_server::jobs::cover_startup::run_cover_startup_passes(
                 svc_db.clone(),
+                enrichment,
+                http,
                 data_dir.join("covers"),
             ),
         )

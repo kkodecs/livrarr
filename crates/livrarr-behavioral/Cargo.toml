@@ -39,9 +39,10 @@ livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
 livrarr-handlers = { workspace = true }
 livrarr-http = { workspace = true, features = ["test-helpers"] }
+livrarr-identity = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-materialize = { workspace = true }
-livrarr-server = { workspace = true }
+livrarr-server = { workspace = true, features = ["test-helpers"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }
@@ -674,3 +675,8 @@ path = "../../tests/behavioral/test_dup_authors_import_race.rs"
 [[test]]
 name = "test_dup_authors_doors"
 path = "../../tests/behavioral/test_dup_authors_doors.rs"
+
+# Identity-layer-rewrite code-stage behavioral suite (RED-first).
+[[test]]
+name = "test_ilr_contracts"
+path = "../../tests/behavioral/test_ilr_contracts.rs"

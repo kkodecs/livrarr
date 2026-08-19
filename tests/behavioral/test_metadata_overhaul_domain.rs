@@ -10,9 +10,8 @@ use std::mem::discriminant;
 
 use livrarr_domain::services::{CoverService, CoverServiceError};
 use livrarr_domain::{
-    CoverCandidate, CoverMediaType, CoverTrust, ExternalIdType, MergeResolved, MetadataProvider,
-    OutcomeClass, PermanentFailureReason, ProvenanceSetter, UserId, WillRetryReason, WorkField,
-    WorkId,
+    CoverCandidate, CoverMediaType, ExternalIdType, MergeResolved, MetadataProvider, OutcomeClass,
+    PermanentFailureReason, ProvenanceSetter, UserId, WillRetryReason, WorkField, WorkId,
 };
 use livrarr_external_data::ProviderOutcome;
 use livrarr_metadata::EnrichmentMode;
@@ -411,60 +410,6 @@ fn test_domain_permanent_failure_reason_serializes_each_variant_in_snake_case() 
 
     for (reason, expected_json) in cases {
         assert_serializes_to_json(reason, expected_json);
-    }
-}
-
-#[test]
-/// REQ-ID: REQ-001 | Contract: CoverTrust::allows_replacement_by | Behavior: evaluates all trust-tier replacement combinations.
-fn test_multi_cover_cover_trust_replacement_matrix_matches_hierarchy() {
-    let cases = [
-        (CoverTrust::Unvalidated, CoverTrust::Unvalidated, true),
-        (CoverTrust::Unvalidated, CoverTrust::Validated, true),
-        (CoverTrust::Unvalidated, CoverTrust::User, true),
-        (CoverTrust::Validated, CoverTrust::Unvalidated, false),
-        (CoverTrust::Validated, CoverTrust::Validated, true),
-        (CoverTrust::Validated, CoverTrust::User, true),
-        (CoverTrust::User, CoverTrust::Unvalidated, false),
-        (CoverTrust::User, CoverTrust::Validated, false),
-        (CoverTrust::User, CoverTrust::User, false),
-    ];
-
-    for (current, incoming, expected) in cases {
-        assert_eq!(
-            current.allows_replacement_by(incoming),
-            expected,
-            "unexpected replacement decision for current={current:?}, incoming={incoming:?}"
-        );
-    }
-}
-
-#[test]
-/// REQ-ID: REQ-004 | Contract: CoverTrust::allows_replacement_by | Behavior: User trust is a permanent lock against automatic replacement.
-fn test_multi_cover_user_trust_never_allows_automatic_replacement() {
-    for incoming in [
-        CoverTrust::Unvalidated,
-        CoverTrust::Validated,
-        CoverTrust::User,
-    ] {
-        assert!(
-            !CoverTrust::User.allows_replacement_by(incoming),
-            "User trust must reject incoming {incoming:?}"
-        );
-    }
-}
-
-#[test]
-/// REQ-ID: REQ-001 | Contract: CoverTrust::allows_replacement_by | Behavior: Unvalidated trust can be replaced by any incoming trust tier.
-fn test_multi_cover_unvalidated_trust_allows_any_incoming_replacement() {
-    for incoming in [
-        CoverTrust::Unvalidated,
-        CoverTrust::Validated,
-        CoverTrust::User,
-    ] {
-        assert!(
-            CoverTrust::Unvalidated.allows_replacement_by(incoming),
-            "Unvalidated trust must accept incoming {incoming:?}"
-        );
     }
 }
 

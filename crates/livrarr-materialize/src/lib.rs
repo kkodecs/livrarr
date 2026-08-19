@@ -3,6 +3,8 @@
 //! Holds the relocated `download_cover_to_disk` (the cycle break, D-002). MUST
 //! NOT depend on enrichment (failure isolation + one-home reuse).
 
+pub mod identity_layer;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -338,12 +340,10 @@ where
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
-            if write_tags_batch(paths, to_tag_metadata(request.tags), ebook_cover_bytes)
+            write_tags_batch(paths, to_tag_metadata(request.tags), ebook_cover_bytes)
                 .await
-                .is_ok()
-            {
-                outcome.tags_written = true;
-            }
+                .map_err(|error| MaterializeError::TagWrite(error.to_string()))?;
+            outcome.tags_written = true;
         }
 
         Ok(outcome)

@@ -294,13 +294,8 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             post(livrarr_handlers::work::affirm_pending_anchor::<AppState>),
         )
         .route(
-            "/work/{id}/identity/preview",
-            post(livrarr_handlers::work::preview_identity_edit::<AppState>),
-        )
-        .route(
-            "/work/{id}/identity/{slot}",
-            put(livrarr_handlers::work::commit_identity_edit::<AppState>)
-                .delete(livrarr_handlers::work::clear_identity_slot::<AppState>),
+            "/work/{id}/identity/search",
+            get(livrarr_handlers::work::manual_provider_search::<AppState>),
         )
         .route(
             "/work/{id}/merge/{loser_id}/preview",
@@ -572,11 +567,21 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         )
         .route(
             "/identity-review/{work_id}/resolve",
-            post(livrarr_handlers::identity_review::resolve::<AppState>),
+            post(livrarr_handlers::identity_layer::resolve::<AppState>),
+        )
+        // Typed identity-v2 review cards. Keep the legacy route above while
+        // clients migrate; its path parameter has always been the card id.
+        .route(
+            "/identity-review-card",
+            get(livrarr_handlers::identity_layer::list::<AppState>),
         )
         .route(
-            "/identity-review/{work_id}/dismiss",
-            post(livrarr_handlers::identity_review::dismiss::<AppState>),
+            "/identity-review-card/{card_id}/resolve",
+            post(livrarr_handlers::identity_layer::resolve::<AppState>),
+        )
+        .route(
+            "/identity-review-card/{card_id}/dismiss",
+            post(livrarr_handlers::identity_layer::dismiss::<AppState>),
         )
         // Library files
         .route(
@@ -925,6 +930,12 @@ mod tests {
             hmac_key.clone(),
             data_dir_arc.clone(),
         ));
+        let identity_road_arc = Arc::new(crate::identity_layer::build_live_identity_road(
+            db.clone(),
+            http_fetcher.clone(),
+            http_client.clone(),
+            live_metadata_config.clone(),
+        ));
 
         let state = AppState {
             db: db.clone(),
@@ -947,6 +958,7 @@ mod tests {
             manual_import_scans: manual_import_scans_shared.clone(),
             provider_queue: queue,
             enrichment_service: enrichment_service.clone(),
+            identity_road: identity_road_arc.clone(),
 
             author_service: Arc::new(m::author_service::AuthorServiceImpl::new(
                 db.clone(),
@@ -960,15 +972,18 @@ mod tests {
                 crate::services::author_linking_service::LiveAuthorLinkingService,
             ),
             series_service: Arc::new(m::series_service::SeriesServiceImpl::new(db.clone())),
-            series_query_service: Arc::new(m::series_query_service::SeriesQueryServiceImpl::new(
-                db.clone(),
-                http_fetcher.clone(),
-                work_service_arc.clone(),
-                livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
-                    live_metadata_config.clone(),
-                    llm_http_client.clone(),
-                ),
-            )),
+            series_query_service: Arc::new(
+                m::series_query_service::SeriesQueryServiceImpl::new(
+                    db.clone(),
+                    http_fetcher.clone(),
+                    work_service_arc.clone(),
+                    livrarr_external_data::llm_caller_service::LlmCallerImpl::new(
+                        live_metadata_config.clone(),
+                        llm_http_client.clone(),
+                    ),
+                )
+                .with_identity_road(identity_road_arc.clone()),
+            ),
             work_service: work_service_arc.clone(),
             discovery_service: discovery_service_arc.clone(),
             grab_service: Arc::new(livrarr_download::grab_service::GrabServiceImpl::new(
@@ -1017,11 +1032,12 @@ mod tests {
                     http_fetcher.clone(),
                     data_dir.clone(),
                 );
-                Arc::new(m::list_service::ListServiceImpl::new(
+                Arc::new(m::list_service::ListServiceImpl::with_identity_road(
                     db.clone(),
                     ws,
                     http_fetcher.clone(),
                     m::list_service::NoOpBibliographyTrigger,
+                    identity_road_arc.clone(),
                 ))
             },
             identity_conflict_service: Arc::new(
@@ -1045,11 +1061,14 @@ mod tests {
                     http_fetcher.clone(),
                     data_dir.clone(),
                 );
-                Arc::new(m::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
-                    Arc::new(db.clone()),
-                    Arc::new(ws),
-                    Arc::new(http_fetcher.clone()),
-                ))
+                Arc::new(
+                    m::author_monitor_workflow::AuthorMonitorWorkflowImpl::with_identity_road(
+                        Arc::new(db.clone()),
+                        Arc::new(ws),
+                        Arc::new(http_fetcher.clone()),
+                        identity_road_arc.clone(),
+                    ),
+                )
             },
             readarr_import_service: readarr_import_service_arc.clone(),
             settings_service: settings_service_arc.clone(),
@@ -1106,7 +1125,8 @@ mod tests {
                     work_service_arc.clone(),
                     db.clone(),
                     import_workflow_arc.clone(),
-                ),
+                )
+                .with_identity_road(identity_road_arc.clone()),
             ),
             cover_service,
             preadd_cover_service: Arc::new(m::preadd_cover_service::LivePreaddCoverService::new(

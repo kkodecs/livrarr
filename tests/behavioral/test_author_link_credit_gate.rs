@@ -29,6 +29,10 @@ use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{AuthorLinkClaim, AuthorLinkDb, AuthorNameVariantDb, GuardedRouteWrite};
 use livrarr_domain::identity::{CapturedIdentity, IdentityMethod, IdentityState, WorkCandidate};
+use livrarr_domain::identity_layer::{
+    title_parts_from_provider, IdentityProvider, RouteKind, RouteOwner, RouteProvenance,
+    SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute, WorkRouteState,
+};
 use livrarr_domain::identity_matching::AuthorVerdict;
 use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 use livrarr_domain::services::{AuthorLinkService, FetchError, FetchResponse, WorkService};
@@ -290,10 +294,89 @@ async fn settled_author(
     keys: WorkKeys,
 ) -> (i64, i64) {
     let result = work_service(db.clone(), label)
-        .add(user_id, add_box_candidate(title, author_name, keys))
+        .add(user_id, add_box_candidate(title, author_name, keys.clone()))
         .await
         .expect("production settled-work writer");
     let author_id = result.author_id.expect("converged author id");
+    let has_f2_schema: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('works') \
+                        WHERE name='identity_status_v2')",
+    )
+    .fetch_one(db.pool())
+    .await
+    .expect("inspect work identity schema");
+    if !has_f2_schema {
+        db.ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorCreated)
+            .await
+            .expect("production enqueue writer");
+        return (author_id, result.work.id);
+    }
+    let expected_generation: i64 =
+        sqlx::query_scalar("SELECT identity_generation FROM works WHERE id=?1 AND user_id=?2")
+            .bind(result.work.id)
+            .bind(user_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read coherent pre-settlement generation");
+    let observed_at = Utc::now();
+    let mut routes = Vec::new();
+    for (value, provider, kind) in [
+        (
+            keys.ol,
+            IdentityProvider::OpenLibrary,
+            RouteKind::OpenLibraryWork,
+        ),
+        (
+            keys.gr,
+            IdentityProvider::Goodreads,
+            RouteKind::GoodreadsWork,
+        ),
+        (
+            keys.hc,
+            IdentityProvider::Hardcover,
+            RouteKind::HardcoverWork,
+        ),
+    ] {
+        if let Some(value) = value {
+            routes.push(WorkRoute {
+                id: 0,
+                user_id,
+                owner: RouteOwner::Work(result.work.id),
+                resolved_work_id: result.work.id,
+                provider,
+                kind,
+                provider_scoped_id: value.to_string(),
+                state: WorkRouteState::Active,
+                provenance: RouteProvenance::UserChoice,
+                user_confirmed: true,
+                observed_at,
+            });
+        }
+    }
+    WorkIdentityRepository::commit_settlement(
+        db,
+        SettlementCommit {
+            user_id,
+            existing_work_id: Some(result.work.id),
+            add_source: None,
+            identity_title: title_parts_from_provider(title.to_string(), None)
+                .expect("fixture title is a valid identity title"),
+            text_distinction: None,
+            contributors: vec![WorkContributor {
+                user_id,
+                work_id: result.work.id,
+                author_id,
+                ordinal: 0,
+                roles: vec![],
+            }],
+            routes,
+            absorbed_work_ids: vec![],
+            expected_generation,
+            review_cards: vec![],
+        },
+    )
+    .await
+    .expect("production F2 settled-work writer");
     db.ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorCreated)
         .await
         .expect("production enqueue writer");

@@ -260,7 +260,7 @@ async fn dead_ended_completion_suppression_survives_plain_refresh() {
 }
 
 #[tokio::test]
-async fn not_found_interactive_refresh_clears_dead_ends_and_rechases() {
+async fn post_cutover_refresh_ignores_legacy_not_found_while_clearing_retry_state() {
     // REQ-009: a single-work, user-clicked try-again refresh for an Unverified
     // (`NotFound`) work must clear durable anchor dead-ends before the chaseable
     // gate runs, so a previously exhausted missing anchor is actually re-chased.
@@ -299,12 +299,9 @@ async fn not_found_interactive_refresh_clears_dead_ends_and_rechases() {
             .await
             .expect("seed gr_key dead-end at threshold");
     }
-    // The try-again door depends on the workflow reset's REAL DB semantics:
-    // `reset_for_manual_refresh` recovers the terminal NotFound from the anchor
-    // columns before settle_identity runs. The counting stub performs no DB
-    // write, which leaves the work NotFound and trips settle's REQ-006 terminal
-    // guard — so this pin wires the reset-only production workflow (scatter is
-    // outside this pin's charter).
+    // Post-cutover refresh clears retry suppression but never branches on the
+    // frozen legacy NotFound badge. This legacy-composed fixture therefore must
+    // not invoke the old resolver road.
     let ol = gr_key_bearing_ol_stub("Try Again Completion");
     let svc = WorkServiceImpl::new(
         db.clone(),
@@ -326,10 +323,22 @@ async fn not_found_interactive_refresh_clears_dead_ends_and_rechases() {
         .await
         .expect("read dead-ends after try-again refresh");
     let resolver_calls = ol.call_count();
+    assert!(
+        dead_ends.is_empty(),
+        "refresh still clears retry suppression"
+    );
     assert_eq!(
-        (dead_ends.is_empty(), resolver_calls > 0),
-        (true, true),
-        "REQ-009: NotFound interactive try-again refresh must clear anchor dead-ends and re-chase; dead_ends={dead_ends:?}, resolver_calls={resolver_calls}"
+        resolver_calls, 0,
+        "the retired badge must not select a road"
+    );
+    let refreshed = db
+        .get_work(user_id, work.id)
+        .await
+        .expect("read refreshed work");
+    assert_eq!(
+        refreshed.identity_status,
+        IdentityStatus::NotFound,
+        "legacy status remains frozen"
     );
 }
 

@@ -139,7 +139,7 @@ impl SqliteDb {
         id: i64,
         user_id: UserId,
     ) -> Result<Option<(IdentityConflict, i64)>, sqlx::Error> {
-        let mut tx = self.pool().begin().await?;
+        let mut tx = crate::pool::begin_write(self.pool()).await?;
         let row: Option<ConflictRow> =
             sqlx::query_as(
                 "SELECT id, user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, raised_source_path, status, resolved_at, resolution_action, resolution_notes
@@ -276,7 +276,7 @@ impl SqliteDb {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "keep_existing".to_string());
 
-        let mut tx = self.pool().begin().await?;
+        let mut tx = crate::pool::begin_write(self.pool()).await?;
 
         if let Some(expected) = expected_generation {
             if !crate::sqlite_work_identity::claim_identity_generation(&mut tx, work_id, expected)
@@ -491,7 +491,7 @@ impl SqliteDb {
         let work_id = conflict.existing_work_id;
         let now = dismissed_at.to_rfc3339();
 
-        let mut tx = self.pool().begin().await?;
+        let mut tx = crate::pool::begin_write(self.pool()).await?;
 
         if let Some(expected) = expected_generation {
             if !crate::sqlite_work_identity::claim_identity_generation(&mut tx, work_id, expected)

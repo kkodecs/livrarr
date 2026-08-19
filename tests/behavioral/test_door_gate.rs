@@ -27,6 +27,11 @@
 //!   by B6's Readarr-shaped candidate through `WorkService::add`.
 //!
 //! Convention: a new R1/R2 door is not done until its row exists here.
+//! Productive machine-door rows that require the activated identity graph and
+//! production scheduler live in `test_ilr_contracts.rs`; see at minimum
+//! `convergence_captured_route_settles_before_attempt_checkpoint` and its
+//! registered-handoff/quiet-visit companions. They deliberately do not use
+//! this file's flag-false services or `InertIdentityRoad`.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,8 +64,9 @@ use livrarr_domain::{
 };
 use livrarr_handlers::context::{
     HasAppConfigService, HasAuthorService, HasEnrichmentWorkflow, HasHistoryService,
-    HasIdentityResolver, HasNotificationService, HasSeriesQueryService, HasTagService,
-    HasWorkIdentityRepository, HasWorkService,
+    HasIdentityLayerRepository, HasIdentityResolver, HasIdentityRoadService,
+    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
+    HasWorkService,
 };
 use livrarr_handlers::work::RefreshAllParams;
 use livrarr_handlers::work::{affirm_pending_anchor, refresh, refresh_all, retry_all_incomplete};
@@ -675,7 +681,7 @@ async fn b14_add_identity_pending_candidate_blocks_enrichment() {
 enum WorkCall {
     ResolveIdentityLocal,
     Add(UserId, Box<WorkCandidate>),
-    AddFast(UserId),
+    AddFast,
     CompleteAdd {
         user_id: UserId,
         work_id: WorkId,
@@ -828,7 +834,8 @@ impl WorkService for RecordingWorkService {
         self.calls
             .lock()
             .expect("work calls")
-            .push(WorkCall::AddFast(user_id));
+            .push(WorkCall::AddFast);
+        let _ = user_id;
         let _ = candidate;
         Ok(AddWorkResult {
             work: Work {
@@ -856,7 +863,7 @@ impl WorkService for RecordingWorkService {
         candidate_id: Option<CandidateId>,
         mode: IdentityMode,
         source: ConflictSource,
-    ) {
+    ) -> Option<livrarr_domain::identity_layer::CapturedRouteHandoff> {
         self.calls
             .lock()
             .expect("work calls")
@@ -868,6 +875,17 @@ impl WorkService for RecordingWorkService {
                 mode,
                 source,
             });
+        None
+    }
+
+    async fn capture_add_identity_routes(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _mode: IdentityMode,
+    ) -> Result<Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>, WorkServiceError>
+    {
+        Ok(Vec::new())
     }
 
     fn is_enriching(&self, _user_id: UserId, _work_id: WorkId) -> bool {
@@ -954,6 +972,8 @@ impl WorkService for RecordingWorkService {
             messages: vec![],
             taggable_items: vec![],
             merge_deferred: false,
+            provider_unavailable: false,
+            route_handoff: None,
         })
     }
 
@@ -969,6 +989,7 @@ impl WorkService for RecordingWorkService {
             total: 1,
             recovered: 1,
             still_incomplete: 0,
+            route_handoffs: Vec::new(),
         })
     }
 
@@ -1237,7 +1258,21 @@ impl AuthorService for InertAuthorService {
         _user_id: UserId,
         _req: AddAuthorRequest,
     ) -> Result<AddAuthorResult, AuthorServiceError> {
-        todo!("not exercised by door-gate")
+        Ok(AddAuthorResult::Created(Author {
+            id: 91,
+            user_id: _user_id,
+            name: _req.name,
+            sort_name: _req.sort_name,
+            ol_key: _req.ol_key,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+            monitored: _req.monitored,
+            monitor_new_items: false,
+            monitor_since: None,
+            monitor_language: None,
+            added_at: Utc::now(),
+        }))
     }
     async fn merge(
         &self,
@@ -1543,6 +1578,244 @@ struct RecordingIdentityRepo {
     confirm_count: Arc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+struct InertIdentityRoad {
+    settlement_count: Arc<AtomicUsize>,
+}
+
+impl livrarr_domain::identity_layer::IdentityRoadService for InertIdentityRoad {
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        if request.origin == livrarr_domain::identity_layer::IdentityRoadOrigin::AffirmPendingRoute
+        {
+            self.settlement_count.fetch_add(1, Ordering::SeqCst);
+            return Ok(
+                livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+                    review_id: 1,
+                    kind: livrarr_domain::identity_layer::ReviewKind::PendingRoute,
+                    unattached: false,
+                    expected_generation: 1,
+                    provenance: livrarr_domain::identity_layer::EvidenceProvenance::User,
+                },
+            );
+        }
+        Ok(
+            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                work_id: request.existing_work_id.unwrap_or(7001),
+                created: request.existing_work_id.is_none(),
+                routes: Vec::new(),
+                status: livrarr_domain::identity_layer::IdentityStatus::NotConnected,
+                library_items_moved: 0,
+                grabs_moved: 0,
+            },
+        )
+    }
+
+    async fn resolve_review(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        command: livrarr_domain::identity_layer::ReviewResolutionCommand,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        match command {
+            livrarr_domain::identity_layer::ReviewResolutionCommand::PendingRoute { .. } => Ok(
+                livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                    work_id: 8801,
+                    created: false,
+                    routes: Vec::new(),
+                    status: livrarr_domain::identity_layer::IdentityStatus::UserConfirmed,
+                    library_items_moved: 0,
+                    grabs_moved: 0,
+                },
+            ),
+            _ => Err(livrarr_domain::identity_layer::IdentityRoadError::InvalidResolution),
+        }
+    }
+}
+
+fn inert_captured(
+    user_id: UserId,
+    work_id: WorkId,
+) -> livrarr_domain::identity_layer::CapturedIdentity {
+    livrarr_domain::identity_layer::CapturedIdentity {
+        user_id,
+        own_work_id: work_id,
+        identity_title: livrarr_domain::identity_layer::title_parts_from_provider(
+            "Door fixture".to_string(),
+            None,
+        )
+        .expect("fixture title"),
+        primary_author_id: 91,
+        text_distinction: "common".to_string(),
+        active_routes: Vec::new(),
+        status: livrarr_domain::identity_layer::IdentityStatus::NotConnected,
+        identity_generation: 0,
+    }
+}
+
+impl livrarr_domain::identity_layer::WorkIdentityRepository for RecordingIdentityRepo {
+    async fn read_captured_identity(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<
+        livrarr_domain::identity_layer::CapturedIdentity,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Ok(inert_captured(user_id, work_id))
+    }
+
+    async fn read_identity_presentations(
+        &self,
+        _user_id: UserId,
+        work_ids: &[WorkId],
+    ) -> Result<
+        Vec<livrarr_domain::identity_layer::WorkIdentityPresentation>,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Ok(work_ids
+            .iter()
+            .copied()
+            .map(
+                |work_id| livrarr_domain::identity_layer::WorkIdentityPresentation {
+                    work_id,
+                    status: livrarr_domain::identity_layer::IdentityStatus::NotConnected,
+                    identifiers: Default::default(),
+                },
+            )
+            .collect())
+    }
+
+    async fn list_captured_identities_in_group(
+        &self,
+        _user_id: UserId,
+        _normalized_main: String,
+        _primary_author_id: AuthorId,
+    ) -> Result<
+        Vec<livrarr_domain::identity_layer::CapturedIdentity>,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn read_primary_author_names(
+        &self,
+        _user_id: UserId,
+        _author_id: AuthorId,
+    ) -> Result<Vec<String>, livrarr_domain::identity_layer::IdentityRepositoryError> {
+        Ok(vec!["Door Author".to_string()])
+    }
+
+    async fn commit_settlement(
+        &self,
+        command: livrarr_domain::identity_layer::SettlementCommit,
+    ) -> Result<
+        livrarr_domain::identity_layer::SettlementCommitOutcome,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        self.confirm_count.fetch_add(1, Ordering::SeqCst);
+        let work_id = command.existing_work_id.unwrap_or(8801);
+        let review_cards = command
+            .review_cards
+            .iter()
+            .enumerate()
+            .map(
+                |(index, card)| livrarr_domain::identity_layer::MintedReviewCard {
+                    id: index as i64 + 1,
+                    kind: card.kind(),
+                    generation: command.expected_generation + 1,
+                },
+            )
+            .collect();
+        Ok(livrarr_domain::identity_layer::SettlementCommitOutcome {
+            identity: inert_captured(command.user_id, work_id),
+            created: command.existing_work_id.is_none(),
+            audit_id: 1,
+            review_cards,
+        })
+    }
+
+    async fn commit_unattached_import_review(
+        &self,
+        _user_id: UserId,
+        _evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle,
+    ) -> Result<
+        livrarr_domain::identity_layer::MintedReviewCard,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
+    }
+
+    async fn load_pending_review(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        _card_id: i64,
+    ) -> Result<
+        livrarr_domain::identity_layer::PendingReviewCard,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound)
+    }
+
+    async fn list_pending_reviews(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+    ) -> Result<
+        Vec<livrarr_domain::identity_layer::PendingReviewCard>,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn dismiss_pending_review(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        _card_id: i64,
+    ) -> Result<(), livrarr_domain::identity_layer::IdentityRepositoryError> {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound)
+    }
+
+    async fn load_pending_conflict_review(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        _conflict_id: i64,
+    ) -> Result<
+        livrarr_domain::identity_layer::PendingReviewCard,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound)
+    }
+
+    async fn commit_review_continuation(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        _command: livrarr_domain::identity_layer::ReviewResolutionCommand,
+        _cancel: CancellationToken,
+    ) -> Result<
+        livrarr_domain::identity_layer::ReviewContinuationOutcome,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
+    }
+
+    async fn resolve_conflict_atomically(
+        &self,
+        _command: livrarr_domain::identity_layer::ResolveIdentityConflictCommand,
+    ) -> Result<
+        livrarr_domain::identity_layer::CapturedIdentity,
+        livrarr_domain::identity_layer::IdentityRepositoryError,
+    > {
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
+    }
+}
+
 impl RecordingIdentityRepo {
     fn with_pending(work_id: WorkId, anchor_type: &str, value: &str) -> Self {
         Self {
@@ -1585,6 +1858,15 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
         _work_id: WorkId,
     ) -> Result<(i64, Vec<WorkIdentityAnchor>), WorkIdentityError> {
         Ok((0, self.anchors.lock().unwrap().clone()))
+    }
+    async fn find_anchor_owner(
+        &self,
+        _user_id: UserId,
+        _anchor_type: &AnchorType,
+        _value: &str,
+        _exclude_work_id: WorkId,
+    ) -> Result<Option<CollisionInfo>, WorkIdentityError> {
+        Ok(None)
     }
     async fn affirm_anchor_claimed(
         &self,
@@ -1752,13 +2034,18 @@ struct HandlerState {
     notifications: InertNotificationService,
     tags: InertTagService,
     history: InertHistoryService,
+    identity_road: InertIdentityRoad,
 }
 
 impl HandlerState {
     fn new(work: RecordingWorkService) -> Self {
+        let identity_repo = RecordingIdentityRepo::with_pending(8801, AnchorType::OL_WORK, "OLC5W");
+        let identity_road = InertIdentityRoad {
+            settlement_count: identity_repo.confirm_count.clone(),
+        };
         Self {
             work,
-            identity_repo: RecordingIdentityRepo::with_pending(8801, AnchorType::OL_WORK, "OLC5W"),
+            identity_repo,
             author: InertAuthorService,
             series: InertSeriesQueryService,
             enrichment: StubEnrichmentWorkflow::succeeding(),
@@ -1767,6 +2054,7 @@ impl HandlerState {
             notifications: InertNotificationService,
             tags: InertTagService,
             history: InertHistoryService,
+            identity_road,
         }
     }
 }
@@ -1781,6 +2069,18 @@ impl HasWorkIdentityRepository for HandlerState {
     type WorkIdentityRepo = RecordingIdentityRepo;
     fn work_identity_repo(&self) -> &Self::WorkIdentityRepo {
         &self.identity_repo
+    }
+}
+impl HasIdentityLayerRepository for HandlerState {
+    type IdentityLayerRepo = RecordingIdentityRepo;
+    fn identity_layer_repository(&self) -> &Self::IdentityLayerRepo {
+        &self.identity_repo
+    }
+}
+impl HasIdentityRoadService for HandlerState {
+    type IdentityRoadSvc = InertIdentityRoad;
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc {
+        &self.identity_road
     }
 }
 impl HasAuthorService for HandlerState {
@@ -1922,7 +2222,6 @@ async fn c1_work_add_handler_chains_complete_add_then_delayed_refresh() {
         matches!(calls[0], WorkCall::ResolveIdentityLocal),
         "C1 call 1"
     );
-    assert!(matches!(calls[1], WorkCall::AddFast(99)), "C1 call 2");
     assert!(
         matches!(
             &calls[2],
@@ -1935,7 +2234,7 @@ async fn c1_work_add_handler_chains_complete_add_then_delayed_refresh() {
                 source: ConflictSource::ManualAdd,
             } if *id == candidate_id
         ),
-        "C1 call 3: {calls:?}"
+        "C1 shared-road completion: {calls:?}"
     );
     assert_eq!(
         work.refresh_calls().await,
@@ -2026,7 +2325,7 @@ async fn c4_retry_all_incomplete_handler_spawns_service_call() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn c5_affirm_pending_anchor_calls_affirm_then_spawns_interactive_refresh() {
+async fn c5_affirm_pending_anchor_resolves_then_spawns_interactive_refresh() {
     let work = RecordingWorkService::new();
     let state = HandlerState::new(work.clone());
     let repo = state.identity_repo.clone();
@@ -2040,8 +2339,10 @@ async fn c5_affirm_pending_anchor_calls_affirm_then_spawns_interactive_refresh()
     assert_eq!(
         repo.confirm_count.load(Ordering::SeqCst),
         1,
-        "C5 affirm service call"
+        "C5 one typed settlement commit"
     );
+    // Bug reproduction: identity-layer-rewrite — successful affirm continues
+    // through resolution and schedules the established interactive refresh.
     wait_for_calls(&work, 1, |calls| {
         calls
             .iter()

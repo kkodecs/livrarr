@@ -1,7 +1,7 @@
-//! C3 preview-door pins for `docs/design-subtitle-matching.md`, test-plan item 5.
+//! C3 provider-response pins for `docs/design-subtitle-matching.md`, test-plan item 5.
 //!
 //! Both cases enter through the production router and authentication middleware,
-//! then traverse the real identity-preview handler, service stack, Goodreads
+//! then traverse the surviving manual-refresh handler, service stack, Goodreads
 //! client, provider queue, call sink, and SQLite persistence. The only double is
 //! the canned Goodreads HTTP endpoint at the transport seam.
 
@@ -17,7 +17,12 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
+use livrarr_db::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb};
+use livrarr_domain::identity_layer::{
+    EvidenceProvenance, IdentityProvider, IdentityTitleTuple, RouteKind, RouteOwner,
+    RouteProvenance, SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute,
+    WorkRouteState,
+};
 use livrarr_domain::services::{ProviderCallSink, RateBucket};
 use livrarr_domain::{MetadataProvider, UserRole, WorkId};
 use livrarr_enrichment::{DefaultProviderQueueBuilder, ProviderQueueConfig};
@@ -28,7 +33,7 @@ use livrarr_http::outbound_queue::{self, AdmissionError};
 use livrarr_metadata as metadata;
 use livrarr_server::auth_crypto::{AuthCryptoService, RealAuthCrypto};
 use livrarr_server::state::AppState;
-use serde_json::{json, Value};
+use serde_json::Value;
 use sqlx::Row;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -192,20 +197,75 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
         .await
         .expect("create route user")
         .id;
-    let work_id = db
-        .create_work(CreateWorkDbRequest {
+    let (author, _) = db
+        .create_author(CreateAuthorDbRequest {
             user_id,
-            title: "The Certified Book".to_string(),
-            author_name: "Case Writer".to_string(),
-            normalized_title: "the certified book".to_string(),
-            normalized_author: "case writer".to_string(),
-            language: Some("en".to_string()),
-            ..CreateWorkDbRequest::default()
+            name: "Case Writer".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
         })
         .await
-        .expect("create route work")
-        .0
-        .id;
+        .expect("create route author");
+    // Bug reproduction: identity-layer-rewrite — a post-activation fixture
+    // has a complete identity graph and no legacy scalar route; live refresh
+    // must dispatch from that graph rather than silently making zero calls.
+    let settled = WorkIdentityRepository::commit_settlement(
+        &db,
+        SettlementCommit {
+            user_id,
+            existing_work_id: None,
+            add_source: None,
+            identity_title: IdentityTitleTuple {
+                main: "The Certified Book".to_string(),
+                subtitle: None,
+                volume: None,
+                normalized_main: "the certified book".to_string(),
+                normalized_subtitle: String::new(),
+                normalized_volume: String::new(),
+                provenance: EvidenceProvenance::User,
+            },
+            text_distinction: None,
+            contributors: vec![WorkContributor {
+                user_id,
+                work_id: 0,
+                author_id: author.id,
+                ordinal: 0,
+                roles: Vec::new(),
+            }],
+            routes: vec![WorkRoute {
+                id: 0,
+                user_id,
+                owner: RouteOwner::Work(0),
+                resolved_work_id: 0,
+                provider: IdentityProvider::Goodreads,
+                kind: RouteKind::GoodreadsWork,
+                provider_scoped_id: "12345".to_string(),
+                state: WorkRouteState::Active,
+                provenance: RouteProvenance::Provider(IdentityProvider::Goodreads),
+                user_confirmed: true,
+                observed_at: chrono::Utc::now(),
+            }],
+            absorbed_work_ids: Vec::new(),
+            expected_generation: 0,
+            review_cards: Vec::new(),
+        },
+    )
+    .await
+    .expect("settle route work fixture");
+    assert!(
+        settled.created,
+        "fixture must use the settlement create branch"
+    );
+    assert_eq!(settled.identity.primary_author_id, author.id);
+    assert!(settled.identity.active_routes.iter().any(|route| {
+        route.provider == IdentityProvider::Goodreads
+            && route.kind == RouteKind::GoodreadsWork
+            && route.provider_scoped_id == "12345"
+    }));
+    let work_id = settled.identity.own_work_id;
 
     let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
         db.clone(),
@@ -312,6 +372,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
     let db_arc = Arc::new(db.clone());
     let queue = Arc::new(
         DefaultProviderQueueBuilder::new()
+            .with_identity_route_dispatch()
             .add_provider(
                 MetadataProvider::Goodreads,
                 ProviderClient::Goodreads(goodreads).with_call_sink(call_sink.clone()),
@@ -343,7 +404,8 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 http_fetcher.clone(),
                 data_dir.clone(),
             )
-            .with_resolver(identity_resolver_arc.clone()),
+            .with_resolver(identity_resolver_arc.clone())
+            .with_identity_routes_authoritative(),
         )
     };
     let discovery_service_arc = Arc::new(
@@ -365,6 +427,12 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
         std::collections::HashMap::new(),
         hmac_key.clone(),
         data_dir_arc.clone(),
+    ));
+    let identity_road_arc = Arc::new(livrarr_server::identity_layer::build_live_identity_road(
+        db.clone(),
+        http_fetcher.clone(),
+        http_client.clone(),
+        live_metadata_config.clone(),
     ));
 
     let state = AppState {
@@ -388,6 +456,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
         manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue: queue,
         enrichment_service: enrichment_service.clone(),
+        identity_road: identity_road_arc.clone(),
         author_service: Arc::new(metadata::author_service::AuthorServiceImpl::new(
             db.clone(),
             http_fetcher.clone(),
@@ -409,7 +478,8 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                     live_metadata_config.clone(),
                     llm_http_client.clone(),
                 ),
-            ),
+            )
+            .with_identity_road(identity_road_arc.clone()),
         ),
         work_service: work_service_arc.clone(),
         discovery_service: discovery_service_arc,
@@ -460,11 +530,12 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 http_fetcher.clone(),
                 data_dir.clone(),
             );
-            Arc::new(metadata::list_service::ListServiceImpl::new(
+            Arc::new(metadata::list_service::ListServiceImpl::with_identity_road(
                 db.clone(),
                 work_service,
                 http_fetcher.clone(),
                 metadata::list_service::NoOpBibliographyTrigger,
+                identity_road_arc.clone(),
             ))
         },
         identity_conflict_service: Arc::new(
@@ -489,10 +560,11 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 data_dir.clone(),
             );
             Arc::new(
-                metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
+                metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::with_identity_road(
                     Arc::new(db.clone()),
                     Arc::new(work_service),
                     Arc::new(http_fetcher.clone()),
+                    identity_road_arc.clone(),
                 ),
             )
         },
@@ -628,14 +700,14 @@ async fn run_preview_failure_case(shape: ProviderShape) {
         &harness.app,
         &harness.api_key,
         Method::POST,
-        format!("/api/v1/work/{}/identity/preview", harness.work_id),
-        Some(json!({"input": "12345", "slot": "gr_work"})),
+        format!("/api/v1/work/{}/refresh", harness.work_id),
+        None,
     )
     .await;
     assert_eq!(
         preview_status,
         StatusCode::OK,
-        "{} must reach the real preview handler",
+        "{} must reach the real manual-refresh handler",
         shape.label()
     );
     assert_eq!(

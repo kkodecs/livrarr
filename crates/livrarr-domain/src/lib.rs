@@ -4,6 +4,7 @@ mod entities;
 pub mod history_events;
 pub mod identity;
 pub mod identity_edit;
+pub mod identity_layer;
 pub mod identity_matching;
 mod infra_config;
 pub mod kash;

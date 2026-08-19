@@ -738,20 +738,51 @@ fn fingerprint_of(tuples: &SettledTuples) -> AuthorEvidenceFingerprint {
     }
 }
 
-/// Confirmed and Provisional works only — a Pending, NeedsReview, Conflict, or
-/// NotFound work has no settled identity to inherit an author route from.
-const SETTLED_WORK_SQL: &str = "SELECT id, title, identity_status, ol_key, gr_key, hc_key \
-                                  FROM works \
-                                 WHERE user_id = ? AND author_id = ? \
-                                   AND identity_status IN ('confirmed', 'provisional') \
-                                 ORDER BY id";
+/// Post-marker settled works and their active F2 work routes. The legacy badge
+/// and scalar provider columns are frozen and are never consulted here; the
+/// aliases retain the existing internal DTO shape while its source is F2.
+const SETTLED_WORK_V2_SQL: &str = "SELECT w.id, w.title, 'confirmed' AS identity_status, \
+        (SELECT r.provider_scoped_id FROM identity_routes r WHERE r.user_id=w.user_id \
+          AND r.resolved_work_id=w.id AND r.provider='\"OpenLibrary\"' \
+          AND r.kind='\"OpenLibraryWork\"' AND r.state='active' LIMIT 1) AS ol_key, \
+        (SELECT r.provider_scoped_id FROM identity_routes r WHERE r.user_id=w.user_id \
+          AND r.resolved_work_id=w.id AND r.provider='\"Goodreads\"' \
+          AND r.kind='\"GoodreadsWork\"' AND r.state='active' LIMIT 1) AS gr_key, \
+        (SELECT r.provider_scoped_id FROM identity_routes r WHERE r.user_id=w.user_id \
+          AND r.resolved_work_id=w.id AND r.provider='\"Hardcover\"' \
+          AND r.kind='\"HardcoverWork\"' AND r.state='active' LIMIT 1) AS hc_key \
+      FROM works w WHERE w.user_id=? AND COALESCE(w.primary_author_id,w.author_id)=? \
+        AND w.identity_status_v2 IN ('user_confirmed','connected') ORDER BY w.id";
+
+/// Compatibility for databases whose migration/authority gate has not reached
+/// F2. This is selected only when the v2 authority marker is absent.
+const SETTLED_WORK_LEGACY_SQL: &str = "SELECT w.id, w.title, w.identity_status, \
+        w.ol_key, w.gr_key, w.hc_key FROM works w \
+      WHERE w.user_id=? AND w.author_id=? \
+        AND w.identity_status='confirmed' ORDER BY w.id";
+
+async fn settled_work_sql_tx(conn: &mut SqliteConnection) -> Result<&'static str, DbError> {
+    let v2_active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
+                        WHERE key='identity_authority_v2' AND value='active')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+    Ok(if v2_active {
+        SETTLED_WORK_V2_SQL
+    } else {
+        SETTLED_WORK_LEGACY_SQL
+    })
+}
 
 async fn load_settled_tuples_tx(
     conn: &mut SqliteConnection,
     user_id: UserId,
     author_id: AuthorId,
 ) -> Result<SettledTuples, DbError> {
-    let rows = sqlx::query(SETTLED_WORK_SQL)
+    let sql = settled_work_sql_tx(conn).await?;
+    let rows = sqlx::query(sql)
         .bind(user_id)
         .bind(author_id)
         .fetch_all(&mut *conn)
@@ -796,7 +827,8 @@ async fn load_settled_works_tx(
     user_id: UserId,
     author_id: AuthorId,
 ) -> Result<Vec<SettledAuthorWork>, DbError> {
-    let rows = sqlx::query(SETTLED_WORK_SQL)
+    let sql = settled_work_sql_tx(conn).await?;
+    let rows = sqlx::query(sql)
         .bind(user_id)
         .bind(author_id)
         .fetch_all(&mut *conn)
@@ -903,7 +935,9 @@ impl AuthorLinkDb for SqliteDb {
         author_id: AuthorId,
         trigger: AuthorLinkTrigger,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         require_author_owned_tx(&mut tx, user_id, author_id).await?;
         ensure_progress_tx(&mut tx, user_id, author_id, trigger).await?;
         tx.commit().await.map_err(map_db_err)?;
@@ -930,7 +964,9 @@ impl AuthorLinkDb for SqliteDb {
 
         let mut inserted = 0u32;
         for (author_id, user_id, name) in rows {
-            let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+            let mut tx = crate::pool::begin_write(self.pool())
+                .await
+                .map_err(map_db_err)?;
             let landed = sqlx::query(
                 "INSERT INTO author_link_progress \
                      (author_id, user_id, state, next_attempt_at, trigger, updated_at) \
@@ -968,7 +1004,9 @@ impl AuthorLinkDb for SqliteDb {
     ) -> Result<Vec<AuthorLinkClaim>, DbError> {
         let now_str = ts(now);
         let lease_str = ts(lease_until);
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // A lease-free or expired row qualifies when its due time has arrived
         // OR a name observation dirtied it — including from an otherwise
@@ -1146,7 +1184,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         evidence_generation: i64,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         // MAX, not assignment: a generation only ever moves forward, so a stale
@@ -1200,7 +1240,9 @@ impl AuthorLinkDb for SqliteDb {
         evidence_generation: i64,
         keys: Vec<SettledWorkProviderKey>,
     ) -> Result<Vec<AuthorKeyAttempt>, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         // Work routes are *work* keys (OL…W, GR book id, HC book id), not
@@ -1291,7 +1333,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         evidence_generation: i64,
     ) -> Result<u64, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         let total: i64 = sqlx::query_scalar(
@@ -1315,7 +1359,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         evidence_generation: i64,
     ) -> Result<Vec<OutstandingKeyRetry>, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         // Retryable rows carrying a deadline are the whole population that will
@@ -1352,7 +1398,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         evidence_generation: i64,
     ) -> Result<u32, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         // The same population the review page shows: pending, of this
@@ -1378,7 +1426,9 @@ impl AuthorLinkDb for SqliteDb {
         user_id: UserId,
         author_id: AuthorId,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         // Ownership first, exactly as `ensure_enqueued` does it: the progress
         // upsert below conflicts on `author_id` alone, so a caller who does not
         // own this author would otherwise void its owner's live lease and
@@ -1438,7 +1488,9 @@ impl AuthorLinkDb for SqliteDb {
         outcome: AuthorKeyAttemptOutcome,
         authorial_credits_seen: u32,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         // A permanent skip carries an operator-visible code because "we will
@@ -1525,7 +1577,9 @@ impl AuthorLinkDb for SqliteDb {
         // `guard_author_route` can mint one, so no caller can assert Agree here.
         let evidence = evidence.into_agreed_evidence();
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let user_id = author_owner_tx(&mut tx, author_id).await?;
         if let Some(claim_token) = claim_token {
             verify_claim_tx(
@@ -1714,7 +1768,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         candidates: Vec<AuthorLinkCandidate>,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
         if candidates.is_empty() {
             tx.commit().await.map_err(map_db_err)?;
@@ -1909,7 +1965,9 @@ impl AuthorLinkDb for SqliteDb {
             });
         }
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         require_author_owned_tx(&mut tx, user_id, author_id).await?;
         // No worker claim is taken or required: a Readarr import is not the
         // author road, and it must never disturb its lease.
@@ -1952,7 +2010,9 @@ impl AuthorLinkDb for SqliteDb {
         claim: AuthorLinkClaim,
         update: AuthorLinkProgressUpdate,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         verify_claim_tx(&mut tx, &claim).await?;
 
         let now = now_ts();
@@ -2001,7 +2061,9 @@ impl AuthorLinkDb for SqliteDb {
         user_id: UserId,
         candidate_id: i64,
     ) -> Result<AuthorRoute, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let row = sqlx::query(&format!(
             "SELECT {CANDIDATE_COLUMNS} FROM author_link_candidates \
@@ -2090,7 +2152,9 @@ impl AuthorLinkDb for SqliteDb {
         author_id: AuthorId,
         key: AuthorRouteKey,
     ) -> Result<AuthorRoute, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let route = attach_route_as_user_tx(&mut tx, user_id, author_id, key).await?;
         rederive_progress_tx(&mut tx, user_id, author_id).await?;
         tx.commit().await.map_err(map_db_err)?;
@@ -2102,7 +2166,9 @@ impl AuthorLinkDb for SqliteDb {
         user_id: UserId,
         candidate_id: i64,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let author_id: AuthorId = sqlx::query_scalar(
             "SELECT author_id FROM author_link_candidates \
@@ -2301,7 +2367,9 @@ impl AuthorLinkDb for SqliteDb {
         author_id: AuthorId,
         route_id: i64,
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         // The row is retained, not deleted: the tombstone is the durable record
         // that the user said no, and it outlives every automatic re-discovery.
         let removed = sqlx::query(
@@ -2446,7 +2514,9 @@ impl AuthorLinkDb for SqliteDb {
                 break;
             }
 
-            let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+            let mut tx = crate::pool::begin_write(self.pool())
+                .await
+                .map_err(map_db_err)?;
             for (id, user_id, author_id, provider, raw_value) in staged {
                 let now = now_ts();
                 let provider = parse_provider(&provider)?;
@@ -2511,7 +2581,9 @@ impl AuthorLinkDb for SqliteDb {
                 break;
             }
 
-            let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+            let mut tx = crate::pool::begin_write(self.pool())
+                .await
+                .map_err(map_db_err)?;
             for (author_id, user_id, name) in staged {
                 let canonical = canonical_author_key(&name);
                 insert_name_variant_tx(
@@ -2875,7 +2947,9 @@ impl AuthorNameVariantDb for SqliteDb {
         work_id: WorkId,
         observations: &[ProviderAuthorNameObservation],
     ) -> Result<u32, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let author_id: AuthorId =
             sqlx::query_scalar("SELECT author_id FROM works WHERE id = ? AND user_id = ?")
@@ -2898,7 +2972,9 @@ impl AuthorNameVariantDb for SqliteDb {
         author_id: AuthorId,
         observations: &[ProviderAuthorNameObservation],
     ) -> Result<u32, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         require_author_owned_tx(&mut tx, user_id, author_id).await?;
         let inserted = record_observed_names_tx(&mut tx, user_id, author_id, observations).await?;
         tx.commit().await.map_err(map_db_err)?;

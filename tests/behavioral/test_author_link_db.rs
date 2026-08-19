@@ -15,6 +15,10 @@ use livrarr_db::{
     AuthorDb, AuthorLinkClaim, AuthorLinkDb, AuthorNameVariantDb, CreateAuthorDbRequest,
     CreateWorkDbRequest, GuardedRouteWrite, RenameAuthorDbRequest, WorkDb, WorkDbCreate,
 };
+use livrarr_domain::identity_layer::{
+    title_parts_from_provider, IdentityProvider, RouteKind, RouteOwner, RouteProvenance,
+    SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute, WorkRouteState,
+};
 use livrarr_domain::identity_matching::AuthorVerdict;
 use livrarr_domain::{
     guard_author_route, normalize_for_matching, AuthorCandidateAlternateNameEvidence,
@@ -745,9 +749,49 @@ async fn ac006_claim_due_pins_due_dirty_terminal_and_lease_matrix() {
 #[tokio::test]
 async fn ac003_ac006_road_input_and_fingerprint_include_only_settled_user_owned_work() {
     let (db, user_id, author_id, work_id) = seeded_db("Road Input").await;
-    db.set_identity_status(user_id, work_id, IdentityStatus::Confirmed)
-        .await
-        .expect("production identity writer");
+    let expected_generation: i64 =
+        sqlx::query_scalar("SELECT identity_generation FROM works WHERE id=?1 AND user_id=?2")
+            .bind(work_id)
+            .bind(user_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read coherent pre-settlement generation");
+    WorkIdentityRepository::commit_settlement(
+        &db,
+        SettlementCommit {
+            user_id,
+            existing_work_id: Some(work_id),
+            add_source: None,
+            identity_title: title_parts_from_provider("Road Input Work".to_string(), None)
+                .expect("fixture title"),
+            text_distinction: None,
+            contributors: vec![WorkContributor {
+                user_id,
+                work_id,
+                author_id,
+                ordinal: 0,
+                roles: vec![],
+            }],
+            routes: vec![WorkRoute {
+                id: 0,
+                user_id,
+                owner: RouteOwner::Work(work_id),
+                resolved_work_id: work_id,
+                provider: IdentityProvider::OpenLibrary,
+                kind: RouteKind::OpenLibraryWork,
+                provider_scoped_id: "OL1W".to_string(),
+                state: WorkRouteState::Active,
+                provenance: RouteProvenance::UserChoice,
+                user_confirmed: true,
+                observed_at: Utc::now(),
+            }],
+            absorbed_work_ids: vec![],
+            expected_generation,
+            review_cards: vec![],
+        },
+    )
+    .await
+    .expect("production F2 identity writer");
     let claim = claimed_author(&db, user_id, author_id).await;
     let input = db
         .load_road_input(claim)

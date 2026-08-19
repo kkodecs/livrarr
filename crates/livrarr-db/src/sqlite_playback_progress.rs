@@ -105,7 +105,9 @@ impl PlaybackProgressDb for SqliteDb {
         };
 
         // Cross-format path: playback write + furthest_ts MAX-advance in one transaction.
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         sqlx::query(
             "INSERT INTO playback_progress (user_id, library_item_id, position, progress_pct, updated_at, finished_at)

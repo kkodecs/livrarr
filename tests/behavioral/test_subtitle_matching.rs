@@ -5,9 +5,9 @@
 //!
 //! * **C1** — a one-sided subtitle no longer needs a hard identifier to agree.
 //!   A subtitle is edition-level; the work record carries the bare title.
-//! * **C2** — the Goodreads cover gate is gone. It asked "is this payload really
-//!   this book?" with raw title Jaccard, and stripped the cover of a work whose
-//!   Goodreads key the user had just certified by hand.
+//! * **C2** — the old Goodreads title-similarity cover gate remains gone. Round
+//!   15 now excludes Goodreads at cover-candidate assembly instead: payload
+//!   parsing and identity trust survive, but Goodreads art cannot be selected.
 //!
 //! Every test here drives a real production entry point: the payload-trust
 //! function the resolver calls, and the real `MergeEngine::merge` chokepoint.
@@ -23,8 +23,7 @@ use livrarr_domain::services::{
     SiblingAction, WorkIdentityRepository, WorkService,
 };
 use livrarr_domain::{
-    normalize_for_matching, AnchorQuery, CoverTrust, MetadataProvider, OutcomeClass, UserId, Work,
-    WorkId,
+    normalize_for_matching, AnchorQuery, MetadataProvider, OutcomeClass, UserId, Work, WorkId,
 };
 use livrarr_external_data::NormalizedWorkDetail;
 use livrarr_metadata::english_identity_resolver::verify_gr_payload;
@@ -58,6 +57,7 @@ fn empty_detail() -> NormalizedWorkDetail {
         publish_date: None,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: None,
         asin: None,
@@ -173,7 +173,7 @@ fn cover_first_priority(cover: Vec<MetadataProvider>) -> PriorityModel {
 
 /// An English work carrying both an OpenLibrary key and a Goodreads key — the
 /// exact shape the deleted gate keyed on.
-fn einstein_work(cover_trust: CoverTrust) -> Work {
+fn einstein_work(cover_manual: bool) -> Work {
     Work {
         id: WORK_ID,
         user_id: USER_ID,
@@ -183,7 +183,7 @@ fn einstein_work(cover_trust: CoverTrust) -> Work {
         ol_key: Some("OL4288870W".to_string()),
         gr_key: Some("10884".to_string()),
         cover_url: Some(OL_COVER.to_string()),
-        cover_trust,
+        cover_manual,
         ..Default::default()
     }
 }
@@ -226,31 +226,18 @@ async fn run_merge(input: MergeInput) -> MergeOutput {
     engine.merge(input).await.expect("merge should succeed")
 }
 
-/// The defect the PO hit: seconds after certifying `gr_key = 10884` by hand, the
-/// work lost its cover. The gate scored raw token Jaccard of "Einstein" against
-/// "Einstein: His Life and Universe" at 0.25, below its 0.6 bar, and stripped
-/// the cover — for a key the user had just confirmed.
-///
-/// RED before C2, green after.
+/// Round 15 contains Goodreads art at candidate assembly without restoring the
+/// deleted raw-title gate. Even this trusted, subtitled payload is parsed but
+/// cannot produce a cover selection.
 #[tokio::test]
-async fn merge_keeps_a_goodreads_cover_whose_title_carries_a_subtitle() {
+async fn merge_excludes_a_goodreads_cover_whose_title_carries_a_subtitle() {
     let output = run_merge(merge_input(
-        einstein_work(CoverTrust::Unvalidated),
+        einstein_work(false),
         vec![(MetadataProvider::Goodreads, gr_payload_with_subtitle())],
     ))
     .await;
 
-    let resolution = output
-        .cover_resolution
-        .expect("a Goodreads cover must survive the merge");
-    assert_eq!(resolution.url, GR_COVER);
-
-    let update = output
-        .work_update
-        .as_ref()
-        .expect("expected a work update")
-        .as_inner();
-    assert_eq!(update.cover_url.as_deref(), Some(GR_COVER));
+    assert!(output.cover_resolution.is_none());
 }
 
 // The gate also stripped `payload.gr_key` alongside the cover. That half has no
@@ -266,7 +253,7 @@ async fn merge_keeps_a_goodreads_cover_whose_title_carries_a_subtitle() {
 #[tokio::test]
 async fn merge_leaves_a_user_chosen_cover_alone() {
     let output = run_merge(merge_input(
-        einstein_work(CoverTrust::User),
+        einstein_work(true),
         vec![(MetadataProvider::Goodreads, gr_payload_with_subtitle())],
     ))
     .await;
@@ -432,7 +419,7 @@ async fn preview_keeps_the_openlibrary_sibling_when_goodreads_adds_a_subtitle() 
 /// it must not remove the other.
 #[tokio::test]
 async fn merge_still_drops_language_incompatible_providers() {
-    let mut work = einstein_work(CoverTrust::Unvalidated);
+    let mut work = einstein_work(false);
     work.language = Some("de".to_string());
     work.title = "Die Krone Der Sterne".to_string();
 

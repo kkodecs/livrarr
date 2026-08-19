@@ -290,7 +290,7 @@ export default function SearchPage() {
                     key={work.olKey ?? `${work.title}-${idx}`}
                     work={work}
                     onAdd={() =>
-                      addWorkWithCover(work, work.coverUrl, !!work.coverUrl)
+                      addWorkWithCover(work, work.coverUrl, false)
                     }
                   />
                 ))}
@@ -340,7 +340,7 @@ export default function SearchPage() {
       })
       .catch((err: Error) => {
         if (err instanceof ApiError && err.status === 409) {
-          toast.error("Already in your library");
+          toast.error(err.message || "Could not complete the add");
         } else {
           toast.error(err.message || "Failed to add work");
         }

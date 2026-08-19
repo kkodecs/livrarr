@@ -1502,6 +1502,15 @@ impl WorkService for StubWorkService {
     ) -> Result<AddWorkResult, WorkServiceError> {
         unreachable!("not used by scan")
     }
+    async fn capture_add_identity_routes(
+        &self,
+        _: UserId,
+        _: WorkId,
+        _: livrarr_domain::identity::IdentityMode,
+    ) -> Result<Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>, WorkServiceError>
+    {
+        Ok(Vec::new())
+    }
     async fn complete_add(
         &self,
         _: UserId,
@@ -1510,7 +1519,7 @@ impl WorkService for StubWorkService {
         _: Option<livrarr_domain::identity::CandidateId>,
         _: livrarr_domain::identity::IdentityMode,
         _: livrarr_domain::identity::ConflictSource,
-    ) {
+    ) -> Option<livrarr_domain::identity_layer::CapturedRouteHandoff> {
         unreachable!("not used by scan")
     }
     fn is_enriching(&self, _: UserId, _: WorkId) -> bool {

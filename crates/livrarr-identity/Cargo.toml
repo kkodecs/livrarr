@@ -11,6 +11,8 @@ serde_json = { workspace = true }
 livrarr-domain = { workspace = true }
 livrarr-external-data = { workspace = true }
 livrarr-http = { workspace = true }
+thiserror = { workspace = true }
+trait-variant = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }

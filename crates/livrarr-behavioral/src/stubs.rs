@@ -3,6 +3,7 @@ use livrarr_db::{
     AuthorLinkClaim, AuthorLinkDb, AuthorNameVariantDb, AuthorProviderCall,
     AuthorRouteBackfillReport, DbError, GuardedRouteWrite,
 };
+use livrarr_domain::identity_layer;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use std::collections::HashMap;
@@ -321,6 +322,9 @@ impl EnrichmentWorkflow for StubEnrichmentWorkflow {
             identity_not_found: false,
             changed: true,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -961,4 +965,169 @@ pub async fn create_second_test_user(db: &livrarr_db::sqlite::SqliteDb) -> i64 {
     .await
     .unwrap()
     .id
+}
+
+// =============================================================================
+// Identity-layer-rewrite (F2) — StubIdentityRoadService. IR v1
+// `livrarr-behavioral` module (ir-v1-identity-layer-rewrite.yaml:1401-1407).
+// Trait+impl+stub pattern (insight 7): trait in domain, impl in
+// livrarr-metadata, this stub here. No behavior yet (stub-writing scope) —
+// `todo!()` bodies, matching this file's existing stub convention.
+// =============================================================================
+
+pub struct StubIdentityRoadService {
+    pub requests: Arc<Mutex<Vec<identity_layer::IdentityRoadRequest>>>,
+    /// Verbatim IR v1 shape (no interior-mutability wrapper) — unused by any
+    /// `todo!()` body yet, so `&self`-only trait methods do not need one
+    /// at this stub stage.
+    pub outcomes: std::collections::VecDeque<identity_layer::IdentityRoadOutcome>,
+}
+
+impl identity_layer::IdentityRoadService for StubIdentityRoadService {
+    async fn settle(
+        &self,
+        _request: identity_layer::IdentityRoadRequest,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        todo!()
+    }
+
+    async fn resolve_review(
+        &self,
+        _actor: identity_layer::ReviewActor,
+        _command: identity_layer::ReviewResolutionCommand,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        todo!()
+    }
+}
+
+/// Repository-backed road used by handler regression fixtures that exercise
+/// the pending-route affirm continuation without composing network gateways.
+#[derive(Clone)]
+pub struct SqlitePendingRouteRoad {
+    db: livrarr_db::sqlite::SqliteDb,
+}
+
+impl SqlitePendingRouteRoad {
+    pub fn new(db: livrarr_db::sqlite::SqliteDb) -> Self {
+        Self { db }
+    }
+}
+
+impl identity_layer::IdentityRoadService for SqlitePendingRouteRoad {
+    async fn settle(
+        &self,
+        request: identity_layer::IdentityRoadRequest,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        use identity_layer::WorkIdentityRepository as _;
+        if request.origin != identity_layer::IdentityRoadOrigin::AffirmPendingRoute {
+            return Err(identity_layer::IdentityRoadError::InvalidDoorEvidence);
+        }
+        let work_id = request
+            .existing_work_id
+            .ok_or(identity_layer::IdentityRoadError::InvalidDoorEvidence)?;
+        let route = request
+            .evidence
+            .provider_identity
+            .first()
+            .ok_or(identity_layer::IdentityRoadError::InvalidDoorEvidence)?;
+        let captured = self
+            .db
+            .read_captured_identity(request.user_id, work_id)
+            .await
+            .map_err(map_pending_route_repo_error)?;
+        let text_distinction =
+            (captured.text_distinction != "common").then(|| captured.text_distinction.clone());
+        let committed = self
+            .db
+            .commit_settlement(identity_layer::SettlementCommit {
+                user_id: request.user_id,
+                existing_work_id: Some(work_id),
+                add_source: None,
+                identity_title: captured.identity_title,
+                text_distinction,
+                contributors: vec![identity_layer::WorkContributor {
+                    user_id: request.user_id,
+                    work_id,
+                    author_id: captured.primary_author_id,
+                    ordinal: 0,
+                    roles: Vec::new(),
+                }],
+                routes: captured.active_routes,
+                absorbed_work_ids: Vec::new(),
+                expected_generation: captured.identity_generation,
+                review_cards: vec![identity_layer::SettlementReviewCard::PendingRoute {
+                    work_id,
+                    candidate: identity_layer::ParkedRouteCandidate {
+                        route: route.route.clone(),
+                        proposed_owner: identity_layer::RouteOwner::Work(work_id),
+                    },
+                }],
+            })
+            .await
+            .map_err(map_pending_route_repo_error)?;
+        let card =
+            committed.review_cards.first().copied().ok_or_else(|| {
+                identity_layer::IdentityRoadError::Database("missing card".into())
+            })?;
+        Ok(identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id: card.id,
+            kind: card.kind,
+            unattached: false,
+            expected_generation: card.generation,
+            provenance: identity_layer::EvidenceProvenance::User,
+        })
+    }
+
+    async fn resolve_review(
+        &self,
+        actor: identity_layer::ReviewActor,
+        command: identity_layer::ReviewResolutionCommand,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        use identity_layer::WorkIdentityRepository as _;
+        let committed = self
+            .db
+            .commit_review_continuation(actor, command, tokio_util::sync::CancellationToken::new())
+            .await
+            .map_err(map_pending_route_repo_error)?;
+        let identity = committed
+            .identity
+            .ok_or(identity_layer::IdentityRoadError::InvalidResolution)?;
+        Ok(identity_layer::IdentityRoadOutcome::Settled {
+            work_id: identity.own_work_id,
+            created: false,
+            routes: identity.active_routes,
+            status: identity.status,
+            library_items_moved: committed.library_items_moved,
+            grabs_moved: committed.grabs_moved,
+        })
+    }
+}
+
+fn map_pending_route_repo_error(
+    error: identity_layer::IdentityRepositoryError,
+) -> identity_layer::IdentityRoadError {
+    match error {
+        identity_layer::IdentityRepositoryError::NotFound => {
+            identity_layer::IdentityRoadError::NotFound
+        }
+        identity_layer::IdentityRepositoryError::StaleGeneration => {
+            identity_layer::IdentityRoadError::StaleGeneration
+        }
+        identity_layer::IdentityRepositoryError::UnauthorizedScope => {
+            identity_layer::IdentityRoadError::UnauthorizedScope
+        }
+        identity_layer::IdentityRepositoryError::ReviewKindMismatch => {
+            identity_layer::IdentityRoadError::ReviewKindMismatch
+        }
+        identity_layer::IdentityRepositoryError::InvalidResolution => {
+            identity_layer::IdentityRoadError::InvalidResolution
+        }
+        identity_layer::IdentityRepositoryError::ReviewProposalInvalidated(reason) => {
+            identity_layer::IdentityRoadError::ReviewProposalInvalidated(reason)
+        }
+        identity_layer::IdentityRepositoryError::Cancelled => {
+            identity_layer::IdentityRoadError::Cancelled
+        }
+        other => identity_layer::IdentityRoadError::Database(other.to_string()),
+    }
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { act } from "react";
 import ReviewPage from "./ReviewPage";
 import AuthorDetailPage from "@/pages/author-detail/AuthorDetailPage";
 import {
@@ -25,7 +26,7 @@ afterEach(() => {
   restore = null;
 });
 
-function stub(handler: (call: ApiCall) => StubReply) {
+function stub(handler: (call: ApiCall) => StubReply | Promise<StubReply>) {
   const s = installApiStub(handler);
   restore = s.restore;
   return s;
@@ -86,7 +87,11 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
 
     // Books half is down; authors half is healthy.
     stub((call) => {
-      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+      if (
+        call.path === "/identity-review" ||
+        call.path === "/identity-review-card" ||
+        call.path === "/identity-conflict"
+      ) {
         return { status: 500, body: { status: 500, error: "internal", message: "boom" } };
       }
       if (call.path === "/author-link-review") {
@@ -169,7 +174,11 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     ];
 
     stub((call) => {
-      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+      if (
+        call.path === "/identity-review" ||
+        call.path === "/identity-review-card" ||
+        call.path === "/identity-conflict"
+      ) {
         return { status: 200, body: [] };
       }
       if (call.path === "/author-link-review") {
@@ -220,6 +229,7 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
         };
       }
       if (call.path === "/identity-conflict") return { status: 200, body: [] };
+      if (call.path === "/identity-review-card") return { status: 200, body: [] };
       if (call.path === "/author-link-review") {
         return {
           status: 503,
@@ -244,6 +254,137 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
       cleanup();
     }
   });
+
+  // Bug reproduction: identity-layer-rewrite round 18 — conflict cards
+  // exposed a bare internal Work id while the title query loaded or failed.
+  it("uses neutral conflict labels while the existing book loads or fails", async () => {
+    let finishWork!: (reply: StubReply) => void;
+    const workReply = new Promise<StubReply>((resolve) => {
+      finishWork = resolve;
+    });
+    stub(async (call) => {
+      if (call.path === "/identity-review") return { status: 200, body: [] };
+      if (call.path === "/identity-review-card") return { status: 200, body: [] };
+      if (call.path === "/identity-conflict") {
+        return {
+          status: 200,
+          body: [
+            {
+              id: 18,
+              existingWorkId: 73,
+              kind: "incoming_different_ol_key",
+              incomingTitle: "A Candidate Book",
+              incomingAuthor: "Candidate Author",
+              incomingOlKey: "OL18W",
+              raisedAt: "2026-08-18T00:00:00Z",
+              raisedBy: "convergence",
+              status: "open",
+            },
+          ],
+        };
+      }
+      if (call.path === "/author-link-review") return { status: 200, body: [] };
+      if (call.path === "/work/73") return workReply;
+      throw new Error(`unexpected call ${call.method} ${call.path}`);
+    });
+
+    const client = newTestClient();
+    const review = mountWith(client, <ReviewPage />);
+    try {
+      await vi.waitFor(
+        () => expect(review.container.textContent).toContain("A Candidate Book"),
+        { timeout: 5000 },
+      );
+      expect(review.container.textContent).toContain("Loading…");
+      expect(review.container.textContent).not.toContain("Work #73");
+
+      await act(async () => {
+        finishWork({
+          status: 500,
+          body: { status: 500, error: "internal", message: "book unavailable" },
+        });
+      });
+      await vi.waitFor(
+        () => expect(review.container.textContent).toContain("this book"),
+        { timeout: 5000 },
+      );
+      expect(review.container.textContent).not.toContain("Work #73");
+    } finally {
+      review.cleanup();
+    }
+  });
+
+  it("finishes a merge from the typed GroupIdentity card", async () => {
+    let resolved = false;
+    const { calls } = stub((call) => {
+      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+        return { status: 200, body: [] };
+      }
+      if (call.path === "/identity-review-card") {
+        return {
+          status: 200,
+          body: resolved
+            ? []
+            : [
+                {
+                  id: 219,
+                  userId: 1,
+                  workId: 216,
+                  workTitle: "Merge Survivor",
+                  workAuthor: "Merge Author",
+                  kind: "GroupIdentity",
+                  // The collection returns the anchor's current generation,
+                  // which may be newer than the immutable mint generation.
+                  generation: 9,
+                  payload: {
+                    GroupIdentity: {
+                      work_ids: [216, 215],
+                      proposed_identity: null,
+                      merge_choices: [],
+                    },
+                  },
+                },
+              ],
+        };
+      }
+      if (call.path === "/identity-review-card/219/resolve" && call.method === "POST") {
+        resolved = true;
+        return { status: 200, body: { workId: 216 } };
+      }
+      if (call.path === "/author-link-review") return { status: 200, body: [] };
+      if (call.path === "/work/216") {
+        return { status: 200, body: { id: 216, title: "Merge Survivor" } };
+      }
+      throw new Error(`unexpected call ${call.method} ${call.path}`);
+    });
+
+    const client = newTestClient();
+    const review = mountWith(client, <ReviewPage />);
+    try {
+      await vi.waitFor(
+        () => expect(review.container.textContent).toContain("Confirm Merge"),
+        { timeout: 5000 },
+      );
+      await clickButton(review.container, "Confirm Merge");
+      await vi.waitFor(() => {
+        const resolveCall = calls.find(
+          (call) =>
+            call.path === "/identity-review-card/219/resolve" && call.method === "POST",
+        );
+        expect(resolveCall?.body).toEqual({
+          command: {
+            GroupIdentity: {
+              card_id: 219,
+              expected_generation: 9,
+              action: { AttachOrMerge: { anchor: 216 } },
+            },
+          },
+        });
+      });
+    } finally {
+      review.cleanup();
+    }
+  });
 });
 
 describe("pickAuthorLinkCandidate — picking a candidate from review", () => {
@@ -266,7 +407,11 @@ describe("pickAuthorLinkCandidate — picking a candidate from review", () => {
 
     let picked = false;
     const { calls } = stub((call) => {
-      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+      if (
+        call.path === "/identity-review" ||
+        call.path === "/identity-review-card" ||
+        call.path === "/identity-conflict"
+      ) {
         return { status: 200, body: [] };
       }
       if (call.path === "/author-link-review") {

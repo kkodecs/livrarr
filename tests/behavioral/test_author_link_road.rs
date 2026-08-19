@@ -17,6 +17,10 @@ use livrarr_db::{
     AuthorDb, AuthorLinkDb, CreateAuthorDbRequest, CreateSeriesDbRequest, ListImportDb, SeriesDb,
 };
 use livrarr_domain::identity::{CapturedIdentity, IdentityMethod, IdentityState, WorkCandidate};
+use livrarr_domain::identity_layer::{
+    title_parts_from_provider, IdentityProvider, RouteKind, RouteOwner, RouteProvenance,
+    SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute, WorkRouteState,
+};
 use livrarr_domain::seed::{
     seed_add_box, seed_list_import, seed_manual_import, seed_readarr_import, seed_series_monitor,
     SeedInput, SeedLanguage,
@@ -151,6 +155,49 @@ async fn settled_author_claim(
         .await
         .expect("production settled-work writer");
     let author_id = result.author_id.expect("converged author id");
+    let expected_generation: i64 =
+        sqlx::query_scalar("SELECT identity_generation FROM works WHERE id=?1 AND user_id=?2")
+            .bind(result.work.id)
+            .bind(user_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("read coherent pre-settlement generation");
+    WorkIdentityRepository::commit_settlement(
+        db,
+        SettlementCommit {
+            user_id,
+            existing_work_id: Some(result.work.id),
+            add_source: None,
+            identity_title: title_parts_from_provider(title.to_string(), None)
+                .expect("fixture title"),
+            text_distinction: None,
+            contributors: vec![WorkContributor {
+                user_id,
+                work_id: result.work.id,
+                author_id,
+                ordinal: 0,
+                roles: vec![],
+            }],
+            routes: vec![WorkRoute {
+                id: 0,
+                user_id,
+                owner: RouteOwner::Work(result.work.id),
+                resolved_work_id: result.work.id,
+                provider: IdentityProvider::OpenLibrary,
+                kind: RouteKind::OpenLibraryWork,
+                provider_scoped_id: "OL9001W".to_string(),
+                state: WorkRouteState::Active,
+                provenance: RouteProvenance::UserChoice,
+                user_confirmed: true,
+                observed_at: Utc::now(),
+            }],
+            absorbed_work_ids: vec![],
+            expected_generation,
+            review_cards: vec![],
+        },
+    )
+    .await
+    .expect("production F2 settled-work writer");
     db.ensure_enqueued(user_id, author_id, AuthorLinkTrigger::AuthorCreated)
         .await
         .expect("production enqueue writer");

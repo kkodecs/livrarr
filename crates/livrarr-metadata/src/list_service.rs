@@ -5,9 +5,10 @@
 
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
+use std::sync::Arc;
 use tracing::{info, warn};
 
-use livrarr_db::{ConfigDb, ListImportDb};
+use livrarr_db::{AuthorLinkDb, ConfigDb, ListImportDb};
 use livrarr_domain::services::*;
 use livrarr_domain::UserId;
 
@@ -17,20 +18,88 @@ use livrarr_external_data::parsers::{self, CsvSource, ParseError};
 // ListServiceImpl
 // ---------------------------------------------------------------------------
 
-pub struct ListServiceImpl<D, W, H, B> {
+pub struct NoIdentityRoad;
+
+pub struct ConfiguredIdentityRoad<R>(Arc<R>);
+
+#[trait_variant::make(ListIdentityRoad: Send)]
+pub trait LocalListIdentityRoad: Send + Sync {
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    >;
+}
+
+impl ListIdentityRoad for NoIdentityRoad {
+    async fn settle(
+        &self,
+        _request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        None
+    }
+}
+
+impl<R> ListIdentityRoad for ConfiguredIdentityRoad<R>
+where
+    R: livrarr_domain::identity_layer::IdentityRoadService + Send + Sync,
+{
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        Some(self.0.settle(request).await)
+    }
+}
+
+pub struct ListServiceImpl<D, W, H, B, R = NoIdentityRoad> {
     pub db: D,
     pub work_service: W,
     pub http: H,
     pub bibliography_trigger: B,
+    identity_road: R,
 }
 
-impl<D, W, H, B> ListServiceImpl<D, W, H, B> {
+impl<D, W, H, B> ListServiceImpl<D, W, H, B, NoIdentityRoad> {
     pub fn new(db: D, work_service: W, http: H, bibliography_trigger: B) -> Self {
         Self {
             db,
             work_service,
             http,
             bibliography_trigger,
+            identity_road: NoIdentityRoad,
+        }
+    }
+}
+
+impl<D, W, H, B, R> ListServiceImpl<D, W, H, B, ConfiguredIdentityRoad<R>> {
+    pub fn with_identity_road(
+        db: D,
+        work_service: W,
+        http: H,
+        bibliography_trigger: B,
+        identity_road: Arc<R>,
+    ) -> Self {
+        Self {
+            db,
+            work_service,
+            http,
+            bibliography_trigger,
+            identity_road: ConfiguredIdentityRoad(identity_road),
         }
     }
 }
@@ -39,9 +108,11 @@ impl<D, W, H, B> ListServiceImpl<D, W, H, B> {
 // Row -> identity candidate (resolved synchronously through the one road)
 // ---------------------------------------------------------------------------
 
-impl<D, W, H, B> ListServiceImpl<D, W, H, B>
+impl<D, W, H, B, R> ListServiceImpl<D, W, H, B, R>
 where
     W: WorkService,
+    D: AuthorLinkDb,
+    R: ListIdentityRoad,
 {
     /// Resolve a confirmed preview row's identity through the shared
     /// [`WorkService::resolve_identity`] — the same road the interactive Add-Work
@@ -136,18 +207,143 @@ where
             candidate_id,
         )
     }
+
+    /// Production ListImport creation enters identity-v2 before a Work row
+    /// exists. `None` means this test/back-compat composition has no v2 road
+    /// and should use the legacy WorkService path below.
+    async fn settle_candidate_v2(
+        &self,
+        user_id: UserId,
+        candidate: &livrarr_domain::identity::WorkCandidate,
+    ) -> Option<Result<(i64, bool, bool, i64), String>> {
+        use livrarr_domain::identity_layer as ilr;
+
+        let author_name = crate::title_cleanup::clean_author(&candidate.fields.author_name);
+        if author_name.is_empty() {
+            return Some(Err("author must not be empty".to_string()));
+        }
+        let (author, author_created) = match self
+            .db
+            .create_or_adopt_author(livrarr_db::CreateAuthorGateRequest {
+                user_id,
+                name: author_name,
+                sort_name: None,
+                import_id: candidate.import_id.clone(),
+                initial_name_source: livrarr_domain::AuthorNameSource::Import,
+                trigger: livrarr_domain::AuthorLinkTrigger::AuthorCreated,
+            })
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error.to_string())),
+        };
+        let identity_title = match ilr::title_parts_from_provider(
+            crate::title_cleanup::clean_title(&candidate.fields.title),
+            None,
+        ) {
+            Ok(title) => title,
+            Err(error) => return Some(Err(error.to_string())),
+        };
+        let minimum = ilr::MinimumWorkEvidence {
+            title: identity_title.main.clone(),
+            authors: vec![author.id],
+        };
+        let core = ilr::ProviderWorkIdentityCore {
+            identity_title,
+            primary_author_id: author.id,
+        };
+        let anchors = candidate.identity.seed_or_confirmed_anchors();
+        let provider_identity = anchors
+            .into_iter()
+            .flat_map(|captured| {
+                [
+                    captured.ol_key.as_ref().map(|value| {
+                        (
+                            ilr::IdentityProvider::OpenLibrary,
+                            ilr::RouteKind::OpenLibraryWork,
+                            value,
+                        )
+                    }),
+                    captured.gr_key.as_ref().map(|value| {
+                        (
+                            ilr::IdentityProvider::Goodreads,
+                            ilr::RouteKind::GoodreadsWork,
+                            value,
+                        )
+                    }),
+                    captured.hc_key.as_ref().map(|value| {
+                        (
+                            ilr::IdentityProvider::Hardcover,
+                            ilr::RouteKind::HardcoverWork,
+                            value,
+                        )
+                    }),
+                    captured.isbn_13.as_ref().map(|value| {
+                        (
+                            ilr::IdentityProvider::IsbnRegistry,
+                            ilr::RouteKind::Isbn13Edition,
+                            value,
+                        )
+                    }),
+                    captured.asin.as_ref().map(|value| {
+                        (
+                            ilr::IdentityProvider::Amazon,
+                            ilr::RouteKind::AsinEdition,
+                            value,
+                        )
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .map(|(provider, kind, value)| ilr::ProviderIdentityEvidence {
+                    provider: provider.clone(),
+                    route: ilr::RouteKey {
+                        provider,
+                        kind,
+                        value: value.clone(),
+                    },
+                    work_core: Some(core.clone()),
+                    provenance: Default::default(),
+                })
+                .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let anchorless = provider_identity.is_empty();
+        let request = ilr::IdentityRoadRequest {
+            user_id,
+            origin: ilr::IdentityRoadOrigin::CreationDoor(ilr::DoorKind::ListImport),
+            evidence: ilr::IdentityEvidenceBundle {
+                user_choice: anchorless
+                    .then(|| ilr::UserIdentityChoice::ExplicitCreate(minimum.clone())),
+                owned_files: Vec::new(),
+                provider_identity,
+                minimum: anchorless.then_some(minimum),
+            },
+            interaction: ilr::IdentityRoadInteraction::HumanWatching,
+            existing_work_id: None,
+        };
+        match self.identity_road.settle(request).await {
+            None => None,
+            Some(Ok(ilr::IdentityRoadOutcome::Settled {
+                work_id, created, ..
+            })) => Some(Ok((work_id, created, author_created, author.id))),
+            Some(Ok(other)) => Some(Err(format!("identity review required: {other:?}"))),
+            Some(Err(error)) => Some(Err(error.to_string())),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ListService trait implementation
 // ---------------------------------------------------------------------------
 
-impl<D, W, H, B> ListService for ListServiceImpl<D, W, H, B>
+impl<D, W, H, B, R> ListService for ListServiceImpl<D, W, H, B, R>
 where
-    D: ListImportDb + livrarr_db::WorkDb + ConfigDb + Send + Sync,
+    D: ListImportDb + livrarr_db::WorkDb + ConfigDb + AuthorLinkDb + Send + Sync,
     W: WorkService + Send + Sync,
     H: HttpFetcher + Send + Sync,
     B: BibliographyTrigger + Send + Sync,
+    R: ListIdentityRoad + Send + Sync,
 {
     async fn preview(
         &self,
@@ -208,17 +404,19 @@ where
             .list_works(user_id)
             .await
             .map_err(ListServiceError::Db)?;
-        let existing_keys: std::collections::HashSet<String> = existing_works
-            .iter()
-            .map(|w| normalize_for_dedup(&w.title, &w.author_name))
-            .collect();
-
         let mut preview_rows = Vec::with_capacity(rows.len());
 
         for row in &rows {
             let status = if row.title.is_empty() {
                 "parse_error"
-            } else if existing_keys.contains(&normalize_for_dedup(&row.title, &row.author)) {
+            } else if existing_works.iter().any(|work| {
+                list_identity_authority_match(
+                    &work.title,
+                    &work.author_name,
+                    &row.title,
+                    &row.author,
+                )
+            }) {
                 "already_exists"
             } else {
                 "new"
@@ -399,6 +597,50 @@ where
                 let add_req = self
                     .resolve_candidate_from_row(user_id, &row, language, default_language_ref)
                     .await;
+
+                if let Some(settled) = self.settle_candidate_v2(user_id, &add_req).await {
+                    return match settled {
+                        Ok((work_id, created, author_created, author_id)) => {
+                            if created {
+                                self.work_service
+                                    .complete_add(
+                                        user_id,
+                                        work_id,
+                                        add_req.source_provider_data.clone(),
+                                        add_req.candidate_id.clone(),
+                                        livrarr_domain::identity::IdentityMode::Background,
+                                        livrarr_domain::identity::ConflictSource::ListImport,
+                                    )
+                                    .await;
+                                if let Err(e) = self
+                                    .db
+                                    .tag_work_with_import(user_id, work_id, resolved_id_ref)
+                                    .await
+                                {
+                                    warn!(user_id, work_id, import_id = %resolved_id_ref, "tag_work_with_import failed (non-fatal): {e}");
+                                }
+                            }
+                            RowOutcome {
+                                result: ListConfirmRowResult {
+                                    row_index: row_idx,
+                                    status: if created { "added" } else { "already_exists" }.into(),
+                                    message: None,
+                                },
+                                works_created: created,
+                                new_author_id: (created && author_created).then_some(author_id),
+                            }
+                        }
+                        Err(error) => RowOutcome {
+                            result: ListConfirmRowResult {
+                                row_index: row_idx,
+                                status: "add_failed".into(),
+                                message: Some(error),
+                            },
+                            works_created: false,
+                            new_author_id: None,
+                        },
+                    };
+                }
 
                 match self.work_service.add(user_id, add_req).await {
                     Ok(add_result) if !add_result.created => RowOutcome {
@@ -610,18 +852,21 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn normalize_for_dedup(title: &str, author: &str) -> String {
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(|c| c.to_lowercase())
-            .collect()
-    };
-    format!("{}::{}", norm(title), norm(author))
+pub fn list_identity_authority_match(
+    left_title: &str,
+    left_author: &str,
+    right_title: &str,
+    right_author: &str,
+) -> bool {
+    livrarr_matching::identity_layer::find_matching_work(
+        crate::identity_consumer_match::authority_inputs(
+            left_title,
+            left_author,
+            right_title,
+            right_author,
+        ),
+    )
+    .is_match
 }
 
 // ---------------------------------------------------------------------------

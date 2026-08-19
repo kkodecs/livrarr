@@ -1578,6 +1578,7 @@ dependencies = [
  "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
+ "livrarr-identity",
  "livrarr-library",
  "livrarr-matching",
  "livrarr-materialize",
@@ -1617,10 +1618,12 @@ dependencies = [
  "livrarr-domain",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "trait-variant",
  "uuid",
@@ -1768,8 +1771,10 @@ dependencies = [
  "livrarr-http",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "trait-variant",
  "uuid",
 ]
 
@@ -1786,8 +1791,10 @@ dependencies = [
 name = "livrarr-library"
 version = "0.1.0-alpha6"
 dependencies = [
+ "chrono",
  "livrarr-db",
  "livrarr-domain",
+ "quick-xml 0.37.5",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1795,6 +1802,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trait-variant",
+ "zip 2.4.2",
 ]
 
 [[package]]
@@ -1886,6 +1894,8 @@ dependencies = [
  "livrarr-external-data",
  "livrarr-handlers",
  "livrarr-http",
+ "livrarr-identity",
+ "livrarr-jobs",
  "livrarr-library",
  "livrarr-matching",
  "livrarr-materialize",

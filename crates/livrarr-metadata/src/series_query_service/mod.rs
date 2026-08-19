@@ -5,4 +5,7 @@ mod roster_merge;
 mod series_list_merge;
 mod service;
 
-pub use service::SeriesQueryServiceImpl;
+pub use service::{
+    ConfiguredSeriesIdentityRoad, LocalSeriesIdentityRoad, NoSeriesIdentityRoad,
+    SeriesIdentityRoad, SeriesQueryServiceImpl,
+};

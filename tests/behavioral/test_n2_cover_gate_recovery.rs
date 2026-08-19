@@ -8,7 +8,7 @@
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate};
-use livrarr_domain::{normalize_for_matching, CoverTrust, UserRole, Work};
+use livrarr_domain::{normalize_for_matching, UserRole, Work};
 use livrarr_metadata::cover_write_gate_recovery::recover_pending_cover_writes;
 
 async fn seed_user_and_work(db: &SqliteDb) -> (i64, Work) {
@@ -36,22 +36,11 @@ async fn seed_user_and_work(db: &SqliteDb) -> (i64, Work) {
     (user_id, work)
 }
 
-async fn write_meta(
-    path: &std::path::Path,
-    url: &str,
-    source: &str,
-    trust: CoverTrust,
-    w: i32,
-    h: i32,
-) {
+async fn write_meta(path: &std::path::Path, url: &str, source: &str, manual: bool, w: i32, h: i32) {
     let json = serde_json::json!({
         "url": url,
         "source": source,
-        "trust": match trust {
-            CoverTrust::Unvalidated => "unvalidated",
-            CoverTrust::Validated => "validated",
-            CoverTrust::User => "user",
-        },
+        "manual": manual,
         "width": w,
         "height": h,
     });
@@ -68,18 +57,14 @@ async fn write_meta_opt_url(
     path: &std::path::Path,
     url: Option<&str>,
     source: &str,
-    trust: CoverTrust,
+    manual: bool,
     w: i32,
     h: i32,
 ) {
     let json = serde_json::json!({
         "url": url,
         "source": source,
-        "trust": match trust {
-            CoverTrust::Unvalidated => "unvalidated",
-            CoverTrust::Validated => "validated",
-            CoverTrust::User => "user",
-        },
+        "manual": manual,
         "width": w,
         "height": h,
     });
@@ -111,7 +96,7 @@ async fn ac11_boundary1_crash_after_sidecar_write_before_decision_discards_both(
         work.id,
         Some("https://old.example/incumbent.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -131,7 +116,7 @@ async fn ac11_boundary1_crash_after_sidecar_write_before_decision_discards_both(
         &meta_path,
         "https://new.example/candidate.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -175,7 +160,7 @@ async fn ac11_boundary2_crash_mid_reject_cleanup_leaves_only_a_harmless_orphan_t
         work.id,
         Some("https://old.example/incumbent.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -229,7 +214,7 @@ async fn ac11_boundary3_crash_after_db_commit_before_rename_completes_the_rename
         work.id,
         Some("https://new.example/candidate.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -245,7 +230,7 @@ async fn ac11_boundary3_crash_after_db_commit_before_rename_completes_the_rename
         &meta_path,
         "https://new.example/candidate.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -281,7 +266,7 @@ async fn ac11_boundary4_crash_after_rename_before_meta_delete_just_deletes_stale
         work.id,
         Some("https://new.example/candidate.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -298,7 +283,7 @@ async fn ac11_boundary4_crash_after_rename_before_meta_delete_just_deletes_stale
         &meta_path,
         "https://new.example/candidate.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -333,7 +318,7 @@ async fn ac11_heals_row_when_tmp_is_gone_but_row_disagrees_with_meta() {
         work.id,
         Some("https://old.example/incumbent.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -349,7 +334,7 @@ async fn ac11_heals_row_when_tmp_is_gone_but_row_disagrees_with_meta() {
         &meta_path,
         "https://new.example/candidate.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -364,7 +349,6 @@ async fn ac11_heals_row_when_tmp_is_gone_but_row_disagrees_with_meta() {
         Some("https://new.example/candidate.jpg")
     );
     assert_eq!(after.cover_source.as_deref(), Some("goodreads"));
-    assert_eq!(after.cover_trust, CoverTrust::Validated);
     assert_eq!((after.cover_width, after.cover_height), (500, 700));
     assert!(no_candidate_files_survive(&user_dir, work.id));
 }
@@ -379,15 +363,7 @@ async fn ac11_orphan_work_candidate_is_discarded() {
     let tmp_path = user_dir.join("999999.candidate.tmp");
     let meta_path = user_dir.join("999999.candidate.meta.json");
     tokio::fs::write(&tmp_path, b"orphan-bytes").await.unwrap();
-    write_meta(
-        &meta_path,
-        "https://x/y.jpg",
-        "goodreads",
-        CoverTrust::Validated,
-        1,
-        1,
-    )
-    .await;
+    write_meta(&meta_path, "https://x/y.jpg", "goodreads", false, 1, 1).await;
 
     let report = recover_pending_cover_writes(&db, covers_root.path()).await;
     assert_eq!(report.orphaned, 1);
@@ -417,7 +393,7 @@ async fn user_upload_heals_row_to_none_url_and_user_trust_when_tmp_is_gone() {
         work.id,
         Some("https://old.example/incumbent.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -429,7 +405,7 @@ async fn user_upload_heals_row_to_none_url_and_user_trust_when_tmp_is_gone() {
         .unwrap();
 
     let meta_path = user_dir.join(format!("{}.candidate.meta.json", work.id));
-    write_meta_opt_url(&meta_path, None, "user_upload", CoverTrust::User, 400, 600).await;
+    write_meta_opt_url(&meta_path, None, "user_upload", true, 400, 600).await;
 
     let report = recover_pending_cover_writes(&db, covers_root.path()).await;
     assert_eq!(report.healed, 1);
@@ -440,7 +416,7 @@ async fn user_upload_heals_row_to_none_url_and_user_trust_when_tmp_is_gone() {
         "healing a url-less upload candidate must not fabricate a URL"
     );
     assert_eq!(after.cover_source.as_deref(), Some("user_upload"));
-    assert_eq!(after.cover_trust, CoverTrust::User);
+    assert!(after.cover_manual);
     assert_eq!((after.cover_width, after.cover_height), (400, 600));
     assert!(
         after.cover_manual,
@@ -465,7 +441,7 @@ async fn user_upload_candidate_is_discarded_when_crash_landed_before_db_commit()
         work.id,
         Some("https://old.example/incumbent.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -481,7 +457,7 @@ async fn user_upload_candidate_is_discarded_when_crash_landed_before_db_commit()
     tokio::fs::write(&tmp_path, b"pending-upload-bytes")
         .await
         .unwrap();
-    write_meta_opt_url(&meta_path, None, "user_upload", CoverTrust::User, 400, 600).await;
+    write_meta_opt_url(&meta_path, None, "user_upload", true, 400, 600).await;
 
     let report = recover_pending_cover_writes(&db, covers_root.path()).await;
     assert_eq!(report.discarded, 1);

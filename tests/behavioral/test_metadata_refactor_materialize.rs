@@ -49,7 +49,9 @@ fn request(changed: bool) -> MaterializeRequest {
     MaterializeRequest {
         work_id: 42,
         changed,
-        tag_fields_changed: changed,
+        // These tests isolate cover acquisition. Tag-write success/failure is
+        // exercised separately against real files by the identity-layer suite.
+        tag_fields_changed: false,
         ebook_cover: CoverSlotState {
             chosen_new_url: Some("https://covers.example.test/ebook.jpg".to_string()),
             current_url: None,

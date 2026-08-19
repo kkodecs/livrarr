@@ -103,7 +103,9 @@ impl crate::ExternalIdDb for SqliteDb {
             }
         }
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         for req in reqs {
             let id_type_str = to_str(req.id_type);

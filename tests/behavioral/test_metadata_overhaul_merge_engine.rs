@@ -76,6 +76,7 @@ fn empty_detail() -> NormalizedWorkDetail {
         publish_date: None,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: None,
         asin: None,
@@ -767,7 +768,9 @@ async fn test_merge_engine_hard_refresh_preserves_last_known_good_for_will_retry
 
 #[tokio::test]
 async fn test_merge_engine_english_priority_model_uses_documented_provider_order() {
-    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority model uses HC→GR→OL for content, HC→OL→GR for description, and (N2/S1) GR→HC→...→OL for cover
+    // REQ-ID: R-02 | Contract: MergeEngine::merge | Behavior: English priority
+    // model keeps its content/description order, while round 15 removes
+    // Goodreads from the cover candidates before that cover order is applied.
     let engine = make_engine();
 
     let input = MergeInput {
@@ -816,9 +819,7 @@ async fn test_merge_engine_english_priority_model_uses_documented_provider_order
         .cover_resolution
         .as_ref()
         .expect("should resolve a cover");
-    // N2/S1: the unified cover rank table puts Goodreads first for English
-    // (GR → HC → GB → Readarr → OL → Audnexus → Audible), not Hardcover.
-    assert_eq!(cover.url, "https://example.test/gr-cover.jpg");
+    assert_eq!(cover.url, "https://example.test/hc-cover.jpg");
 }
 
 #[tokio::test]
@@ -864,7 +865,7 @@ async fn test_merge_engine_foreign_priority_model_uses_gr_only() {
         .cover_resolution
         .as_ref()
         .expect("should resolve a cover");
-    assert_eq!(cover.url, "https://example.test/gr-cover.jpg");
+    assert_eq!(cover.url, "https://example.test/ol-cover.jpg");
 }
 
 #[tokio::test]
@@ -1108,12 +1109,10 @@ async fn test_merge_engine_audio_fields_use_audio_priority_model_not_content_pri
 }
 
 #[tokio::test]
-async fn test_merge_engine_cover_manual_no_longer_blocks_provider_cover() {
-    // REQ-008 (metadata-refactor): cover_manual is no longer a cover lock — provenance
-    // Setter=User is the single lock mechanism (metadata-refactor AC-005). The cover
-    // provenance here is Provider-owned, so the highest-priority provider cover wins;
-    // the legacy cover_manual bypass is removed. Cover selection generates no field
-    // provenance (cover is resolved separately from MERGE_FIELDS).
+async fn test_merge_engine_cover_manual_blocks_provider_cover() {
+    // The manual flag remains the user-sovereignty signal after the independent
+    // cover-grade vocabulary is retired. Provider refreshes must preserve the
+    // manually selected URL even if its provenance row is stale or provider-owned.
     let engine = make_engine();
 
     let input = MergeInput {
@@ -1157,7 +1156,7 @@ async fn test_merge_engine_cover_manual_no_longer_blocks_provider_cover() {
 
     assert_eq!(
         resolved(&output).cover_url.as_deref(),
-        Some("https://example.test/gr-cover.jpg")
+        Some("https://example.test/manual-cover.jpg")
     );
     assert_no_field_mutation(&output, WorkField::CoverUrl);
 }
@@ -1409,15 +1408,15 @@ async fn test_merge_language_fills_when_blank() {
     );
 }
 
-/// REQ-ID: M-012 | Contract: MergeEngine::merge | Behavior: Goodreads outranks
-/// OpenLibrary in the English cover priority list, so a Goodreads cover wins the
-/// cover field when both providers offer one.
+/// REQ-ID: M-012 | Contract: MergeEngine::merge | Behavior: round 15 removes
+/// Goodreads before the English cover priority list is applied, so OpenLibrary
+/// wins when these are the two provider payloads.
 ///
-/// The title-similarity half of this test is gone with the Goodreads cover gate
-/// (`docs/design-subtitle-matching.md` r3, C2). Nothing compares titles for cover
-/// purposes any more; the ranking below is the whole policy.
+/// The title-similarity half of this test remains gone (`docs/design-subtitle-matching.md`
+/// r3, C2). Round 15 additionally contains Goodreads at the cover-candidate
+/// boundary, so the next eligible ranked source wins without reparsing payloads.
 #[tokio::test]
-async fn test_merge_engine_goodreads_outranks_openlibrary_for_cover() {
+async fn test_merge_engine_goodreads_is_excluded_before_cover_ranking() {
     let engine = make_engine();
 
     let base_work = Work {
@@ -1464,7 +1463,7 @@ async fn test_merge_engine_goodreads_outranks_openlibrary_for_cover() {
         .as_ref()
         .expect("should resolve a cover");
     assert_eq!(
-        matching_cover.url, "https://example.test/gr-cover.jpg",
-        "Goodreads outranks OpenLibrary for the English ebook cover"
+        matching_cover.url, "https://example.test/ol-cover.jpg",
+        "the Goodreads payload survives, but its cover is not a candidate"
     );
 }

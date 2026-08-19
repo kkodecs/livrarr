@@ -49,7 +49,9 @@ impl ChapterDb for SqliteDb {
         library_item_id: LibraryItemId,
         chapters: &[AudiobookChapter],
     ) -> Result<(), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         sqlx::query("DELETE FROM audiobook_chapters WHERE library_item_id = ?")
             .bind(library_item_id)

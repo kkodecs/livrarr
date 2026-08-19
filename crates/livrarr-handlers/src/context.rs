@@ -38,6 +38,52 @@ pub trait HasWorkIdentityRepository: Clone + Send + Sync + 'static {
     fn work_identity_repo(&self) -> &Self::WorkIdentityRepo;
 }
 
+/// Identity-layer-rewrite (F2). IR v1 `livrarr-handlers` module names this
+/// `HasIdentityRoadService { identity_road_service: &S where S:
+/// IdentityRoadService }`; represented with the same associated-type
+/// accessor shape every other `Has*` trait in this file uses (`trait_variant`
+/// traits are not dyn-compatible — see insight 8).
+pub trait HasIdentityRoadService: Clone + Send + Sync + 'static {
+    type IdentityRoadSvc: livrarr_domain::identity_layer::IdentityRoadService
+        + Send
+        + Sync
+        + 'static;
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc;
+}
+
+/// Persistence half of the F2 composition, used only by interactive doors to
+/// place their typed review-card draft in the same settlement transaction.
+pub trait HasIdentityLayerRepository: Clone + Send + Sync + 'static {
+    type IdentityLayerRepo: livrarr_domain::identity_layer::WorkIdentityRepository
+        + Send
+        + Sync
+        + 'static;
+    fn identity_layer_repository(&self) -> &Self::IdentityLayerRepo;
+}
+
+/// Narrow ManualImport boundary for first-class Edition evidence. The
+/// concrete server adapter owns persistence lookup/creation and delegates the
+/// evidence decision to the domain `EditionRepository`; handlers see neither
+/// SQL nor a database implementation.
+#[trait_variant::make(Send)]
+pub trait EditionEvidenceCapability: Send + Sync {
+    async fn apply_evidence(
+        &self,
+        user_id: livrarr_domain::UserId,
+        work_id: livrarr_domain::WorkId,
+        format: livrarr_domain::identity_layer::EditionFormat,
+        language: Option<String>,
+    ) -> Result<
+        livrarr_domain::identity_layer::EditionEvidenceOutcome,
+        livrarr_domain::identity_layer::EditionRepositoryError,
+    >;
+}
+
+pub trait HasEditionRepository: Clone + Send + Sync + 'static {
+    type EditionRepo: EditionEvidenceCapability + Send + Sync + 'static;
+    fn edition_repository(&self) -> &Self::EditionRepo;
+}
+
 pub trait HasFileService: Clone + Send + Sync + 'static {
     type FileSvc: FileService + Send + Sync + 'static;
     fn file_service(&self) -> &Self::FileSvc;

@@ -93,7 +93,9 @@ impl SqliteDb {
         &self,
         request: CreateAuthorGateRequest,
     ) -> Result<(Author, bool), DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let converged =
             crate::sqlite_author_link::create_or_adopt_author_tx(&mut tx, &request).await?;
         tx.commit().await.map_err(map_db_err)?;
@@ -395,7 +397,9 @@ impl AuthorDb for SqliteDb {
             });
         }
 
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         let report = merge_authors_tx(&mut tx, user_id, survivor_id, loser_id).await?;
         tx.commit().await.map_err(map_db_err)?;
         Ok(report)
@@ -576,16 +580,34 @@ impl AuthorDb for SqliteDb {
     }
 
     async fn delete_author(&self, user_id: UserId, id: AuthorId) -> Result<(), DbError> {
+        // Contributor credits are historical presentation data, not ownership
+        // of an Author row. Remove only this author's scoped credits first so
+        // the intentional RESTRICT FK cannot turn the author-delete door into
+        // a 500. Contributor roles cascade from those rows; sibling credits
+        // and the Work itself remain untouched, and the legacy/primary author
+        // FKs degrade through their SET NULL rules. One transaction prevents
+        // an ownership miss from stripping any credits.
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        sqlx::query("DELETE FROM work_contributors WHERE user_id = ? AND author_id = ?")
+            .bind(user_id)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_db_err)?;
+
         let result = sqlx::query("DELETE FROM authors WHERE id = ? AND user_id = ?")
             .bind(id)
             .bind(user_id)
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(map_db_err)?;
 
         if result.rows_affected() == 0 {
             return Err(DbError::NotFound { entity: "author" });
         }
+        tx.commit().await.map_err(map_db_err)?;
         Ok(())
     }
 
@@ -697,7 +719,9 @@ impl SqliteDb {
         request: crate::RenameAuthorDbRequest,
         origin: DisplayNameOrigin,
     ) -> Result<Author, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let owner: Option<i64> = sqlx::query_scalar("SELECT user_id FROM authors WHERE id = ?")
             .bind(request.author_id)

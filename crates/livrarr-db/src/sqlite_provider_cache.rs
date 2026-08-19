@@ -78,7 +78,9 @@ impl crate::ProviderResponseCacheDb for SqliteDb {
     }
 
     async fn evict_provider_cache_to_cap(&self, max_rows: i64) -> Result<u64, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_response_cache")
             .fetch_one(&mut *tx)

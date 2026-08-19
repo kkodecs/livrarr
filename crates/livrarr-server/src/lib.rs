@@ -169,6 +169,7 @@ pub mod rate_limit;
 pub use livrarr_matching as matching;
 pub mod email_service;
 pub mod history_service;
+pub mod identity_layer;
 pub mod import_io_service;
 pub mod import_service;
 pub mod manual_import_scan_service;

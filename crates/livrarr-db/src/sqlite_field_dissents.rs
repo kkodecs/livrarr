@@ -57,7 +57,9 @@ impl FieldDissentDb for SqliteDb {
                 .map_err(map_db_err)?;
             return Ok(());
         };
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
         sqlx::query(
             "DELETE FROM work_field_dissents \
              WHERE user_id = ? AND work_id = ? AND merge_generation < ?",

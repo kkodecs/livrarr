@@ -2,7 +2,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::state::AppState;
-use crate::tag_service::{build_tag_metadata, read_cover_bytes, tag_sync_single_item};
+use crate::tag_service::{build_tag_metadata, read_cover_bytes, route_isbn, tag_sync_single_item};
 use livrarr_db::{record_history, HistoryDb, LibraryItemDb, WorkDb};
 use livrarr_domain::history_events;
 use livrarr_domain::services::ImportIoService;
@@ -68,7 +68,12 @@ pub async fn recover_item_tags<D, I>(
     data_dir: &std::path::Path,
     item: &livrarr_domain::LibraryItem,
 ) where
-    D: WorkDb + LibraryItemDb + HistoryDb + Send + Sync,
+    D: WorkDb
+        + LibraryItemDb
+        + HistoryDb
+        + livrarr_domain::identity_layer::WorkIdentityRepository
+        + Send
+        + Sync,
     I: ImportIoService + Send + Sync,
 {
     let work = match db.get_work(item.user_id, item.work_id).await {
@@ -88,7 +93,7 @@ pub async fn recover_item_tags<D, I>(
         return;
     }
 
-    let tag_metadata = build_tag_metadata(&work);
+    let tag_metadata = build_tag_metadata(&work, route_isbn(db, &work).await);
     let cover_data = read_cover_bytes(data_dir, item.user_id, work.id).await;
 
     // Look up root folder path for this item.

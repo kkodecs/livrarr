@@ -34,6 +34,30 @@ use crate::hardcover::query_hardcover;
 use crate::openlibrary::query_ol_detail;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
 
+/// One provider-native candidate returned to the enrichment queue's REQ-027
+/// policy layer. External-data owns transport/parsing; selection and
+/// corroboration remain queue-side.
+#[derive(Debug, Clone)]
+pub struct IdentitySearchCandidate {
+    pub title: String,
+    pub author: String,
+    pub work_id: String,
+    pub edition_identifiers: Vec<IdentitySearchIdentifier>,
+    pub probe: Option<IdentitySearchProbe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentitySearchIdentifier {
+    pub kind: livrarr_domain::identity_layer::RouteKind,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdentitySearchProbe {
+    GoodreadsBook { book_id: String },
+    HardcoverWork { work_id: i64 },
+}
+
 /// Heterogeneous provider client. Enum dispatch instead of `Box<dyn>` because
 /// `trait_variant::make(Send)` traits are not dyn-compatible. New real-provider
 /// adapters are added as new variants here.
@@ -180,6 +204,237 @@ impl ProviderClient {
             | Self::Audible(_) => 0,
         }
     }
+
+    /// Whether invoking `search_identity_candidates` will issue a real search
+    /// request. Disabled/unconfigured Hardcover and all anchor-only/stub
+    /// providers are silent absences, not chase attempts.
+    pub fn identity_search_available(&self) -> bool {
+        match self {
+            Self::OpenLibrary(_) | Self::Goodreads(_) => true,
+            Self::Hardcover(client) => {
+                let cfg = client.live_config.snapshot();
+                cfg.hardcover_enabled
+                    && cfg
+                        .hardcover_api_token
+                        .as_deref()
+                        .map(normalize_hardcover_token)
+                        .is_some_and(|token| !token.is_empty())
+            }
+            Self::Stub(_) | Self::Audnexus(_) | Self::GoogleBooks(_) | Self::Audible(_) => false,
+        }
+    }
+
+    /// Provider-native title search. A transport or parse failure is an honest
+    /// miss for this pass; the caller has already counted the spawned fetch.
+    pub async fn search_identity_candidates(
+        &self,
+        title: &str,
+        author: &str,
+        language: Option<&str>,
+        priority: RequestPriority,
+    ) -> Result<Vec<IdentitySearchCandidate>, ()> {
+        match self {
+            Self::OpenLibrary(client) => {
+                let term = format!("{title} {author}");
+                crate::openlibrary::search_openlibrary_identity_hits_with_options(
+                    &client.fetcher,
+                    "https://openlibrary.org",
+                    &term,
+                    language.unwrap_or("en"),
+                    priority,
+                    Duration::from_secs(30),
+                    15,
+                )
+                .await
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|hit| IdentitySearchCandidate {
+                            title: hit.title,
+                            author: hit.author_name,
+                            work_id: hit.ol_key,
+                            edition_identifiers: hit
+                                .isbns
+                                .into_iter()
+                                .map(|value| IdentitySearchIdentifier {
+                                    kind: livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+                                    value,
+                                })
+                                .chain(hit.amazon_ids.into_iter().map(|value| {
+                                    IdentitySearchIdentifier {
+                                        kind:
+                                            livrarr_domain::identity_layer::RouteKind::AsinEdition,
+                                        value,
+                                    }
+                                }))
+                                .collect(),
+                            probe: None,
+                        })
+                        .collect()
+                })
+                .map_err(|error| {
+                    tracing::warn!(%error, "OpenLibrary identity search fallback failed");
+                })
+            }
+            Self::Goodreads(client) => {
+                goodreads::search_goodreads(&client.fetcher, &client.base_url, title, priority)
+                    .await
+                    .map(|hits| {
+                        hits.into_iter()
+                            .filter_map(|hit| {
+                                let book_id = hit.book_id?;
+                                let work_id = hit.work_id?;
+                                Some(IdentitySearchCandidate {
+                                    title: hit.title_bare.unwrap_or(hit.title),
+                                    author: hit.author.unwrap_or_default(),
+                                    work_id,
+                                    edition_identifiers: Vec::new(),
+                                    probe: Some(IdentitySearchProbe::GoodreadsBook { book_id }),
+                                })
+                            })
+                            .collect()
+                    })
+                    .map_err(|error| {
+                        tracing::warn!(error = ?error, "Goodreads identity search fallback failed");
+                    })
+            }
+            Self::Hardcover(client) => {
+                let cfg = client.live_config.snapshot();
+                if !cfg.hardcover_enabled {
+                    return Ok(Vec::new());
+                }
+                let token = cfg
+                    .hardcover_api_token
+                    .as_deref()
+                    .map(normalize_hardcover_token)
+                    .filter(|token| !token.is_empty())
+                    .ok_or(())?;
+                crate::hardcover::fetch_hardcover_discovery_hits(
+                    &client.fetcher,
+                    title,
+                    token,
+                    priority,
+                )
+                .await
+                .map(|hits| {
+                    hits.into_iter()
+                        .filter_map(|hit| {
+                            let document = hit.get("document")?;
+                            let title = document.get("title")?.as_str()?.to_string();
+                            let author = document
+                                .get("author_names")
+                                .and_then(|value| value.as_array())
+                                .and_then(|values| values.first())
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let work_id = document
+                                .get("id")?
+                                .as_i64()
+                                .or_else(|| document.get("id")?.as_str()?.parse::<i64>().ok())?;
+                            Some(IdentitySearchCandidate {
+                                title,
+                                author,
+                                work_id: work_id.to_string(),
+                                edition_identifiers: Vec::new(),
+                                probe: Some(IdentitySearchProbe::HardcoverWork { work_id }),
+                            })
+                        })
+                        .collect()
+                })
+                .map_err(|error| {
+                    tracing::warn!(%error, "Hardcover identity search fallback failed");
+                })
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// The sole optional corroboration probe for a picked search candidate.
+    pub async fn probe_identity_candidate(
+        &self,
+        probe: &IdentitySearchProbe,
+        language: Option<&str>,
+        priority: RequestPriority,
+    ) -> Result<Vec<IdentitySearchIdentifier>, ()> {
+        match (self, probe) {
+            (Self::Goodreads(client), IdentitySearchProbe::GoodreadsBook { book_id }) => {
+                match client
+                    .fetch_detail_by_key(book_id, language, priority)
+                    .await
+                {
+                    ProviderOutcome::Success(detail) => Ok(detail_identifiers(&detail)),
+                    _ => Err(()),
+                }
+            }
+            (Self::Hardcover(client), IdentitySearchProbe::HardcoverWork { work_id }) => {
+                let cfg = client.live_config.snapshot();
+                let token = cfg
+                    .hardcover_api_token
+                    .as_deref()
+                    .map(normalize_hardcover_token)
+                    .filter(|token| !token.is_empty())
+                    .ok_or(())?;
+                crate::hardcover::probe_hardcover_identity_ids(
+                    &client.fetcher,
+                    *work_id,
+                    token,
+                    priority,
+                )
+                .await
+                .map(|ids| {
+                    ids.isbns
+                        .into_iter()
+                        .map(|value| IdentitySearchIdentifier {
+                            kind: livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+                            value,
+                        })
+                        .chain(ids.asins.into_iter().map(|value| IdentitySearchIdentifier {
+                            kind: livrarr_domain::identity_layer::RouteKind::AsinEdition,
+                            value,
+                        }))
+                        .collect()
+                })
+                .map_err(|_| ())
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+fn normalize_hardcover_token(token: &str) -> &str {
+    token
+        .trim()
+        .trim_start_matches("Bearer ")
+        .trim_start_matches("bearer ")
+}
+
+fn detail_identifiers(detail: &NormalizedWorkDetail) -> Vec<IdentitySearchIdentifier> {
+    let mut identifiers = Vec::new();
+    if let Some(value) = detail.isbn_13.as_ref() {
+        identifiers.push(IdentitySearchIdentifier {
+            kind: livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+            value: value.clone(),
+        });
+    }
+    identifiers.extend(detail.additional_isbns.iter().cloned().map(|value| {
+        IdentitySearchIdentifier {
+            kind: livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+            value,
+        }
+    }));
+    if let Some(value) = detail.asin.as_ref() {
+        identifiers.push(IdentitySearchIdentifier {
+            kind: livrarr_domain::identity_layer::RouteKind::AsinEdition,
+            value: value.clone(),
+        });
+    }
+    identifiers.extend(detail.additional_asins.iter().cloned().map(|value| {
+        IdentitySearchIdentifier {
+            kind: livrarr_domain::identity_layer::RouteKind::AsinEdition,
+            value,
+        }
+    }));
+    identifiers
 }
 
 /// REQ-006 anchor mapping: which anchor kinds each provider's enrichment
@@ -352,6 +607,13 @@ impl StubProviderClient {
 
     pub fn call_count(&self) -> usize {
         self.call_count.load(Ordering::SeqCst)
+    }
+
+    /// Replace the scripted outcome for subsequent calls while retaining the
+    /// same provider client and call counter. Behavioral tests use this to
+    /// model a provider changing between two production workflow legs.
+    pub fn set_outcome(&self, outcome: ProviderOutcome<NormalizedWorkDetail>) {
+        *self.outcome.lock().unwrap() = outcome;
     }
 
     /// The `RequestPriority` the most recent `fetch`/`fetch_by_anchor` call
@@ -540,6 +802,7 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
         publish_date: None,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: None,
         asin: audnexus.asin.clone(),
@@ -870,6 +1133,7 @@ impl<F: HttpFetcher> HardcoverClient<F> {
             publish_date: hc.publish_date,
             hc_key: hc.hc_key,
             gr_key: None,
+            gr_work_key: None,
             ol_key: None,
             isbn_13,
             asin: None,
@@ -2877,9 +3141,10 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             publish_date: detail.publish_date,
             hc_key: None,
             gr_key,
+            gr_work_key: detail.work_id,
             ol_key: None,
             isbn_13,
-            asin: None,
+            asin: detail.asin,
             narrator: None,
             narration_type: None,
             abridged: None,
@@ -3769,6 +4034,8 @@ mod tests {
             rating: None,
             series_name: None,
             series_position: None,
+            book_id: Some("1".to_string()),
+            work_id: None,
         }
     }
 

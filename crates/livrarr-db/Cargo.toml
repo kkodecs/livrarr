@@ -12,6 +12,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 trait-variant = { workspace = true }
 livrarr-domain = { workspace = true }
@@ -19,5 +20,6 @@ sqlx = { workspace = true }
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

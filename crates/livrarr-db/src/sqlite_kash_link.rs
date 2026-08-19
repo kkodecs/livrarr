@@ -27,7 +27,9 @@ fn row_to_kash_link(row: sqlx::sqlite::SqliteRow) -> Result<KashLink, DbError> {
 
 impl KashLinkDb for SqliteDb {
     async fn upsert_link(&self, link: NewKashLink) -> Result<KashLink, DbError> {
-        let mut tx = self.pool().begin().await.map_err(map_db_err)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
 
         // Check for an existing link keyed by this audio item.
         let existing = sqlx::query(

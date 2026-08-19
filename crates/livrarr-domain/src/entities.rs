@@ -3,7 +3,6 @@
 //! plus their id type aliases, lifecycle-status enums, and the canonical
 //! `DbError` type.
 
-use crate::enrichment_types::CoverTrust;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -193,6 +192,8 @@ pub enum NotificationType {
     RateLimitHit,
     /// Download complete but file not found locally — likely needs remote path mapping.
     PathNotFound,
+    /// A machine-found provider route needs a human link/dismiss decision.
+    IdentityReviewNeeded,
     /// RSS sync auto-grabbed a release.
     RssGrabbed,
     /// RSS sync grab failed (download client unreachable or rejected).
@@ -423,12 +424,10 @@ pub struct Work {
     pub cover_url: Option<String>,
     pub cover_manual: bool,
     pub cover_source: Option<String>,
-    pub cover_trust: CoverTrust,
     pub cover_width: i32,
     pub cover_height: i32,
     pub audiobook_cover_url: Option<String>,
     pub audiobook_cover_source: Option<String>,
-    pub audiobook_cover_trust: CoverTrust,
     pub audiobook_cover_width: i32,
     pub audiobook_cover_height: i32,
     pub monitor_ebook: bool,

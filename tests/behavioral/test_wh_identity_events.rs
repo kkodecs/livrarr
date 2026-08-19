@@ -3,10 +3,14 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use livrarr_behavioral::stubs::{create_test_user, StubEnrichmentWorkflow, StubHttpFetcher};
+use livrarr_behavioral::stubs::{
+    create_test_user, SqlitePendingRouteRoad, StubEnrichmentWorkflow, StubHttpFetcher,
+};
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
-use livrarr_db::{CreateWorkDbRequest, HistoryDb, UserDb, WorkDb, WorkDbCreate};
+use livrarr_db::{
+    AuthorDb, CreateAuthorDbRequest, CreateWorkDbRequest, HistoryDb, UserDb, WorkDb, WorkDbCreate,
+};
 use livrarr_domain::identity::{
     AnchorConfidence, AnchorSetter, AnchorType, Candidate, CandidateId, CapturedIdentity,
     ConflictResolutionAction, ConflictSource, IdentityConflictKind, IncomingConflictPayload,
@@ -17,7 +21,9 @@ use livrarr_domain::{
     normalize_for_matching, AuthType, EventType, HistoryFilter, IdentityStatus, MetadataProvider,
     UserId, Work, WorkId,
 };
-use livrarr_handlers::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
+use livrarr_handlers::context::{
+    HasHistoryService, HasIdentityRoadService, HasWorkIdentityRepository, HasWorkService,
+};
 use livrarr_handlers::AuthContext;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_server::history_service::HistoryServiceImpl;
@@ -31,6 +37,7 @@ struct TestState {
     work_service: Arc<TestWorkService>,
     identity_repo: SqliteDb,
     history_service: Arc<TestHistoryService>,
+    identity_road: SqlitePendingRouteRoad,
 }
 
 impl HasWorkService for TestState {
@@ -54,6 +61,14 @@ impl HasHistoryService for TestState {
 
     fn history_service(&self) -> &Self::HistorySvc {
         &self.history_service
+    }
+}
+
+impl HasIdentityRoadService for TestState {
+    type IdentityRoadSvc = SqlitePendingRouteRoad;
+
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc {
+        &self.identity_road
     }
 }
 
@@ -96,9 +111,22 @@ async fn seed_work(
     identity_status: IdentityStatus,
     ol_key: Option<&str>,
 ) -> Work {
+    let (author, _) = db
+        .create_author(CreateAuthorDbRequest {
+            user_id,
+            name: "Work History Author".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("seed author");
     let (work, created) = db
         .create_work(CreateWorkDbRequest {
             ol_key: ol_key.map(str::to_string),
+            author_id: Some(author.id),
             ..work_req(user_id, title)
         })
         .await
@@ -133,7 +161,8 @@ fn test_state(db: SqliteDb) -> TestState {
     TestState {
         work_service: Arc::new(service(db.clone())),
         identity_repo: db.clone(),
-        history_service: Arc::new(HistoryServiceImpl::new(db)),
+        history_service: Arc::new(HistoryServiceImpl::new(db.clone())),
+        identity_road: SqlitePendingRouteRoad::new(db),
     }
 }
 
@@ -425,7 +454,9 @@ async fn wh_affirm_pending_anchor_records_once_and_settled_slot_records_zero() {
     )
     .await
     .expect("affirm pending anchor");
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Bug reproduction: identity-layer-rewrite — affirm resolves in the same
+    // request and records exactly one actor-attributed identity event.
+    assert_eq!(status.status(), StatusCode::NO_CONTENT);
     let events = identity_events(&db, user_id).await;
     assert_only_action(&events, "affirm", work.id);
 

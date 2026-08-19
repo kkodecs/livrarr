@@ -1,7 +1,7 @@
 //! Metadata-enrichment and merge-engine vocabulary: provider identity, cover
-//! candidates and trust, field provenance, merge outcomes and dissent, and a
-//! few adjacent value types (external id kind, queue progress/summary,
-//! log-surface status).
+//! candidates, field provenance, merge outcomes and dissent, and a few
+//! adjacent value types (external id kind, queue progress/summary, log-surface
+//! status).
 
 use crate::entities::{UserId, WorkId};
 use chrono::{DateTime, Utc};
@@ -36,28 +36,6 @@ impl MetadataProvider {
             Self::Readarr => "readarr",
             Self::GoogleBooks => "google_books",
             Self::Audible => "audible",
-        }
-    }
-}
-
-/// Trust level for a work's cover image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum CoverTrust {
-    #[default]
-    Unvalidated,
-    Validated,
-    User,
-}
-
-impl CoverTrust {
-    pub fn allows_replacement_by(self, incoming: CoverTrust) -> bool {
-        match (self, incoming) {
-            (CoverTrust::User, _) => false,
-            (CoverTrust::Validated, CoverTrust::User) => true,
-            (CoverTrust::Validated, CoverTrust::Validated) => true,
-            (CoverTrust::Validated, CoverTrust::Unvalidated) => false,
-            (CoverTrust::Unvalidated, _) => true,
         }
     }
 }
@@ -135,7 +113,6 @@ pub struct SelectCoverRequest {
 pub struct CoverResolution {
     pub url: String,
     pub source: String,
-    pub trust: CoverTrust,
     pub media_type: CoverMediaType,
 }
 

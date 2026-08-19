@@ -13,11 +13,7 @@ export type GrabStatus =
   | "importFailed"
   | "removed"
   | "failed";
-export type EnrichmentStatus =
-  | "unenriched"
-  | "enriched"
-  | "thin"
-  | "failed";
+export type EnrichmentStatus = "unenriched" | "enriched" | "thin" | "failed";
 export type IdentityStatus =
   | "pending"
   | "confirmed"
@@ -40,6 +36,7 @@ export type NotificationType =
   | "jobPanicked"
   | "rateLimitHit"
   | "pathNotFound"
+  | "identityReviewNeeded"
   | "rssGrabbed"
   | "rssGrabFailed";
 export type NarrationType = "human" | "ai" | "ai_authorized_replica";
@@ -60,7 +57,10 @@ export type EventType =
   | "workDeleted"
   | "worksMerged"
   | "identityResolved";
-export type DownloadClientImplementation = "qBittorrent" | "sabnzbd" | "transmission";
+export type DownloadClientImplementation =
+  | "qBittorrent"
+  | "sabnzbd"
+  | "transmission";
 export type LlmProvider = "groq" | "gemini" | "openai" | "custom";
 
 // Paginated response wrapper
@@ -201,6 +201,34 @@ export interface AddWorkResponse {
 export interface RefreshWorkResponse {
   work: WorkDetailResponse;
   messages: string[];
+  reason?: "provider_unavailable";
+}
+
+export type CoverSourceLabel = "Provider" | "Your file" | "Yours";
+
+export interface IdentitySiblingPresentation {
+  workId: number;
+  title: string;
+  authorName: string;
+  edition?: string | null;
+  route?: string | null;
+}
+
+export interface FormatNeededCover {
+  id: string;
+  source: CoverSourceLabel;
+}
+
+export type CoverSlotUiState =
+  | { state: "Selected"; source: CoverSourceLabel }
+  | { state: "Searching" }
+  | { state: "NoCoverFound" }
+  | { state: "NowhereToLook" };
+
+export interface WorkCoverUiState {
+  formatNeeded: { candidates: FormatNeededCover[] } | null;
+  ebook: CoverSlotUiState;
+  audiobook: CoverSlotUiState;
 }
 
 export interface UpdateWorkRequest {
@@ -248,14 +276,13 @@ export interface WorkDetailResponse {
   parkedByConflicts: boolean;
   enrichedAt: string | null;
   enrichmentSource: string | null;
+  coverUrl: string | null;
   coverManual: boolean;
   coverSource: string | null;
-  coverTrust: string;
   coverWidth: number;
   coverHeight: number;
   audiobookCoverUrl: string | null;
   audiobookCoverSource: string | null;
-  audiobookCoverTrust: string;
   audiobookCoverWidth: number;
   audiobookCoverHeight: number;
   monitorEbook: boolean;
@@ -266,6 +293,8 @@ export interface WorkDetailResponse {
   detailUrl?: string | null;
   coverMtime?: number | null;
   audiobookCoverMtime?: number | null;
+  identitySiblings: IdentitySiblingPresentation[];
+  coverUiState: WorkCoverUiState;
 }
 
 export interface LibraryItemResponse {
@@ -349,6 +378,43 @@ export interface MergeWorksResponse {
   libraryItemsMoved: number;
   grabsMoved: number;
   warnings: string[];
+}
+
+export interface PendingIdentityReviewResponse {
+  cardId: number;
+  kind: string;
+  unattached?: boolean;
+  expectedGeneration: number;
+  provenance: string;
+}
+
+export type MergeWorksOutcome =
+  | MergeWorksResponse
+  | PendingIdentityReviewResponse;
+
+export interface IdentityReviewCard {
+  id: number;
+  userId: number;
+  workId: number | null;
+  workTitle: string | null;
+  workAuthor: string | null;
+  kind: string;
+  generation: number;
+  payload: {
+    GroupIdentity?: {
+      work_ids: number[];
+      proposed_identity: unknown | null;
+      merge_choices: MergeChoiceEntry[];
+    };
+    PendingRoute?: {
+      work_id: number;
+      candidate: {
+        route: { provider: unknown; kind: unknown; value: string };
+        proposed_owner: unknown;
+      };
+    };
+    [kind: string]: unknown;
+  };
 }
 
 // Authors
@@ -1086,15 +1152,78 @@ export interface LanguageInfo {
 
 /** All supported languages with their metadata providers. */
 export const SUPPORTED_LANGUAGES: LanguageInfo[] = [
-  { code: "en", englishName: "English", providerName: "OpenLibrary + Hardcover", providerType: "api", requiresLlm: false, flag: "\u{1F1FA}\u{1F1F8}" },
-  { code: "nl", englishName: "Dutch", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F3}\u{1F1F1}" },
-  { code: "fr", englishName: "French", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EB}\u{1F1F7}" },
-  { code: "de", englishName: "German", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1E9}\u{1F1EA}" },
-  { code: "it", englishName: "Italian", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EE}\u{1F1F9}" },
-  { code: "ja", englishName: "Japanese", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EF}\u{1F1F5}" },
-  { code: "ko", englishName: "Korean", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F0}\u{1F1F7}" },
-  { code: "pl", englishName: "Polish", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1F5}\u{1F1F1}" },
-  { code: "es", englishName: "Spanish", providerName: "Google Books", providerType: "api", requiresLlm: false, flag: "\u{1F1EA}\u{1F1F8}" },
+  {
+    code: "en",
+    englishName: "English",
+    providerName: "OpenLibrary + Hardcover",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1FA}\u{1F1F8}",
+  },
+  {
+    code: "nl",
+    englishName: "Dutch",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1F3}\u{1F1F1}",
+  },
+  {
+    code: "fr",
+    englishName: "French",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1EB}\u{1F1F7}",
+  },
+  {
+    code: "de",
+    englishName: "German",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1E9}\u{1F1EA}",
+  },
+  {
+    code: "it",
+    englishName: "Italian",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1EE}\u{1F1F9}",
+  },
+  {
+    code: "ja",
+    englishName: "Japanese",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1EF}\u{1F1F5}",
+  },
+  {
+    code: "ko",
+    englishName: "Korean",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1F0}\u{1F1F7}",
+  },
+  {
+    code: "pl",
+    englishName: "Polish",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1F5}\u{1F1F1}",
+  },
+  {
+    code: "es",
+    englishName: "Spanish",
+    providerName: "Google Books",
+    providerType: "api",
+    requiresLlm: false,
+    flag: "\u{1F1EA}\u{1F1F8}",
+  },
 ];
 
 export interface UpdateMetadataConfigRequest {
@@ -1219,7 +1348,12 @@ export interface ApiErrorDetails {
 
 // --- Identity edit (preview-confirm; design identity-edit r4) ---
 
-export type IdentitySlot = "gr_work" | "ol_work" | "hc_work" | "isbn_13" | "asin";
+export type IdentitySlot =
+  | "gr_work"
+  | "ol_work"
+  | "hc_work"
+  | "isbn_13"
+  | "asin";
 
 export interface IdentityPreviewRequest {
   input: string;
@@ -1261,7 +1395,6 @@ export interface IdentityPreviewResponse {
   conflictWarning: boolean;
   reason?: string;
 }
-
 
 export interface FieldError {
   field: string;
@@ -1374,6 +1507,12 @@ export interface ManualSearchResponse {
 }
 
 // Readarr Import types
+export interface ReadarrOrigin {
+  id: number;
+  origin: string;
+  createdAt: string;
+}
+
 export interface ReadarrRootFolder {
   id: number;
   name: string | null;

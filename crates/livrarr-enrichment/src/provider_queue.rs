@@ -23,6 +23,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use livrarr_db::{DbError, ProviderCacheEntry, ProviderResponseCacheDb, ProviderRetryStateDb};
+use livrarr_domain::identity_layer::{
+    IdentityProvider, ProviderIdentityEvidence, ProviderIdentityEvidenceProvenance, RouteKey,
+    RouteKind, WorkIdentityRepository, WorkRoute, WorkRouteState,
+};
 use livrarr_domain::services::{CallOperation, CallOutcomeClass, ProviderCallRecord};
 use livrarr_domain::{
     AnchorQuery, Freshness, MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId,
@@ -34,7 +38,203 @@ use crate::{
     EnrichmentContext, EnrichmentMode, NormalizedWorkDetail, PreviewFetchOutcome, ProviderOutcome,
     ProviderQueue, ProviderQueueConfig, ProviderQueueError, ScatterGatherResult, WillRetryReason,
 };
-use livrarr_external_data::provider_client::ProviderClient;
+use livrarr_external_data::provider_client::{
+    IdentitySearchIdentifier, IdentitySearchProbe, ProviderClient,
+};
+
+#[derive(Default)]
+struct SearchFallbackCapture {
+    provider_identity: Vec<ProviderIdentityEvidence>,
+    route_proposals: Vec<RouteKey>,
+}
+
+fn text_decisive_search_capture(
+    provider: IdentityProvider,
+    route: RouteKey,
+) -> SearchFallbackCapture {
+    SearchFallbackCapture {
+        provider_identity: vec![ProviderIdentityEvidence {
+            provider,
+            route,
+            work_core: None,
+            provenance: ProviderIdentityEvidenceProvenance::TextDecisiveSearchFallback,
+        }],
+        route_proposals: Vec::new(),
+    }
+}
+
+fn search_route_kind(provider: MetadataProvider) -> Option<(IdentityProvider, RouteKind)> {
+    match provider {
+        MetadataProvider::OpenLibrary => {
+            Some((IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork))
+        }
+        MetadataProvider::Goodreads => {
+            Some((IdentityProvider::Goodreads, RouteKind::GoodreadsWork))
+        }
+        MetadataProvider::Hardcover => {
+            Some((IdentityProvider::Hardcover, RouteKind::HardcoverWork))
+        }
+        _ => None,
+    }
+}
+
+fn edition_identifier_matches(route: &WorkRoute, identifier: &IdentitySearchIdentifier) -> bool {
+    if route.state != WorkRouteState::Active || route.kind != identifier.kind {
+        return false;
+    }
+    match identifier.kind {
+        RouteKind::Isbn13Edition => {
+            livrarr_domain::strip_isbn_punctuation(&route.provider_scoped_id)
+                == livrarr_domain::strip_isbn_punctuation(&identifier.value)
+        }
+        RouteKind::AsinEdition | RouteKind::GoodreadsBookEdition => {
+            route.provider_scoped_id.trim() == identifier.value.trim()
+        }
+        _ => false,
+    }
+}
+
+async fn run_identity_search_fallback(
+    provider: MetadataProvider,
+    client: ProviderClient,
+    seed_title: String,
+    seed_author: String,
+    language: Option<String>,
+    active_routes: Vec<WorkRoute>,
+    priority: livrarr_domain::RequestPriority,
+) -> SearchFallbackCapture {
+    let Ok(mut candidates) = client
+        .search_identity_candidates(&seed_title, &seed_author, language.as_deref(), priority)
+        .await
+    else {
+        return SearchFallbackCapture::default();
+    };
+    let decision_candidates: Vec<livrarr_domain::identity_matching::SearchFallbackCandidate<'_>> =
+        candidates
+            .iter()
+            .map(
+                |candidate| livrarr_domain::identity_matching::SearchFallbackCandidate {
+                    title: &candidate.title,
+                    author: &candidate.author,
+                    provider_work_id: &candidate.work_id,
+                },
+            )
+            .collect();
+    // REQ-027 is Same-tier only. The authority still types an explicitly
+    // grey-enabled pick as Propose for other consumers; this queue never
+    // broadens its own bar.
+    let decision = livrarr_domain::identity_matching::classify_search_fallback(
+        &seed_title,
+        &seed_author,
+        &decision_candidates,
+        false,
+    );
+    let Some(index) = decision.candidate_index() else {
+        return SearchFallbackCapture::default();
+    };
+    let text_decisive = matches!(
+        decision,
+        livrarr_domain::identity_matching::SearchFallbackDecision::AutoLink { .. }
+    );
+    drop(decision_candidates);
+    let candidate = &mut candidates[index];
+    let Some((identity_provider, work_kind)) = search_route_kind(provider) else {
+        return SearchFallbackCapture::default();
+    };
+    let work_route = RouteKey {
+        provider: identity_provider.clone(),
+        kind: work_kind,
+        value: candidate.work_id.trim().to_string(),
+    };
+
+    let can_corroborate = active_routes.iter().any(|route| {
+        route.state == WorkRouteState::Active
+            && matches!(
+                route.kind,
+                RouteKind::AsinEdition | RouteKind::Isbn13Edition | RouteKind::GoodreadsBookEdition
+            )
+    });
+    if !can_corroborate {
+        return if text_decisive {
+            text_decisive_search_capture(identity_provider, work_route)
+        } else {
+            SearchFallbackCapture {
+                provider_identity: Vec::new(),
+                route_proposals: vec![work_route],
+            }
+        };
+    }
+
+    let mut goodreads_book_id = None;
+    if let Some(probe) = candidate.probe.as_ref() {
+        if let IdentitySearchProbe::GoodreadsBook { book_id } = probe {
+            goodreads_book_id = Some(book_id.clone());
+            candidate
+                .edition_identifiers
+                .push(IdentitySearchIdentifier {
+                    kind: RouteKind::GoodreadsBookEdition,
+                    value: book_id.clone(),
+                });
+        }
+        // A probe is solely an opportunity to upgrade the result to
+        // corroborated outcome (a). Failure retains a text-decisive (b), but a
+        // proposal-grade pick remains an honest miss: the failed probe cannot
+        // manufacture confidence for a card.
+        let Ok(probed) = client
+            .probe_identity_candidate(probe, language.as_deref(), priority)
+            .await
+        else {
+            return if text_decisive {
+                text_decisive_search_capture(identity_provider, work_route)
+            } else {
+                SearchFallbackCapture::default()
+            };
+        };
+        candidate.edition_identifiers.extend(probed);
+    }
+
+    let corroborating_kind = candidate.edition_identifiers.iter().find_map(|identifier| {
+        active_routes
+            .iter()
+            .any(|route| edition_identifier_matches(route, identifier))
+            .then(|| identifier.kind.clone())
+    });
+    let Some(corroborating_kind) = corroborating_kind else {
+        return if text_decisive {
+            text_decisive_search_capture(identity_provider, work_route)
+        } else {
+            SearchFallbackCapture {
+                provider_identity: Vec::new(),
+                route_proposals: vec![work_route],
+            }
+        };
+    };
+    let provenance = ProviderIdentityEvidenceProvenance::SearchFallback {
+        corroborating_kind: corroborating_kind.clone(),
+    };
+    let mut provider_identity = vec![ProviderIdentityEvidence {
+        provider: identity_provider.clone(),
+        route: work_route,
+        work_core: None,
+        provenance: provenance.clone(),
+    }];
+    if let Some(book_id) = goodreads_book_id {
+        provider_identity.push(ProviderIdentityEvidence {
+            provider: IdentityProvider::Goodreads,
+            route: RouteKey {
+                provider: IdentityProvider::Goodreads,
+                kind: RouteKind::GoodreadsBookEdition,
+                value: book_id,
+            },
+            work_core: None,
+            provenance,
+        });
+    }
+    SearchFallbackCapture {
+        provider_identity,
+        route_proposals: Vec::new(),
+    }
+}
 
 /// REQ-006 anchor derivation: the anchor query each provider's enrichment
 /// fetch uses, from the work's stored anchors. Empty/whitespace values count
@@ -60,6 +260,59 @@ fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<Anchor
             present(&work.asin).map(AnchorQuery::Asin)
         }
         // Never scatter providers; no anchor surface exists for them.
+        MetadataProvider::Llm | MetadataProvider::Readarr => None,
+    }
+}
+
+/// F2 cutover anchor derivation: production enrichment reads only active
+/// identity routes. The returned query preserves the legacy provider-specific
+/// preference order while keeping the route table authoritative.
+fn derive_route_anchor_query(
+    provider: MetadataProvider,
+    routes: &[WorkRoute],
+) -> Option<AnchorQuery> {
+    let find = |identity_provider: IdentityProvider, kind: RouteKind| {
+        routes
+            .iter()
+            .find(|route| {
+                route.state == WorkRouteState::Active
+                    && route.provider == identity_provider
+                    && route.kind == kind
+                    && !route.provider_scoped_id.trim().is_empty()
+            })
+            .map(|route| route.provider_scoped_id.trim().to_string())
+    };
+
+    match provider {
+        // A Goodreads BookEdition id remains edition-scoped evidence, but it
+        // can fetch that Book page. The payload parser returns its distinct
+        // Book -> Work legacy id as fresh route evidence; the book id itself
+        // is never promoted to a Work route.
+        MetadataProvider::Goodreads => find(IdentityProvider::Goodreads, RouteKind::GoodreadsWork)
+            .or_else(|| find(IdentityProvider::Goodreads, RouteKind::GoodreadsBookEdition))
+            .map(AnchorQuery::GrKey),
+        MetadataProvider::OpenLibrary => {
+            find(IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork)
+                .map(AnchorQuery::OlKey)
+                .or_else(|| {
+                    find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition)
+                        .map(AnchorQuery::Isbn13)
+                })
+        }
+        MetadataProvider::Hardcover => {
+            find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition)
+                .map(AnchorQuery::Isbn13)
+                .or_else(|| {
+                    find(IdentityProvider::Hardcover, RouteKind::HardcoverWork)
+                        .map(AnchorQuery::HcKey)
+                })
+        }
+        MetadataProvider::GoogleBooks => {
+            find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition).map(AnchorQuery::Isbn13)
+        }
+        MetadataProvider::Audnexus | MetadataProvider::Audible => {
+            find(IdentityProvider::Amazon, RouteKind::AsinEdition).map(AnchorQuery::Asin)
+        }
         MetadataProvider::Llm | MetadataProvider::Readarr => None,
     }
 }
@@ -120,6 +373,7 @@ pub struct DefaultProviderQueueBuilder {
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
     cache_ttl: chrono::Duration,
     cache_max_rows: i64,
+    identity_routes_authoritative: bool,
 }
 
 impl Default for DefaultProviderQueueBuilder {
@@ -136,6 +390,7 @@ impl DefaultProviderQueueBuilder {
             call_sink: None,
             cache_ttl: chrono::Duration::days(7),
             cache_max_rows: 100_000,
+            identity_routes_authoritative: false,
         }
     }
 
@@ -155,6 +410,14 @@ impl DefaultProviderQueueBuilder {
         sink: Arc<dyn livrarr_domain::services::ProviderCallSink>,
     ) -> Self {
         self.call_sink = Some(sink);
+        self
+    }
+
+    /// Enable post-F2 production dispatch. Every enrichment pass reads the
+    /// Work's captured identity and derives provider queries from active routes;
+    /// legacy scalar anchors are not consulted in this mode.
+    pub fn with_identity_route_dispatch(mut self) -> Self {
+        self.identity_routes_authoritative = true;
         self
     }
 
@@ -188,6 +451,7 @@ impl DefaultProviderQueueBuilder {
             call_sink: self.call_sink,
             cache_ttl: self.cache_ttl,
             cache_max_rows: self.cache_max_rows,
+            identity_routes_authoritative: self.identity_routes_authoritative,
         }
     }
 }
@@ -207,6 +471,10 @@ where
     /// REQ-009: the store is evicted oldest-first down to this cap after a
     /// batch of real-fetch cache writes.
     cache_max_rows: i64,
+    /// True only in the post-activation production composition and faithful
+    /// production-router harnesses. Legacy queue unit tests keep their scalar
+    /// fixtures until that older surface is retired.
+    identity_routes_authoritative: bool,
 }
 
 /// Outcome of one provider's phase-1 dispatch, before terminal-budget conversion
@@ -236,7 +504,12 @@ async fn existing_terminal_outcome<DB: ProviderRetryStateDb + Send + Sync>(
 
 impl<DB> ProviderQueue for DefaultProviderQueue<DB>
 where
-    DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
+    DB: ProviderRetryStateDb
+        + ProviderResponseCacheDb
+        + WorkIdentityRepository
+        + Send
+        + Sync
+        + 'static,
 {
     async fn preview_fetch(
         &self,
@@ -272,6 +545,47 @@ where
     ) -> Result<ScatterGatherResult, ProviderQueueError> {
         let mut outcomes: HashMap<MetadataProvider, ProviderOutcome<NormalizedWorkDetail>> =
             HashMap::new();
+        let captured_identity = if self.identity_routes_authoritative {
+            Some(
+                self.retry_db
+                    .read_captured_identity(work.user_id, work.id)
+                    .await
+                    .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let route_plan = captured_identity.clone().map(|identity| {
+            use crate::identity_layer::EnrichmentService as _;
+            crate::identity_layer::RouteDrivenEnrichmentService::from_arc(
+                self.retry_db.clone(),
+                identity.clone(),
+                context.priority,
+            )
+            .plan_from_routes(identity)
+        });
+        let search_seed = if let Some(identity) = captured_identity.as_ref().filter(|identity| {
+            !identity.active_routes.iter().any(|route| {
+                route.state == WorkRouteState::Active
+                    && matches!(
+                        route.kind,
+                        RouteKind::OpenLibraryWork
+                            | RouteKind::GoodreadsWork
+                            | RouteKind::HardcoverWork
+                    )
+            })
+        }) {
+            let author_name = self
+                .retry_db
+                .read_primary_author_names(work.user_id, identity.primary_author_id)
+                .await
+                .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?
+                .into_iter()
+                .next();
+            author_name.map(|author| (identity.identity_title.main.clone(), author))
+        } else {
+            None
+        };
 
         // Partition providers into: skip (not applicable / anchor-less /
         // restart-resumed) and dispatch. The dispatch tuple carries the
@@ -282,7 +596,12 @@ where
             config: ProviderQueueConfig,
             anchor: AnchorQuery,
         }
+        struct SearchDispatchEntry {
+            provider: MetadataProvider,
+            client: ProviderClient,
+        }
         let mut to_dispatch: Vec<DispatchEntry> = Vec::new();
+        let mut to_search: Vec<SearchDispatchEntry> = Vec::new();
         // REQ-009: pre-populated with cache hits before the scatter phase —
         // a hit occupies its provider's slot here so the spawn loop below
         // never fetches it, yet it still reaches the same finalization
@@ -308,7 +627,25 @@ where
             // REQ-006: enrichment fetches only by stored anchor. No anchor for
             // this provider → no fetch, a SkippedNoAnchor record, a NotFound
             // outcome (anchor acquisition is the identity track's job).
-            let Some(anchor) = derive_anchor_query(provider, work) else {
+            let anchor = route_plan.as_ref().map_or_else(
+                || derive_anchor_query(provider, work),
+                |plan| derive_route_anchor_query(provider, &plan.usable_routes),
+            );
+            let search_eligible = search_seed.is_some()
+                && search_route_kind(provider).is_some()
+                && entry.client.identity_search_available();
+            let Some(anchor) = anchor else {
+                if search_eligible {
+                    to_search.push(SearchDispatchEntry {
+                        provider,
+                        client: entry.client.clone(),
+                    });
+                    // Search is a route-finding side leg, not an enrichment
+                    // payload. Keep the provider outcome terminal while its
+                    // typed evidence travels on the handoff-only channel.
+                    outcomes.insert(provider, ProviderOutcome::NotFound);
+                    continue;
+                }
                 record_queue_skip(
                     &self.call_sink,
                     provider,
@@ -320,11 +657,27 @@ where
                 continue;
             };
 
-            // Restart safety: skip if the row is already terminal.
-            if existing_terminal_outcome(self.retry_db.as_ref(), work.user_id, work.id, provider)
-                .await?
-                .is_some()
-            {
+            // Spec v10 dead-anchor predicate: an applicable OL/GR/HC provider
+            // with a derivable anchor joins the search leg only when no active
+            // work-level route exists, provider search is available, and the
+            // anchor's current standing is terminal `not_found`. `will_retry`
+            // is non-terminal and therefore remains anchor-first. Explicit
+            // retry-state reset after a re-key/generation change removes this
+            // standing and likewise restores anchor-first dispatch.
+            let terminal =
+                existing_terminal_outcome(self.retry_db.as_ref(), work.user_id, work.id, provider)
+                    .await?;
+            if terminal == Some(OutcomeClass::NotFound) && search_eligible {
+                to_search.push(SearchDispatchEntry {
+                    provider,
+                    client: entry.client.clone(),
+                });
+                outcomes.insert(provider, ProviderOutcome::NotFound);
+                continue;
+            }
+
+            // Restart safety for every other terminal standing.
+            if terminal.is_some() {
                 continue;
             }
 
@@ -345,13 +698,45 @@ where
             });
         }
 
+        let priority = context.priority;
+        let language = work.language.clone();
+        let active_routes = captured_identity
+            .as_ref()
+            .map(|identity| identity.active_routes.clone())
+            .unwrap_or_default();
+        let mut provider_chase_attempted = false;
+        let mut search_provider_identity = Vec::new();
+        let mut search_route_proposals = Vec::new();
+        if let Some((seed_title, seed_author)) = search_seed {
+            let mut search_set = JoinSet::new();
+            for entry in to_search {
+                provider_chase_attempted = true;
+                search_set.spawn(run_identity_search_fallback(
+                    entry.provider,
+                    entry.client,
+                    seed_title.clone(),
+                    seed_author.clone(),
+                    language.clone(),
+                    active_routes.clone(),
+                    priority,
+                ));
+            }
+            while let Some(joined) = search_set.join_next().await {
+                match joined {
+                    Ok(capture) => {
+                        search_provider_identity.extend(capture.provider_identity);
+                        search_route_proposals.extend(capture.route_proposals);
+                    }
+                    Err(error) => warn!("identity search fallback task failed: {error}"),
+                }
+            }
+        }
+
         // Phase 1: scatter — spawn each provider call not already served from
         // cache. Panic isolation via JoinSet. Pacing, concurrency capping, and
         // circuit breaking happen at the outbound queue (every HTTP call
         // routes through it); this layer only dispatches.
         let mut set: JoinSet<(MetadataProvider, DispatchedOutcome)> = JoinSet::new();
-        let language = work.language.clone();
-        let priority = context.priority;
         for d in &to_dispatch {
             if dispatched.contains_key(&d.provider) {
                 continue; // REQ-009 cache hit — no client fetch, no call record.
@@ -360,6 +745,7 @@ where
             let client = d.client.clone();
             let anchor = d.anchor.clone();
             let language = language.clone();
+            provider_chase_attempted = true;
             set.spawn(async move {
                 let outcome = client
                     .fetch_by_anchor(anchor, language.as_deref(), priority)
@@ -476,6 +862,9 @@ where
             outcomes,
             merge_eligible,
             deferred,
+            provider_chase_attempted,
+            search_provider_identity,
+            search_route_proposals,
         })
     }
 }
@@ -690,6 +1079,131 @@ where
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod identity_route_dispatch_tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use livrarr_db::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb, WorkDb};
+    use livrarr_domain::identity_layer::{
+        EvidenceProvenance, IdentityProvider, IdentityTitleTuple, RouteKind, RouteOwner,
+        RouteProvenance, SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute,
+        WorkRouteState,
+    };
+    use livrarr_domain::{Freshness, MetadataProvider, RequestPriority, UserRole};
+    use livrarr_external_data::{ProviderClient, ProviderOutcome, StubProviderClient};
+
+    use crate::provider_queue::DefaultProviderQueueBuilder;
+    use crate::{EnrichmentContext, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
+
+    // Bug reproduction: identity-layer-rewrite — post-F2 Works carry provider
+    // routes only in identity_routes; live dispatch must not require works.gr_key.
+    #[tokio::test]
+    async fn post_f2_goodreads_route_dispatches_without_legacy_scalar() {
+        let db = livrarr_db::create_test_db().await;
+        let user_id = db
+            .create_user(CreateUserDbRequest {
+                username: "f2_route_dispatch_user".to_string(),
+                password_hash: "hash".to_string(),
+                role: UserRole::Admin,
+                api_key_hash: "apikey".to_string(),
+            })
+            .await
+            .expect("create route-dispatch user")
+            .id;
+        let (author, _) = db
+            .create_author(CreateAuthorDbRequest {
+                user_id,
+                name: "Route Dispatch Author".to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .expect("create route-dispatch author");
+        let settled = WorkIdentityRepository::commit_settlement(
+            &db,
+            SettlementCommit {
+                user_id,
+                existing_work_id: None,
+                add_source: None,
+                identity_title: IdentityTitleTuple {
+                    main: "Route Dispatch Book".to_string(),
+                    subtitle: None,
+                    volume: None,
+                    normalized_main: "route dispatch book".to_string(),
+                    normalized_subtitle: String::new(),
+                    normalized_volume: String::new(),
+                    provenance: EvidenceProvenance::User,
+                },
+                text_distinction: None,
+                contributors: vec![WorkContributor {
+                    user_id,
+                    work_id: 0,
+                    author_id: author.id,
+                    ordinal: 0,
+                    roles: Vec::new(),
+                }],
+                routes: vec![WorkRoute {
+                    id: 0,
+                    user_id,
+                    owner: RouteOwner::Work(0),
+                    resolved_work_id: 0,
+                    provider: IdentityProvider::Goodreads,
+                    kind: RouteKind::GoodreadsWork,
+                    provider_scoped_id: "12345".to_string(),
+                    state: WorkRouteState::Active,
+                    provenance: RouteProvenance::UserChoice,
+                    user_confirmed: true,
+                    observed_at: Utc::now(),
+                }],
+                absorbed_work_ids: Vec::new(),
+                expected_generation: 0,
+                review_cards: Vec::new(),
+            },
+        )
+        .await
+        .expect("settle route-dispatch work");
+        let work = db
+            .get_work(user_id, settled.identity.own_work_id)
+            .await
+            .expect("read settled work");
+        assert_eq!(work.gr_key, None, "fixture must have no legacy GR scalar");
+
+        let stub = StubProviderClient::new(MetadataProvider::Goodreads, ProviderOutcome::NotFound);
+        let queue = DefaultProviderQueueBuilder::new()
+            .with_identity_route_dispatch()
+            .add_provider(
+                MetadataProvider::Goodreads,
+                ProviderClient::Stub(stub.clone()),
+                ProviderQueueConfig {
+                    provider: MetadataProvider::Goodreads,
+                    max_attempts: 1,
+                },
+            )
+            .build(Arc::new(db));
+        let result = queue
+            .dispatch_enrichment(
+                &work,
+                EnrichmentContext {
+                    priority: RequestPriority::Normal,
+                    mode: EnrichmentMode::Manual,
+                    freshness: Freshness::Bypass,
+                },
+            )
+            .await
+            .expect("dispatch from captured route");
+
+        assert_eq!(stub.call_count(), 1, "captured GR route must dispatch once");
+        assert!(matches!(
+            result.outcomes.get(&MetadataProvider::Goodreads),
+            Some(ProviderOutcome::NotFound)
+        ));
     }
 }
 

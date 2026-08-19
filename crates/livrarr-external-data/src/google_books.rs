@@ -546,6 +546,7 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
         publish_date: vi.published_date.clone(),
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13,
         asin: None,

@@ -22,6 +22,10 @@ use livrarr_domain::{DbError, EventType, GrabStatus, HistoryEvent, HistoryFilter
 /// Grabs are paged at this size while scanning for backfill candidates.
 const GRABS_PAGE_SIZE: u32 = 500;
 
+/// Generation 2 reopens the additive pass for Works created by the v2
+/// settlement INSERT before that transaction emitted live birth history.
+const HISTORY_BACKFILL_GENERATION: i64 = 2;
+
 /// The pass yields to the runtime after this many inserts, so it never holds
 /// the single SQLite writer connection continuously.
 const YIELD_EVERY: u32 = 50;
@@ -42,7 +46,7 @@ struct Coverage {
 /// retries additively.
 pub async fn run_history_backfill(db: SqliteDb) {
     match marker_generation(&db).await {
-        Ok(generation) if generation >= 1 => {
+        Ok(generation) if generation >= HISTORY_BACKFILL_GENERATION => {
             tracing::debug!(generation, "history backfill: already complete");
             return;
         }
@@ -97,9 +101,10 @@ async fn marker_generation(db: &SqliteDb) -> Result<i64, sqlx::Error> {
 /// would silently no-op on the first clean run.
 async fn write_marker(db: &SqliteDb) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO _livrarr_meta (key, value) VALUES ('history_backfill_generation', '1') \
-         ON CONFLICT(key) DO UPDATE SET value = '1'",
+        "INSERT INTO _livrarr_meta (key, value) VALUES ('history_backfill_generation', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
+    .bind(HISTORY_BACKFILL_GENERATION.to_string())
     .execute(db.pool())
     .await?;
     Ok(())

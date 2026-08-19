@@ -22,7 +22,7 @@ use livrarr_behavioral::stubs::{
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    CreateDownloadClientDbRequest, CreateGrabDbRequest, CreateHistoryEventDbRequest,
+    AuthorDb, CreateDownloadClientDbRequest, CreateGrabDbRequest, CreateHistoryEventDbRequest,
     CreateLibraryItemDbRequest, CreateUserDbRequest, CreateWorkDbRequest, DownloadClientDb, GrabDb,
     HistoryDb, LibraryItemDb, RootFolderDb, TagStatus, UserDb, WorkDb, WorkDbCreate,
 };
@@ -42,7 +42,8 @@ use livrarr_domain::{
 use livrarr_download::release_service::ReleaseServiceImpl;
 use livrarr_handlers::accessors::ManualImportScanAccessor;
 use livrarr_handlers::context::{
-    HasAppConfigService, HasAuthorService, HasDiscoveryService, HasFileService, HasHistoryService,
+    EditionEvidenceCapability, HasAppConfigService, HasAuthorService, HasDiscoveryService,
+    HasEditionRepository, HasFileService, HasHistoryService, HasIdentityRoadService,
     HasImportService, HasManualImportScan, HasManualImportService, HasMatchingService,
     HasRootFolderService, HasWorkService,
 };
@@ -215,15 +216,35 @@ impl ImportService for ScriptedImportService {
 /// Author lookups on the confirm road are a best-effort OL enrichment step —
 /// an empty result is a legal, network-free answer. Everything else on the
 /// trait is unreachable from the driven roads.
-struct ScriptedAuthorService;
+#[derive(Clone)]
+struct ScriptedAuthorService {
+    db: SqliteDb,
+}
 
 impl AuthorService for ScriptedAuthorService {
     async fn add(
         &self,
-        _user_id: UserId,
-        _req: AddAuthorRequest,
+        user_id: UserId,
+        req: AddAuthorRequest,
     ) -> Result<AddAuthorResult, AuthorServiceError> {
-        unreachable!("author add is not driven by these tests")
+        let (author, created) = self
+            .db
+            .create_author(livrarr_db::CreateAuthorDbRequest {
+                user_id,
+                name: req.name,
+                sort_name: req.sort_name,
+                ol_key: req.ol_key,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            })
+            .await
+            .map_err(AuthorServiceError::Db)?;
+        Ok(if created {
+            AddAuthorResult::Created(author)
+        } else {
+            AddAuthorResult::Updated(author)
+        })
     }
     async fn merge(
         &self,
@@ -351,6 +372,78 @@ impl DiscoveryService for PanicDiscoveryService {
     }
 }
 
+#[derive(Clone)]
+struct ManualImportRoad {
+    db: SqliteDb,
+}
+
+impl livrarr_domain::identity_layer::IdentityRoadService for ManualImportRoad {
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        let work_id = if let Some(work_id) = request.existing_work_id {
+            work_id
+        } else {
+            let minimum = request
+                .evidence
+                .minimum
+                .expect("manual-import creation carries minimum evidence");
+            let author_id = *minimum
+                .authors
+                .first()
+                .expect("manual-import creation carries a primary author");
+            let author = self
+                .db
+                .get_author(request.user_id, author_id)
+                .await
+                .expect("read settled author");
+            let normalized_author = livrarr_domain::normalize_for_matching(&author.name);
+            self.db
+                .create_work(CreateWorkDbRequest {
+                    user_id: request.user_id,
+                    title: minimum.title.clone(),
+                    author_name: author.name,
+                    normalized_title: livrarr_domain::normalize_for_matching(&minimum.title),
+                    normalized_author,
+                    author_id: Some(author_id),
+                    language: Some("en".to_string()),
+                    monitor_ebook: true,
+                    monitor_audiobook: true,
+                    ..Default::default()
+                })
+                .await
+                .expect("persist settled work")
+                .0
+                .id
+        };
+        Ok(
+            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                work_id,
+                created: request.existing_work_id.is_none(),
+                routes: Vec::new(),
+                status: livrarr_domain::identity_layer::IdentityStatus::UserConfirmed,
+                library_items_moved: 0,
+                grabs_moved: 0,
+            },
+        )
+    }
+
+    async fn resolve_review(
+        &self,
+        _actor: livrarr_domain::identity_layer::ReviewActor,
+        _command: livrarr_domain::identity_layer::ReviewResolutionCommand,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        unreachable!("manual-import history fixtures never resolve reviews")
+    }
+}
+
 /// Scan-progress state is a scan-endpoint concern; the confirm/adopt roads
 /// never touch it.
 struct NoScanState;
@@ -391,6 +484,39 @@ struct TestState {
     matching: Arc<ScriptedMatchingService>,
     discovery: Arc<PanicDiscoveryService>,
     scan_state: Arc<NoScanState>,
+    identity_road: Arc<ManualImportRoad>,
+    edition_repository: Arc<NoEditionEvidence>,
+}
+
+struct NoEditionEvidence;
+
+impl EditionEvidenceCapability for NoEditionEvidence {
+    async fn apply_evidence(
+        &self,
+        user_id: i64,
+        work_id: i64,
+        format: livrarr_domain::identity_layer::EditionFormat,
+        language: Option<String>,
+    ) -> Result<
+        livrarr_domain::identity_layer::EditionEvidenceOutcome,
+        livrarr_domain::identity_layer::EditionRepositoryError,
+    > {
+        Ok(livrarr_domain::identity_layer::EditionEvidenceOutcome {
+            edition: livrarr_domain::identity_layer::Edition {
+                id: 1,
+                user_id,
+                work_id,
+                format,
+                language,
+                subtitle: None,
+                routes: Vec::new(),
+                covers: Vec::new(),
+                source_provider: None,
+                provider_edition_id: None,
+                state: livrarr_domain::identity_layer::EditionState::Active,
+            },
+        })
+    }
 }
 
 fn test_state(db: &SqliteDb) -> TestState {
@@ -406,10 +532,12 @@ fn test_state(db: &SqliteDb) -> TestState {
         history: Arc::new(HistoryServiceImpl::new(db.clone())),
         files: Arc::new(FileServiceImpl::new(db.clone())),
         imports: Arc::new(ScriptedImportService::default()),
-        authors: Arc::new(ScriptedAuthorService),
+        authors: Arc::new(ScriptedAuthorService { db: db.clone() }),
         matching: Arc::new(ScriptedMatchingService),
         discovery: Arc::new(PanicDiscoveryService),
         scan_state: Arc::new(NoScanState),
+        identity_road: Arc::new(ManualImportRoad { db: db.clone() }),
+        edition_repository: Arc::new(NoEditionEvidence),
     }
 }
 
@@ -417,6 +545,20 @@ impl HasWorkService for TestState {
     type WorkSvc = TestWorkService;
     fn work_service(&self) -> &Self::WorkSvc {
         &self.work_service
+    }
+}
+
+impl HasIdentityRoadService for TestState {
+    type IdentityRoadSvc = ManualImportRoad;
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc {
+        &self.identity_road
+    }
+}
+
+impl HasEditionRepository for TestState {
+    type EditionRepo = NoEditionEvidence;
+    fn edition_repository(&self) -> &Self::EditionRepo {
+        &self.edition_repository
     }
 }
 
@@ -698,6 +840,9 @@ async fn wh_manual_success_writes_one_per_file_imported_event() {
     *state.imports.single.lock().unwrap() = Some(ImportFileResult::Ok);
 
     let source = books.path().join("Manual Author - Manual Work.epub");
+    tokio::fs::write(&source, b"manual import identity evidence")
+        .await
+        .expect("write manual import fixture");
     let response = manual_import::import(
         State(state.clone()),
         admin_auth(&db, user_id).await,
@@ -820,6 +965,9 @@ async fn wh_manual_late_failure_writes_attached_import_failed_with_work_title() 
     ));
 
     let source = books.path().join("Late Failure Work.epub");
+    tokio::fs::write(&source, b"late failure identity evidence")
+        .await
+        .expect("write manual import fixture");
     let response = manual_import::import(
         State(state.clone()),
         admin_auth(&db, user_id).await,

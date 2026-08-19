@@ -7,7 +7,6 @@ use livrarr_domain::{
     RequestPriority, Work,
 };
 
-use crate::cover_resolution::should_reject_cover;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
 use livrarr_external_data::provider_client::ProviderClient;
 
@@ -46,8 +45,7 @@ fn extract_cover_info(
                 .as_deref()
                 .filter(|u| !u.is_empty())?
                 .to_string();
-            let edition_title = detail.title.clone();
-            Some((url, edition_title))
+            Some((url, detail.title.clone()))
         }
         _ => None,
     }
@@ -99,12 +97,6 @@ pub async fn fetch_internal_alternatives<F: HttpFetcher>(
     for (provider, info) in results {
         if let Some((url, edition_title)) = info {
             let media_type = media_type_for_provider(provider);
-            if media_type == CoverMediaType::Ebook
-                && should_reject_cover(edition_title.as_deref(), &work.title)
-            {
-                tracing::debug!(?provider, "cover alternatives: rejected by title filter");
-                continue;
-            }
             candidates.push(InternalCoverCandidate {
                 source: CoverCandidateSource::Provider(provider),
                 url,

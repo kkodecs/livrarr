@@ -10,8 +10,8 @@ use livrarr_db::{
 };
 use livrarr_domain::identity::{AnchorConfidence, AnchorType, ConflictSource, IdentityMode};
 use livrarr_domain::services::{
-    ConvergeOutcome, EnrichmentMode, EnrichmentWorkflow, HttpFetcher, RefreshSurface, RetrySummary,
-    WorkService, WorkServiceError,
+    ConvergeOutcome, ConvergencePass, EnrichmentMode, EnrichmentWorkflow, HttpFetcher,
+    RefreshSurface, RetrySummary, SourceProviderData, WorkService, WorkServiceError,
 };
 use livrarr_domain::{EnrichmentStatus, IdentityStatus, UserId, Work, WorkId};
 
@@ -27,7 +27,8 @@ pub(crate) async fn converge_work<D, E, H>(
     user_id: UserId,
     work_id: WorkId,
     threshold: u32,
-) -> Result<ConvergeOutcome, WorkServiceError>
+    source_provider_data: Option<SourceProviderData>,
+) -> Result<ConvergencePass, WorkServiceError>
 where
     D: WorkDb
         + WorkDbCreate
@@ -42,6 +43,7 @@ where
         + livrarr_db::HistoryDb
         + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
+        + livrarr_domain::identity_layer::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -49,6 +51,72 @@ where
 {
     // Fresh row (R-10): the job hands us an id; re-read so we settle on truth.
     let work = svc.get(user_id, work_id).await?;
+    if svc.identity_routes_authoritative {
+        let captured =
+            livrarr_domain::identity_layer::WorkIdentityRepository::read_captured_identity(
+                &svc.db, user_id, work_id,
+            )
+            .await
+            .map_err(|error| WorkServiceError::Validation(error.to_string()))?;
+        let bridge_chaseable = !captured.active_routes.iter().any(|route| {
+            matches!(
+                route.kind,
+                livrarr_domain::identity_layer::RouteKind::OpenLibraryWork
+                    | livrarr_domain::identity_layer::RouteKind::GoodreadsWork
+                    | livrarr_domain::identity_layer::RouteKind::HardcoverWork
+            )
+        });
+        let enrichment_incomplete = matches!(
+            work.enrichment_status,
+            EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
+        );
+        let mut enrichment_outcome = None;
+        if enrichment_incomplete || bridge_chaseable || source_provider_data.is_some() {
+            // Normal convergence preserves provider retry standing. In
+            // particular, spec v10 needs a prior terminal `not_found` anchor
+            // to become eligible for the route-search leg on this visit.
+            // Manual refresh owns the unconditional reset. Settlement and
+            // identity-edit transactions invalidate standing only when their
+            // active route graph changes, restoring anchor-first dispatch for
+            // a newly derived key without weakening same-anchor dead ends.
+            enrichment_outcome = Some(
+                svc.run_unified_enrichment(
+                    user_id,
+                    &work,
+                    source_provider_data,
+                    EnrichmentMode::Background,
+                    None,
+                    livrarr_domain::RequestPriority::Low,
+                    livrarr_domain::Freshness::PreferCache,
+                )
+                .await,
+            );
+        }
+        let after = svc.get(user_id, work_id).await?;
+        let outcome = if bridge_chaseable
+            || enrichment_outcome
+                .as_ref()
+                .is_some_and(|o| o.route_handoff.is_some())
+        {
+            ConvergeOutcome::StillIncomplete
+        } else if matches!(
+            after.enrichment_status,
+            EnrichmentStatus::Enriched | EnrichmentStatus::Thin
+        ) {
+            ConvergeOutcome::Completed
+        } else {
+            ConvergeOutcome::StillIncomplete
+        };
+        return Ok(ConvergencePass {
+            outcome,
+            route_handoff: enrichment_outcome
+                .as_mut()
+                .and_then(|outcome| outcome.route_handoff.take()),
+            provider_chase_attempted: enrichment_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.provider_chase_attempted),
+        });
+    }
     let was_pending = work.identity_status == IdentityStatus::Pending;
 
     // The anchor slots that are currently NULL on works.*.
@@ -94,7 +162,11 @@ where
         svc.db.set_needs_review(work_id).await.map_err(|e| {
             WorkServiceError::Validation(format!("convergence set_needs_review failed: {e}"))
         })?;
-        return Ok(ConvergeOutcome::Terminal);
+        return Ok(ConvergencePass {
+            outcome: ConvergeOutcome::Terminal,
+            route_handoff: None,
+            provider_chase_attempted: false,
+        });
     }
 
     // Step 1 — identity / ID-chasing leg via the one identity road. Settle ONLY when
@@ -195,7 +267,11 @@ where
         work.enrichment_status,
         !chaseable_after.is_empty(),
     );
-    Ok(outcome)
+    Ok(ConvergencePass {
+        outcome,
+        route_handoff: None,
+        provider_chase_attempted: false,
+    })
 }
 
 /// Step-4 outcome mapping for one [`converge_work`] pass.
@@ -260,6 +336,7 @@ where
         + livrarr_db::HistoryDb
         + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
+        + livrarr_domain::identity_layer::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -280,19 +357,21 @@ where
             matches!(
                 w.enrichment_status,
                 EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
-            ) || w.identity_status == IdentityStatus::Pending
+            ) || (!svc.identity_routes_authoritative
+                && w.identity_status == IdentityStatus::Pending)
         })
         .collect();
 
     let total = incomplete.len();
     let mut recovered = 0usize;
+    let mut route_handoffs = Vec::new();
 
     for work in &incomplete {
         // A Pending work re-resolves identity first via the one identity road
         // (settle_identity) — Background mode so Audnexus stays eligible
         // (REQ-001). The promoted anchor survives the refresh below
         // (reset_enrichment_for_refresh touches only enrichment).
-        if work.identity_status == IdentityStatus::Pending {
+        if !svc.identity_routes_authoritative && work.identity_status == IdentityStatus::Pending {
             if let Some(resolver) = svc.resolver.as_ref() {
                 if let Err(e) = crate::async_resolver::settle_identity(
                     resolver.as_ref(),
@@ -315,16 +394,16 @@ where
         // Re-enrich through the one road (refresh -> run_unified ->
         // materialize). A refresh error never blocks the rest of the sweep.
         // Low: unattended retry-all-incomplete sweep (B4 table).
-        if svc
-            .refresh(user_id, work.id, RefreshSurface::Bulk)
-            .await
-            .is_ok()
-        {
+        if let Ok(refresh) = svc.refresh(user_id, work.id, RefreshSurface::Bulk).await {
+            if let Some(handoff) = refresh.route_handoff {
+                route_handoffs.push((work.id, handoff));
+            }
             if let Ok(after) = svc.db.get_work(user_id, work.id).await {
                 let still_incomplete = matches!(
                     after.enrichment_status,
                     EnrichmentStatus::Failed | EnrichmentStatus::Unenriched
-                ) || after.identity_status == IdentityStatus::Pending;
+                ) || (!svc.identity_routes_authoritative
+                    && after.identity_status == IdentityStatus::Pending);
                 if !still_incomplete {
                     recovered += 1;
                 }
@@ -336,6 +415,7 @@ where
         total,
         recovered,
         still_incomplete: total - recovered,
+        route_handoffs,
     })
 }
 

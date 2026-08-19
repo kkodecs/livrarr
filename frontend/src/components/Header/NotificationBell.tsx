@@ -11,6 +11,7 @@ import {
   Trash2,
   Check,
   Rss,
+  Link2,
 } from "lucide-react";
 import { Link } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
@@ -31,6 +32,7 @@ const notificationIcons: Record<NotificationType, ReactNode> = {
   jobPanicked: <AlertOctagon size={16} className="text-red-400" />,
   rateLimitHit: <AlertTriangle size={16} className="text-orange-400" />,
   pathNotFound: <FolderX size={16} className="text-red-400" />,
+  identityReviewNeeded: <Link2 size={16} className="text-amber-400" />,
   rssGrabbed: <Rss size={16} className="text-green-400" />,
   rssGrabFailed: <Rss size={16} className="text-red-400" />,
 };
@@ -50,7 +52,8 @@ export function NotificationBell() {
     staleTime: 0,
   });
 
-  // Show persistent toast for pathNotFound notifications (once per notification).
+  // Surface actionable notifications as a toast once per notification. They
+  // remain available in the bell until the user reads or dismisses them.
   useEffect(() => {
     if (!unreadNotifications) return;
     for (const n of unreadNotifications) {
@@ -92,6 +95,19 @@ export function NotificationBell() {
             ),
           },
         );
+      } else if (
+        n.notificationType === "identityReviewNeeded" &&
+        !toastedIds.current.has(n.id)
+      ) {
+        toastedIds.current.add(n.id);
+        toast(n.message, {
+          id: `identity-review-${n.id}`,
+          duration: 12_000,
+          action: {
+            label: "Review",
+            onClick: () => window.location.assign("/review"),
+          },
+        });
       }
     }
   }, [unreadNotifications]);
@@ -204,7 +220,18 @@ export function NotificationBell() {
                           </ul>
                         </>
                       );
-                    })() : (
+                    })() : n.notificationType === "identityReviewNeeded" ? (
+                      <>
+                        <p className="text-sm text-zinc-200">{n.message}</p>
+                        <Link
+                          to="/review"
+                          onClick={() => setOpen(false)}
+                          className="mt-1 inline-block text-xs text-brand hover:underline"
+                        >
+                          Open review
+                        </Link>
+                      </>
+                    ) : (
                       <p className="text-sm text-zinc-200">{n.message}</p>
                     )}
                     <p className="mt-0.5 text-xs text-muted">
@@ -216,7 +243,7 @@ export function NotificationBell() {
                       <button
                         onClick={() => markRead.mutate(n.id)}
                         className="rounded p-1 text-muted hover:text-zinc-100"
-                        title="Mark as read"
+                        aria-label="Mark as read"
                       >
                         <Check size={14} />
                       </button>
@@ -224,7 +251,7 @@ export function NotificationBell() {
                     <button
                       onClick={() => dismiss.mutate(n.id)}
                       className="rounded p-1 text-muted hover:text-red-400"
-                      title="Dismiss"
+                      aria-label="Dismiss notification"
                     >
                       <Trash2 size={14} />
                     </button>

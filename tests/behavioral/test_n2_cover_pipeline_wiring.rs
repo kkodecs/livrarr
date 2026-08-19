@@ -18,8 +18,8 @@ use livrarr_domain::services::{
     SourceProviderData, WorkService,
 };
 use livrarr_domain::{
-    normalize_for_matching, CoverMediaType, CoverResolution, CoverTrust, EnrichmentStatus,
-    RequestPriority, UserId, UserRole, Work, WorkId,
+    normalize_for_matching, CoverMediaType, CoverResolution, EnrichmentStatus, RequestPriority,
+    UserId, UserRole, Work, WorkId,
 };
 use livrarr_metadata::work_service::WorkServiceImpl;
 
@@ -49,13 +49,15 @@ impl EnrichmentWorkflow for CoverResolvingWorkflow {
             cover_resolution: Some(CoverResolution {
                 url: "https://i.gr-assets.com/books/won-the-merge.jpg".into(),
                 source: "goodreads".into(),
-                trust: CoverTrust::Validated,
                 media_type: CoverMediaType::Ebook,
             }),
             audiobook_cover_resolution: None,
             identity_not_found: false,
             changed: true,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -130,7 +132,7 @@ async fn v1_refresh_reaches_the_cover_write_gate_and_lands_a_provenanced_file() 
         work.id,
         Some("https://old.example/thin.jpg"),
         "add",
-        CoverTrust::Unvalidated,
+        false,
         200,
         300,
     )
@@ -170,7 +172,6 @@ async fn v1_refresh_reaches_the_cover_write_gate_and_lands_a_provenanced_file() 
         "must stamp the real provider, never the literal 'add' placeholder \
          the row started with (V3 root cause, fixed)"
     );
-    assert_eq!(after.cover_trust, CoverTrust::Validated);
     assert_eq!(
         (after.cover_width, after.cover_height),
         (600, 900),

@@ -1,5 +1,6 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{SqliteConnection, SqlitePool};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// Create and configure a SQLite connection pool.
@@ -32,6 +33,18 @@ pub async fn create_sqlite_pool(data_dir: &Path) -> Result<SqlitePool, sqlx::Err
     Ok(pool)
 }
 
+/// Start a transaction that intends to write.
+///
+/// SQLite's deferred default can read successfully and then reject the first
+/// write immediately with `SQLITE_BUSY`, bypassing `busy_timeout`. Reserving
+/// the write slot at BEGIN makes concurrent writers queue at the only safe
+/// wait point instead.
+pub(crate) async fn begin_write(
+    pool: &SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
+}
+
 /// Run embedded migrations.
 ///
 /// Satisfies: RUNTIME-SQLITE-003
@@ -42,7 +55,12 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::Migr
 // ── Startup checks ──────────────────────────────────────────────────────────
 
 /// Maximum schema_version this binary understands.
-const MAX_SCHEMA_VERSION: i64 = 38;
+///
+/// Migration 083 writes this shared compatibility key, and the identity
+/// cutover report requires the same version before activation. Keep the guard
+/// on the legacy key so databases produced by genuinely newer binaries remain
+/// rejected.
+const MAX_SCHEMA_VERSION: i64 = 83;
 /// Maximum data_version this binary understands.
 const MAX_DATA_VERSION: i64 = 1;
 
@@ -428,8 +446,7 @@ pub async fn backfill_normalized_identity(pool: &SqlitePool) -> Result<(), Strin
         return Ok(());
     }
 
-    let mut tx = pool
-        .begin()
+    let mut tx = crate::pool::begin_write(pool)
         .await
         .map_err(|e| format!("begin normalized identity backfill transaction: {e}"))?;
 
@@ -840,8 +857,7 @@ pub async fn backfill_author_identity(pool: &SqlitePool) -> Result<(), String> {
         return Ok(());
     }
 
-    let mut tx = pool
-        .begin()
+    let mut tx = crate::pool::begin_write(pool)
         .await
         .map_err(|e| format!("begin author identity backfill transaction: {e}"))?;
 
@@ -1051,6 +1067,706 @@ pub async fn backfill_identity_key_recompute(pool: &SqlitePool) -> Result<(), St
     Ok(())
 }
 
+/// Compiled-in generation for the provider-title policy. This is a runtime
+/// data heal, deliberately separate from immutable schema migrations 082-084.
+const IDENTITY_TITLE_POLICY_GENERATION: i64 = 2;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityTitlePolicyHealReport {
+    pub healed: usize,
+    pub review_cards_minted: usize,
+    pub blocked_cohorts: usize,
+    pub article_cohorts: usize,
+    pub article_folds: usize,
+}
+
+/// Heal pre-policy provider titles after F2 authority is active.
+///
+/// Every trailing parenthetical recognized by the shared parser moves out of
+/// the immutable main title; series markers retain their identity volume and
+/// edition qualifiers retain their parsed subtitle. The complete row rewrite,
+/// generation bump, and settlement audit share one transaction. If the new key
+/// collides, the whole cohort is left untouched and enters the existing
+/// GroupIdentity review mechanics; the generation marker intentionally remains
+/// behind so a later startup retries after review resolution.
+pub async fn heal_identity_title_policy(
+    pool: &SqlitePool,
+) -> Result<IdentityTitlePolicyHealReport, String> {
+    let mut tx = crate::pool::begin_write(pool)
+        .await
+        .map_err(|error| format!("begin identity title-policy heal: {error}"))?;
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key = 'identity_title_policy_generation'",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("read identity_title_policy_generation: {error}"))?;
+    if marker
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|generation| generation >= IDENTITY_TITLE_POLICY_GENERATION)
+    {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("close completed identity title-policy heal: {error}"))?;
+        return Ok(IdentityTitlePolicyHealReport::default());
+    }
+
+    type IdentityKey = (i64, String, String, String, i64, String);
+    #[derive(sqlx::FromRow)]
+    struct WorkRow {
+        id: i64,
+        user_id: i64,
+        title: String,
+        subtitle: Option<String>,
+        normalized_identity_main: String,
+        normalized_identity_subtitle: String,
+        normalized_identity_volume: String,
+        primary_author_id: i64,
+        text_distinction: String,
+        identity_generation: i64,
+        enrichment_status: String,
+        enriched_at: Option<String>,
+        series_id: Option<i64>,
+        import_id: Option<String>,
+        next_convergence_at: Option<String>,
+        cover_url: Option<String>,
+        audiobook_cover_url: Option<String>,
+    }
+    struct HealWork {
+        row: WorkRow,
+        title: livrarr_domain::identity_layer::IdentityTitleTuple,
+        normalized_display_main: String,
+        fold_eligible: bool,
+    }
+    struct Proposal {
+        id: i64,
+        user_id: i64,
+        generation: i64,
+        key: IdentityKey,
+        title: livrarr_domain::identity_layer::IdentityTitleTuple,
+    }
+
+    let raw_rows: Vec<WorkRow> = sqlx::query_as(
+        "SELECT id, user_id, title, subtitle, normalized_identity_main, \
+                normalized_identity_subtitle, normalized_identity_volume, \
+                primary_author_id, text_distinction, identity_generation, \
+                enrichment_status, enriched_at, series_id, import_id, \
+                next_convergence_at, cover_url, audiobook_cover_url \
+           FROM works ORDER BY user_id, id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select works for identity title-policy heal: {error}"))?;
+
+    let mut works = Vec::with_capacity(raw_rows.len());
+    for row in raw_rows {
+        let title = livrarr_domain::identity_layer::title_parts_from_provider(
+            row.title.clone(),
+            row.subtitle.clone(),
+        )
+        .map_err(|error| format!("parse identity title for work {}: {error}", row.id))?;
+        let normalized_display_main =
+            livrarr_domain::title_cleanup::collapse_whitespace(&title.main).to_lowercase();
+        let fold_eligible = row.identity_generation == 1
+            && row.enrichment_status == "pending"
+            && row.enriched_at.is_none()
+            && row.series_id.is_none()
+            && row.import_id.is_none()
+            && row.next_convergence_at.is_none()
+            && row.cover_url.is_none()
+            && row.audiobook_cover_url.is_none();
+        works.push(HealWork {
+            row,
+            title,
+            normalized_display_main,
+            fold_eligible,
+        });
+    }
+
+    // Semantic article cohorts are found before tuple rewrites so pairs whose
+    // one-sided volume keeps them out of the unique-index collision set still
+    // enter the same match semantics as the add road.
+    let strict_lost = livrarr_domain::identity_layer::LostMatchGuardSet {
+        one_sided_subtitle_recovery: true,
+        shared_edition_id_confirmation: true,
+        translation_same_text_signals: Default::default(),
+    };
+    let strict_wrong = livrarr_domain::identity_layer::WrongMergeGuardSet {
+        main_title_guard: livrarr_domain::identity_layer::MainTitleGuard(true),
+        volume_conflict_guard: true,
+        author_disagreement_guard: true,
+        work_key_contradiction_guard: true,
+        audited_different_text_guard: true,
+    };
+    let mut adjacency = vec![BTreeSet::new(); works.len()];
+    for left_index in 0..works.len() {
+        for right_index in (left_index + 1)..works.len() {
+            let left = &works[left_index];
+            let right = &works[right_index];
+            if left.row.user_id != right.row.user_id
+                || left.row.primary_author_id != right.row.primary_author_id
+                || left.row.text_distinction != "common"
+                || right.row.text_distinction != "common"
+                || left.title.normalized_subtitle != right.title.normalized_subtitle
+            {
+                continue;
+            }
+            let left_stripped = livrarr_domain::identity_matching::strip_leading_identity_article(
+                &left.normalized_display_main,
+            );
+            let right_stripped = livrarr_domain::identity_matching::strip_leading_identity_article(
+                &right.normalized_display_main,
+            );
+            let differs_only_by_article = left.normalized_display_main
+                != right.normalized_display_main
+                && left_stripped == right_stripped
+                && (left_stripped != left.normalized_display_main
+                    || right_stripped != right.normalized_display_main);
+            if !differs_only_by_article {
+                continue;
+            }
+            let verdicts = livrarr_domain::identity_layer::evaluate_match(
+                livrarr_domain::identity_layer::WorkIdentityEvidence {
+                    title: left.title.clone(),
+                    primary_author_id: left.row.primary_author_id,
+                    routes: Vec::new(),
+                },
+                livrarr_domain::identity_layer::WorkIdentityEvidence {
+                    title: right.title.clone(),
+                    primary_author_id: right.row.primary_author_id,
+                    routes: Vec::new(),
+                },
+                strict_lost.clone(),
+                strict_wrong.clone(),
+            );
+            let title_tolerated = matches!(
+                verdicts.title,
+                livrarr_domain::identity_matching::TitleVerdict::Same
+                    | livrarr_domain::identity_matching::TitleVerdict::Grey {
+                        cause: livrarr_domain::identity_matching::GreyCause::VolumeAsymmetry,
+                        ..
+                    }
+            );
+            if title_tolerated
+                && matches!(
+                    verdicts.author,
+                    livrarr_domain::identity_matching::AuthorVerdict::Agree
+                )
+            {
+                adjacency[left_index].insert(right_index);
+                adjacency[right_index].insert(left_index);
+            }
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut article_components: Vec<Vec<usize>> = Vec::new();
+    for start in 0..works.len() {
+        if adjacency[start].is_empty() || !visited.insert(start) {
+            continue;
+        }
+        let mut stack = vec![start];
+        let mut component = Vec::new();
+        while let Some(index) = stack.pop() {
+            component.push(index);
+            for neighbor in &adjacency[index] {
+                if visited.insert(*neighbor) {
+                    stack.push(*neighbor);
+                }
+            }
+        }
+        component.sort_by_key(|index| works[*index].row.id);
+        article_components.push(component);
+    }
+
+    let mut report = IdentityTitlePolicyHealReport {
+        article_cohorts: article_components.len(),
+        ..Default::default()
+    };
+    let mut folded_ids = BTreeSet::new();
+    let mut folded_winners: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    let mut review_cohorts: BTreeSet<Vec<i64>> = BTreeSet::new();
+    for component in article_components {
+        let winner_index = component[0];
+        let winner = &works[winner_index];
+        let mut safe = true;
+        for loser_index in component.iter().skip(1) {
+            let loser = &works[*loser_index];
+            if !loser.fold_eligible
+                || !crate::identity_layer::article_duplicate_is_safe_to_fold(
+                    &mut tx,
+                    loser.row.user_id,
+                    loser.row.id,
+                )
+                .await?
+            {
+                safe = false;
+                break;
+            }
+        }
+        if safe {
+            for loser_index in component.iter().skip(1) {
+                let loser = &works[*loser_index];
+                crate::identity_layer::absorb_article_duplicate(
+                    &mut tx,
+                    winner.row.user_id,
+                    winner.row.id,
+                    loser.row.id,
+                )
+                .await?;
+                folded_ids.insert(loser.row.id);
+                folded_winners
+                    .entry(winner.row.id)
+                    .or_default()
+                    .push(loser.row.id);
+                report.article_folds += 1;
+            }
+        } else {
+            review_cohorts.insert(component.iter().map(|index| works[*index].row.id).collect());
+        }
+    }
+
+    let mut current_ids: BTreeMap<IdentityKey, BTreeSet<i64>> = BTreeMap::new();
+    let mut proposals = Vec::new();
+    for work in works
+        .iter()
+        .filter(|work| !folded_ids.contains(&work.row.id))
+    {
+        current_ids
+            .entry((
+                work.row.user_id,
+                work.row.normalized_identity_main.clone(),
+                work.row.normalized_identity_subtitle.clone(),
+                work.row.normalized_identity_volume.clone(),
+                work.row.primary_author_id,
+                work.row.text_distinction.clone(),
+            ))
+            .or_default()
+            .insert(work.row.id);
+        if work.title.main == livrarr_domain::title_cleanup::collapse_whitespace(&work.row.title)
+            && work.title.subtitle == work.row.subtitle
+            && work.title.normalized_main == work.row.normalized_identity_main
+            && work.title.normalized_subtitle == work.row.normalized_identity_subtitle
+            && work.title.normalized_volume == work.row.normalized_identity_volume
+        {
+            continue;
+        }
+        proposals.push(Proposal {
+            id: work.row.id,
+            user_id: work.row.user_id,
+            generation: work.row.identity_generation,
+            key: (
+                work.row.user_id,
+                work.title.normalized_main.clone(),
+                work.title.normalized_subtitle.clone(),
+                work.title.normalized_volume.clone(),
+                work.row.primary_author_id,
+                work.row.text_distinction.clone(),
+            ),
+            title: work.title.clone(),
+        });
+    }
+
+    let mut proposals_by_key: BTreeMap<IdentityKey, Vec<usize>> = BTreeMap::new();
+    for (index, proposal) in proposals.iter().enumerate() {
+        proposals_by_key
+            .entry(proposal.key.clone())
+            .or_default()
+            .push(index);
+    }
+    let mut blocked_keys = BTreeSet::new();
+    for (key, indexes) in &proposals_by_key {
+        let mut cohort = current_ids.get(key).cloned().unwrap_or_default();
+        cohort.extend(indexes.iter().map(|index| proposals[*index].id));
+        if cohort.len() > 1 {
+            blocked_keys.insert(key.clone());
+            review_cohorts.insert(cohort.into_iter().collect());
+        }
+    }
+
+    report.blocked_cohorts = review_cohorts.len();
+    for work_ids in &review_cohorts {
+        let anchor_id = *work_ids.first().expect("review cohort is nonempty");
+        let anchor = works
+            .iter()
+            .find(|work| work.row.id == anchor_id)
+            .expect("review cohort anchor came from selected works");
+        let anchor_will_bump = proposals
+            .iter()
+            .any(|proposal| proposal.id == anchor_id && !blocked_keys.contains(&proposal.key));
+        let card_generation = anchor.row.identity_generation + i64::from(anchor_will_bump);
+        let payload = serde_json::to_string(
+            &livrarr_domain::identity_layer::SettlementReviewCard::GroupIdentity {
+                work_ids: work_ids.clone(),
+                proposed_identity: None,
+                merge_choices: Vec::new(),
+            },
+        )
+        .map_err(|error| format!("serialize title-policy review: {error}"))?;
+        let inserted = sqlx::query(
+            "INSERT INTO identity_review_cards \
+                (user_id, work_id, kind, generation, status, payload, created_at) \
+             SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6 \
+              WHERE NOT EXISTS (SELECT 1 FROM identity_review_cards \
+                                 WHERE user_id=?1 AND work_id=?2 AND kind=?3 \
+                                   AND status='pending' AND payload=?5)",
+        )
+        .bind(anchor.row.user_id)
+        .bind(anchor.row.id)
+        .bind(livrarr_domain::identity_layer::ReviewKind::GroupIdentity.storage_code())
+        .bind(card_generation)
+        .bind(payload)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("mint title-policy GroupIdentity card: {error}"))?;
+        report.review_cards_minted += inserted.rows_affected() as usize;
+    }
+
+    for proposal in proposals
+        .iter()
+        .filter(|proposal| !blocked_keys.contains(&proposal.key))
+    {
+        let new_generation = proposal.generation + 1;
+        let updated = sqlx::query(
+            "UPDATE works SET title=?1, subtitle=?2, identity_volume=?3, \
+                    normalized_title=?4, normalized_identity_main=?4, \
+                    normalized_identity_subtitle=?5, normalized_identity_volume=?6, \
+                    identity_generation=?7 \
+              WHERE user_id=?8 AND id=?9 AND identity_generation=?10",
+        )
+        .bind(&proposal.title.main)
+        .bind(&proposal.title.subtitle)
+        .bind(&proposal.title.volume)
+        .bind(&proposal.title.normalized_main)
+        .bind(&proposal.title.normalized_subtitle)
+        .bind(&proposal.title.normalized_volume)
+        .bind(new_generation)
+        .bind(proposal.user_id)
+        .bind(proposal.id)
+        .bind(proposal.generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("heal identity title for work {}: {error}", proposal.id))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "identity title-policy generation changed for work {}",
+                proposal.id
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'settlement', 'identity-title-policy-heal', ?3, ?4)",
+        )
+        .bind(proposal.user_id)
+        .bind(proposal.id)
+        .bind(format!("generation={new_generation}"))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "audit identity title heal for work {}: {error}",
+                proposal.id
+            )
+        })?;
+        report.healed += 1;
+    }
+
+    // A fold whose winner already needed tuple normalization was claimed by
+    // the update above. A bare-title winner still needs one generation/audit
+    // for the graph absorption, but no tuple rewrite.
+    let proposal_ids: BTreeSet<i64> = proposals
+        .iter()
+        .filter(|proposal| !blocked_keys.contains(&proposal.key))
+        .map(|proposal| proposal.id)
+        .collect();
+    for (winner_id, loser_ids) in &folded_winners {
+        if proposal_ids.contains(winner_id) {
+            continue;
+        }
+        let winner = works
+            .iter()
+            .find(|work| work.row.id == *winner_id)
+            .expect("fold winner came from selected works");
+        let updated = sqlx::query(
+            "UPDATE works SET identity_generation=identity_generation+1 \
+              WHERE user_id=?1 AND id=?2 AND identity_generation=?3",
+        )
+        .bind(winner.row.user_id)
+        .bind(winner.row.id)
+        .bind(winner.row.identity_generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("bump article-fold winner {}: {error}", winner.row.id))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "article-fold winner generation changed for work {}",
+                winner.row.id
+            ));
+        }
+        let new_generation = winner.row.identity_generation + 1;
+        sqlx::query(
+            "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'settlement', 'identity-title-policy-heal', ?3, ?4)",
+        )
+        .bind(winner.row.user_id)
+        .bind(winner.row.id)
+        .bind(format!(
+            "generation={new_generation};folded_work_ids={}",
+            loser_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("audit article-fold winner {}: {error}", winner.row.id))?;
+    }
+
+    if blocked_keys.is_empty() {
+        sqlx::query(
+            "INSERT INTO _livrarr_meta (key, value) \
+             VALUES ('identity_title_policy_generation', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        )
+        .bind(IDENTITY_TITLE_POLICY_GENERATION.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("stamp identity title-policy generation: {error}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit identity title-policy heal: {error}"))?;
+    Ok(report)
+}
+
+/// Compiled-in generation for the PM seam-sweep route-taxonomy/data-debris
+/// repair. This is runtime data healing, not an immutable schema migration.
+const IDENTITY_SWEEP_HEAL_GENERATION: i64 = 1;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentitySweepHealReport {
+    pub routes_reowned: usize,
+    pub editions_created: usize,
+    pub works_bumped: usize,
+    pub invalid_cards_dismissed: usize,
+}
+
+/// Repair edition-scoped routes left Work-owned by the first v2 cutover and
+/// dismiss pending-route cards whose route is already owned by another Work.
+/// Route re-ownership, one generation/audit per affected Work, card cleanup,
+/// and the idempotence marker commit atomically.
+pub async fn heal_identity_sweep_findings(
+    pool: &SqlitePool,
+) -> Result<IdentitySweepHealReport, String> {
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key='identity_sweep_heal_generation'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("read identity_sweep_heal_generation: {error}"))?;
+    if marker
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|generation| generation >= IDENTITY_SWEEP_HEAL_GENERATION)
+    {
+        return Ok(IdentitySweepHealReport::default());
+    }
+
+    type RouteRow = (i64, i64, i64, String, String);
+    let mut tx = crate::pool::begin_write(pool)
+        .await
+        .map_err(|error| format!("begin identity sweep heal: {error}"))?;
+    let edition_kinds = [
+        livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+        livrarr_domain::identity_layer::RouteKind::AsinEdition,
+        livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+    ]
+    .map(|kind| serde_json::to_string(&kind).expect("RouteKind serialization"));
+    let routes: Vec<RouteRow> = sqlx::query_as(
+        "SELECT id, user_id, resolved_work_id, provider, provider_scoped_id \
+           FROM identity_routes \
+          WHERE owner_type='work' AND state='active' \
+            AND kind IN (?1, ?2, ?3) ORDER BY user_id, resolved_work_id, id",
+    )
+    .bind(&edition_kinds[0])
+    .bind(&edition_kinds[1])
+    .bind(&edition_kinds[2])
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select work-owned edition routes: {error}"))?;
+    let mut report = IdentitySweepHealReport::default();
+    let mut affected_works = BTreeSet::new();
+    for (route_id, user_id, work_id, provider, provider_scoped_id) in routes {
+        let edition_id: i64 = if let Some(existing) = sqlx::query_scalar(
+            "SELECT id FROM editions WHERE user_id=?1 AND work_id=?2 AND state='active' \
+               AND source_provider=?3 AND provider_edition_id=?4 ORDER BY id LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(&provider)
+        .bind(&provider_scoped_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("find edition for route {route_id}: {error}"))?
+        {
+            existing
+        } else {
+            let inserted = sqlx::query(
+                "INSERT INTO editions \
+                    (user_id, work_id, format, source_provider, provider_edition_id, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
+            )
+            .bind(user_id)
+            .bind(work_id)
+            .bind(
+                serde_json::to_string(&livrarr_domain::identity_layer::EditionFormat::Unknown)
+                    .expect("EditionFormat serialization"),
+            )
+            .bind(&provider)
+            .bind(&provider_scoped_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("create edition for route {route_id}: {error}"))?;
+            report.editions_created += 1;
+            inserted.last_insert_rowid()
+        };
+        let updated = sqlx::query(
+            "UPDATE identity_routes SET owner_type='edition', work_id=NULL, edition_id=?1 \
+              WHERE id=?2 AND user_id=?3 AND owner_type='work'",
+        )
+        .bind(edition_id)
+        .bind(route_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("re-own edition route {route_id}: {error}"))?;
+        report.routes_reowned += updated.rows_affected() as usize;
+        if updated.rows_affected() == 1 {
+            affected_works.insert((user_id, work_id));
+        }
+    }
+
+    for (user_id, work_id) in affected_works {
+        let updated = sqlx::query(
+            "UPDATE works SET identity_generation=identity_generation+1 \
+              WHERE user_id=?1 AND id=?2",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("bump route-taxonomy work {work_id}: {error}"))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!("route-taxonomy Work {work_id} disappeared"));
+        }
+        let generation: i64 =
+            sqlx::query_scalar("SELECT identity_generation FROM works WHERE user_id=?1 AND id=?2")
+                .bind(user_id)
+                .bind(work_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("read healed generation for work {work_id}: {error}"))?;
+        sqlx::query(
+            "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'settlement', 'identity-route-taxonomy-heal', ?3, ?4)",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(format!("generation={generation}"))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("audit route-taxonomy work {work_id}: {error}"))?;
+        report.works_bumped += 1;
+    }
+
+    type CardRow = (i64, i64, Option<i64>, String);
+    let cards: Vec<CardRow> = sqlx::query_as(
+        "SELECT id, user_id, work_id, payload FROM identity_review_cards \
+          WHERE status='pending' AND kind=?1 ORDER BY id",
+    )
+    .bind(livrarr_domain::identity_layer::ReviewKind::PendingRoute.storage_code())
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select pending-route debris: {error}"))?;
+    for (card_id, user_id, work_id, payload) in cards {
+        let card: livrarr_domain::identity_layer::SettlementReviewCard =
+            serde_json::from_str(&payload)
+                .map_err(|error| format!("decode pending-route card {card_id}: {error}"))?;
+        let livrarr_domain::identity_layer::SettlementReviewCard::PendingRoute {
+            candidate, ..
+        } = card
+        else {
+            continue;
+        };
+        let provider = serde_json::to_string(&candidate.route.provider)
+            .map_err(|error| format!("encode card {card_id} provider: {error}"))?;
+        let kind = serde_json::to_string(&candidate.route.kind)
+            .map_err(|error| format!("encode card {card_id} kind: {error}"))?;
+        let owner: Option<i64> = sqlx::query_scalar(
+            "SELECT resolved_work_id FROM identity_routes \
+              WHERE user_id=?1 AND provider=?2 AND kind=?3 AND provider_scoped_id=?4 \
+                AND state='active' LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(provider)
+        .bind(kind)
+        .bind(&candidate.route.value)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("check owner for pending card {card_id}: {error}"))?;
+        if owner.is_none() || owner == work_id {
+            continue;
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE identity_review_cards SET status='cancelled', resolved_at=?1 \
+              WHERE id=?2 AND user_id=?3 AND status='pending'",
+        )
+        .bind(&now)
+        .bind(card_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("dismiss invalid pending card {card_id}: {error}"))?;
+        sqlx::query(
+            "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'review-dismissal', 'identity-sweep-heal', ?3, ?4)",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(format!(
+            "card_id={card_id};reason=route-owned-by-another-work"
+        ))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("audit invalid pending card {card_id}: {error}"))?;
+        report.invalid_cards_dismissed += 1;
+    }
+
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('identity_sweep_heal_generation', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(IDENTITY_SWEEP_HEAL_GENERATION.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("stamp identity sweep heal generation: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit identity sweep heal: {error}"))?;
+    Ok(report)
+}
+
 /// Clear Goodreads-work anchor dead ends created before the subtitle matching
 /// rule changed, and make the affected works immediately convergence-eligible.
 ///
@@ -1071,8 +1787,7 @@ pub async fn clear_subtitle_rule_deadends(pool: &SqlitePool) -> Result<(), Strin
         return Ok(());
     }
 
-    let mut tx = pool
-        .begin()
+    let mut tx = crate::pool::begin_write(pool)
         .await
         .map_err(|e| format!("begin subtitle-rule dead-end clear transaction: {e}"))?;
 
@@ -2782,7 +3497,8 @@ mod subtitle_rule_deadend_clear_tests {
     ) {
         sqlx::query(
             "UPDATE works \
-             SET identity_status = 'confirmed', enrichment_status = 'enriched', \
+             SET identity_status = 'confirmed', identity_status_v2 = 'connected', \
+                 enrichment_status = 'enriched', \
                  ol_key = '/works/OL1W', hc_key = '1', isbn_13 = '9780743264747', \
                  asin = 'B000000001', next_convergence_at = ? \
              WHERE id = ?",
@@ -2809,6 +3525,16 @@ mod subtitle_rule_deadend_clear_tests {
     #[tokio::test]
     async fn subtitle_rule_deadend_clear_unsticks_gr_work_once_then_marker_noops() {
         let db = create_test_db().await;
+        // This heal is deliberately pre-activation legacy work. Active v2
+        // selection reads typed routes/attempts and never consults this scalar
+        // dead-end ledger.
+        sqlx::query(
+            "UPDATE _livrarr_meta SET value='inactive' \
+              WHERE key='identity_authority_v2'",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
         let user_id = seed_user(&db).await;
         let work_id = seed_work(&db, user_id).await;
         let future_clock = (Utc::now() + Duration::hours(1)).to_rfc3339();

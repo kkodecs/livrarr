@@ -1,6 +1,7 @@
 use chrono::Utc;
 use livrarr_domain::identity::*;
 use livrarr_domain::identity_edit::IdentityEditError;
+use livrarr_domain::identity_layer::{EditionFormat, IdentityProvider, RouteKind, RouteProvenance};
 use livrarr_domain::normalization::{normalize_asin, normalize_gr_key, normalize_isbn13, AsinNorm};
 use livrarr_domain::services::{
     ClearedSlot, CollisionInfo, IdentityCompletion, IdentityCompletionOutcome, IdentityEditBasis,
@@ -179,9 +180,7 @@ impl WorkIdentityRepository for SqliteDb {
         value: &str,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -370,9 +369,7 @@ impl WorkIdentityRepository for SqliteDb {
         // All operations — generation bump, dedup-SELECT, conflict INSERT,
         // badge UPDATE — run inside a single transaction so no partial state
         // is ever visible.
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -399,9 +396,7 @@ impl WorkIdentityRepository for SqliteDb {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "auto_search".to_string());
 
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -531,9 +526,7 @@ impl WorkIdentityRepository for SqliteDb {
         candidate: &Candidate,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -617,9 +610,7 @@ impl WorkIdentityRepository for SqliteDb {
     }
 
     async fn dismiss_review(&self, work_id: WorkId) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -858,9 +849,7 @@ impl WorkIdentityRepository for SqliteDb {
         let now = Utc::now().to_rfc3339();
         let anchor_type_str = anchor_type.as_str().to_string();
 
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -976,9 +965,7 @@ impl WorkIdentityRepository for SqliteDb {
         value: &str,
         setter: AnchorSetter,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1017,7 +1004,9 @@ impl WorkIdentityRepository for SqliteDb {
         expected_generation: i64,
         drop_slots: &[AnchorType],
     ) -> Result<(), IdentityEditError> {
-        let mut tx = self.pool().begin().await.map_err(classify_edit_sqlx)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(classify_edit_sqlx)?;
 
         let result = apply_identity_edit_in_tx(
             &mut tx,
@@ -1075,7 +1064,9 @@ impl WorkIdentityRepository for SqliteDb {
         user_id: UserId,
         slot: AnchorType,
     ) -> Result<ClearedSlot, IdentityEditError> {
-        let mut tx = self.pool().begin().await.map_err(classify_edit_sqlx)?;
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(classify_edit_sqlx)?;
 
         // First statement: user-scoped generation bump — claims the
         // then-current slot against delayed completions. Zero rows means a
@@ -1092,6 +1083,24 @@ impl WorkIdentityRepository for SqliteDb {
         if claimed.rows_affected() == 0 {
             return Err(IdentityEditError::NotFound);
         }
+
+        let v2_active = identity_v2_active(&mut tx)
+            .await
+            .map_err(classify_edit_sqlx)?;
+        let (route_graph_before, active_route_values) = if v2_active {
+            let graph = crate::identity_layer::read_active_route_graph(&mut tx, user_id, work_id)
+                .await
+                .map_err(classify_edit_sqlx)?;
+            let values = active_identity_slot_routes(&mut tx, user_id, work_id, &slot)
+                .await
+                .map_err(classify_edit_sqlx)?
+                .into_iter()
+                .map(|(_, _, value)| value)
+                .collect::<Vec<_>>();
+            (Some(graph), values)
+        } else {
+            (None, Vec::new())
+        };
 
         let slot_str = slot.as_str().to_string();
         let confirmed: Option<String> = sqlx::query_scalar(
@@ -1129,7 +1138,11 @@ impl WorkIdentityRepository for SqliteDb {
         // as no confirmed row, no nonempty column, AND no pending row. A pending row
         // whose value is empty is still a row, and it is exactly the one a user has no
         // other way to get rid of — filtering it out here strands it forever.
-        if confirmed.is_none() && column.is_none() && pending.is_empty() {
+        if confirmed.is_none()
+            && column.is_none()
+            && pending.is_empty()
+            && active_route_values.is_empty()
+        {
             drop(tx);
             return Err(IdentityEditError::EmptySlot);
         }
@@ -1137,6 +1150,7 @@ impl WorkIdentityRepository for SqliteDb {
             .clone()
             .or_else(|| column.clone())
             .or_else(|| pending.iter().find(|v| !v.is_empty()).cloned())
+            .or_else(|| active_route_values.first().cloned())
             .unwrap_or_default();
 
         sqlx::query(
@@ -1176,6 +1190,20 @@ impl WorkIdentityRepository for SqliteDb {
             .await
             .map_err(classify_edit_sqlx)?;
 
+        if let Some(before) = route_graph_before.as_ref() {
+            retire_all_identity_slot_routes(&mut tx, user_id, work_id, &slot)
+                .await
+                .map_err(classify_edit_sqlx)?;
+            recompute_v2_identity_status(&mut tx, user_id, work_id)
+                .await
+                .map_err(classify_edit_sqlx)?;
+            crate::identity_layer::invalidate_retry_state_if_route_graph_changed(
+                &mut tx, user_id, work_id, before,
+            )
+            .await
+            .map_err(classify_edit_sqlx)?;
+        }
+
         tx.commit().await.map_err(classify_edit_sqlx)?;
         Ok(ClearedSlot {
             old_value,
@@ -1188,9 +1216,7 @@ impl WorkIdentityRepository for SqliteDb {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<IdentityEditBasis, WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1305,9 +1331,7 @@ impl WorkIdentityRepository for SqliteDb {
         expected_generation: i64,
         completion: IdentityCompletion,
     ) -> Result<IdentityCompletionOutcome, WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1461,9 +1485,7 @@ impl WorkIdentityRepository for SqliteDb {
         &self,
         work_id: WorkId,
     ) -> Result<(i64, Vec<WorkIdentityAnchor>), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
         let generation: i64 =
@@ -1491,9 +1513,7 @@ impl WorkIdentityRepository for SqliteDb {
         &self,
         work_id: WorkId,
     ) -> Result<(i64, Option<Vec<Candidate>>), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
         let generation: i64 =
@@ -1529,9 +1549,7 @@ impl WorkIdentityRepository for SqliteDb {
         setter: AnchorSetter,
         expected_generation: i64,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1569,9 +1587,7 @@ impl WorkIdentityRepository for SqliteDb {
         setter: AnchorSetter,
         expected_generation: i64,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1644,9 +1660,7 @@ impl WorkIdentityRepository for SqliteDb {
         work_id: WorkId,
         expected_generation: i64,
     ) -> Result<(), WorkIdentityError> {
-        let mut tx = self
-            .pool()
-            .begin()
+        let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(|e| WorkIdentityError::Db(e.to_string()))?;
 
@@ -1758,7 +1772,7 @@ fn classify_edit_sqlx(e: sqlx::Error) -> IdentityEditError {
     IdentityEditError::Db(e.to_string())
 }
 
-/// Same-user owner lookup over the validated ledger∪column union — the
+/// Same-user owner lookup over the validated v2-route∪ledger∪column union — the
 /// preview/commit collision authority. The ledger half joins `works` on
 /// `user_id` (explicit-user invariant); the column half applies the same
 /// filter, so another user's id/title can never be returned. The queried
@@ -1773,8 +1787,22 @@ async fn find_anchor_owner_on<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
+    let route_kind = match anchor_type.as_str() {
+        AnchorType::OL_WORK => livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsWork,
+        AnchorType::HC_WORK => livrarr_domain::identity_layer::RouteKind::HardcoverWork,
+        AnchorType::ISBN_13 => livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+        AnchorType::ASIN => livrarr_domain::identity_layer::RouteKind::AsinEdition,
+        _ => return Ok(None),
+    };
+    let route_kind = serde_json::to_string(&route_kind).expect("RouteKind serialization");
     let sql = format!(
         "SELECT id, title FROM ( \
+           SELECT w.id AS id, w.title AS title FROM identity_routes r \
+             JOIN works w ON w.id = r.resolved_work_id AND w.user_id = r.user_id \
+             WHERE r.user_id = ?1 AND r.kind = ?5 AND r.provider_scoped_id = ?3 \
+               AND r.state = 'active' AND w.id != ?4 \
+           UNION \
            SELECT w.id AS id, w.title AS title FROM work_identity_anchors a \
              JOIN works w ON w.id = a.work_id AND w.user_id = ?1 \
              WHERE a.anchor_type = ?2 AND a.anchor_value = ?3 \
@@ -1790,6 +1818,7 @@ where
         .bind(anchor_type.as_str())
         .bind(value)
         .bind(exclude_work_id)
+        .bind(route_kind)
         .fetch_optional(executor)
         .await?;
     Ok(
@@ -1820,6 +1849,284 @@ async fn delete_slot_residue(
         .bind(work_id)
         .bind(slot_str)
         .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+#[derive(Clone)]
+struct IdentityRouteSlot {
+    provider: IdentityProvider,
+    kind: RouteKind,
+    edition_scoped: bool,
+}
+
+fn identity_route_slot(slot: &AnchorType) -> Option<IdentityRouteSlot> {
+    let (provider, kind, edition_scoped) = match slot.as_str() {
+        AnchorType::OL_WORK => (
+            IdentityProvider::OpenLibrary,
+            RouteKind::OpenLibraryWork,
+            false,
+        ),
+        // The legacy `gr_work` edit slot carries a Goodreads Book id. The v2
+        // cutover maps that column to edition-scoped evidence, not a Work id.
+        AnchorType::GR_WORK => (
+            IdentityProvider::Goodreads,
+            RouteKind::GoodreadsBookEdition,
+            true,
+        ),
+        AnchorType::HC_WORK => (IdentityProvider::Hardcover, RouteKind::HardcoverWork, false),
+        AnchorType::ISBN_13 => (
+            IdentityProvider::IsbnRegistry,
+            RouteKind::Isbn13Edition,
+            true,
+        ),
+        AnchorType::ASIN => (IdentityProvider::Amazon, RouteKind::AsinEdition, true),
+        _ => return None,
+    };
+    Some(IdentityRouteSlot {
+        provider,
+        kind,
+        edition_scoped,
+    })
+}
+
+async fn identity_v2_active(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
+                        WHERE key='identity_authority_v2' AND value='active')",
+    )
+    .fetch_one(conn)
+    .await
+}
+
+async fn active_identity_slot_routes(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+    slot: &AnchorType,
+) -> Result<Vec<(i64, Option<i64>, String)>, sqlx::Error> {
+    let Some(spec) = identity_route_slot(slot) else {
+        return Ok(Vec::new());
+    };
+    let provider = serde_json::to_string(&spec.provider).expect("IdentityProvider serialization");
+    let kind = serde_json::to_string(&spec.kind).expect("RouteKind serialization");
+    sqlx::query_as(
+        "SELECT id, edition_id, provider_scoped_id FROM identity_routes \
+          WHERE user_id=?1 AND resolved_work_id=?2 AND provider=?3 AND kind=?4 \
+            AND state='active' ORDER BY id",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .bind(provider)
+    .bind(kind)
+    .fetch_all(conn)
+    .await
+}
+
+async fn retire_all_identity_slot_routes(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+    slot: &AnchorType,
+) -> Result<(), sqlx::Error> {
+    let Some(spec) = identity_route_slot(slot) else {
+        return Ok(());
+    };
+    let provider = serde_json::to_string(&spec.provider).expect("IdentityProvider serialization");
+    let kind = serde_json::to_string(&spec.kind).expect("RouteKind serialization");
+    sqlx::query(
+        "UPDATE identity_routes SET state='retired' \
+          WHERE user_id=?1 AND resolved_work_id=?2 AND provider=?3 AND kind=?4 \
+            AND state='active'",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .bind(provider)
+    .bind(kind)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Synchronize the certified legacy edit slot into the active v2 route graph.
+/// A single existing route (the normal A→B shape) is retired and its Edition
+/// reused; plural evidence is preserved unless the frozen legacy projection
+/// identifies the exact route being replaced.
+async fn sync_identity_edit_route(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+    slot: &AnchorType,
+    old_value: Option<&str>,
+    new_value: &str,
+) -> Result<(), sqlx::Error> {
+    let Some(spec) = identity_route_slot(slot) else {
+        return Ok(());
+    };
+    let provider = serde_json::to_string(&spec.provider).expect("IdentityProvider serialization");
+    let kind = serde_json::to_string(&spec.kind).expect("RouteKind serialization");
+    let provenance =
+        serde_json::to_string(&RouteProvenance::UserChoice).expect("RouteProvenance serialization");
+    let routes = active_identity_slot_routes(conn, user_id, work_id, slot).await?;
+    let singleton = routes.len() == 1;
+    let mut replacement_edition = None;
+    for (route_id, edition_id, value) in &routes {
+        if value == new_value {
+            continue;
+        }
+        let replaces_projected = old_value.is_some_and(|old| old == value);
+        if replaces_projected || (old_value.is_none() && singleton) {
+            replacement_edition = replacement_edition.or(*edition_id);
+            sqlx::query(
+                "UPDATE identity_routes SET state='retired' \
+                  WHERE user_id=?1 AND id=?2 AND state='active'",
+            )
+            .bind(user_id)
+            .bind(route_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+
+    if routes.iter().any(|(_, _, value)| value == new_value) {
+        sqlx::query(
+            "UPDATE identity_routes SET provenance=?1, user_confirmed=1, observed_at=?2 \
+              WHERE user_id=?3 AND resolved_work_id=?4 AND provider=?5 AND kind=?6 \
+                AND provider_scoped_id=?7 AND state='active'",
+        )
+        .bind(&provenance)
+        .bind(Utc::now().to_rfc3339())
+        .bind(user_id)
+        .bind(work_id)
+        .bind(&provider)
+        .bind(&kind)
+        .bind(new_value)
+        .execute(&mut *conn)
+        .await?;
+        return Ok(());
+    }
+
+    let retired: Option<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, edition_id FROM identity_routes \
+          WHERE user_id=?1 AND resolved_work_id=?2 AND provider=?3 AND kind=?4 \
+            AND provider_scoped_id=?5 AND state='retired' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .bind(&provider)
+    .bind(&kind)
+    .bind(new_value)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let edition_id = if spec.edition_scoped {
+        match replacement_edition.or_else(|| retired.and_then(|(_, edition_id)| edition_id)) {
+            Some(edition_id) => {
+                sqlx::query(
+                    "UPDATE editions SET state='active', source_provider=?1, \
+                            provider_edition_id=?2 \
+                      WHERE user_id=?3 AND id=?4 AND work_id=?5",
+                )
+                .bind(&provider)
+                .bind(new_value)
+                .bind(user_id)
+                .bind(edition_id)
+                .bind(work_id)
+                .execute(&mut *conn)
+                .await?;
+                Some(edition_id)
+            }
+            None => Some(
+                sqlx::query(
+                    "INSERT INTO editions \
+                        (user_id, work_id, format, source_provider, provider_edition_id, state) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
+                )
+                .bind(user_id)
+                .bind(work_id)
+                .bind(
+                    serde_json::to_string(&EditionFormat::Unknown)
+                        .expect("EditionFormat serialization"),
+                )
+                .bind(&provider)
+                .bind(new_value)
+                .execute(&mut *conn)
+                .await?
+                .last_insert_rowid(),
+            ),
+        }
+    } else {
+        None
+    };
+    let (owner_type, owner_work_id) = if spec.edition_scoped {
+        ("edition", None)
+    } else {
+        ("work", Some(work_id))
+    };
+    if let Some((route_id, _)) = retired {
+        sqlx::query(
+            "UPDATE identity_routes \
+                SET owner_type=?1, work_id=?2, edition_id=?3, state='active', \
+                    provenance=?4, user_confirmed=1, observed_at=?5 \
+              WHERE user_id=?6 AND id=?7",
+        )
+        .bind(owner_type)
+        .bind(owner_work_id)
+        .bind(edition_id)
+        .bind(&provenance)
+        .bind(Utc::now().to_rfc3339())
+        .bind(user_id)
+        .bind(route_id)
+        .execute(&mut *conn)
+        .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO identity_routes \
+                (user_id, owner_type, work_id, edition_id, resolved_work_id, provider, kind, \
+                 provider_scoped_id, state, provenance, user_confirmed, observed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'active', ?9, 1, ?10)",
+        )
+        .bind(user_id)
+        .bind(owner_type)
+        .bind(owner_work_id)
+        .bind(edition_id)
+        .bind(work_id)
+        .bind(&provider)
+        .bind(&kind)
+        .bind(new_value)
+        .bind(&provenance)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn recompute_v2_identity_status(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+) -> Result<(), sqlx::Error> {
+    let (route_count, any_confirmed): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MAX(user_confirmed), 0) FROM identity_routes \
+          WHERE user_id=?1 AND resolved_work_id=?2 AND state='active'",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let status = if any_confirmed != 0 {
+        "user_confirmed"
+    } else if route_count != 0 {
+        "connected"
+    } else {
+        "not_connected"
+    };
+    sqlx::query("UPDATE works SET identity_status_v2=?1 WHERE user_id=?2 AND id=?3")
+        .bind(status)
+        .bind(user_id)
+        .bind(work_id)
+        .execute(conn)
         .await?;
     Ok(())
 }
@@ -1864,6 +2171,23 @@ async fn apply_identity_edit_in_tx(
     if claimed.rows_affected() == 0 {
         return Err(EditTxFailure::Edit(IdentityEditError::StalePreview));
     }
+
+    let v2_active = identity_v2_active(&mut *tx).await?;
+    let (route_graph_before, old_route_value) = if v2_active {
+        let graph =
+            crate::identity_layer::read_active_route_graph(&mut *tx, user_id, work_id).await?;
+        let value: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT {} FROM works WHERE user_id=?1 AND id=?2",
+            column_for(slot)
+        ))
+        .bind(user_id)
+        .bind(work_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        (Some(graph), value.filter(|value| !value.trim().is_empty()))
+    } else {
+        (None, None)
+    };
 
     // 1. Work-key slots: in-tx, user-filtered collision re-check over the
     // validated ledger∪column projection. The per-user work-key unique index
@@ -1988,6 +2312,26 @@ async fn apply_identity_edit_in_tx(
         .bind(work_id)
         .execute(&mut *tx)
         .await?;
+
+    if let Some(before) = route_graph_before.as_ref() {
+        for drop_slot in drop_slots {
+            retire_all_identity_slot_routes(&mut *tx, user_id, work_id, drop_slot).await?;
+        }
+        sync_identity_edit_route(
+            &mut *tx,
+            user_id,
+            work_id,
+            slot,
+            old_route_value.as_deref(),
+            new_value,
+        )
+        .await?;
+        recompute_v2_identity_status(&mut *tx, user_id, work_id).await?;
+        crate::identity_layer::invalidate_retry_state_if_route_graph_changed(
+            &mut *tx, user_id, work_id, before,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -2120,8 +2464,7 @@ pub async fn backfill_work_identity_ledger(pool: &sqlx::SqlitePool) -> Result<()
         return Ok(());
     }
 
-    let mut tx = pool
-        .begin()
+    let mut tx = crate::pool::begin_write(pool)
         .await
         .map_err(|e| format!("begin identity ledger backfill: {e}"))?;
 

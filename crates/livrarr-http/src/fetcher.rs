@@ -88,6 +88,10 @@ fn user_agent_string(profile: &UserAgentProfile) -> String {
 // HttpFetcherImpl
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "test-helpers")]
+type ScriptedTransport =
+    std::sync::Arc<dyn Fn(&FetchRequest) -> ScriptedTransportOutcome + Send + Sync + 'static>;
+
 /// Production implementation of [`HttpFetcher`].
 #[derive(Clone)]
 pub struct HttpFetcherImpl {
@@ -113,6 +117,28 @@ pub struct HttpFetcherImpl {
     /// with admin-approved TRUSTED-infrastructure callers (insight #37), and
     /// adding the SSRF resolver there would regress those trusted setups.
     readarr_safe_client: reqwest::Client,
+    #[cfg(feature = "test-helpers")]
+    scripted_transport: Option<ScriptedTransport>,
+    /// Hermetic DNS answers for the explicit SSRF preflight that precedes a
+    /// scripted transport. The production resolver remains unchanged, and
+    /// supplied addresses still pass through the normal private-IP filter.
+    #[cfg(feature = "test-helpers")]
+    ssrf_preflight_overrides: std::collections::HashMap<String, Vec<std::net::SocketAddr>>,
+}
+
+/// Hermetic transport result used by cross-crate real-router tests. The
+/// production fetch path still owns queue admission and request-only timing;
+/// only the actual socket exchange is replaced.
+#[cfg(feature = "test-helpers")]
+pub enum ScriptedTransportOutcome {
+    Response {
+        delay: Duration,
+        response: FetchResponse,
+    },
+    Error {
+        delay: Duration,
+        error: FetchError,
+    },
 }
 
 impl HttpFetcherImpl {
@@ -165,7 +191,59 @@ impl HttpFetcherImpl {
             fast_connect_ssrf_client,
             no_redirect_client,
             readarr_safe_client,
+            #[cfg(feature = "test-helpers")]
+            scripted_transport: None,
+            #[cfg(feature = "test-helpers")]
+            ssrf_preflight_overrides: std::collections::HashMap::new(),
         })
+    }
+
+    #[cfg(feature = "test-helpers")]
+    pub fn with_scripted_transport<F>(mut self, transport: F) -> Self
+    where
+        F: Fn(&FetchRequest) -> ScriptedTransportOutcome + Send + Sync + 'static,
+    {
+        self.scripted_transport = Some(std::sync::Arc::new(transport));
+        self
+    }
+
+    /// Supply a public DNS answer to the SSRF preflight in hermetic scripted-
+    /// transport tests. This never bypasses URL or address validation and does
+    /// not alter non-test builds.
+    #[cfg(feature = "test-helpers")]
+    pub fn with_ssrf_preflight_test_dns(
+        mut self,
+        host: &str,
+        address: std::net::SocketAddr,
+    ) -> Self {
+        self.ssrf_preflight_overrides
+            .insert(host.to_ascii_lowercase(), vec![address]);
+        self
+    }
+
+    /// Hermetic DNS seam for the Readarr trust-boundary regression. Both
+    /// Readarr transports resolve the same hostname to the same address: the
+    /// safe client still rejects private results, while the trusted,
+    /// no-redirect client may connect to admin-approved infrastructure.
+    #[cfg(feature = "test-helpers")]
+    pub fn with_readarr_test_dns(
+        mut self,
+        host: &str,
+        address: std::net::SocketAddr,
+    ) -> Result<Self, String> {
+        self.no_redirect_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve(host, address)
+            .no_proxy()
+            .build()
+            .map_err(|e| e.to_string())?;
+        self.readarr_safe_client = reqwest::Client::builder()
+            .dns_resolver(ssrf::SsrfSafeResolver::with_override(host, address))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(self)
     }
 
     /// Internal fetch logic shared between `fetch` and `fetch_ssrf_safe`.
@@ -191,6 +269,32 @@ impl HttpFetcherImpl {
                 return Err(FetchError::QueueFull { retry_after })
             }
         };
+
+        #[cfg(feature = "test-helpers")]
+        if let Some(transport) = &self.scripted_transport {
+            let timeout = req.timeout;
+            let rate_bucket = req.rate_bucket.clone();
+            let outcome = transport(&req);
+            let scripted = async move {
+                match outcome {
+                    ScriptedTransportOutcome::Response { delay, response } => {
+                        tokio::time::sleep(delay).await;
+                        Ok(response)
+                    }
+                    ScriptedTransportOutcome::Error { delay, error } => {
+                        tokio::time::sleep(delay).await;
+                        Err(error)
+                    }
+                }
+            };
+            return match tokio::time::timeout(timeout, scripted).await {
+                Ok(result) => result,
+                Err(_) => {
+                    outbound_queue::shared().report_outcome(rate_bucket, BreakerSignal::Failure);
+                    Err(FetchError::Timeout(timeout))
+                }
+            };
+        }
 
         // Build request
         let method = match req.method {
@@ -407,6 +511,19 @@ impl HttpFetcherImpl {
             }
         } else {
             // DNS resolution check
+            #[cfg(feature = "test-helpers")]
+            let addrs: Vec<_> = if let Some(addresses) = self
+                .ssrf_preflight_overrides
+                .get(&host.to_ascii_lowercase())
+            {
+                addresses.clone()
+            } else {
+                tokio::net::lookup_host(format!("{host}:{port}"))
+                    .await
+                    .map_err(|e| FetchError::Ssrf(format!("DNS resolution failed: {e}")))?
+                    .collect()
+            };
+            #[cfg(not(feature = "test-helpers"))]
             let addrs: Vec<_> = tokio::net::lookup_host(format!("{host}:{port}"))
                 .await
                 .map_err(|e| FetchError::Ssrf(format!("DNS resolution failed: {e}")))?

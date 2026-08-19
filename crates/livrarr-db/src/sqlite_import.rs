@@ -178,8 +178,26 @@ impl ImportDb for SqliteDb {
 
     async fn delete_orphan_authors_by_import(&self, import_id: &str) -> Result<i64, DbError> {
         let result = sqlx::query(
-            "DELETE FROM authors WHERE import_id = ? AND id NOT IN \
-             (SELECT DISTINCT author_id FROM works WHERE author_id IS NOT NULL)",
+            "DELETE FROM authors AS a WHERE a.import_id = ?1 \
+               AND a.monitored=0 AND a.monitor_new_items=0 \
+               AND a.monitor_since IS NULL AND a.monitor_language IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM works w \
+                                WHERE w.user_id=a.user_id \
+                                  AND (w.author_id=a.id OR w.primary_author_id=a.id)) \
+               AND NOT EXISTS (SELECT 1 FROM work_contributors wc \
+                                WHERE wc.user_id=a.user_id AND wc.author_id=a.id) \
+               AND NOT EXISTS (SELECT 1 FROM series s \
+                                WHERE s.user_id=a.user_id AND s.author_id=a.id) \
+               AND NOT EXISTS (SELECT 1 FROM author_provider_routes r \
+                                WHERE r.user_id=a.user_id AND r.author_id=a.id \
+                                  AND (r.provenance='user_picked' \
+                                       OR r.removed_by_user_id IS NOT NULL)) \
+               AND NOT EXISTS (SELECT 1 FROM author_name_variants n \
+                                WHERE n.user_id=a.user_id AND n.author_id=a.id \
+                                  AND (n.source='user' OR n.user_selected_at IS NOT NULL)) \
+               AND NOT EXISTS (SELECT 1 FROM author_link_candidates c \
+                                WHERE c.user_id=a.user_id AND c.author_id=a.id \
+                                  AND c.status='picked')",
         )
         .bind(import_id)
         .execute(self.pool())

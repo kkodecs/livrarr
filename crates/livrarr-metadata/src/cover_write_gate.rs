@@ -1,8 +1,8 @@
-//! The consolidated cover save gate (S2). Every road that saves a non-User
+//! The consolidated cover save gate (S2). Every road that saves an automatic
 //! cover — add-time enrichment, refresh, background retry, all funneling
 //! through `work_service::run_unified_enrichment` — routes through
 //! [`run_cover_write_gate`]. It wires the previously-dormant size/trust
-//! comparator into the single chokepoint with a crash-safe commit protocol:
+//! rank comparator into the single chokepoint with a crash-safe commit protocol:
 //! `works.cover_*` (and the audiobook twins) update ONLY on an accepted swap
 //! or an initial save, atomically with the file write, never in the generic
 //! enrichment field merge — so the row always describes the file actually on
@@ -17,7 +17,7 @@
 //!
 //! Commit order (every step durable before the next is visible):
 //! 1. write `{id}{suffix}.candidate.tmp` (bytes) + `.candidate.meta.json`
-//!    (url/source/trust/dims) before anything else changes.
+//!    (url/source/manual/dims) before anything else changes.
 //! 2. the comparator decides accept/reject (enrichment only — a user's own
 //!    pick always accepts once its bytes are validated).
 //! 3. reject: delete both candidate files, row and final file untouched.
@@ -41,9 +41,7 @@ use std::sync::LazyLock;
 use livrarr_db::WorkDb;
 use livrarr_domain::keyed_mutex::{KeyedMutex, KeyedMutexGuard};
 use livrarr_domain::services::HttpFetcher;
-use livrarr_domain::{
-    CoverMediaType, CoverResolution, CoverTrust, RequestPriority, UserId, Work, WorkId,
-};
+use livrarr_domain::{CoverMediaType, CoverResolution, RequestPriority, UserId, Work, WorkId};
 use livrarr_enrichment::cover_rank::CoverRankModel;
 use livrarr_enrichment::cover_resolution::should_upgrade_same_tier;
 
@@ -93,7 +91,8 @@ pub struct CandidateMeta {
     #[serde(default)]
     pub url: Option<String>,
     pub source: String,
-    pub trust: CoverTrust,
+    #[serde(default)]
+    pub manual: bool,
     pub width: i32,
     pub height: i32,
 }
@@ -113,8 +112,7 @@ pub(crate) fn final_cover_path(covers_dir: &Path, work_id: WorkId, suffix: &str)
 /// Observable result of offering one candidate to the gate.
 #[derive(Debug)]
 pub enum GateOutcome {
-    /// No candidate, a User lock backed by an existing file, or trust
-    /// disallows replacement — no-op.
+    /// No candidate or a manual ebook selection backed by an existing file.
     NoOp,
     /// Same URL already committed to disk — an unchanged pick on refresh
     /// must not re-download every pass.
@@ -141,24 +139,28 @@ impl GateOutcome {
 /// INSIDE the slot lock — never a caller-captured snapshot, which could be
 /// stale by the time the lock is acquired.
 struct CurrentCoverState {
-    trust: CoverTrust,
+    manual: bool,
     width: i32,
     height: i32,
     source: Option<String>,
     url: Option<String>,
 }
 
-fn current_state_for_slot(work: &Work, media_type: CoverMediaType) -> CurrentCoverState {
+fn current_state_for_slot(
+    work: &Work,
+    media_type: CoverMediaType,
+    audiobook_manual: bool,
+) -> CurrentCoverState {
     match media_type {
         CoverMediaType::Ebook => CurrentCoverState {
-            trust: work.cover_trust,
+            manual: work.cover_manual,
             width: work.cover_width,
             height: work.cover_height,
             source: work.cover_source.clone(),
             url: work.cover_url.clone(),
         },
         CoverMediaType::Audiobook => CurrentCoverState {
-            trust: work.audiobook_cover_trust,
+            manual: audiobook_manual,
             width: work.audiobook_cover_width,
             height: work.audiobook_cover_height,
             source: work.audiobook_cover_source.clone(),
@@ -167,23 +169,10 @@ fn current_state_for_slot(work: &Work, media_type: CoverMediaType) -> CurrentCov
     }
 }
 
-/// Whether the incumbent's trust should block the candidate outright, before
-/// any download is attempted. A User lock is absolute only while its file
-/// still exists on disk (`locked_file_exists`) — a User-trust row with no
-/// file is a damaged slot (e.g. a failed phase-1 add-time download, see
-/// `addtime_cover_trust` in work_service.rs) and must not permanently refuse
-/// every future candidate. Any other trust falls back to the usual
-/// replacement rule. Pure and file-I/O-free so it's unit testable directly.
-fn trust_blocks_candidate(
-    current_trust: CoverTrust,
-    incoming_trust: CoverTrust,
-    locked_file_exists: bool,
-) -> bool {
-    if current_trust == CoverTrust::User {
-        locked_file_exists
-    } else {
-        !current_trust.allows_replacement_by(incoming_trust)
-    }
+/// A manual ebook choice is absolute while its file exists. A stale manual
+/// bit with no file must remain repairable by the normal ranked candidate.
+fn manual_selection_blocks_candidate(current_manual: bool, file_exists: bool) -> bool {
+    current_manual && file_exists
 }
 
 pub struct CoverWriteGateInput {
@@ -221,7 +210,22 @@ where
         Ok(w) => w,
         Err(outcome) => return outcome,
     };
-    let current = current_state_for_slot(&work, media_type);
+    let audiobook_manual = if media_type == CoverMediaType::Audiobook {
+        match db.get_audiobook_cover_manual(user_id, work_id).await {
+            Ok(manual) => manual,
+            Err(error) => {
+                tracing::warn!(
+                    work_id,
+                    error = %error,
+                    "cover write gate: audiobook manual state unreadable"
+                );
+                return GateOutcome::NoOp;
+            }
+        }
+    } else {
+        false
+    };
+    let current = current_state_for_slot(&work, media_type, audiobook_manual);
     let foreign = matches!(
         livrarr_external_data::language::provider_priority(work.language.as_deref()),
         livrarr_external_data::language::ProviderPriority::Foreign
@@ -231,15 +235,14 @@ where
     let suffix = media_type.suffix();
     let final_path = final_cover_path(&covers_dir, work_id, suffix);
 
-    // A User lock is honored only when its cover actually exists on disk —
+    // A manual selection is honored only when its cover actually exists on disk —
     // either the final .jpg, or the crash-safe protocol's committed-but-
     // unrenamed state (candidate meta sidecar present: the DB row is already
-    // User and startup recovery owns finishing the rename). A failed phase-1
-    // add-time download stamps User trust with NOTHING on disk (0x0 dims,
-    // cover_url still set — see `addtime_cover_trust` in work_service.rs);
+    // manual and startup recovery owns finishing the rename). A failed phase-1
+    // add-time download leaves NOTHING on disk (0x0 dims, cover_url still set);
     // only that fully-empty shape is a damaged, replaceable slot. Only pay
-    // for the existence checks when the row is actually User-locked.
-    let locked_file_exists = if current.trust == CoverTrust::User {
+    // for the existence checks when the row is actually manually selected.
+    let locked_file_exists = if current.manual {
         tokio::fs::try_exists(&final_path).await.unwrap_or(false)
             || tokio::fs::try_exists(&candidate_meta_path(&covers_dir, work_id, suffix))
                 .await
@@ -247,7 +250,7 @@ where
     } else {
         false
     };
-    if trust_blocks_candidate(current.trust, resolution.trust, locked_file_exists) {
+    if manual_selection_blocks_candidate(current.manual, locked_file_exists) {
         return GateOutcome::NoOp;
     }
 
@@ -272,7 +275,7 @@ where
     let meta = CandidateMeta {
         url: Some(resolution.url.clone()),
         source: resolution.source.clone(),
-        trust: resolution.trust,
+        manual: false,
         width: new_w,
         height: new_h,
     };
@@ -286,20 +289,16 @@ where
         return GateOutcome::DownloadFailed;
     }
 
-    let accept = if resolution.trust != current.trust {
-        true // higher trust always wins (already gated by allows_replacement_by above)
-    } else {
-        let rank_model = CoverRankModel::for_media(media_type, foreign);
-        should_upgrade_same_tier(
-            current.width.max(0) as u32,
-            current.height.max(0) as u32,
-            new_w as u32,
-            new_h as u32,
-            current.source.as_deref(),
-            &resolution.source,
-            rank_model,
-        )
-    };
+    let rank_model = CoverRankModel::for_media(media_type, foreign);
+    let accept = should_upgrade_same_tier(
+        current.width.max(0) as u32,
+        current.height.max(0) as u32,
+        new_w as u32,
+        new_h as u32,
+        current.source.as_deref(),
+        &resolution.source,
+        rank_model,
+    );
 
     if !accept {
         // See `discard_candidate_files`'s doc for why the order matters.
@@ -353,8 +352,7 @@ pub enum UserCoverError {
 /// byte payload) to the same crash-safe protocol [`run_cover_write_gate`]
 /// uses — same slot lock, same tmp+meta commit/rename/cleanup steps — but
 /// without the enrichment-only guards: a user's choice is absolute and must
-/// be able to replace even their own earlier User-trust pick, exactly the
-/// case `run_cover_write_gate`'s User-NoOp guard blocks. Only a `Bytes`
+/// be able to replace even their own earlier manual pick. Only a `Bytes`
 /// payload can fail outright (validation); a resolved `Url` behaves like any
 /// other candidate fetch and reports failure via `GateOutcome::DownloadFailed`.
 pub async fn run_user_cover_write<D, H>(
@@ -409,7 +407,7 @@ where
     let meta = CandidateMeta {
         url: meta_url,
         source,
-        trust: CoverTrust::User,
+        manual: true,
         width,
         height,
     };
@@ -589,7 +587,7 @@ async fn commit_and_finalize<D: WorkDb + Sync>(
                 work_id,
                 meta.url.as_deref(),
                 &meta.source,
-                meta.trust,
+                meta.manual,
                 meta.width,
                 meta.height,
             )
@@ -601,7 +599,7 @@ async fn commit_and_finalize<D: WorkDb + Sync>(
                 work_id,
                 meta.url.as_deref(),
                 &meta.source,
-                meta.trust,
+                meta.manual,
                 meta.width,
                 meta.height,
             )
@@ -665,56 +663,23 @@ pub(crate) async fn invalidate_thumbnails(
 }
 
 #[cfg(test)]
-mod trust_blocks_candidate_tests {
+mod manual_selection_blocks_candidate_tests {
     use super::*;
 
     #[test]
     fn user_lock_with_missing_file_does_not_block() {
-        // BUG: a User-trust slot with no file on disk (a failed phase-1
-        // add-time download) must not permanently refuse every candidate.
-        assert!(!trust_blocks_candidate(
-            CoverTrust::User,
-            CoverTrust::Validated,
-            false,
-        ));
+        assert!(!manual_selection_blocks_candidate(true, false));
     }
 
     #[test]
     fn user_lock_with_existing_file_blocks() {
-        // A real user-chosen cover on disk stays absolute.
-        assert!(trust_blocks_candidate(
-            CoverTrust::User,
-            CoverTrust::Validated,
-            true,
-        ));
+        assert!(manual_selection_blocks_candidate(true, true));
     }
 
     #[test]
-    fn validated_rejects_unvalidated_regardless_of_file_flag() {
-        assert!(trust_blocks_candidate(
-            CoverTrust::Validated,
-            CoverTrust::Unvalidated,
-            false,
-        ));
-        assert!(trust_blocks_candidate(
-            CoverTrust::Validated,
-            CoverTrust::Unvalidated,
-            true,
-        ));
-    }
-
-    #[test]
-    fn unvalidated_never_blocks() {
-        assert!(!trust_blocks_candidate(
-            CoverTrust::Unvalidated,
-            CoverTrust::Unvalidated,
-            false,
-        ));
-        assert!(!trust_blocks_candidate(
-            CoverTrust::Unvalidated,
-            CoverTrust::User,
-            false,
-        ));
+    fn automatic_cover_never_blocks_by_itself() {
+        assert!(!manual_selection_blocks_candidate(false, false));
+        assert!(!manual_selection_blocks_candidate(false, true));
     }
 }
 

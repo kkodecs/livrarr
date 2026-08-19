@@ -10,7 +10,7 @@ use livrarr_domain::services::{
     CoverSlotState, DiscoveryService, LookupRequest, MaterializeRequest, MaterializeService,
     MaterializeTags, RefreshSurface, WorkFilter, WorkService,
 };
-use livrarr_domain::{normalize_for_matching, CoverTrust, EnrichmentStatus, Work};
+use livrarr_domain::{normalize_for_matching, EnrichmentStatus, Work};
 use livrarr_materialize::LiveMaterializeService;
 use livrarr_metadata::work_service::WorkServiceImpl;
 
@@ -174,7 +174,7 @@ async fn user_set_cover_survives_refresh_byte_identically() {
         work.id,
         Some("https://covers.example/manual.jpg"),
         "user",
-        CoverTrust::User,
+        true,
         640,
         960,
     )
@@ -194,7 +194,7 @@ async fn user_set_cover_survives_refresh_byte_identically() {
         refreshed.cover_url.as_deref(),
         Some("https://covers.example/manual.jpg")
     );
-    assert_eq!(refreshed.cover_trust, CoverTrust::User);
+    assert!(refreshed.cover_manual);
 }
 
 #[tokio::test]

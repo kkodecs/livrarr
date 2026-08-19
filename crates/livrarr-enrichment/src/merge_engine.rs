@@ -727,31 +727,23 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
     // are chosen by provider PRIORITY (something-beats-nothing, no size ranking).
     // REQ-008: a user-locked cover (provenance Setter=User) is never resolved
     // over, so materialize neither downloads nor writes a replacement.
-    let outcomes_ref: HashMap<livrarr_domain::MetadataProvider, &ReconstructedOutcome> = inputs
-        .provider_results
-        .iter()
-        .map(|(p, o)| (*p, o))
-        .collect();
-    let cover_user_locked = prov_map
-        .get(&WorkField::CoverUrl)
-        .is_some_and(|fp| fp.setter == livrarr_domain::ProvenanceSetter::User && !fp.cleared);
+    let cover_user_locked = inputs.current_work.cover_manual
+        || prov_map
+            .get(&WorkField::CoverUrl)
+            .is_some_and(|fp| fp.setter == livrarr_domain::ProvenanceSetter::User && !fp.cleared);
     let cover_resolution = if cover_user_locked {
         None
     } else {
         cover_resolution::resolve_cover(
-            &inputs.current_work,
             livrarr_domain::CoverMediaType::Ebook,
             &pm.cover,
             &eligible_providers,
-            &outcomes_ref,
         )
     };
     let audiobook_cover_resolution = cover_resolution::resolve_cover(
-        &inputs.current_work,
         livrarr_domain::CoverMediaType::Audiobook,
         &pm.audio,
         &eligible_providers,
-        &outcomes_ref,
     );
     // 6. Status classification (REQ-019): Enriched iff >=1 meaningful text field
     // is present; otherwise Thin ("we know the book, found no info"). The cover

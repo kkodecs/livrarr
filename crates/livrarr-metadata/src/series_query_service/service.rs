@@ -13,30 +13,96 @@ use super::llm_clean::llm_clean_series_list;
 use super::roster_merge::merge_roster_with_works;
 use super::series_list_merge::build_merged_series_list;
 
+pub struct NoSeriesIdentityRoad;
+
+pub struct ConfiguredSeriesIdentityRoad<R>(Arc<R>);
+
+#[trait_variant::make(SeriesIdentityRoad: Send)]
+pub trait LocalSeriesIdentityRoad: Send + Sync {
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    >;
+}
+
+impl SeriesIdentityRoad for NoSeriesIdentityRoad {
+    async fn settle(
+        &self,
+        _request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        None
+    }
+}
+
+impl<R> SeriesIdentityRoad for ConfiguredSeriesIdentityRoad<R>
+where
+    R: livrarr_domain::identity_layer::IdentityRoadService + Send + Sync,
+{
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        Some(self.0.settle(request).await)
+    }
+}
+
 pub struct SeriesQueryServiceImpl<
     D,
     F,
     W,
     L = livrarr_external_data::llm_caller_service::LlmCallerImpl,
+    R = NoSeriesIdentityRoad,
 > {
     db: D,
     fetcher: F,
     work_service: Arc<W>,
     llm: L,
+    identity_road: R,
 }
 
-impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L> {
+impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L, NoSeriesIdentityRoad> {
     pub fn new(db: D, fetcher: F, work_service: Arc<W>, llm: L) -> Self {
         Self {
             db,
             fetcher,
             work_service,
             llm,
+            identity_road: NoSeriesIdentityRoad,
         }
     }
 }
 
-impl<D, F, W, L> SeriesQueryServiceImpl<D, F, W, L>
+impl<D, F, W, L, R> SeriesQueryServiceImpl<D, F, W, L, R> {
+    pub fn with_identity_road<R2>(
+        self,
+        identity_road: Arc<R2>,
+    ) -> SeriesQueryServiceImpl<D, F, W, L, ConfiguredSeriesIdentityRoad<R2>> {
+        SeriesQueryServiceImpl {
+            db: self.db,
+            fetcher: self.fetcher,
+            work_service: self.work_service,
+            llm: self.llm,
+            identity_road: ConfiguredSeriesIdentityRoad(identity_road),
+        }
+    }
+}
+
+impl<D, F, W, L, R> SeriesQueryServiceImpl<D, F, W, L, R>
 where
     D: SeriesDb
         + AuthorDb
@@ -53,6 +119,7 @@ where
     F: HttpFetcher + Clone + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
+    R: SeriesIdentityRoad + Send + Sync,
 {
     /// REQ-010 amendment 2: resolve a stub's GR identity on expand WITHOUT
     /// monitoring — the REQ-009 exact-match road only (no picker, no author
@@ -408,7 +475,7 @@ where
     }
 }
 
-impl<D, F, W, L> SeriesQueryService for SeriesQueryServiceImpl<D, F, W, L>
+impl<D, F, W, L, R> SeriesQueryService for SeriesQueryServiceImpl<D, F, W, L, R>
 where
     D: SeriesDb
         + AuthorDb
@@ -425,6 +492,7 @@ where
     F: HttpFetcher + Clone + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     L: LlmCaller + Send + Sync,
+    R: SeriesIdentityRoad + Send + Sync,
 {
     async fn list_enriched(
         &self,
@@ -1022,7 +1090,95 @@ where
                 continue;
             }
 
-            // No match — create new work via WorkService::add() (M2 single creation gate).
+            let provider_route = (!book.gr_key.trim().is_empty()).then(|| {
+                livrarr_domain::identity_layer::ProviderIdentityEvidence {
+                    provider: livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+                    route: livrarr_domain::identity_layer::RouteKey {
+                        provider: livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+                        kind: livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+                        value: book.gr_key.clone(),
+                    },
+                    work_core: livrarr_domain::identity_layer::title_parts_from_provider(
+                        book.title.clone(),
+                        None,
+                    )
+                    .ok()
+                    .map(|identity_title| {
+                        livrarr_domain::identity_layer::ProviderWorkIdentityCore {
+                            identity_title,
+                            primary_author_id: author.id,
+                        }
+                    }),
+                    provenance: Default::default(),
+                }
+            });
+            let minimum = provider_route.is_none().then(|| {
+                livrarr_domain::identity_layer::MinimumWorkEvidence {
+                    title: book.title.clone(),
+                    authors: vec![author.id],
+                }
+            });
+            let road_request = livrarr_domain::identity_layer::IdentityRoadRequest {
+                user_id: author.user_id,
+                origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                    livrarr_domain::identity_layer::DoorKind::SeriesMonitor,
+                ),
+                evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                    user_choice: None,
+                    owned_files: Vec::new(),
+                    provider_identity: provider_route.into_iter().collect(),
+                    minimum,
+                },
+                interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::MachineAlone,
+                existing_work_id: None,
+            };
+            if let Some(road_result) = self.identity_road.settle(road_request).await {
+                match road_result {
+                    Ok(livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                        work_id,
+                        created: road_created,
+                        ..
+                    }) => {
+                        if let Err(error) = self
+                            .db
+                            .link_work_to_series(
+                                user_id,
+                                LinkWorkToSeriesRequest {
+                                    work_id,
+                                    series_id,
+                                    series_work_count: series.work_count,
+                                    series_name: series_name.clone(),
+                                    series_position: book.position,
+                                    monitor_ebook,
+                                    monitor_audiobook,
+                                },
+                            )
+                            .await
+                        {
+                            tracing::warn!(work_id, series_id, %error, "series worker: failed to link road-settled work");
+                        }
+                        if road_created {
+                            created += 1;
+                        } else {
+                            linked += 1;
+                        }
+                        let work_service = self.work_service.clone();
+                        tokio::spawn(async move {
+                            let _ = work_service.converge_work(user_id, work_id, 3).await;
+                        });
+                    }
+                    Ok(other) => {
+                        tracing::warn!(title = %book.title, outcome = ?other, "series identity road did not settle work");
+                    }
+                    Err(error) => {
+                        tracing::warn!(title = %book.title, %error, "series identity road failed");
+                    }
+                }
+                continue;
+            }
+
+            // Compatibility construction for narrow legacy unit fixtures. The
+            // production composition always injects the shared identity road.
             use livrarr_domain::identity::{IdentityState, PendingReason};
             use livrarr_domain::seed::{seed_series_monitor, SeedInput, SeedLanguage};
             match self

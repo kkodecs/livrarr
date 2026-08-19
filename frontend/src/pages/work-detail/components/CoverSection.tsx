@@ -80,15 +80,11 @@ export function CoverSection({
           </div>
           <div className="text-xs text-zinc-400 space-y-0.5">
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Ebook</p>
-            <p>Trust: <span className="text-zinc-200">{prettyCoverTrust(work.coverTrust)}</span></p>
             {work.coverSource && (
-              <p>Source: <span className="text-zinc-200">{prettyCoverSource(work.coverSource)}</span></p>
+              <p>Source: <span className="text-zinc-200">{prettyCoverSource(work.coverSource, work.coverManual)}</span></p>
             )}
             {(work.coverWidth > 0 || work.coverHeight > 0) && (
               <p>Size: <span className="text-zinc-200">{work.coverWidth}&times;{work.coverHeight}</span></p>
-            )}
-            {work.coverTrust === "user" && (
-              <p className="text-amber-500 text-[10px]">Locked</p>
             )}
           </div>
         </div>
@@ -103,15 +99,11 @@ export function CoverSection({
           </div>
           <div className="text-xs text-zinc-400 space-y-0.5">
             <p className="text-[10px] text-zinc-500 uppercase tracking-wider">Audiobook</p>
-            <p>Trust: <span className="text-zinc-200">{prettyCoverTrust(work.audiobookCoverTrust)}</span></p>
             {work.audiobookCoverSource && (
               <p>Source: <span className="text-zinc-200">{prettyCoverSource(work.audiobookCoverSource)}</span></p>
             )}
             {(work.audiobookCoverWidth > 0 || work.audiobookCoverHeight > 0) && (
               <p>Size: <span className="text-zinc-200">{work.audiobookCoverWidth}&times;{work.audiobookCoverHeight}</span></p>
-            )}
-            {work.audiobookCoverTrust === "user" && (
-              <p className="text-amber-500 text-[10px]">Locked</p>
             )}
             {!work.audiobookCoverUrl && (
               <p className="text-zinc-600 text-[10px]">Falls back to ebook</p>
@@ -191,7 +183,7 @@ export function CoverSection({
                 Refresh
               </button>
               <p className="text-[10px] text-zinc-600">
-                Selecting a cover locks it from automatic updates.
+                Your selected cover remains labelled as Yours.
               </p>
             </>
           )}
@@ -236,9 +228,9 @@ export function CoverSection({
 
 
 const COVER_SOURCE_NAMES: Record<string, string> = {
-  add: "the search result picked at add",
-  import: "the file import match",
-  user: "your upload",
+  add: "Yours",
+  import: "Your file",
+  user: "Yours",
   openlibrary: "OpenLibrary",
   goodreads: "Goodreads",
   google_books: "Google Books",
@@ -246,19 +238,7 @@ const COVER_SOURCE_NAMES: Record<string, string> = {
   other: "an enrichment provider",
 };
 
-function prettyCoverSource(source: string): string {
+function prettyCoverSource(source: string, userSelected = false): string {
+  if (userSelected) return "Yours";
   return COVER_SOURCE_NAMES[source] ?? source;
-}
-
-function prettyCoverTrust(trust: string): string {
-  switch (trust) {
-    case "validated":
-      return "Validated (matched identity)";
-    case "user":
-      return "Your choice (locked)";
-    case "unvalidated":
-      return "Unvalidated";
-    default:
-      return trust;
-  }
 }

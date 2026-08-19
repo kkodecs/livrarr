@@ -552,7 +552,7 @@ impl WorkDb for StubDb {
         _work_id: WorkId,
         _cover_url: Option<&str>,
         _cover_source: &str,
-        _cover_trust: CoverTrust,
+        _cover_manual: bool,
         _cover_width: i32,
         _cover_height: i32,
     ) -> Result<(), DbError> {
@@ -565,10 +565,18 @@ impl WorkDb for StubDb {
         _work_id: WorkId,
         _audiobook_cover_url: Option<&str>,
         _audiobook_cover_source: &str,
-        _audiobook_cover_trust: CoverTrust,
+        _audiobook_cover_manual: bool,
         _audiobook_cover_width: i32,
         _audiobook_cover_height: i32,
     ) -> Result<(), DbError> {
+        unreachable!("not exercised by indexer citizenship pins")
+    }
+
+    async fn get_audiobook_cover_manual(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+    ) -> Result<bool, DbError> {
         unreachable!("not exercised by indexer citizenship pins")
     }
 

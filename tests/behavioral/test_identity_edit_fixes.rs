@@ -207,6 +207,9 @@ impl EnrichmentWorkflow for ParkingNotFoundEnrichment {
             identity_not_found: true,
             changed: false,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 

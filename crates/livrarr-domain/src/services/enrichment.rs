@@ -38,6 +38,12 @@ pub struct EnrichmentResult {
     /// when the pass ended with no provider dispatch and no merge application.
     /// The history writer records no metadata event for an unattempted pass.
     pub attempted: bool,
+    /// Work-level provider identities observed in successful payloads. This
+    /// layer reports evidence only; the identity road is the sole writer.
+    pub captured_provider_identity: Vec<crate::identity_layer::ProviderIdentityEvidence>,
+    pub captured_route_proposals: Vec<crate::identity_layer::RouteKey>,
+    /// Honest provider chase marker (skips and source-only merges are false).
+    pub provider_chase_attempted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

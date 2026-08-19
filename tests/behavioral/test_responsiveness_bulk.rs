@@ -86,6 +86,16 @@ impl WorkService for BulkRefreshStub {
         unimplemented!("not exercised")
     }
 
+    async fn capture_add_identity_routes(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _mode: livrarr_domain::identity::IdentityMode,
+    ) -> Result<Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>, WorkServiceError>
+    {
+        Ok(Vec::new())
+    }
+
     async fn complete_add(
         &self,
         _user_id: UserId,
@@ -94,7 +104,7 @@ impl WorkService for BulkRefreshStub {
         _candidate_id: Option<livrarr_domain::identity::CandidateId>,
         _mode: livrarr_domain::identity::IdentityMode,
         _source: livrarr_domain::identity::ConflictSource,
-    ) {
+    ) -> Option<livrarr_domain::identity_layer::CapturedRouteHandoff> {
         unimplemented!("not exercised")
     }
 
@@ -179,6 +189,8 @@ impl WorkService for BulkRefreshStub {
                 messages: vec![],
                 taggable_items: vec![],
                 merge_deferred: false,
+                provider_unavailable: false,
+                route_handoff: None,
             })
         }
     }

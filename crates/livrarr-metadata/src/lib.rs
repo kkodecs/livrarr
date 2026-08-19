@@ -24,6 +24,8 @@ pub mod cover_write_gate_recovery;
 pub mod discovery_service;
 pub mod enrichment_workflow_service;
 pub mod http_llm;
+mod identity_consumer_match;
+pub mod identity_road;
 pub mod list_service;
 pub mod preadd_cover_service;
 pub mod series_link;
@@ -303,6 +305,9 @@ pub mod tests {
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
                     attempted: true,
+                    captured_provider_identity: Vec::new(),
+                    captured_route_proposals: Vec::new(),
+                    provider_chase_attempted: false,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -320,6 +325,9 @@ pub mod tests {
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
                     attempted: true,
+                    captured_provider_identity: Vec::new(),
+                    captured_route_proposals: Vec::new(),
+                    provider_chase_attempted: false,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -341,6 +349,9 @@ pub mod tests {
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
                     attempted: true,
+                    captured_provider_identity: Vec::new(),
+                    captured_route_proposals: Vec::new(),
+                    provider_chase_attempted: false,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -359,6 +370,9 @@ pub mod tests {
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
                     attempted: true,
+                    captured_provider_identity: Vec::new(),
+                    captured_route_proposals: Vec::new(),
+                    provider_chase_attempted: false,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -373,6 +387,9 @@ pub mod tests {
                     audiobook_cover_resolution: None,
                     dissents: Vec::new(),
                     attempted: true,
+                    captured_provider_identity: Vec::new(),
+                    captured_route_proposals: Vec::new(),
+                    provider_chase_attempted: false,
                 }),
             }
         }

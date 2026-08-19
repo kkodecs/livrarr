@@ -156,6 +156,73 @@ pub fn hc_extract_hits(data: &Value) -> Result<Vec<Value>, HardcoverError> {
         .ok_or_else(|| hardcover_response_error("GraphQL search response missing hits array"))
 }
 
+/// Pure Hardcover discovery transport lifted out of livrarr-metadata so both
+/// interactive lookup and REQ-027 use one DEP-004-legal authority.
+pub async fn fetch_hardcover_discovery_hits<F: HttpFetcher>(
+    fetcher: &F,
+    term: &str,
+    token: &str,
+    priority: RequestPriority,
+) -> Result<Vec<Value>, HardcoverError> {
+    let body = hc_search_body(15, term);
+    let data = hc_post(fetcher, body, token, priority).await?;
+    hc_extract_hits(&data)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HardcoverIdentityIds {
+    pub isbns: Vec<String>,
+    pub asins: Vec<String>,
+}
+
+/// One corroboration probe for a picked Hardcover work. The editions relation
+/// carries every ISBN-13/ASIN needed by REQ-027 in this single `hc_post` call.
+pub async fn probe_hardcover_identity_ids<F: HttpFetcher>(
+    fetcher: &F,
+    work_id: i64,
+    token: &str,
+    priority: RequestPriority,
+) -> Result<HardcoverIdentityIds, HardcoverError> {
+    let body = serde_json::json!({
+        "query": r#"query IdentityEditions($bookId: Int!) {
+            editions(where: {book_id: {_eq: $bookId}}, limit: 50) {
+                isbn_13
+                asin
+            }
+        }"#,
+        "variables": {"bookId": work_id}
+    });
+    let data = hc_post(fetcher, body, token, priority).await?;
+    let editions = data
+        .pointer("/data/editions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| hardcover_response_error("identity probe missing editions array"))?;
+    let mut ids = HardcoverIdentityIds::default();
+    for edition in editions {
+        if let Some(value) = edition
+            .get("isbn_13")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !ids.isbns.iter().any(|existing| existing == value) {
+                ids.isbns.push(value.to_string());
+            }
+        }
+        if let Some(value) = edition
+            .get("asin")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            if !ids.asins.iter().any(|existing| existing == value) {
+                ids.asins.push(value.to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// Hardcover GraphQL API endpoint.
 pub const HARDCOVER_API_URL: &str = "https://api.hardcover.app/v1/graphql";
 

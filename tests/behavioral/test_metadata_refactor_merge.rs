@@ -172,21 +172,24 @@ async fn user_set_series_and_cover_survive_refresh() {
 
 #[tokio::test]
 async fn cover_selection_uses_provider_priority_not_pixel_dimensions() {
-    // AC-012. N2/S1: the unified English cover order is GR → HC → ... — GR
-    // is now the higher-priority provider (the live picker never compares
-    // pixels; that's the comparator's job at the save gate, not the merge).
+    // AC-012. The live picker never compares pixels; that's the comparator's
+    // job at the save gate, not the merge. Use two round-15-eligible sources so
+    // this remains a provider-priority pin after Goodreads containment.
     let engine = DefaultMergeEngine::new(PriorityModel::english());
     let mut high_priority_small = detail();
-    high_priority_small.cover_url = Some("https://covers.example.test/gr-small.jpg".to_string());
+    high_priority_small.cover_url = Some("https://covers.example.test/hc-small.jpg".to_string());
     let mut low_priority_large = detail();
-    low_priority_large.cover_url = Some("https://covers.example.test/hc-large.jpg".to_string());
+    low_priority_large.cover_url = Some("https://covers.example.test/ol-large.jpg".to_string());
+
+    let mut automatic_work = work();
+    automatic_work.cover_manual = false;
 
     let output = engine
         .merge(merge_input(
-            work(),
+            automatic_work,
             HashMap::from([
-                (MetadataProvider::Goodreads, outcome(high_priority_small)),
-                (MetadataProvider::Hardcover, outcome(low_priority_large)),
+                (MetadataProvider::Hardcover, outcome(high_priority_small)),
+                (MetadataProvider::OpenLibrary, outcome(low_priority_large)),
             ]),
             vec![],
         ))
@@ -195,7 +198,7 @@ async fn cover_selection_uses_provider_priority_not_pixel_dimensions() {
 
     assert_eq!(
         update(output).cover_url,
-        Some("https://covers.example.test/gr-small.jpg".to_string()),
+        Some("https://covers.example.test/hc-small.jpg".to_string()),
         "higher-priority provider must win even when a lower-priority provider has a larger image"
     );
 }

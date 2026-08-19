@@ -500,7 +500,7 @@ async fn wh_backfill_full_fixture_synthesizes_only_uncovered_facts() {
     let rows = history(&db, user).await;
     let other_rows = history(&db, other_user).await;
 
-    assert_eq!(marker_value(&db).await.as_deref(), Some("1"));
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
     assert!(rows.iter().all(|row| row.user_id == user));
     assert!(other_rows.iter().all(|row| row.user_id == other_user));
     assert_eq!(rows.len(), 14, "2 real rows plus 12 synthesized rows");
@@ -738,7 +738,7 @@ async fn wh_backfill_idempotency_is_non_destructive_and_marker_stops_clean_rerun
     let after_first = history(&db, user).await;
     let first_count = after_first.len();
     assert!(first_count > 0);
-    assert_eq!(marker_value(&db).await.as_deref(), Some("1"));
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
 
     sqlx::query("DELETE FROM works WHERE id = ? AND user_id = ?")
         .bind(work.id)
@@ -759,7 +759,7 @@ async fn wh_backfill_idempotency_is_non_destructive_and_marker_stops_clean_rerun
     run_history_backfill(db.clone()).await;
     let after_third = history(&db, user).await;
     assert_eq!(after_third.len(), first_count);
-    assert_eq!(marker_value(&db).await.as_deref(), Some("1"));
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
 }
 
 #[tokio::test]
@@ -813,7 +813,7 @@ async fn wh_backfill_insert_failure_leaves_no_marker_and_rerun_is_additive() {
 
     run_history_backfill(db.clone()).await;
     let completed_rows = history(&db, user).await;
-    assert_eq!(marker_value(&db).await.as_deref(), Some("1"));
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
     assert_eq!(backfilled(&completed_rows, EventType::Added).len(), 1);
     assert_eq!(backfilled(&completed_rows, EventType::Imported).len(), 1);
 }
@@ -907,7 +907,7 @@ async fn wh_backfill_failure_dedup_is_per_guid_for_same_title_grabs() {
         .filter_map(|event| event.data.get("guid").and_then(Value::as_str))
         .collect();
     assert_eq!(guids, HashSet::from(["guid-a", "guid-b"]));
-    assert_eq!(marker_value(&db).await.as_deref(), Some("1"));
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
 }
 
 #[tokio::test]
@@ -964,4 +964,57 @@ async fn wh_create_history_event_date_some_persists_fact_date_and_none_uses_now(
         before,
         after
     );
+}
+
+// Bug reproduction: identity-layer-rewrite S-14 — installations that already
+// completed history backfill generation 1 must receive the additive v2-birth
+// repair once, fact-dated from works.added_at, and a rerun must write nothing.
+#[tokio::test]
+async fn wh_v2_missing_birth_backfills_once_after_generation_one_marker() {
+    let db = create_test_db().await;
+    let user = seed_user(&db, "wh-v2-birth-user").await;
+    let added_at = dt(7, 45, 12);
+    let work = seed_work(
+        &db,
+        user,
+        "The Cider House Rules",
+        "John Irving",
+        added_at,
+        None,
+        None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE works SET identity_generation=1, identity_status_v2='connected' \
+          WHERE user_id=?1 AND id=?2",
+    )
+    .bind(user)
+    .bind(work.id)
+    .execute(db.pool())
+    .await
+    .expect("mark fixture as a v2-created Work");
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('history_backfill_generation', '1') \
+         ON CONFLICT(key) DO UPDATE SET value='1'",
+    )
+    .execute(db.pool())
+    .await
+    .expect("seed completed generation-one marker");
+
+    run_history_backfill(db.clone()).await;
+    let after_first = history(&db, user).await;
+    let births = backfilled(&after_first, EventType::Added);
+    assert_eq!(births.len(), 1);
+    assert_eq!(births[0].work_id, Some(work.id));
+    assert_eq!(births[0].date, added_at);
+    assert_eq!(births[0].data["work_title"], "The Cider House Rules");
+    assert_eq!(births[0].data["work_author"], "John Irving");
+    assert_eq!(births[0].data["backfilled"], true);
+    assert_eq!(marker_value(&db).await.as_deref(), Some("2"));
+
+    run_history_backfill(db.clone()).await;
+    let after_second = history(&db, user).await;
+    assert_eq!(after_second.len(), after_first.len(), "rerun is zero-write");
+    assert_eq!(backfilled(&after_second, EventType::Added).len(), 1);
 }

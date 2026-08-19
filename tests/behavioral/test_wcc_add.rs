@@ -171,6 +171,9 @@ impl ProviderQueue for NoProviderDispatchQueue {
             )]),
             merge_eligible: false,
             deferred: false,
+            provider_chase_attempted: true,
+            search_provider_identity: Vec::new(),
+            search_route_proposals: Vec::new(),
         })
     }
 }
@@ -456,11 +459,9 @@ async fn test_wcc_add_reqs_014_015_add_reuses_cached_payloads_in_process_without
 /// `/api/v1/coverproxy?url=<absolute>`; the handler reverses that so the work
 /// service receives the canonical absolute URL). This test pins the work-service
 /// half of that contract — the absolute URL it is handed, plus the `cover_manual`
-/// flag, must survive create + phase-1 cover write. The prior bug here: the
-/// phase-1 cover write assigned Validated trust and reset `cover_manual` to
-/// false, so background enrichment overrode the pick. After the fix the stored
-/// URL is unchanged, `cover_manual` stays true, and trust is `User` (which
-/// `resolve_cover` refuses to upgrade).
+/// flag, must survive create + phase-1 cover write. The stored URL remains
+/// unchanged and `cover_manual` stays true so ranked enrichment cannot replace
+/// the user's selection.
 #[tokio::test]
 async fn test_wcc_add_picked_cover_persists_and_locks_manual() {
     let db = common::create_test_db().await;
@@ -489,10 +490,5 @@ async fn test_wcc_add_picked_cover_persists_and_locks_manual() {
     assert!(
         result.work.cover_manual,
         "a user-picked cover must stay cover_manual so enrichment cannot replace it"
-    );
-    assert_eq!(
-        result.work.cover_trust,
-        livrarr_domain::CoverTrust::User,
-        "a user pick is locked at User trust; resolve_cover refuses to upgrade it"
     );
 }

@@ -21,6 +21,8 @@ livrarr-matching = { workspace = true }
 livrarr-db = { workspace = true }
 livrarr-http = { workspace = true }
 livrarr-external-data = { workspace = true }
+livrarr-identity = { workspace = true }
+livrarr-jobs = { workspace = true }
 livrarr-metadata = { workspace = true }
 livrarr-download = { workspace = true }
 livrarr-library = { workspace = true }
@@ -58,6 +60,8 @@ dhat = { version = "0.3", optional = true }
 
 [features]
 dhat-heap = ["dhat"]
+test-helpers = ["livrarr-http/test-helpers"]
 
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }
+livrarr-http = { workspace = true, features = ["test-helpers"] }

@@ -196,6 +196,12 @@ async fn build_route_harness() -> RouteHarness {
         hmac_key.clone(),
         data_dir_arc.clone(),
     ));
+    let identity_road_arc = Arc::new(livrarr_server::identity_layer::build_live_identity_road(
+        db.clone(),
+        http_fetcher.clone(),
+        http_client.clone(),
+        live_metadata_config.clone(),
+    ));
 
     let harness_db = db.clone();
     let state = AppState {
@@ -219,6 +225,7 @@ async fn build_route_harness() -> RouteHarness {
         manual_import_scans: manual_import_scans_shared.clone(),
         provider_queue: queue,
         enrichment_service: enrichment_service.clone(),
+        identity_road: identity_road_arc.clone(),
         author_service: Arc::new(metadata::author_service::AuthorServiceImpl::new(
             db.clone(),
             http_fetcher.clone(),
@@ -240,7 +247,8 @@ async fn build_route_harness() -> RouteHarness {
                     live_metadata_config.clone(),
                     llm_http_client.clone(),
                 ),
-            ),
+            )
+            .with_identity_road(identity_road_arc.clone()),
         ),
         work_service: work_service_arc.clone(),
         discovery_service: discovery_service_arc,
@@ -291,11 +299,12 @@ async fn build_route_harness() -> RouteHarness {
                 http_fetcher.clone(),
                 data_dir.clone(),
             );
-            Arc::new(metadata::list_service::ListServiceImpl::new(
+            Arc::new(metadata::list_service::ListServiceImpl::with_identity_road(
                 db.clone(),
                 work_service,
                 http_fetcher.clone(),
                 metadata::list_service::NoOpBibliographyTrigger,
+                identity_road_arc.clone(),
             ))
         },
         identity_conflict_service: Arc::new(
@@ -320,10 +329,11 @@ async fn build_route_harness() -> RouteHarness {
                 data_dir.clone(),
             );
             Arc::new(
-                metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::new(
+                metadata::author_monitor_workflow::AuthorMonitorWorkflowImpl::with_identity_road(
                     Arc::new(db.clone()),
                     Arc::new(work_service),
                     Arc::new(http_fetcher.clone()),
+                    identity_road_arc.clone(),
                 ),
             )
         },

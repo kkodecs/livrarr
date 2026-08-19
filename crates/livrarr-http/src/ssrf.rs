@@ -112,19 +112,52 @@ pub async fn validate_url(url: &str) -> Result<(), SsrfError> {
 /// - Redirect-based SSRF (reqwest re-resolves on redirect targets)
 ///
 /// Attach to a `reqwest::ClientBuilder` via `.dns_resolver(SsrfSafeResolver::new())`.
-pub struct SsrfSafeResolver;
+pub struct SsrfSafeResolver {
+    #[cfg(feature = "test-helpers")]
+    overrides: std::collections::HashMap<String, Vec<SocketAddr>>,
+}
 
 impl SsrfSafeResolver {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self)
+        Arc::new(Self {
+            #[cfg(feature = "test-helpers")]
+            overrides: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Hermetic hostname-resolution seam for transport tests. The resolved
+    /// addresses still pass through the production private-address filter.
+    #[cfg(feature = "test-helpers")]
+    pub fn with_override(host: &str, address: SocketAddr) -> Arc<Self> {
+        Arc::new(Self {
+            overrides: std::collections::HashMap::from([(
+                host.to_ascii_lowercase(),
+                vec![address],
+            )]),
+        })
     }
 }
 
 impl reqwest::dns::Resolve for SsrfSafeResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        #[cfg(feature = "test-helpers")]
+        let override_addrs = self
+            .overrides
+            .get(&name.as_str().to_ascii_lowercase())
+            .cloned();
         Box::pin(async move {
             let host = name.as_str();
             // Resolve via standard DNS.
+            #[cfg(feature = "test-helpers")]
+            let addrs: Vec<SocketAddr> = if let Some(addrs) = override_addrs {
+                addrs
+            } else {
+                tokio::net::lookup_host(format!("{host}:0"))
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+                    .collect()
+            };
+            #[cfg(not(feature = "test-helpers"))]
             let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:0"))
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?

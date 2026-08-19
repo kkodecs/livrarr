@@ -43,6 +43,9 @@ pub type LiveSeriesQueryService = livrarr_metadata::series_query_service::Series
     livrarr_http::fetcher::HttpFetcherImpl,
     LiveWorkService,
     livrarr_external_data::llm_caller_service::LlmCallerImpl,
+    livrarr_metadata::series_query_service::ConfiguredSeriesIdentityRoad<
+        crate::identity_layer::AppIdentityRoad,
+    >,
 >;
 pub type LiveTagServiceImpl = crate::tag_service::LiveTagService<LiveImportIoService>;
 pub type LiveIdentityResolver =
@@ -53,6 +56,43 @@ pub type LiveWorkService = livrarr_metadata::work_service::WorkServiceImpl<
     LiveEnrichmentWorkflow,
     livrarr_http::fetcher::HttpFetcherImpl,
 >;
+
+/// Shared production composition for the multi-provider identity resolver.
+/// Real-router regressions call this same constructor with scripted clients,
+/// so the live-add capture seam cannot drift from `main.rs` wiring again.
+pub fn build_live_identity_resolver(
+    clients: std::collections::HashMap<
+        livrarr_domain::MetadataProvider,
+        livrarr_external_data::ProviderClient,
+    >,
+    cache: Arc<livrarr_external_data::transport_cache::TransportCache>,
+    config: livrarr_metadata::english_identity_resolver::ResolverConfig,
+) -> Arc<LiveIdentityResolver> {
+    Arc::new(LiveIdentityResolver {
+        clients,
+        cache,
+        config,
+    })
+}
+
+/// Shared post-marker WorkService composition. Every production consumer gets
+/// the resolver and the F2-authoritative switch together; constructing a live
+/// service that can fall back to legacy status/anchor writers is impossible at
+/// the composition root.
+pub fn build_live_work_service(
+    db: SqliteDb,
+    enrichment_service: Arc<LiveEnrichmentService>,
+    http_fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+    data_dir: std::path::PathBuf,
+    identity_resolver: Arc<LiveIdentityResolver>,
+) -> LiveWorkService {
+    let workflow = livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
+        enrichment_service,
+    );
+    livrarr_metadata::work_service::WorkServiceImpl::new(db, workflow, http_fetcher, data_dir)
+        .with_resolver(identity_resolver)
+        .with_identity_routes_authoritative()
+}
 
 pub type LiveDiscoveryService = livrarr_metadata::discovery_service::DiscoveryServiceImpl<
     SqliteDb,
@@ -75,6 +115,7 @@ pub type LiveListService = livrarr_metadata::list_service::ListServiceImpl<
     LiveWorkService,
     livrarr_http::fetcher::HttpFetcherImpl,
     livrarr_metadata::list_service::NoOpBibliographyTrigger,
+    livrarr_metadata::list_service::ConfiguredIdentityRoad<crate::identity_layer::AppIdentityRoad>,
 >;
 
 /// Build the production list service.
@@ -90,12 +131,14 @@ pub fn build_live_list_service(
     db: SqliteDb,
     work_service: LiveWorkService,
     http_fetcher: livrarr_http::fetcher::HttpFetcherImpl,
+    identity_road: Arc<crate::identity_layer::AppIdentityRoad>,
 ) -> LiveListService {
-    livrarr_metadata::list_service::ListServiceImpl::new(
+    livrarr_metadata::list_service::ListServiceImpl::with_identity_road(
         db,
         work_service,
         http_fetcher,
         livrarr_metadata::list_service::NoOpBibliographyTrigger,
+        identity_road,
     )
 }
 pub type LiveAuthorMonitorWorkflow =
@@ -103,6 +146,9 @@ pub type LiveAuthorMonitorWorkflow =
         SqliteDb,
         LiveWorkService,
         livrarr_http::fetcher::HttpFetcherImpl,
+        livrarr_metadata::author_monitor_workflow::ConfiguredIdentityRoad<
+            crate::identity_layer::AppIdentityRoad,
+        >,
     >;
 pub type ReadarrImportServiceImpl =
     crate::readarr_import_service::LiveReadarrImportService<SqliteDb>;
@@ -166,6 +212,10 @@ pub struct AppState {
     /// Live `EnrichmentServiceImpl` wrapping `provider_queue` + the merge
     /// engine — drives live enrichment through the work service.
     pub enrichment_service: Arc<LiveEnrichmentService>,
+    /// The sole production identity mutation road. Handlers depend only on
+    /// `HasIdentityRoadService`; this concrete generic composition preserves
+    /// static dispatch and makes call recording injectable in route tests.
+    pub identity_road: Arc<crate::identity_layer::AppIdentityRoad>,
 
     // --- Service layer (Phase 4) ---
     pub author_service: Arc<LiveAuthorService>,
@@ -221,6 +271,58 @@ impl livrarr_handlers::context::HasWorkIdentityRepository for AppState {
     type WorkIdentityRepo = SqliteDb;
     fn work_identity_repo(&self) -> &Self::WorkIdentityRepo {
         &self.db
+    }
+}
+
+impl livrarr_handlers::context::HasIdentityRoadService for AppState {
+    type IdentityRoadSvc = crate::identity_layer::AppIdentityRoad;
+
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc {
+        self.identity_road.as_ref()
+    }
+}
+
+impl livrarr_handlers::context::HasIdentityLayerRepository for AppState {
+    type IdentityLayerRepo = SqliteDb;
+
+    fn identity_layer_repository(&self) -> &Self::IdentityLayerRepo {
+        &self.db
+    }
+}
+
+impl livrarr_handlers::context::EditionEvidenceCapability for AppState {
+    async fn apply_evidence(
+        &self,
+        user_id: livrarr_domain::UserId,
+        work_id: livrarr_domain::WorkId,
+        format: livrarr_domain::identity_layer::EditionFormat,
+        language: Option<String>,
+    ) -> Result<
+        livrarr_domain::identity_layer::EditionEvidenceOutcome,
+        livrarr_domain::identity_layer::EditionRepositoryError,
+    > {
+        use livrarr_domain::identity_layer::{
+            EditionRepository, EditionWorkEvidenceCommand, EvidenceProvenance,
+        };
+        EditionRepository::apply_work_evidence(
+            &self.db,
+            EditionWorkEvidenceCommand {
+                user_id,
+                work_id,
+                format,
+                language,
+                provenance: EvidenceProvenance::OwnedFile,
+            },
+        )
+        .await
+    }
+}
+
+impl livrarr_handlers::context::HasEditionRepository for AppState {
+    type EditionRepo = AppState;
+
+    fn edition_repository(&self) -> &Self::EditionRepo {
+        self
     }
 }
 

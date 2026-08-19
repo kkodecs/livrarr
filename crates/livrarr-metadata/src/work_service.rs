@@ -10,9 +10,76 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub fn fast_cover_identity_authority_match(
+    left_title: &str,
+    left_author: &str,
+    right_title: &str,
+    right_author: &str,
+) -> bool {
+    livrarr_matching::identity_layer::find_matching_work(
+        crate::identity_consumer_match::authority_inputs(
+            left_title,
+            left_author,
+            right_title,
+            right_author,
+        ),
+    )
+    .is_match
+}
+
+fn captured_provider_routes(
+    captured: &livrarr_domain::identity::CapturedIdentity,
+) -> Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence> {
+    use livrarr_domain::identity_layer::{
+        IdentityProvider, ProviderIdentityEvidence, RouteKey, RouteKind,
+    };
+
+    [
+        captured.ol_key.as_ref().map(|value| {
+            (
+                IdentityProvider::OpenLibrary,
+                RouteKind::OpenLibraryWork,
+                value,
+            )
+        }),
+        captured
+            .gr_key
+            .as_ref()
+            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+        captured
+            .hc_key
+            .as_ref()
+            .map(|value| (IdentityProvider::Hardcover, RouteKind::HardcoverWork, value)),
+        captured.isbn_13.as_ref().map(|value| {
+            (
+                IdentityProvider::IsbnRegistry,
+                RouteKind::Isbn13Edition,
+                value,
+            )
+        }),
+        captured
+            .asin
+            .as_ref()
+            .map(|value| (IdentityProvider::Amazon, RouteKind::AsinEdition, value)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(provider, kind, value)| ProviderIdentityEvidence {
+        provider: provider.clone(),
+        route: RouteKey {
+            provider,
+            kind,
+            value: value.clone(),
+        },
+        work_core: None,
+        provenance: Default::default(),
+    })
+    .collect()
+}
+
 pub struct WorkServiceImpl<D, E, H> {
     pub(crate) db: D,
-    enrichment: E,
+    pub(crate) enrichment: E,
     http: H,
     data_dir: PathBuf,
     refresh_locks: Arc<KeyedMutex<(UserId, WorkId)>>,
@@ -21,11 +88,15 @@ pub struct WorkServiceImpl<D, E, H> {
     /// mid-enrichment identity leg (`settle_identity`, REQ-010). `None` skips
     /// that leg (back-compat until the resolver is composed in the server).
     pub(crate) resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+    /// Post-F2 production flows already have a settled identity graph. In this
+    /// mode refresh/add completion skip the retired scalar-anchor resolver/gate
+    /// and let the enrichment queue dispatch from active identity routes.
+    pub(crate) identity_routes_authoritative: bool,
     /// REQ-005 (responsiveness): in-memory signal read by `is_enriching` —
     /// true exactly while a `complete_add`/background enrichment run
     /// executes for (user, work). Never persisted: empty after a restart
     /// (D-001), same shape as `refresh_locks` but a signal, not a lock.
-    enriching: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+    enriching: Arc<std::sync::Mutex<HashMap<(UserId, WorkId), usize>>>,
     /// Identity-edit preview snapshots (single-use intent tokens, r4
     /// §Preview 6): bounded per-user/global, TTL'd, process-local by design —
     /// restart → redo preview. The durable `identity_generation` each entry
@@ -39,20 +110,20 @@ pub struct WorkServiceImpl<D, E, H> {
 /// family as `BulkRefreshGuard`, but a signal (multiple runs may be members
 /// at once) rather than mutual exclusion.
 struct EnrichingGuard {
-    registry: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+    registry: Arc<std::sync::Mutex<HashMap<(UserId, WorkId), usize>>>,
     key: (UserId, WorkId),
 }
 
 impl EnrichingGuard {
     fn enter(
-        registry: Arc<std::sync::Mutex<std::collections::HashSet<(UserId, WorkId)>>>,
+        registry: Arc<std::sync::Mutex<HashMap<(UserId, WorkId), usize>>>,
         key: (UserId, WorkId),
     ) -> Self {
         {
-            let mut set = registry
+            let mut counts = registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            set.insert(key);
+            *counts.entry(key).or_default() += 1;
         }
         Self { registry, key }
     }
@@ -61,11 +132,16 @@ impl EnrichingGuard {
 impl Drop for EnrichingGuard {
     fn drop(&mut self) {
         // A panicked peer must not wedge release: take the lock through poison.
-        let mut set = self
+        let mut counts = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.remove(&self.key);
+        if let Some(count) = counts.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.key);
+            }
+        }
     }
 }
 
@@ -81,7 +157,8 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
             refresh_locks,
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
-            enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            identity_routes_authoritative: false,
+            enriching: Arc::new(std::sync::Mutex::new(HashMap::new())),
             preview_snapshots: Arc::new(std::sync::Mutex::new(PreviewSnapshotStore::default())),
         }
     }
@@ -118,6 +195,13 @@ impl<D, E, H> WorkServiceImpl<D, E, H> {
         self.resolver = Some(resolver);
         self
     }
+
+    /// Select the post-activation identity path. Kept explicit so legacy
+    /// pre-cutover service tests do not silently change their fixture contract.
+    pub fn with_identity_routes_authoritative(mut self) -> Self {
+        self.identity_routes_authoritative = true;
+        self
+    }
 }
 
 impl<D, H> WorkServiceImpl<D, (), H> {
@@ -136,7 +220,8 @@ impl<D, H> WorkServiceImpl<D, (), H> {
             refresh_locks,
             bulk_refresh_users: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             resolver: None,
-            enriching: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            identity_routes_authoritative: false,
+            enriching: Arc::new(std::sync::Mutex::new(HashMap::new())),
             preview_snapshots: Arc::new(std::sync::Mutex::new(PreviewSnapshotStore::default())),
         }
     }
@@ -159,6 +244,9 @@ impl EnrichmentWorkflow for StubNoEnrichment {
             changed: false,
             // A no-op workflow never dispatches or merges — not an attempt.
             attempted: false,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
             enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
@@ -290,6 +378,9 @@ where
         incoming: &livrarr_domain::identity::CapturedIdentity,
         source: livrarr_domain::identity::ConflictSource,
     ) -> Result<(), WorkServiceError> {
+        if self.identity_routes_authoritative {
+            return Ok(());
+        }
         let conflicts = self
             .db
             .detect_conflicting_anchors(existing_work_id, incoming, source)
@@ -324,6 +415,7 @@ where
         + livrarr_db::HistoryDb
         + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
+        + livrarr_domain::identity_layer::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -654,7 +746,7 @@ where
                     // REQ-010: the matched work takes the same identity +
                     // enrichment road as every other add outcome (the
                     // existing-work doors previously bypassed it).
-                    let (enrichment_status, _identity_not_found) = self
+                    let (enrichment_status, _identity_not_found, _route_handoff) = self
                         .ensure_identity_and_enrichment(
                             user_id,
                             work.id,
@@ -716,7 +808,7 @@ where
                         .map_err(WorkServiceError::Db)?;
                     // REQ-010: the adopted work takes the same identity +
                     // enrichment road as every other add outcome.
-                    let (enrichment_status, _identity_not_found) = self
+                    let (enrichment_status, _identity_not_found, _route_handoff) = self
                         .ensure_identity_and_enrichment(
                             user_id,
                             existing.id,
@@ -766,7 +858,7 @@ where
                         .map_err(WorkServiceError::Db)?;
                     // REQ-010: the deduped work takes the same identity +
                     // enrichment road as every other add outcome.
-                    let (enrichment_status, _identity_not_found) = self
+                    let (enrichment_status, _identity_not_found, _route_handoff) = self
                         .ensure_identity_and_enrichment(
                             user_id,
                             work.id,
@@ -1074,20 +1166,22 @@ where
                     .unwrap_or(ProvenanceSetter::User);
                 write_addtime_provenance(&self.db, user_id, &work, setter).await;
 
-                if let IdentityState::Pending { reason, .. } = &candidate.identity {
-                    let anchor_setter = match setter {
-                        ProvenanceSetter::User => AnchorSetter::User,
-                        ProvenanceSetter::Import => AnchorSetter::Import,
-                        _ => AnchorSetter::AutoSearch,
-                    };
-                    self.db
-                        .set_identity_pending(work.id, *reason, anchor_setter)
-                        .await
-                        .map_err(|e| {
-                            WorkServiceError::Validation(format!(
-                                "set_identity_pending failed: {e}"
-                            ))
-                        })?;
+                if !self.identity_routes_authoritative {
+                    if let IdentityState::Pending { reason, .. } = &candidate.identity {
+                        let anchor_setter = match setter {
+                            ProvenanceSetter::User => AnchorSetter::User,
+                            ProvenanceSetter::Import => AnchorSetter::Import,
+                            _ => AnchorSetter::AutoSearch,
+                        };
+                        self.db
+                            .set_identity_pending(work.id, *reason, anchor_setter)
+                            .await
+                            .map_err(|e| {
+                                WorkServiceError::Validation(format!(
+                                    "set_identity_pending failed: {e}"
+                                ))
+                            })?;
+                    }
                 }
 
                 // A Pending identity reaches ensure_identity_and_enrichment via
@@ -1108,6 +1202,75 @@ where
         }
     }
 
+    async fn capture_add_identity_routes(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        mode: livrarr_domain::identity::IdentityMode,
+    ) -> Result<Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>, WorkServiceError>
+    {
+        if !self.identity_routes_authoritative {
+            return Ok(Vec::new());
+        }
+        let Some(resolver) = self.resolver.as_ref() else {
+            return Err(WorkServiceError::Validation(
+                "authoritative identity resolver is not composed".to_string(),
+            ));
+        };
+        let work = self
+            .db
+            .get_work(user_id, work_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        let Some(captured) =
+            crate::async_resolver::capture_identity_routes(resolver.as_ref(), user_id, &work, mode)
+                .await
+                .map_err(|error| {
+                    WorkServiceError::Validation(format!("identity route capture failed: {error}"))
+                })?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(captured_provider_routes(&captured))
+    }
+
+    async fn capture_add_identity_route_handoff(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        mode: livrarr_domain::identity::IdentityMode,
+    ) -> Result<Option<livrarr_domain::identity_layer::CapturedRouteHandoff>, WorkServiceError>
+    {
+        if !self.identity_routes_authoritative {
+            return Ok(None);
+        }
+        let snapshot =
+            livrarr_domain::identity_layer::WorkIdentityRepository::read_captured_identity(
+                &self.db, user_id, work_id,
+            )
+            .await
+            .map_err(|error| WorkServiceError::Validation(error.to_string()))?;
+        let routes = self
+            .capture_add_identity_routes(user_id, work_id, mode)
+            .await?
+            .into_iter()
+            .filter(|evidence| {
+                !snapshot.active_routes.iter().any(|route| {
+                    route.provider == evidence.route.provider
+                        && route.kind == evidence.route.kind
+                        && route.provider_scoped_id == evidence.route.value
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(
+            (!routes.is_empty()).then_some(livrarr_domain::identity_layer::CapturedRouteHandoff {
+                metadata_generation: snapshot.identity_generation,
+                provider_identity: routes,
+                route_proposals: Vec::new(),
+            }),
+        )
+    }
+
     async fn complete_add(
         &self,
         user_id: UserId,
@@ -1116,7 +1279,7 @@ where
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         mode: livrarr_domain::identity::IdentityMode,
         source: livrarr_domain::identity::ConflictSource,
-    ) {
+    ) -> Option<livrarr_domain::identity_layer::CapturedRouteHandoff> {
         use livrarr_domain::IdentityStatus;
 
         // RAII: visible in the registry for the whole call, including a
@@ -1132,34 +1295,36 @@ where
         // refresh. Anchorless works are deliberately excluded here:
         // ensure_identity_and_enrichment runs its own settle leg for those,
         // and chasing both places would fan out twice.
-        if let Ok(work) = self.db.get_work(user_id, work_id).await {
-            let anchorless = work.ol_key.is_none()
-                && work.gr_key.is_none()
-                && work.hc_key.is_none()
-                && work.isbn_13.is_none()
-                && work.asin.is_none();
-            if work.identity_status == IdentityStatus::Pending && !anchorless {
-                if let Some(resolver) = self.resolver.as_ref() {
-                    let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
-                    let dead_ends = self
-                        .db
-                        .list_anchor_dead_ends(work.id)
-                        .await
-                        .unwrap_or_default();
-                    if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD)
-                        .is_empty()
-                    {
-                        if let Err(e) = crate::async_resolver::settle_identity(
-                            resolver.as_ref(),
-                            &self.db,
-                            user_id,
-                            &work,
-                            mode,
-                            source,
-                        )
-                        .await
+        if !self.identity_routes_authoritative {
+            if let Ok(work) = self.db.get_work(user_id, work_id).await {
+                let anchorless = work.ol_key.is_none()
+                    && work.gr_key.is_none()
+                    && work.hc_key.is_none()
+                    && work.isbn_13.is_none()
+                    && work.asin.is_none();
+                if work.identity_status == IdentityStatus::Pending && !anchorless {
+                    if let Some(resolver) = self.resolver.as_ref() {
+                        let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
+                        let dead_ends = self
+                            .db
+                            .list_anchor_dead_ends(work.id)
+                            .await
+                            .unwrap_or_default();
+                        if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD)
+                            .is_empty()
                         {
-                            tracing::warn!(work_id, "complete_add identity settle failed: {e}");
+                            if let Err(e) = crate::async_resolver::settle_identity(
+                                resolver.as_ref(),
+                                &self.db,
+                                user_id,
+                                &work,
+                                mode,
+                                source,
+                            )
+                            .await
+                            {
+                                tracing::warn!(work_id, "complete_add identity settle failed: {e}");
+                            }
                         }
                     }
                 }
@@ -1188,7 +1353,7 @@ where
             })
             .ok();
 
-        let (enrichment_status, identity_not_found) = self
+        let (enrichment_status, identity_not_found, route_handoff) = self
             .ensure_identity_and_enrichment(
                 user_id,
                 work_id,
@@ -1206,7 +1371,7 @@ where
         // (Conflict/NeedsReview) work, so identity_not_found should never
         // coincide with a parked status — this guarantees the invariant
         // structurally rather than relying on the gate alone.
-        if identity_not_found {
+        if identity_not_found && !self.identity_routes_authoritative {
             // Delayed NotFound conclusion (identity-edit r4 §Writer coverage): the
             // completion claims the PRE-wait generation captured above, so a user edit
             // landing during enrichment supersedes this stale conclusion instead of
@@ -1284,16 +1449,38 @@ where
                 );
             }
         }
+        route_handoff
     }
 
     fn is_enriching(&self, user_id: UserId, work_id: WorkId) -> bool {
         // Poison-proof: a panicked peer must not wedge this read (same
         // pattern as try_start_bulk_refresh / BulkRefreshGuard).
-        let set = self
+        let counts = self
             .enriching
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.contains(&(user_id, work_id))
+        counts.contains_key(&(user_id, work_id))
+    }
+
+    fn begin_enriching(&self, user_id: UserId, work_id: WorkId) {
+        let mut counts = self
+            .enriching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *counts.entry((user_id, work_id)).or_default() += 1;
+    }
+
+    fn end_enriching(&self, user_id: UserId, work_id: WorkId) {
+        let mut counts = self
+            .enriching
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = counts.get_mut(&(user_id, work_id)) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&(user_id, work_id));
+            }
+        }
     }
 
     async fn get(&self, user_id: UserId, work_id: WorkId) -> Result<Work, WorkServiceError> {
@@ -1678,58 +1865,64 @@ where
         // NOTE: reset_for_manual_refresh above already DELETED provider_retry_state,
         // so a refresh always re-attempts providers — no suppression survives.
         let mut work = work;
-        if let Some(resolver) = self.resolver.as_ref() {
-            let _id_span = livrarr_domain::perf::StageTimer::start("identity", work_id);
-            // REQ-009: the single-work manual refresh is the "try again" door for a
-            // stuck identity — clear the dead-end counters so the chase gate below
-            // can re-attempt. Healthy works keep the Sprint-E skip; bulk sweeps
-            // never clear (a routine sweep must not resurrect dead ends).
-            if matches!(surface, RefreshSurface::Interactive)
-                && work.identity_status == livrarr_domain::IdentityStatus::NotFound
-            {
-                if let Err(e) = self.db.clear_anchor_dead_ends(work.id).await {
-                    tracing::warn!(work_id, "refresh: failed to clear anchor dead-ends: {e}");
-                }
-                // reset_for_manual_refresh (above) already recovered the terminal
-                // status from the anchor columns; re-read so settle_identity sees
-                // the recovered status — its REQ-006 terminal guard no-ops on the
-                // stale NotFound and the try-again resolve would never run.
-                if let Ok(w) = self.db.get_work(user_id, work_id).await {
-                    work = w;
-                }
-            }
-            let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
-            let dead_ends = self
-                .db
-                .list_anchor_dead_ends(work.id)
-                .await
-                .unwrap_or_default();
-            if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD).is_empty() {
-                match crate::async_resolver::settle_identity(
-                    resolver.as_ref(),
-                    &self.db,
-                    user_id,
-                    &work,
-                    match surface {
-                        RefreshSurface::Interactive => {
-                            livrarr_domain::identity::IdentityMode::Interactive
-                        }
-                        RefreshSurface::Bulk => livrarr_domain::identity::IdentityMode::Background,
-                    },
-                    livrarr_domain::identity::ConflictSource::Refresh,
-                )
-                .await
+        if !self.identity_routes_authoritative {
+            if let Some(resolver) = self.resolver.as_ref() {
+                let _id_span = livrarr_domain::perf::StageTimer::start("identity", work_id);
+                // REQ-009: the single-work manual refresh is the "try again" door for a
+                // stuck identity — clear the dead-end counters so the chase gate below
+                // can re-attempt. Healthy works keep the Sprint-E skip; bulk sweeps
+                // never clear (a routine sweep must not resurrect dead ends).
+                if matches!(surface, RefreshSurface::Interactive)
+                    && work.identity_status == livrarr_domain::IdentityStatus::NotFound
                 {
-                    Ok(_) => {
-                        if let Ok(w) = self.db.get_work(user_id, work_id).await {
-                            work = w;
-                        }
+                    if let Err(e) = self.db.clear_anchor_dead_ends(work.id).await {
+                        tracing::warn!(work_id, "refresh: failed to clear anchor dead-ends: {e}");
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            work_id,
-                            "refresh identity settle failed; scatter proceeds: {e}"
-                        );
+                    // reset_for_manual_refresh (above) already recovered the terminal
+                    // status from the anchor columns; re-read so settle_identity sees
+                    // the recovered status — its REQ-006 terminal guard no-ops on the
+                    // stale NotFound and the try-again resolve would never run.
+                    if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                        work = w;
+                    }
+                }
+                let anchors = self.db.list_anchors(work.id).await.unwrap_or_default();
+                let dead_ends = self
+                    .db
+                    .list_anchor_dead_ends(work.id)
+                    .await
+                    .unwrap_or_default();
+                if !chaseable_anchor_types(&work, &anchors, &dead_ends, DEAD_END_THRESHOLD)
+                    .is_empty()
+                {
+                    match crate::async_resolver::settle_identity(
+                        resolver.as_ref(),
+                        &self.db,
+                        user_id,
+                        &work,
+                        match surface {
+                            RefreshSurface::Interactive => {
+                                livrarr_domain::identity::IdentityMode::Interactive
+                            }
+                            RefreshSurface::Bulk => {
+                                livrarr_domain::identity::IdentityMode::Background
+                            }
+                        },
+                        livrarr_domain::identity::ConflictSource::Refresh,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            if let Ok(w) = self.db.get_work(user_id, work_id).await {
+                                work = w;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                work_id,
+                                "refresh identity settle failed; scatter proceeds: {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -1741,17 +1934,20 @@ where
         // not enrich here either. Re-reads the post-settle status above, so a
         // work the settle step just confirmed still enriches this same call;
         // only a work still Pending/Conflict/NeedsReview after settling skips.
-        let identity_permits = !matches!(
-            work.identity_status,
-            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
-        );
+        let identity_permits = self.identity_routes_authoritative
+            || !matches!(
+                work.identity_status,
+                IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+            );
+        let mut provider_unavailable = false;
+        let mut route_handoff = None;
         if identity_permits {
             // Unified enrichment: provider dispatch, merge, cover download, tag sync.
             // Manual mode (not Background) so a transiently-unavailable provider
             // (e.g. Google Books quota 429) does not defer the entire merge and
             // discard the data other providers returned — best-effort merge. (#117)
             // No candidate_id for a manual refresh — always re-fetches from network.
-            let _enrichment_status = self
+            let enrichment_outcome = self
                 .run_unified_enrichment(
                     user_id,
                     &work,
@@ -1767,6 +1963,8 @@ where
                     livrarr_domain::Freshness::Bypass,
                 )
                 .await;
+            provider_unavailable = enrichment_outcome.provider_unavailable;
+            route_handoff = enrichment_outcome.route_handoff;
         }
 
         let refreshed_work = match self.db.get_work(user_id, work_id).await {
@@ -1779,6 +1977,8 @@ where
             messages: vec![],
             taggable_items: vec![],
             merge_deferred: false,
+            provider_unavailable,
+            route_handoff,
         })
     }
 
@@ -1926,7 +2126,28 @@ where
         work_id: WorkId,
         threshold: u32,
     ) -> Result<ConvergeOutcome, WorkServiceError> {
-        crate::convergence_service::converge_work(self, user_id, work_id, threshold).await
+        Ok(
+            crate::convergence_service::converge_work(self, user_id, work_id, threshold, None)
+                .await?
+                .outcome,
+        )
+    }
+
+    async fn converge_work_with_handoff(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        threshold: u32,
+        source_provider_data: Option<SourceProviderData>,
+    ) -> Result<ConvergencePass, WorkServiceError> {
+        crate::convergence_service::converge_work(
+            self,
+            user_id,
+            work_id,
+            threshold,
+            source_provider_data,
+        )
+        .await
     }
 
     async fn preview_merge_works(
@@ -2787,6 +3008,7 @@ where
         + livrarr_db::HistoryDb
         + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
+        + livrarr_domain::identity_layer::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -2812,7 +3034,7 @@ where
                 // `ensure_identity_and_enrichment`, not a background call
                 // (unlisted call site — B4 table's "add door" bucket applied
                 // by extension; flagged in the B4 report).
-                let (status, _) = self
+                let enrichment_outcome = self
                     .run_unified_enrichment(
                         user_id,
                         &work,
@@ -2824,7 +3046,7 @@ where
                     )
                     .await;
                 let refreshed = self.db.get_work(user_id, work.id).await.unwrap_or(work);
-                (refreshed, status)
+                (refreshed, enrichment_outcome.enrichment_status)
             } else {
                 let status = work.enrichment_status;
                 (work, status)
@@ -2971,7 +3193,11 @@ where
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         mode: livrarr_domain::identity::IdentityMode,
         source: livrarr_domain::identity::ConflictSource,
-    ) -> (EnrichmentStatus, bool) {
+    ) -> (
+        EnrichmentStatus,
+        bool,
+        Option<livrarr_domain::identity_layer::CapturedRouteHandoff>,
+    ) {
         use livrarr_domain::IdentityStatus;
 
         let mut work = match self.db.get_work(user_id, work_id).await {
@@ -2981,7 +3207,7 @@ where
                     work_id,
                     "ensure_identity_and_enrichment: get_work failed: {e}"
                 );
-                return (EnrichmentStatus::Failed, false);
+                return (EnrichmentStatus::Failed, false, None);
             }
         };
 
@@ -2990,7 +3216,10 @@ where
             && work.hc_key.is_none()
             && work.isbn_13.is_none()
             && work.asin.is_none();
-        if anchorless && work.identity_status != IdentityStatus::Conflict {
+        if !self.identity_routes_authoritative
+            && anchorless
+            && work.identity_status != IdentityStatus::Conflict
+        {
             if let Some(resolver) = self.resolver.as_ref() {
                 // The add-time identity leg routes through the one identity road
                 // (settle_identity): resolve the anchorless seed, hard/fuzzy
@@ -3023,13 +3252,19 @@ where
             }
         }
 
-        // Identity gate (unchanged shape): a held identity does not enrich
-        // here — the fan-out waits for identity convergence.
-        if matches!(
-            work.identity_status,
-            IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
-        ) {
-            return (work.enrichment_status, false);
+        // The authority marker freezes the legacy badge. Active composition
+        // therefore gates exclusively on the F2 projection; pre-cutover test
+        // composition retains the legacy branch until it explicitly opts in.
+        let identity_permits = if self.identity_routes_authoritative {
+            true
+        } else {
+            !matches!(
+                work.identity_status,
+                IdentityStatus::Pending | IdentityStatus::Conflict | IdentityStatus::NeedsReview
+            )
+        };
+        if !identity_permits {
+            return (work.enrichment_status, false, None);
         }
 
         // Needs-enrichment gate: Unenriched/Failed or fresh source data; an
@@ -3039,22 +3274,28 @@ where
             EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
         ) || source_provider_data.is_some();
         if !needs {
-            return (work.enrichment_status, false);
+            return (work.enrichment_status, false, None);
         }
 
         // High: the interactive Add/manual-import flow's provider work (B4
         // table) — mode stays Background (suppression/budget semantics
         // untouched), priority is the door's own queue-ordering hint.
-        self.run_unified_enrichment(
-            user_id,
-            &work,
-            source_provider_data,
-            EnrichmentMode::Background,
-            candidate_id,
-            RequestPriority::High,
-            livrarr_domain::Freshness::PreferCache,
+        let enrichment_outcome = self
+            .run_unified_enrichment(
+                user_id,
+                &work,
+                source_provider_data,
+                EnrichmentMode::Background,
+                candidate_id,
+                RequestPriority::High,
+                livrarr_domain::Freshness::PreferCache,
+            )
+            .await;
+        (
+            enrichment_outcome.enrichment_status,
+            enrichment_outcome.identity_not_found,
+            enrichment_outcome.route_handoff,
         )
-        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3068,7 +3309,7 @@ where
         mode: livrarr_domain::identity::IdentityMode,
         source: livrarr_domain::identity::ConflictSource,
     ) -> Result<AddWorkResult, WorkServiceError> {
-        let (enrichment_status, _identity_not_found) = self
+        let (enrichment_status, _identity_not_found, _route_handoff) = self
             .ensure_identity_and_enrichment(
                 user_id,
                 work.id,
@@ -3105,7 +3346,7 @@ where
         author_created: bool,
         author_id: Option<i64>,
         derived_identity: livrarr_domain::IdentityStatus,
-        is_user_initiated: bool,
+        _is_user_initiated: bool,
         add_source: history_events::WorkAddSource,
     ) -> Result<AddWorkResult, WorkServiceError> {
         // REQ-001: the birth event, at the one created:true funnel — the work
@@ -3120,10 +3361,12 @@ where
 
         // Persist the identity-confidence badge derived at resolution time
         // (REQ-014/D-013) — independent of enrichment, written once at create.
-        self.db
-            .set_identity_status(user_id, work.id, derived_identity)
-            .await
-            .map_err(WorkServiceError::Db)?;
+        if !self.identity_routes_authoritative {
+            self.db
+                .set_identity_status(user_id, work.id, derived_identity)
+                .await
+                .map_err(WorkServiceError::Db)?;
+        }
 
         // Series reconcile (REQ-001): a metadata-provided series_name gets a
         // series row (stub if absent) and the FK link. Worker-created works
@@ -3145,32 +3388,34 @@ where
 
         // Phase 1: synchronous cover download within 3s budget (REQ-010).
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        let phase1_mtime = crate::cover::fetch_phase1_cover(
-            &self.http,
+        let phase1_mtime = if fast_cover_identity_authority_match(
             &work.title,
             &work.author_name,
-            work.cover_url.as_deref(),
-            None,
-            &covers_dir,
-            work.id,
-        )
-        .await;
+            &work.title,
+            &work.author_name,
+        ) {
+            crate::cover::fetch_phase1_cover(
+                &self.http,
+                &work.title,
+                &work.author_name,
+                work.cover_url.as_deref(),
+                None,
+                &covers_dir,
+                work.id,
+            )
+            .await
+        } else {
+            None
+        };
 
-        // Assign trust based on how the work was added.
+        // Persist phase-1 cover metadata after the file attempt.
         if phase1_mtime.is_some() || work.cover_url.is_some() {
-            // A user-picked cover (cover_manual, set from the selected search
-            // result) is locked at User trust so enrichment never overrides it
-            // (resolve_cover bails on User) and update_cover_metadata keeps the
-            // cover_manual flag set. Without this, the phase-1 write would assign
-            // Validated trust and reset cover_manual to false, letting background
-            // enrichment replace the user's chosen cover. That lock is earned
-            // only when the download actually succeeded — see
-            // `addtime_cover_trust`.
-            let trust = addtime_cover_trust(
+            // A manual selection is locked only after bytes actually land.
+            // A failed download leaves the slot repairable by ranked enrichment.
+            let cover_is_manual = addtime_cover_is_manual(
                 work.cover_manual,
                 work.cover_url.is_some(),
                 phase1_mtime.is_some(),
-                is_user_initiated,
             );
             let source = work.cover_source.as_deref().unwrap_or("add");
             // REQ-017/S3: measure the bytes phase-1 just wrote instead of
@@ -3193,7 +3438,7 @@ where
                     work.id,
                     work.cover_url.as_deref(),
                     source,
-                    trust,
+                    cover_is_manual,
                     width,
                     height,
                 )
@@ -3227,6 +3472,15 @@ where
 // Unified enrichment pipeline
 // =============================================================================
 
+#[derive(Debug)]
+pub(crate) struct UnifiedEnrichmentOutcome {
+    pub enrichment_status: EnrichmentStatus,
+    pub identity_not_found: bool,
+    pub provider_unavailable: bool,
+    pub route_handoff: Option<livrarr_domain::identity_layer::CapturedRouteHandoff>,
+    pub provider_chase_attempted: bool,
+}
+
 impl<D, E, H> WorkServiceImpl<D, E, H>
 where
     D: WorkDb
@@ -3238,6 +3492,7 @@ where
         + livrarr_db::HistoryDb
         + livrarr_db::AuthorLinkDb
         + livrarr_domain::services::WorkIdentityRepository
+        + livrarr_domain::identity_layer::WorkIdentityRepository
         + Send
         + Sync,
     E: EnrichmentWorkflow + Send + Sync,
@@ -3251,7 +3506,8 @@ where
     ///   3. Reload work from DB (post-merge state)
     ///   4. Materialize: cover download + tag write, change-gated (REQ-012)
     ///
-    /// Returns `(enrichment_status, identity_not_found)`. Never returns `Err` — all
+    /// Returns `(enrichment_status, identity_not_found, provider_unavailable)`.
+    /// Never returns `Err` — all
     /// failures are absorbed, producing `Failed` status when enrichment itself fails
     /// and otherwise continuing past materialize errors (non-fatal, warned).
     /// `priority` (B4) is the queue-ordering hint threaded to the scatter —
@@ -3271,8 +3527,17 @@ where
         candidate_id: Option<livrarr_domain::identity::CandidateId>,
         priority: RequestPriority,
         freshness: livrarr_domain::Freshness,
-    ) -> (EnrichmentStatus, bool) {
+    ) -> UnifiedEnrichmentOutcome {
         let work_id = work.id;
+        let identity_snapshot = if self.identity_routes_authoritative {
+            livrarr_domain::identity_layer::WorkIdentityRepository::read_captured_identity(
+                &self.db, user_id, work_id,
+            )
+            .await
+            .ok()
+        } else {
+            None
+        };
 
         // REQ-008 parity at the add door: an anchor-poor work starves the
         // scatter — every provider skips on "no anchor" and the status lands
@@ -3281,7 +3546,8 @@ where
         // anchor-completion the refresh door runs, so fresh anchors are in
         // the DB before the scatter reads it. One-shot per add — the
         // refresh door keeps the terminal-outcome bookkeeping for its loop.
-        if work.ol_key.is_none()
+        if !self.identity_routes_authoritative
+            && work.ol_key.is_none()
             && work.isbn_13.is_none()
             && work.asin.is_none()
             && work.hc_key.is_none()
@@ -3337,7 +3603,13 @@ where
                     ),
                 )
                 .await;
-                return (EnrichmentStatus::Failed, false);
+                return UnifiedEnrichmentOutcome {
+                    enrichment_status: EnrichmentStatus::Failed,
+                    identity_not_found: false,
+                    provider_unavailable: true,
+                    route_handoff: None,
+                    provider_chase_attempted: false,
+                };
             }
         };
 
@@ -3357,7 +3629,13 @@ where
                     ),
                 )
                 .await;
-                return (EnrichmentStatus::Failed, false);
+                return UnifiedEnrichmentOutcome {
+                    enrichment_status: EnrichmentStatus::Failed,
+                    identity_not_found: false,
+                    provider_unavailable: false,
+                    route_handoff: None,
+                    provider_chase_attempted: enrich_result.provider_chase_attempted,
+                };
             }
         };
 
@@ -3377,6 +3655,15 @@ where
 
         let final_status = enrich_result.enrichment_status;
         let identity_not_found = enrich_result.identity_not_found;
+        let provider_unavailable = !enrich_result.provider_outcomes.is_empty()
+            && enrich_result.provider_outcomes.values().all(|outcome| {
+                matches!(
+                    outcome,
+                    livrarr_domain::OutcomeClass::NotConfigured
+                        | livrarr_domain::OutcomeClass::WillRetry
+                        | livrarr_domain::OutcomeClass::PermanentFailure
+                )
+            });
 
         // Step 4 (S2): the cover write gate — the ONE save chokepoint every
         // non-User cover resolution routes through, add/refresh/background-
@@ -3392,6 +3679,7 @@ where
 
         let mut ebook_prefetched: Option<Vec<u8>> = None;
         if let Some(resolution) = enrich_result.cover_resolution.clone() {
+            let candidate_source = resolution.source.clone();
             let outcome = crate::cover_write_gate::run_cover_write_gate(
                 &self.db,
                 &self.http,
@@ -3404,9 +3692,42 @@ where
                 },
             )
             .await;
+            if mode == EnrichmentMode::Manual {
+                tracing::info!(
+                    work_id,
+                    media_type = "ebook",
+                    source = %candidate_source,
+                    outcome = ?outcome,
+                    "refresh cover write gate invoked"
+                );
+            }
             if let crate::cover_write_gate::GateOutcome::Accepted { bytes, .. } = outcome {
                 ebook_prefetched = Some(bytes);
             }
+        } else if mode == EnrichmentMode::Manual {
+            let reason = if post_enrich_work.cover_manual {
+                "user_locked"
+            } else if !enrich_result.attempted {
+                "no_provider_attempt"
+            } else if enrich_result.provider_outcomes.is_empty() {
+                "no_provider_outcomes"
+            } else if enrich_result
+                .provider_outcomes
+                .values()
+                .any(|outcome| matches!(outcome, livrarr_domain::OutcomeClass::Success))
+            {
+                "successful_payloads_coverless_or_ineligible"
+            } else {
+                "no_successful_provider_payload"
+            };
+            tracing::info!(
+                work_id,
+                media_type = "ebook",
+                reason,
+                attempted = enrich_result.attempted,
+                provider_outcomes = ?enrich_result.provider_outcomes,
+                "refresh cover write gate not invoked"
+            );
         }
 
         if let Some(resolution) = enrich_result.audiobook_cover_resolution.clone() {
@@ -3455,7 +3776,7 @@ where
                 chosen_new_url: None,
                 current_url: None,
                 current_path: None,
-                user_locked: post_enrich_work.cover_trust == livrarr_domain::CoverTrust::User,
+                user_locked: post_enrich_work.cover_manual,
                 prefetched_bytes: ebook_prefetched,
             },
             audiobook_cover: livrarr_domain::services::CoverSlotState::default(),
@@ -3538,7 +3859,34 @@ where
             .await;
         }
 
-        (final_status, identity_not_found)
+        let route_proposals = enrich_result.captured_route_proposals;
+        let route_handoff = identity_snapshot.and_then(|snapshot| {
+            let fresh = enrich_result
+                .captured_provider_identity
+                .into_iter()
+                .filter(|evidence| {
+                    !snapshot.active_routes.iter().any(|route| {
+                        route.provider == evidence.route.provider
+                            && route.kind == evidence.route.kind
+                            && route.provider_scoped_id == evidence.route.value
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!fresh.is_empty() || !route_proposals.is_empty()).then_some(
+                livrarr_domain::identity_layer::CapturedRouteHandoff {
+                    metadata_generation: snapshot.identity_generation,
+                    provider_identity: fresh,
+                    route_proposals,
+                },
+            )
+        });
+        UnifiedEnrichmentOutcome {
+            enrichment_status: final_status,
+            identity_not_found,
+            provider_unavailable,
+            route_handoff,
+            provider_chase_attempted: enrich_result.provider_chase_attempted,
+        }
     }
 }
 
@@ -3614,86 +3962,38 @@ fn is_supported_image(bytes: &[u8]) -> bool {
     false
 }
 
-/// Trust to stamp for the phase-1 add-time cover write (REQ-010).
-///
-/// A user-picked candidate (`cover_manual` with a `cover_url` set from the
-/// selected search result) locks at `CoverTrust::User` so background
-/// enrichment never overrides it (`resolve_cover` bails on `User`) — but
-/// only when the phase-1 download actually produced a file
-/// (`download_succeeded`). A failed download leaves no file on disk; locking
-/// that slot at `User` trust would permanently refuse every future
-/// candidate before the write gate ever checks whether a file exists (the
-/// bug this guards against). A failed user-pick download instead falls back
-/// to `CoverTrust::Unvalidated` — the weakest trust, since
-/// `allows_replacement_by` returns `true` for every incoming trust — leaving
-/// the slot fully replaceable, consistent with how `derive_cover_trust`
-/// already maps every non-success provider outcome.
-///
-/// Every other add (no manual pick, or a manual pick with no URL) keeps the
-/// existing `phase1_trust` computation unchanged.
-fn addtime_cover_trust(
+/// Whether a phase-1 ebook write earns the durable manual-selection lock.
+fn addtime_cover_is_manual(
     cover_manual: bool,
     has_cover_url: bool,
     download_succeeded: bool,
-    is_user_initiated: bool,
-) -> livrarr_domain::CoverTrust {
-    if cover_manual && has_cover_url {
-        return if download_succeeded {
-            livrarr_domain::CoverTrust::User
-        } else {
-            livrarr_domain::CoverTrust::Unvalidated
-        };
-    }
-    let is_fallback = download_succeeded && !has_cover_url;
-    crate::cover_resolution::phase1_trust(is_user_initiated, is_fallback)
+) -> bool {
+    cover_manual && has_cover_url && download_succeeded
 }
 
 #[cfg(test)]
-mod addtime_cover_trust_tests {
+mod addtime_cover_is_manual_tests {
     use super::*;
 
     #[test]
     fn manual_pick_failed_download_is_replaceable() {
-        // BUG: a user-picked candidate whose phase-1 download failed must
-        // not lock the slot at User trust — no file landed, so the write
-        // gate would refuse every future candidate forever.
-        let trust = addtime_cover_trust(true, true, false, true);
-        assert_ne!(trust, livrarr_domain::CoverTrust::User);
-        assert_eq!(trust, livrarr_domain::CoverTrust::Unvalidated);
+        assert!(!addtime_cover_is_manual(true, true, false));
     }
 
     #[test]
     fn manual_pick_successful_download_stays_user_locked() {
-        // Deliberate product behavior: a successful user-picked download
-        // keeps the absolute User lock so enrichment never overrides it.
-        let trust = addtime_cover_trust(true, true, true, true);
-        assert_eq!(trust, livrarr_domain::CoverTrust::User);
+        assert!(addtime_cover_is_manual(true, true, true));
     }
 
     #[test]
     fn manual_pick_without_url_is_unaffected() {
-        // cover_manual with no cover_url never entered the User-lock branch
-        // before this fix and must not start now — falls through to
-        // phase1_trust exactly as it always has (is_fallback = downloaded
-        // && !has_cover_url).
-        assert_eq!(
-            addtime_cover_trust(true, false, true, true),
-            crate::cover_resolution::phase1_trust(true, true)
-        );
+        assert!(!addtime_cover_is_manual(true, false, true));
     }
 
     #[test]
-    fn non_manual_add_delegates_to_phase1_trust_unchanged() {
-        // Non-manual path is untouched by this fix — delegates to
-        // phase1_trust exactly as before.
-        assert_eq!(
-            addtime_cover_trust(false, true, true, true),
-            crate::cover_resolution::phase1_trust(true, false)
-        );
-        assert_eq!(
-            addtime_cover_trust(false, false, false, false),
-            crate::cover_resolution::phase1_trust(false, false)
-        );
+    fn non_manual_add_remains_automatic() {
+        assert!(!addtime_cover_is_manual(false, true, true));
+        assert!(!addtime_cover_is_manual(false, false, false));
     }
 }
 

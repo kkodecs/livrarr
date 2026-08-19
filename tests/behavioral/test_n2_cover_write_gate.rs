@@ -8,9 +8,7 @@ use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate};
-use livrarr_domain::{
-    normalize_for_matching, CoverMediaType, CoverResolution, CoverTrust, UserRole, Work,
-};
+use livrarr_domain::{normalize_for_matching, CoverMediaType, CoverResolution, UserRole, Work};
 use livrarr_metadata::cover_write_gate::{
     run_cover_write_gate, run_user_cover_write, CandidateMeta, CoverWriteGateInput, GateOutcome,
     UserCoverError, UserCoverInput, UserCoverPayload,
@@ -55,11 +53,10 @@ async fn seed_user_and_work(db: &SqliteDb) -> (i64, Work) {
     (user_id, work)
 }
 
-fn ebook_resolution(url: &str, source: &str, trust: CoverTrust) -> CoverResolution {
+fn ebook_resolution(url: &str, source: &str) -> CoverResolution {
     CoverResolution {
         url: url.to_string(),
         source: source.to_string(),
-        trust,
         media_type: CoverMediaType::Ebook,
     }
 }
@@ -75,7 +72,7 @@ async fn ac2_rescue_incumbent_below_floor_is_replaced_by_bigger_same_trust_candi
         work.id,
         Some("https://i.gr-assets.com/old.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         300,
         400,
     )
@@ -96,11 +93,7 @@ async fn ac2_rescue_incumbent_below_floor_is_replaced_by_bigger_same_trust_candi
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://i.gr-assets.com/new.jpg",
-                "goodreads",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://i.gr-assets.com/new.jpg", "goodreads"),
         },
     )
     .await;
@@ -122,7 +115,6 @@ async fn ac2_rescue_incumbent_below_floor_is_replaced_by_bigger_same_trust_candi
         Some("https://i.gr-assets.com/new.jpg")
     );
     assert_eq!(after.cover_source.as_deref(), Some("goodreads"));
-    assert_eq!(after.cover_trust, CoverTrust::Validated);
     assert_eq!((after.cover_width, after.cover_height), (500, 700));
     let bytes_on_disk = tokio::fs::read(&final_path).await.unwrap();
     assert_eq!(bytes_on_disk, fake_jpeg(500, 700));
@@ -148,7 +140,7 @@ async fn ac3_desync_guard_rejected_candidate_leaves_file_and_row_untouched() {
         work.id,
         Some("https://assets.hardcover.app/old.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -170,11 +162,7 @@ async fn ac3_desync_guard_rejected_candidate_leaves_file_and_row_untouched() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://covers.openlibrary.org/new.jpg",
-                "openlibrary",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://covers.openlibrary.org/new.jpg", "openlibrary"),
         },
     )
     .await;
@@ -204,7 +192,7 @@ async fn ac3_desync_guard_rejected_candidate_leaves_file_and_row_untouched() {
 }
 
 #[tokio::test]
-async fn ac4_sovereignty_user_trust_incumbent_never_downloads_or_writes() {
+async fn ac4_manually_selected_ebook_never_downloads_or_writes() {
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
     let covers_dir = tempfile::tempdir().unwrap();
@@ -214,14 +202,14 @@ async fn ac4_sovereignty_user_trust_incumbent_never_downloads_or_writes() {
         work.id,
         Some("https://example.test/user-pick.jpg"),
         "user_upload",
-        CoverTrust::User,
+        true,
         900,
         1300,
     )
     .await
     .unwrap();
 
-    // A User lock is honored only while its file exists on disk — materialize
+    // A manual lock is honored only while its file exists on disk — materialize
     // the user's cover so this test pins the protected case.
     tokio::fs::write(
         covers_dir.path().join(format!("{}.jpg", work.id)),
@@ -241,11 +229,7 @@ async fn ac4_sovereignty_user_trust_incumbent_never_downloads_or_writes() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://i.gr-assets.com/never.jpg",
-                "goodreads",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://i.gr-assets.com/never.jpg", "goodreads"),
         },
     )
     .await;
@@ -254,81 +238,23 @@ async fn ac4_sovereignty_user_trust_incumbent_never_downloads_or_writes() {
     assert_eq!(
         http.call_count(),
         0,
-        "a User-trust incumbent must never trigger a download — the comparator is never invoked"
+        "a manually selected incumbent must never trigger a download"
     );
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(
         after.cover_url.as_deref(),
         Some("https://example.test/user-pick.jpg")
     );
-    assert_eq!(after.cover_trust, CoverTrust::User);
 }
 
 #[tokio::test]
-async fn ac4_sovereignty_applies_to_the_audiobook_slot_too() {
-    let db = create_test_db().await;
-    let (user_id, work) = seed_user_and_work(&db).await;
-    let covers_dir = tempfile::tempdir().unwrap();
-
-    db.update_audiobook_cover_metadata(
-        user_id,
-        work.id,
-        Some("https://example.test/user-audio.jpg"),
-        "user_upload",
-        CoverTrust::User,
-        900,
-        1300,
-    )
-    .await
-    .unwrap();
-
-    // A User lock is honored only while its file exists on disk — materialize
-    // the user's audiobook cover so this test pins the protected case.
-    tokio::fs::write(
-        covers_dir.path().join(format!("{}_audio.jpg", work.id)),
-        fake_jpeg(900, 1300),
-    )
-    .await
-    .unwrap();
-
-    let http = StubHttpFetcher::with_ok(200, fake_jpeg(2000, 3000));
-
-    let outcome = run_cover_write_gate(
-        &db,
-        &http,
-        user_id,
-        CoverWriteGateInput {
-            covers_dir: covers_dir.path().to_path_buf(),
-            work_id: work.id,
-            media_type: CoverMediaType::Audiobook,
-            resolution: CoverResolution {
-                url: "https://m.media-amazon.com/never.jpg".into(),
-                source: "audible".into(),
-                trust: CoverTrust::Validated,
-                media_type: CoverMediaType::Audiobook,
-            },
-        },
-    )
-    .await;
-
-    assert!(matches!(outcome, GateOutcome::NoOp));
-    assert_eq!(http.call_count(), 0);
-    let after = db.get_work(user_id, work.id).await.unwrap();
-    assert_eq!(after.audiobook_cover_trust, CoverTrust::User);
-    assert_eq!(
-        after.audiobook_cover_url.as_deref(),
-        Some("https://example.test/user-audio.jpg")
-    );
-}
-
-#[tokio::test]
-async fn user_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
+async fn manual_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
     let covers_dir = tempfile::tempdir().unwrap();
 
     // The crash-safe protocol's committed-but-unrenamed state: the DB row is
-    // already User, the final .jpg is missing, and the candidate tmp + meta
+    // already manual, the final .jpg is missing, and the candidate tmp + meta
     // sidecar await startup recovery's rename. A provider candidate must not
     // bulldoze the pending user cover.
     db.update_cover_metadata(
@@ -336,7 +262,7 @@ async fn user_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
         work.id,
         Some("https://example.test/user-pick.jpg"),
         "user_upload",
-        CoverTrust::User,
+        true,
         900,
         1300,
     )
@@ -359,11 +285,7 @@ async fn user_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://i.gr-assets.com/never.jpg",
-                "goodreads",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://i.gr-assets.com/never.jpg", "goodreads"),
         },
     )
     .await;
@@ -377,19 +299,19 @@ async fn user_lock_in_the_committed_unrenamed_crash_window_still_blocks() {
 }
 
 #[tokio::test]
-async fn user_trust_row_with_no_file_on_disk_is_replaceable() {
+async fn manual_row_with_no_file_on_disk_is_replaceable() {
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
     let covers_dir = tempfile::tempdir().unwrap();
 
-    // A damaged slot: User trust stamped by a failed add-time download —
+    // A damaged slot: manual selection stamped by a failed add-time download —
     // cover_url set, 0x0 dims, no file on disk.
     db.update_cover_metadata(
         user_id,
         work.id,
         Some("https://covers.openlibrary.org/failed.jpg"),
         "add",
-        CoverTrust::User,
+        true,
         0,
         0,
     )
@@ -406,27 +328,23 @@ async fn user_trust_row_with_no_file_on_disk_is_replaceable() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://assets.hardcover.app/real.jpg",
-                "hardcover",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://assets.hardcover.app/real.jpg", "hardcover"),
         },
     )
     .await;
 
     assert!(
         matches!(outcome, GateOutcome::Accepted { .. }),
-        "a fileless User lock must not refuse a real candidate"
+        "a fileless manual lock must not refuse a real candidate"
     );
     let after = db.get_work(user_id, work.id).await.unwrap();
-    assert_eq!(after.cover_trust, CoverTrust::Validated);
+    assert!(!after.cover_manual);
     assert_eq!(after.cover_source.as_deref(), Some("hardcover"));
     assert_ne!((after.cover_width, after.cover_height), (0, 0));
 }
 
 #[tokio::test]
-async fn ac5_no_incumbent_initial_save_stamps_real_source_trust_and_measured_dims() {
+async fn ac5_no_incumbent_initial_save_stamps_real_source_and_measured_dims() {
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
     let covers_dir = tempfile::tempdir().unwrap();
@@ -441,11 +359,7 @@ async fn ac5_no_incumbent_initial_save_stamps_real_source_trust_and_measured_dim
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://assets.hardcover.app/first.jpg",
-                "hardcover",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://assets.hardcover.app/first.jpg", "hardcover"),
         },
     )
     .await;
@@ -464,7 +378,6 @@ async fn ac5_no_incumbent_initial_save_stamps_real_source_trust_and_measured_dim
         Some("hardcover"),
         "must stamp the real provider — never the literal 'add' placeholder"
     );
-    assert_eq!(after.cover_trust, CoverTrust::Validated);
     assert_eq!((after.cover_width, after.cover_height), (640, 960));
     assert_ne!((after.cover_width, after.cover_height), (0, 0));
 }
@@ -488,7 +401,6 @@ async fn ac5_audiobook_slot_is_symmetric_with_its_own_dims_writer() {
             resolution: CoverResolution {
                 url: "https://m.media-amazon.com/audio-first.jpg".into(),
                 source: "audible".into(),
-                trust: CoverTrust::Validated,
                 media_type: CoverMediaType::Audiobook,
             },
         },
@@ -498,7 +410,6 @@ async fn ac5_audiobook_slot_is_symmetric_with_its_own_dims_writer() {
     assert!(outcome.is_accepted());
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(after.audiobook_cover_source.as_deref(), Some("audible"));
-    assert_eq!(after.audiobook_cover_trust, CoverTrust::Validated);
     assert_eq!(
         (after.audiobook_cover_width, after.audiobook_cover_height),
         (720, 1080)
@@ -516,7 +427,7 @@ async fn ac8_ebook_gate_call_never_writes_audiobook_columns() {
         work.id,
         Some("https://m.media-amazon.com/audio.jpg"),
         "audible",
-        CoverTrust::Validated,
+        false,
         1000,
         1000,
     )
@@ -532,11 +443,7 @@ async fn ac8_ebook_gate_call_never_writes_audiobook_columns() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://assets.hardcover.app/ebook.jpg",
-                "hardcover",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://assets.hardcover.app/ebook.jpg", "hardcover"),
         },
     )
     .await;
@@ -574,7 +481,6 @@ async fn ac9_audiobook_save_lands_at_the_audio_suffix_path_never_the_legacy_one(
             resolution: CoverResolution {
                 url: "https://m.media-amazon.com/audio.jpg".into(),
                 source: "audible".into(),
-                trust: CoverTrust::Validated,
                 media_type: CoverMediaType::Audiobook,
             },
         },
@@ -604,7 +510,7 @@ async fn refresh_with_unchanged_pick_and_file_present_is_idempotent_no_redownloa
         work.id,
         Some("https://i.gr-assets.com/same.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -625,11 +531,7 @@ async fn refresh_with_unchanged_pick_and_file_present_is_idempotent_no_redownloa
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://i.gr-assets.com/same.jpg",
-                "goodreads",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://i.gr-assets.com/same.jpg", "goodreads"),
         },
     )
     .await;
@@ -652,18 +554,18 @@ async fn refresh_with_unchanged_pick_and_file_present_is_idempotent_no_redownloa
 /// round-trip check, independent of the DB/filesystem harness above.
 #[test]
 fn v1_candidate_meta_with_string_url_still_deserializes() {
-    let json = r#"{"url":"https://i.gr-assets.com/old.jpg","source":"goodreads","trust":"validated","width":500,"height":700}"#;
+    let json = r#"{"url":"https://i.gr-assets.com/old.jpg","source":"goodreads","width":500,"height":700}"#;
     let meta: CandidateMeta = serde_json::from_str(json).unwrap();
     assert_eq!(meta.url.as_deref(), Some("https://i.gr-assets.com/old.jpg"));
     assert_eq!(meta.source, "goodreads");
-    assert_eq!(meta.trust, CoverTrust::Validated);
+    assert!(!meta.manual);
     assert_eq!((meta.width, meta.height), (500, 700));
 }
 
 #[tokio::test]
-async fn user_select_replaces_an_existing_user_trust_cover() {
-    // The enrichment gate's User-NoOp guard must NOT apply to a user's own
-    // pick — replacing an earlier User-trust cover with a new one is exactly
+async fn user_select_replaces_an_existing_manual_cover() {
+    // The enrichment gate's manual guard must NOT apply to a user's own
+    // pick — replacing an earlier manual cover with a new one is exactly
     // the case `run_user_cover_write` exists to serve.
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
@@ -674,7 +576,7 @@ async fn user_select_replaces_an_existing_user_trust_cover() {
         work.id,
         Some("https://example.test/old-user-pick.jpg"),
         "user_upload",
-        CoverTrust::User,
+        true,
         900,
         1300,
     )
@@ -709,7 +611,7 @@ async fn user_select_replaces_an_existing_user_trust_cover() {
                 ..
             }
         ),
-        "a user's own pick must replace their own earlier User-trust cover, not NoOp: {outcome:?}"
+        "a user's own pick must replace their own earlier manual cover: {outcome:?}"
     );
     assert_eq!(http.call_count(), 1);
 
@@ -719,10 +621,9 @@ async fn user_select_replaces_an_existing_user_trust_cover() {
         Some("https://covers.openlibrary.org/new-user-pick.jpg")
     );
     assert_eq!(after.cover_source.as_deref(), Some("isbn_ol"));
-    assert_eq!(after.cover_trust, CoverTrust::User);
     assert!(
         after.cover_manual,
-        "the ebook slot derives cover_manual from trust=User via update_cover_metadata"
+        "the ebook slot records a user selection through the existing manual bit"
     );
 }
 
@@ -869,7 +770,6 @@ async fn upload_valid_png_is_reencoded_to_jpeg_and_accepted() {
 
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(after.cover_source.as_deref(), Some("user_upload"));
-    assert_eq!(after.cover_trust, CoverTrust::User);
     assert!(after.cover_url.is_none(), "an upload has no source URL");
     assert!(after.cover_manual);
 
@@ -916,11 +816,7 @@ async fn enrichment_still_noops_after_a_real_user_cover_write() {
             covers_dir: covers_dir.path().to_path_buf(),
             work_id: work.id,
             media_type: CoverMediaType::Ebook,
-            resolution: ebook_resolution(
-                "https://i.gr-assets.com/never.jpg",
-                "goodreads",
-                CoverTrust::Validated,
-            ),
+            resolution: ebook_resolution("https://i.gr-assets.com/never.jpg", "goodreads"),
         },
     )
     .await;
@@ -929,7 +825,7 @@ async fn enrichment_still_noops_after_a_real_user_cover_write() {
     assert_eq!(
         http.call_count(),
         1,
-        "the enrichment attempt must never download — the User-trust guard blocks before fetch"
+        "the enrichment attempt must never download — the manual guard blocks before fetch"
     );
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(
@@ -937,5 +833,63 @@ async fn enrichment_still_noops_after_a_real_user_cover_write() {
         Some("https://example.test/user-pick.jpg"),
         "the user's own pick must survive an enrichment attempt"
     );
-    assert_eq!(after.cover_trust, CoverTrust::User);
+    assert!(after.cover_manual);
+}
+
+#[tokio::test]
+async fn audiobook_user_cover_write_sets_durable_manual_guard() {
+    let db = create_test_db().await;
+    let (user_id, work) = seed_user_and_work(&db).await;
+    let covers_dir = tempfile::tempdir().unwrap();
+    let http = StubHttpFetcher::with_ok(200, fake_jpeg(900, 900));
+
+    let user_outcome = run_user_cover_write(
+        &db,
+        &http,
+        user_id,
+        UserCoverInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Audiobook,
+            payload: UserCoverPayload::Url {
+                url: "https://example.test/user-audio-pick.jpg".into(),
+                source: "user_pick".into(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(user_outcome.is_accepted());
+    assert!(db
+        .get_audiobook_cover_manual(user_id, work.id)
+        .await
+        .unwrap());
+
+    let enrichment_outcome = run_cover_write_gate(
+        &db,
+        &http,
+        user_id,
+        CoverWriteGateInput {
+            covers_dir: covers_dir.path().to_path_buf(),
+            work_id: work.id,
+            media_type: CoverMediaType::Audiobook,
+            resolution: CoverResolution {
+                url: "https://hardcover.test/automatic-audio.jpg".into(),
+                source: "hardcover".into(),
+                media_type: CoverMediaType::Audiobook,
+            },
+        },
+    )
+    .await;
+    assert!(matches!(enrichment_outcome, GateOutcome::NoOp));
+    assert_eq!(
+        http.call_count(),
+        1,
+        "the persisted audiobook manual guard must block before download"
+    );
+    let after = db.get_work(user_id, work.id).await.unwrap();
+    assert_eq!(
+        after.audiobook_cover_url.as_deref(),
+        Some("https://example.test/user-audio-pick.jpg")
+    );
 }

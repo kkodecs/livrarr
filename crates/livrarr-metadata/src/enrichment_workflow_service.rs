@@ -84,6 +84,9 @@ where
             identity_not_found: result.identity_not_found,
             changed: result.changed,
             attempted: result.attempted,
+            captured_provider_identity: result.captured_provider_identity,
+            captured_route_proposals: result.captured_route_proposals,
+            provider_chase_attempted: result.provider_chase_attempted,
         })
     }
 

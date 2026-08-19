@@ -5,7 +5,7 @@
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDb, WorkDbCreate};
-use livrarr_domain::{normalize_for_matching, CoverTrust, UserRole, Work};
+use livrarr_domain::{normalize_for_matching, UserRole, Work};
 use livrarr_metadata::cover_layout_migration::run_cover_layout_migration;
 use livrarr_metadata::cover_provenance_backfill::run_cover_provenance_backfill;
 
@@ -46,7 +46,7 @@ async fn ac6_backfill_derives_source_from_url_host_and_is_idempotent() {
         work.id,
         Some("https://i.gr-assets.com/books/x.jpg"),
         "add",
-        CoverTrust::Validated,
+        false,
         640,
         960,
     )
@@ -58,11 +58,6 @@ async fn ac6_backfill_derives_source_from_url_host_and_is_idempotent() {
 
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(after.cover_source.as_deref(), Some("goodreads"));
-    assert_eq!(
-        after.cover_trust,
-        CoverTrust::Validated,
-        "trust is untouched"
-    );
     assert_eq!(
         (after.cover_width, after.cover_height),
         (640, 960),
@@ -86,7 +81,7 @@ async fn ac6_backfill_never_overwrites_a_real_provider_source() {
         work.id,
         Some("https://assets.hardcover.app/x.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         640,
         960,
     )
@@ -98,7 +93,7 @@ async fn ac6_backfill_never_overwrites_a_real_provider_source() {
 }
 
 #[tokio::test]
-async fn ac6_backfill_skips_user_trust_rows() {
+async fn ac6_backfill_skips_manually_selected_rows() {
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
 
@@ -107,7 +102,7 @@ async fn ac6_backfill_skips_user_trust_rows() {
         work.id,
         Some("https://i.gr-assets.com/books/x.jpg"),
         "add",
-        CoverTrust::User,
+        true,
         640,
         960,
     )
@@ -117,7 +112,7 @@ async fn ac6_backfill_skips_user_trust_rows() {
     let report = run_cover_provenance_backfill(&db).await;
     assert_eq!(
         report.ebook_stamped, 0,
-        "User-trust rows must never be touched"
+        "manually selected rows must never be touched"
     );
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(after.cover_source.as_deref(), Some("add"));
@@ -133,7 +128,7 @@ async fn ac6_backfill_leaves_unknown_hosts_untouched() {
         work.id,
         Some("https://random-cdn.example.com/x.jpg"),
         "add",
-        CoverTrust::Validated,
+        false,
         640,
         960,
     )
@@ -246,7 +241,7 @@ async fn ac10_provenance_backfill_never_writes_a_cover_file_only_the_source_colu
         work.id,
         Some("https://i.gr-assets.com/x.jpg"),
         "add",
-        CoverTrust::Validated,
+        false,
         640,
         960,
     )
@@ -287,5 +282,5 @@ async fn ac10_layout_migration_never_downloads_only_reorganizes_existing_bytes()
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(before.cover_url, after.cover_url);
     assert_eq!(before.cover_source, after.cover_source);
-    assert_eq!(before.cover_trust, after.cover_trust);
+    assert_eq!(before.cover_manual, after.cover_manual);
 }

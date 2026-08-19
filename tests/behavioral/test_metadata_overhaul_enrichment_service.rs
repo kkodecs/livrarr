@@ -516,7 +516,7 @@ impl WorkDb for SequencedApplyDb {
         work_id: WorkId,
         cover_url: Option<&str>,
         cover_source: &str,
-        cover_trust: livrarr_domain::CoverTrust,
+        cover_manual: bool,
         cover_width: i32,
         cover_height: i32,
     ) -> Result<(), DbError> {
@@ -526,7 +526,7 @@ impl WorkDb for SequencedApplyDb {
                 work_id,
                 cover_url,
                 cover_source,
-                cover_trust,
+                cover_manual,
                 cover_width,
                 cover_height,
             )
@@ -539,7 +539,7 @@ impl WorkDb for SequencedApplyDb {
         work_id: WorkId,
         audiobook_cover_url: Option<&str>,
         audiobook_cover_source: &str,
-        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_manual: bool,
         audiobook_cover_width: i32,
         audiobook_cover_height: i32,
     ) -> Result<(), DbError> {
@@ -549,10 +549,20 @@ impl WorkDb for SequencedApplyDb {
                 work_id,
                 audiobook_cover_url,
                 audiobook_cover_source,
-                audiobook_cover_trust,
+                audiobook_cover_manual,
                 audiobook_cover_width,
                 audiobook_cover_height,
             )
+            .await
+    }
+
+    async fn get_audiobook_cover_manual(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<bool, DbError> {
+        self.inner
+            .get_audiobook_cover_manual(user_id, work_id)
             .await
     }
 
@@ -807,6 +817,7 @@ fn normalized_payload(
         publish_date: None,
         hc_key: None,
         gr_key: Some("gr/work/123".to_string()),
+        gr_work_key: None,
         ol_key: Some("OL999W".to_string()),
         isbn_13: Some("9781234567890".to_string()),
         asin: Some("B00TEST123".to_string()),
@@ -844,6 +855,9 @@ fn scatter_result(
         outcomes,
         merge_eligible,
         deferred,
+        provider_chase_attempted: true,
+        search_provider_identity: Vec::new(),
+        search_route_proposals: Vec::new(),
     }
 }
 

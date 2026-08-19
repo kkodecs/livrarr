@@ -311,9 +311,35 @@ fn get_field(record: &csv::StringRecord, idx: usize) -> Option<String> {
 /// Strip Goodreads Excel-safe ISBN wrapping: `="0060590297"` -> `0060590297`.
 fn strip_excel_wrapper(val: &str) -> String {
     let trimmed = val.trim();
-    if trimmed.len() > 3 && trimmed.starts_with("=\"") && trimmed.ends_with('"') {
+    if trimmed.len() >= 3 && trimmed.starts_with("=\"") && trimmed.ends_with('"') {
         trimmed[2..trimmed.len() - 1].to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod excel_wrapper_regressions {
+    use super::*;
+
+    #[test]
+    fn goodreads_empty_excel_wrapped_isbns_are_absent() {
+        // PM sweep F8 reproduction: Goodreads represents an empty spreadsheet
+        // cell as exactly `=""`; the old `len() > 3` guard leaked that token as
+        // a fake ISBN instead of normalizing it to absence.
+        assert_eq!(strip_excel_wrapper("=\"\""), "");
+
+        let mut writer = csv::Writer::from_writer(Vec::new());
+        writer
+            .write_record(["Book Id", "Title", "Author", "ISBN", "ISBN13"])
+            .unwrap();
+        writer
+            .write_record(["1", "Dune", "Frank Herbert", "=\"\"", "=\"\""])
+            .unwrap();
+        let csv = writer.into_inner().unwrap();
+        let rows = parse_goodreads_csv(&csv).expect("valid Goodreads CSV");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].isbn_10, None);
+        assert_eq!(rows[0].isbn_13, None);
     }
 }

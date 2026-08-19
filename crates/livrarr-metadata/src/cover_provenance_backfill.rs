@@ -2,7 +2,8 @@
 //! for existing rows from the stored cover URL's host, using the slot-aware
 //! host->provider classifier (`provider_for_cover_host_for_slot` — the shared
 //! amazon CDN family stamps `goodreads` for the ebook slot and `audible` for
-//! the audiobook slot). Idempotent; User-trust rows are never touched; a host
+//! the audiobook slot). Idempotent; manually selected ebook rows are never
+//! touched; a host
 //! the classifier doesn't recognize is left as-is.
 //!
 //! Interpretation note (flagged — not silently assumed): the brief's "never
@@ -20,7 +21,7 @@
 use std::collections::HashMap;
 
 use livrarr_db::WorkDb;
-use livrarr_domain::{CoverMediaType, CoverTrust, UserId, WorkId};
+use livrarr_domain::{CoverMediaType, UserId, WorkId};
 
 use crate::cover_rank::provider_for_cover_host_for_slot;
 
@@ -55,9 +56,7 @@ pub async fn run_cover_provenance_backfill<D: WorkDb + Sync>(
             Err(_) => continue,
         };
 
-        if work.cover_trust != CoverTrust::User
-            && eligible_for_backfill(work.cover_source.as_deref())
-        {
+        if !work.cover_manual && eligible_for_backfill(work.cover_source.as_deref()) {
             if let Some(url) = work.cover_url.as_deref() {
                 if let Some(provider) = provider_for_cover_host_for_slot(url, CoverMediaType::Ebook)
                 {
@@ -68,7 +67,7 @@ pub async fn run_cover_provenance_backfill<D: WorkDb + Sync>(
                             work_id,
                             Some(url),
                             &source,
-                            work.cover_trust,
+                            work.cover_manual,
                             work.cover_width,
                             work.cover_height,
                         )
@@ -81,21 +80,23 @@ pub async fn run_cover_provenance_backfill<D: WorkDb + Sync>(
             }
         }
 
-        if work.audiobook_cover_trust != CoverTrust::User
-            && eligible_for_backfill(work.audiobook_cover_source.as_deref())
-        {
+        if eligible_for_backfill(work.audiobook_cover_source.as_deref()) {
             if let Some(url) = work.audiobook_cover_url.as_deref() {
                 if let Some(provider) =
                     provider_for_cover_host_for_slot(url, CoverMediaType::Audiobook)
                 {
                     let source = format!("{provider:?}").to_lowercase();
+                    let manual = match db.get_audiobook_cover_manual(user_id, work_id).await {
+                        Ok(manual) => manual,
+                        Err(_) => continue,
+                    };
                     if db
                         .update_audiobook_cover_metadata(
                             user_id,
                             work_id,
                             Some(url),
                             &source,
-                            work.audiobook_cover_trust,
+                            manual,
                             work.audiobook_cover_width,
                             work.audiobook_cover_height,
                         )

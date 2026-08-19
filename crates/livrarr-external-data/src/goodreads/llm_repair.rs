@@ -178,6 +178,7 @@ pub async fn extract_with_llm(
         publish_date: result.publish_date,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: result.isbn.filter(|s| s.len() >= 10),
         asin: None,

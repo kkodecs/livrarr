@@ -15,15 +15,13 @@ import type {
   AddWorkRequest,
   AddWorkResponse,
   WorkDetailResponse,
-  IdentityPreviewRequest,
-  IdentityPreviewResponse,
-  IdentitySlot,
   UpdateWorkRequest,
   RefreshWorkResponse,
   DeleteWorkResponse,
   MergePreviewResponse,
   MergeWorksRequest,
-  MergeWorksResponse,
+  MergeWorksOutcome,
+  IdentityReviewCard,
   AuthorSearchResult,
   AddAuthorRequest,
   AuthorResponse,
@@ -77,6 +75,7 @@ import type {
   ManualSearchResponse,
   ManualImportItem,
   ManualImportResponse,
+  ReadarrOrigin,
   PaginatedResponse,
   ReadarrRootFolder,
   ImportPreviewResponse,
@@ -102,7 +101,6 @@ import type {
   AnchorDTO,
   PendingAnchorDTO,
   IdentityReviewPark,
-  ResolveIdentityReviewRequest,
   IdentityConflictSummary,
   IdentityConflictDetail,
   ResolveIdentityConflictRequest,
@@ -178,27 +176,20 @@ export const listWorks = (params?: {
 };
 export const getWork = (id: number) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`);
-export const previewIdentityEdit = (id: number, req: IdentityPreviewRequest) =>
-  apiFetch<IdentityPreviewResponse>(`/work/${id}/identity/preview`, {
-    method: "POST",
-    body: JSON.stringify(req),
-  });
-export const commitIdentityEdit = (id: number, slot: IdentitySlot, previewId: string) =>
-  apiFetch<WorkDetailResponse>(`/work/${id}/identity/${slot}`, {
-    method: "PUT",
-    body: JSON.stringify({ preview_id: previewId }),
-  });
-export const clearIdentitySlot = (id: number, slot: IdentitySlot) =>
-  apiFetch<WorkDetailResponse>(`/work/${id}/identity/${slot}`, {
-    method: "DELETE",
-  });
 export const updateWork = (id: number, req: UpdateWorkRequest) =>
   apiFetch<WorkDetailResponse>(`/work/${id}`, {
     method: "PUT",
     body: JSON.stringify(req),
   });
-export const uploadWorkCover = (id: number, imageData: Blob, mediaType: string = "ebook") =>
-  apiUpload<void>(`/work/${id}/cover/upload?media_type=${mediaType}`, imageData);
+export const uploadWorkCover = (
+  id: number,
+  imageData: Blob,
+  mediaType: string = "ebook",
+) =>
+  apiUpload<void>(
+    `/work/${id}/cover/upload?media_type=${mediaType}`,
+    imageData,
+  );
 
 export interface CoverCandidate {
   candidateId: string;
@@ -213,7 +204,11 @@ export interface CoverCandidate {
 export const getCoverAlternatives = (workId: number) =>
   apiFetch<CoverCandidate[]>(`/work/${workId}/cover/alternatives`);
 
-export const selectCover = (workId: number, candidateId: string, mediaType: string) =>
+export const selectCover = (
+  workId: number,
+  candidateId: string,
+  mediaType: string,
+) =>
   apiFetch<void>(`/work/${workId}/cover/select`, {
     method: "POST",
     body: JSON.stringify({ candidateId, mediaType }),
@@ -233,10 +228,14 @@ export const refreshAllWorks = (params?: {
   const sp = new URLSearchParams();
   if (params?.language) sp.set("language", params.language);
   if (params?.mediaType) sp.set("media_type", params.mediaType);
-  if (params?.monitored !== undefined) sp.set("monitored", String(params.monitored));
-  if (params?.enrichmentStatus) sp.set("enrichment_status", params.enrichmentStatus);
+  if (params?.monitored !== undefined)
+    sp.set("monitored", String(params.monitored));
+  if (params?.enrichmentStatus)
+    sp.set("enrichment_status", params.enrichmentStatus);
   const qs = sp.toString();
-  return apiFetch<void>(`/work/refresh${qs ? `?${qs}` : ""}`, { method: "POST" });
+  return apiFetch<void>(`/work/refresh${qs ? `?${qs}` : ""}`, {
+    method: "POST",
+  });
 };
 export const retryAllIncomplete = () =>
   apiFetch<void>("/work/retry-incomplete", { method: "POST" });
@@ -248,13 +247,15 @@ export const affirmPendingAnchor = (workId: number, anchorType: string) =>
     { method: "POST" },
   );
 export const previewMergeWorks = (survivorId: number, loserId: number) =>
-  apiFetch<MergePreviewResponse>(`/work/${survivorId}/merge/${loserId}/preview`);
+  apiFetch<MergePreviewResponse>(
+    `/work/${survivorId}/merge/${loserId}/preview`,
+  );
 export const mergeWorks = (
   survivorId: number,
   loserId: number,
   req: MergeWorksRequest,
 ) =>
-  apiFetch<MergeWorksResponse>(`/work/${survivorId}/merge/${loserId}`, {
+  apiFetch<MergeWorksOutcome>(`/work/${survivorId}/merge/${loserId}`, {
     method: "POST",
     body: JSON.stringify(req),
   });
@@ -282,7 +283,9 @@ export const deleteAuthor = (id: number) =>
 export const searchAuthors = () =>
   apiFetch<void>("/author/search", { method: "POST" });
 export const getAuthorBibliography = (id: number, raw = false) =>
-  apiFetch<AuthorBibliography>(`/author/${id}/bibliography${raw ? "?raw=true" : ""}`);
+  apiFetch<AuthorBibliography>(
+    `/author/${id}/bibliography${raw ? "?raw=true" : ""}`,
+  );
 export const refreshAuthorBibliography = (id: number) =>
   apiFetch<AuthorBibliography>(`/author/${id}/bibliography/refresh`, {
     method: "POST",
@@ -337,7 +340,9 @@ export const resolveGr = (authorId: number) =>
     method: "POST",
   });
 export const getAuthorSeries = (authorId: number, raw = false) =>
-  apiFetch<SeriesListResponse>(`/author/${authorId}/series${raw ? "?raw=true" : ""}`);
+  apiFetch<SeriesListResponse>(
+    `/author/${authorId}/series${raw ? "?raw=true" : ""}`,
+  );
 export const refreshAuthorSeries = (authorId: number) =>
   apiFetch<SeriesListResponse>(`/author/${authorId}/series/refresh`, {
     method: "POST",
@@ -375,16 +380,16 @@ export const dismissAllNotifications = () =>
 // Identity review (AC-013 grey-park surface)
 export const listIdentityReview = () =>
   apiFetch<IdentityReviewPark[]>("/identity-review");
-export const resolveIdentityReview = (
-  workId: number,
-  req: ResolveIdentityReviewRequest,
-) =>
-  apiFetch<void>(`/identity-review/${workId}/resolve`, {
+
+export const listIdentityReviewCards = () =>
+  apiFetch<IdentityReviewCard[]>("/identity-review-card");
+export const resolveIdentityReviewCard = (cardId: number, command: unknown) =>
+  apiFetch<Record<string, unknown>>(`/identity-review-card/${cardId}/resolve`, {
     method: "POST",
-    body: JSON.stringify(req),
+    body: JSON.stringify({ command }),
   });
-export const dismissIdentityReview = (workId: number) =>
-  apiFetch<void>(`/identity-review/${workId}/dismiss`, { method: "POST" });
+export const dismissIdentityReviewCard = (cardId: number) =>
+  apiFetch<void>(`/identity-review-card/${cardId}/dismiss`, { method: "POST" });
 
 // Identity conflicts (AC-021 work-key contradictions)
 export const listIdentityConflicts = () =>
@@ -514,8 +519,7 @@ export const updateMediaManagementConfig = (
     body: JSON.stringify(req),
   });
 // Indexers
-export const listIndexers = () =>
-  apiFetch<IndexerResponse[]>("/indexer");
+export const listIndexers = () => apiFetch<IndexerResponse[]>("/indexer");
 export const getIndexer = (id: number) =>
   apiFetch<IndexerResponse>(`/indexer/${id}`);
 export const createIndexer = (req: CreateIndexerRequest) =>
@@ -591,7 +595,8 @@ export const triggerRssSync = () =>
 // System
 export const getHealth = () => apiFetch<HealthCheckResult[]>("/health");
 export const getSystemStatus = () => apiFetch<SystemStatus>("/system/status"),
-  getHealthSummary = () => apiFetch<HealthSummaryResponse>("/system/health-summary");
+  getHealthSummary = () =>
+    apiFetch<HealthSummaryResponse>("/system/health-summary");
 export const getLogTail = (lines = 30) =>
   apiFetch<string[]>(`/system/logs/tail?lines=${lines}`);
 export const setLogLevel = (level: string) =>
@@ -647,8 +652,7 @@ export const syncCrossFormatToHere = (id: number, currentTs: number) =>
   });
 
 // File download URL (for reader/player — returns the API path, not a fetch)
-export const getDownloadUrl = (id: number) =>
-  `/api/v1/workfile/${id}/download`;
+export const getDownloadUrl = (id: number) => `/api/v1/workfile/${id}/download`;
 
 // Scoped, expiring stream token (Unit C). The `<audio src>` element can't
 // send an Authorization header, so playback needs a URL-embeddable
@@ -699,6 +703,15 @@ export const executeManualImport = (items: ManualImportItem[]) =>
   });
 
 // Readarr Import
+export const readarrOrigins = () =>
+  apiFetch<ReadarrOrigin[]>("/import/readarr/origin");
+export const addReadarrOrigin = (url: string) =>
+  apiFetch<ReadarrOrigin>("/import/readarr/origin", {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  });
+export const removeReadarrOrigin = (id: number) =>
+  apiFetch<void>(`/import/readarr/origin/${id}`, { method: "DELETE" });
 export const readarrConnect = (url: string, apiKey: string) =>
   apiFetch<{ rootFolders: ReadarrRootFolder[] }>("/import/readarr/connect", {
     method: "POST",
@@ -754,8 +767,12 @@ export const listImportConfirm = (req: ListImportConfirmRequest) =>
     body: JSON.stringify(req),
   });
 export const listImportComplete = (importId: string) =>
-  apiFetch<{ status: string }>(`/listimport/${importId}/complete`, { method: "POST" });
+  apiFetch<{ status: string }>(`/listimport/${importId}/complete`, {
+    method: "POST",
+  });
 export const listImportUndo = (importId: string) =>
-  apiFetch<ListImportUndoResponse>(`/listimport/${importId}`, { method: "DELETE" });
+  apiFetch<ListImportUndoResponse>(`/listimport/${importId}`, {
+    method: "DELETE",
+  });
 export const listImportHistory = () =>
   apiFetch<ListImportSummary[]>("/listimport");

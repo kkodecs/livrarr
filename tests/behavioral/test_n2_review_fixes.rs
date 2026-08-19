@@ -24,8 +24,8 @@ use livrarr_db::{
     UpdateWorkEnrichmentDbRequest, UpdateWorkUserFieldsDbRequest, UserDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::{
-    normalize_for_matching, ApplyMergeOutcome, CoverMediaType, CoverResolution, CoverTrust,
-    DbError, MediaType, UserId, UserRole, Work, WorkId,
+    normalize_for_matching, ApplyMergeOutcome, CoverMediaType, CoverResolution, DbError, MediaType,
+    UserId, UserRole, Work, WorkId,
 };
 use tokio::sync::Notify;
 
@@ -71,18 +71,14 @@ async fn write_candidate_meta(
     path: &std::path::Path,
     url: &str,
     source: &str,
-    trust: CoverTrust,
+    manual: bool,
     w: i32,
     h: i32,
 ) {
     let json = serde_json::json!({
         "url": url,
         "source": source,
-        "trust": match trust {
-            CoverTrust::Unvalidated => "unvalidated",
-            CoverTrust::Validated => "validated",
-            CoverTrust::User => "user",
-        },
+        "manual": manual,
         "width": w,
         "height": h,
     });
@@ -136,7 +132,7 @@ impl WorkDb for HookedWorkDb {
         work_id: WorkId,
         cover_url: Option<&str>,
         cover_source: &str,
-        cover_trust: CoverTrust,
+        cover_manual: bool,
         cover_width: i32,
         cover_height: i32,
     ) -> Result<(), DbError> {
@@ -150,7 +146,7 @@ impl WorkDb for HookedWorkDb {
                 work_id,
                 cover_url,
                 cover_source,
-                cover_trust,
+                cover_manual,
                 cover_width,
                 cover_height,
             )
@@ -163,7 +159,7 @@ impl WorkDb for HookedWorkDb {
         work_id: WorkId,
         audiobook_cover_url: Option<&str>,
         audiobook_cover_source: &str,
-        audiobook_cover_trust: CoverTrust,
+        audiobook_cover_manual: bool,
         audiobook_cover_width: i32,
         audiobook_cover_height: i32,
     ) -> Result<(), DbError> {
@@ -173,10 +169,20 @@ impl WorkDb for HookedWorkDb {
                 work_id,
                 audiobook_cover_url,
                 audiobook_cover_source,
-                audiobook_cover_trust,
+                audiobook_cover_manual,
                 audiobook_cover_width,
                 audiobook_cover_height,
             )
+            .await
+    }
+
+    async fn get_audiobook_cover_manual(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<bool, DbError> {
+        self.inner
+            .get_audiobook_cover_manual(user_id, work_id)
             .await
     }
 
@@ -478,7 +484,7 @@ async fn t_a_startup_sequence_runs_migration_then_recovery_then_backfill() {
         work.id,
         Some("https://new.example/committed.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -494,7 +500,7 @@ async fn t_a_startup_sequence_runs_migration_then_recovery_then_backfill() {
         &user_dir.join(format!("{}.candidate.meta.json", work.id)),
         "https://new.example/committed.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -520,7 +526,7 @@ async fn t_a_startup_sequence_runs_migration_then_recovery_then_backfill() {
         work2.id,
         Some("https://i.gr-assets.com/probe.jpg"),
         "add",
-        CoverTrust::Validated,
+        false,
         600,
         900,
     )
@@ -574,7 +580,7 @@ async fn t_b_transient_get_work_error_leaves_candidate_files_and_row_untouched()
         work.id,
         Some("https://new.example/committed.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -589,7 +595,7 @@ async fn t_b_transient_get_work_error_leaves_candidate_files_and_row_untouched()
         &meta_path,
         "https://new.example/committed.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -681,7 +687,6 @@ async fn t_c_two_gate_runs_for_one_slot_are_serialized_not_interleaved() {
                     resolution: CoverResolution {
                         url: "https://i.gr-assets.com/candidate-a.jpg".into(),
                         source: "goodreads".into(),
-                        trust: CoverTrust::Validated,
                         media_type: CoverMediaType::Ebook,
                     },
                 },
@@ -710,7 +715,6 @@ async fn t_c_two_gate_runs_for_one_slot_are_serialized_not_interleaved() {
                     resolution: CoverResolution {
                         url: "https://assets.hardcover.app/candidate-b.jpg".into(),
                         source: "hardcover".into(),
-                        trust: CoverTrust::Validated,
                         media_type: CoverMediaType::Ebook,
                     },
                 },
@@ -791,7 +795,7 @@ async fn t_f_recovery_completing_a_rename_invalidates_the_stale_thumbnail() {
         work.id,
         Some("https://new.example/committed.jpg"),
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -806,7 +810,7 @@ async fn t_f_recovery_completing_a_rename_invalidates_the_stale_thumbnail() {
         &meta_path,
         "https://new.example/committed.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -855,7 +859,7 @@ async fn t_f_recovery_healing_a_row_invalidates_the_stale_thumbnail() {
         work.id,
         Some("https://old.example/previous.jpg"),
         "hardcover",
-        CoverTrust::Validated,
+        false,
         800,
         1200,
     )
@@ -872,7 +876,7 @@ async fn t_f_recovery_healing_a_row_invalidates_the_stale_thumbnail() {
         &meta_path,
         "https://new.example/healed.jpg",
         "goodreads",
-        CoverTrust::Validated,
+        false,
         500,
         700,
     )
@@ -942,8 +946,8 @@ fn read_epub_cover(path: &std::path::Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// A provider queue whose single Goodreads result carries ONLY a cover URL —
-/// no text field. The merge, the `changed` computation, the gate, and the
+/// A provider queue whose single eligible provider result carries ONLY a cover
+/// URL — no text field. The merge, the `changed` computation, the gate, and the
 /// retag all run REAL.
 struct CoverOnlyQueue {
     cover_url: String,
@@ -957,7 +961,7 @@ impl livrarr_metadata::ProviderQueue for CoverOnlyQueue {
     ) -> Result<livrarr_metadata::ScatterGatherResult, livrarr_metadata::ProviderQueueError> {
         let mut outcomes = std::collections::HashMap::new();
         outcomes.insert(
-            livrarr_domain::MetadataProvider::Goodreads,
+            livrarr_domain::MetadataProvider::Hardcover,
             livrarr_external_data::ProviderOutcome::Success(Box::new(
                 livrarr_external_data::NormalizedWorkDetail {
                     cover_url: Some(self.cover_url.clone()),
@@ -970,6 +974,9 @@ impl livrarr_metadata::ProviderQueue for CoverOnlyQueue {
             outcomes,
             merge_eligible: true,
             deferred: false,
+            provider_chase_attempted: true,
+            search_provider_identity: Vec::new(),
+            search_route_proposals: Vec::new(),
         })
     }
 }
@@ -1025,7 +1032,7 @@ async fn t_e_cover_only_change_through_real_enrichment_retags_with_the_accepted_
     let enrichment = livrarr_metadata::EnrichmentServiceImpl::new(
         Arc::new(db.clone()),
         Arc::new(CoverOnlyQueue {
-            cover_url: "https://i.gr-assets.com/only-cover.jpg".into(),
+            cover_url: "https://images.hardcover.app/only-cover.jpg".into(),
         }),
         Arc::new(livrarr_metadata::DefaultMergeEngine::new(
             livrarr_metadata::PriorityModel::english(),
@@ -1051,9 +1058,9 @@ async fn t_e_cover_only_change_through_real_enrichment_retags_with_the_accepted_
     let after = db.get_work(user_id, work.id).await.unwrap();
     assert_eq!(
         after.cover_url.as_deref(),
-        Some("https://i.gr-assets.com/only-cover.jpg")
+        Some("https://images.hardcover.app/only-cover.jpg")
     );
-    assert_eq!(after.cover_source.as_deref(), Some("goodreads"));
+    assert_eq!(after.cover_source.as_deref(), Some("hardcover"));
     assert_eq!((after.cover_width, after.cover_height), (640, 960));
 
     // ...and the retag embedded those SAME bytes into the book file — the
@@ -1078,23 +1085,15 @@ async fn t_g_amazon_host_backfills_goodreads_for_ebook_and_audible_for_audiobook
     // The SAME amazon-family asset URL sits in both slots with the
     // create-time placeholder source.
     let amazon_url = "https://m.media-amazon.com/images/I/81Nzlrfud+L.jpg";
-    db.update_cover_metadata(
-        user_id,
-        work.id,
-        Some(amazon_url),
-        "add",
-        CoverTrust::Validated,
-        600,
-        900,
-    )
-    .await
-    .unwrap();
+    db.update_cover_metadata(user_id, work.id, Some(amazon_url), "add", false, 600, 900)
+        .await
+        .unwrap();
     db.update_audiobook_cover_metadata(
         user_id,
         work.id,
         Some(amazon_url),
         "add",
-        CoverTrust::Validated,
+        false,
         1000,
         1000,
     )

@@ -8,8 +8,9 @@ use axum::response::{IntoResponse, Response};
 use crate::context::{
     HasAppConfigService, HasAuthorMonitorWorkflow, HasAuthorService, HasDiscoveryService,
     HasEmailService, HasEnrichmentWorkflow, HasFileService, HasHistoryService, HasHmacKey,
-    HasIdentityResolver, HasImportService, HasNotificationService, HasSeriesQueryService,
-    HasTagService, HasWorkIdentityRepository, HasWorkService,
+    HasIdentityLayerRepository, HasIdentityResolver, HasIdentityRoadService, HasImportService,
+    HasNotificationService, HasSeriesQueryService, HasTagService, HasWorkIdentityRepository,
+    HasWorkService,
 };
 
 use crate::middleware::RequireAdmin;
@@ -21,11 +22,75 @@ use crate::{
 };
 use livrarr_domain::history_events;
 use livrarr_domain::identity::{AnchorConfidence, AnchorSetter, AnchorType};
+use livrarr_domain::identity_layer::IdentityRoadService;
+use livrarr_domain::identity_layer::WorkIdentityRepository as _;
 use livrarr_domain::services::{
     AppConfigService, AuthorService, CreateNotificationRequest, DiscoveryService, EmailService,
     FileService, HistoryService, ImportService, MergeFieldChoiceEntry, NotificationService,
     RefreshSurface, SeriesQueryService, WorkIdentityRepository, WorkService, WorkServiceError,
 };
+
+/// A composition-level claim covering the whole live-add background chain.
+/// Nested service calls keep their own counted claims; this outer Drop closes
+/// the signal on every normal return and every panic unwind.
+struct BackgroundEnrichingGuard<S: HasWorkService> {
+    state: S,
+    user_id: i64,
+    work_id: i64,
+}
+
+impl<S: HasWorkService> Drop for BackgroundEnrichingGuard<S> {
+    fn drop(&mut self) {
+        self.state
+            .work_service()
+            .end_enriching(self.user_id, self.work_id);
+    }
+}
+
+/// Submit one fresh route handoff produced by the direct-add background
+/// chain. Resolver capture, add completion, and the delayed refresh are all
+/// machine continuations of the add, so they share `EnrichmentPass` origin.
+async fn apply_add_background_handoff<S: HasIdentityRoadService>(
+    state: &S,
+    user_id: i64,
+    work_id: i64,
+    phase: &'static str,
+    handoff: Option<livrarr_domain::identity_layer::CapturedRouteHandoff>,
+) -> bool {
+    let Some(handoff) = handoff else {
+        return true;
+    };
+    match state
+        .identity_road_service()
+        .apply_captured_route_handoff(
+            user_id,
+            work_id,
+            livrarr_domain::identity_layer::IdentityRoadOrigin::EnrichmentPass,
+            handoff,
+        )
+        .await
+    {
+        Ok(Some(livrarr_domain::identity_layer::IdentityRoadOutcome::Settled { .. }))
+        | Ok(None) => true,
+        Ok(Some(other)) => {
+            tracing::warn!(
+                work_id,
+                phase,
+                ?other,
+                "live-add identity route settlement parked"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                work_id,
+                phase,
+                "live-add identity route settlement failed: {error}"
+            );
+            false
+        }
+    }
+}
 
 fn proxy_cover_url(url: String) -> String {
     if url.starts_with('/') {
@@ -174,6 +239,8 @@ pub async fn add<
         + HasSeriesQueryService
         + HasEnrichmentWorkflow
         + HasIdentityResolver
+        + HasIdentityRoadService
+        + HasIdentityLayerRepository
         + HasAppConfigService,
 >(
     State(state): State<S>,
@@ -221,9 +288,22 @@ pub async fn add<
     let identity = resolved.identity;
     let candidate_id_for_completion = req.candidate_id.clone();
 
-    // Funnel through the one road: enrichment + cover/tag materialization run
-    // synchronously via the pipeline, reusing the candidate's cached discovery
-    // payloads (zero-network when the search cache is still warm).
+    let author_result = state
+        .author_service()
+        .add(
+            ctx.user.id,
+            livrarr_domain::services::AddAuthorRequest {
+                name: req.author_name.clone(),
+                sort_name: None,
+                ol_key: req.author_ol_key.clone(),
+                monitored: true,
+            },
+        )
+        .await?;
+    let author_id = author_result.author().id;
+    // The canonical seed constructor is the normalization boundary for this
+    // door. The road receives its parsed fields and sanitized anchors; the raw
+    // HTTP payload is never reconstructed downstream.
     let candidate = seed_add_box(
         SeedInput {
             title: req.title,
@@ -241,11 +321,69 @@ pub async fn add<
         req.candidate_id,
         cover_is_manual,
     );
+    let provider_identity = candidate_provider_evidence(&candidate.identity);
+    let minimum = livrarr_domain::identity_layer::MinimumWorkEvidence {
+        title: candidate.fields.title.clone(),
+        authors: vec![author_id],
+    };
+    let road_outcome = state
+        .identity_road_service()
+        .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
+            user_id: ctx.user.id,
+            origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                livrarr_domain::identity_layer::DoorKind::DirectAdd,
+            ),
+            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                user_choice: Some(
+                    livrarr_domain::identity_layer::UserIdentityChoice::ExplicitCreate(
+                        minimum.clone(),
+                    ),
+                ),
+                owned_files: Vec::new(),
+                provider_identity,
+                minimum: Some(minimum),
+            },
+            interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+            existing_work_id: None,
+        })
+        .await
+        .map_err(map_identity_road_error)?;
+    let (road_work_id, road_created) = match road_outcome {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+            work_id,
+            created,
+            status,
+            ..
+        } => {
+            let _ = status;
+            (work_id, created)
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id, ..
+        } => {
+            return Err(ApiError::Conflict {
+                reason: format!("direct add requires review card {review_id}"),
+            });
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Deferred { reason } => {
+            return Err(ApiError::Conflict { reason: reason.0 });
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Rejected { reason } => {
+            return Err(map_identity_road_error(reason));
+        }
+    };
 
-    let result = state
-        .work_service()
-        .add_fast(ctx.user.id, candidate)
-        .await?;
+    let work = state.work_service().get(ctx.user.id, road_work_id).await?;
+    let result = livrarr_domain::services::AddWorkResult {
+        enrichment_status: work.enrichment_status,
+        work,
+        created: road_created,
+        author_created: author_result.is_created(),
+        author_id: Some(author_id),
+        messages: Vec::new(),
+        cover_mtime: None,
+        audiobook_cover_mtime: None,
+    };
 
     // Background completion (REQ-004): identity fan-out + enrichment + covers
     // run off the response path; the +5s anchor top-up refresh chains AFTER
@@ -254,8 +392,36 @@ pub async fn add<
         let s = state.clone();
         let uid = ctx.user.id;
         let wid = result.work.id;
+        // Claim synchronously before spawning so the first detail poll cannot
+        // observe a false gap ahead of identity capture.
+        state.work_service().begin_enriching(uid, wid);
         tokio::spawn(async move {
-            s.work_service()
+            let _background_enriching = BackgroundEnrichingGuard {
+                state: s.clone(),
+                user_id: uid,
+                work_id: wid,
+            };
+            let route_handoff = match s
+                .work_service()
+                .capture_add_identity_route_handoff(
+                    uid,
+                    wid,
+                    livrarr_domain::identity::IdentityMode::Interactive,
+                )
+                .await
+            {
+                Ok(handoff) => handoff,
+                Err(error) => {
+                    tracing::warn!(wid, "live-add identity capture failed: {error}");
+                    return;
+                }
+            };
+            if !apply_add_background_handoff(&s, uid, wid, "resolver-capture", route_handoff).await
+            {
+                return;
+            }
+            let completion_handoff = s
+                .work_service()
                 .complete_add(
                     uid,
                     wid,
@@ -265,11 +431,30 @@ pub async fn add<
                     livrarr_domain::identity::ConflictSource::ManualAdd,
                 )
                 .await;
+            if !apply_add_background_handoff(&s, uid, wid, "complete-add", completion_handoff).await
+            {
+                return;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let _ = s
+            match s
                 .work_service()
                 .refresh(uid, wid, RefreshSurface::Interactive)
-                .await;
+                .await
+            {
+                Ok(mut result) => {
+                    let _ = apply_add_background_handoff(
+                        &s,
+                        uid,
+                        wid,
+                        "delayed-refresh",
+                        result.route_handoff.take(),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    tracing::warn!(wid, "live-add delayed refresh failed: {error}");
+                }
+            }
         });
     }
 
@@ -311,6 +496,8 @@ pub async fn add<
         result.cover_mtime,
         result.audiobook_cover_mtime,
     );
+    project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
+        .await?;
     // A created work has its completion running right now (spawned above) —
     // report it directly rather than racing the registry's first insert.
     detail.enriching = result.created;
@@ -322,7 +509,80 @@ pub async fn add<
     }))
 }
 
-pub async fn list<S: HasWorkService + HasFileService>(
+fn candidate_provider_evidence(
+    identity: &livrarr_domain::identity::IdentityState,
+) -> Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence> {
+    use livrarr_domain::identity_layer::{
+        IdentityProvider, ProviderIdentityEvidence, RouteKey, RouteKind,
+    };
+
+    let Some(anchors) = identity.seed_or_confirmed_anchors() else {
+        return Vec::new();
+    };
+    [
+        anchors.ol_key.as_ref().map(|value| {
+            (
+                IdentityProvider::OpenLibrary,
+                RouteKind::OpenLibraryWork,
+                value,
+            )
+        }),
+        anchors
+            .gr_key
+            .as_ref()
+            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+        anchors
+            .hc_key
+            .as_ref()
+            .map(|value| (IdentityProvider::Hardcover, RouteKind::HardcoverWork, value)),
+        anchors.isbn_13.as_ref().map(|value| {
+            (
+                IdentityProvider::IsbnRegistry,
+                RouteKind::Isbn13Edition,
+                value,
+            )
+        }),
+        anchors
+            .asin
+            .as_ref()
+            .map(|value| (IdentityProvider::Amazon, RouteKind::AsinEdition, value)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(provider, kind, value)| ProviderIdentityEvidence {
+        provider: provider.clone(),
+        route: RouteKey {
+            provider,
+            kind,
+            value: value.clone(),
+        },
+        work_core: None,
+        provenance: Default::default(),
+    })
+    .collect()
+}
+
+fn map_identity_road_error(error: livrarr_domain::identity_layer::IdentityRoadError) -> ApiError {
+    use livrarr_domain::identity_layer::IdentityRoadError;
+    match error {
+        IdentityRoadError::NotFound => ApiError::NotFound,
+        IdentityRoadError::StaleGeneration
+        | IdentityRoadError::ReviewProposalInvalidated(_)
+        | IdentityRoadError::ReviewRequired
+        | IdentityRoadError::ProbeBlocked(_) => ApiError::Conflict {
+            reason: error.to_string(),
+        },
+        IdentityRoadError::UnauthorizedScope => ApiError::Forbidden,
+        IdentityRoadError::InvalidDoorEvidence
+        | IdentityRoadError::ReviewKindMismatch
+        | IdentityRoadError::InvalidResolution => ApiError::BadRequest(error.to_string()),
+        IdentityRoadError::ProviderBoundary => ApiError::BadGateway(error.to_string()),
+        IdentityRoadError::Cancelled => ApiError::ServiceUnavailable,
+        IdentityRoadError::Database(message) => ApiError::Internal(message),
+    }
+}
+
+pub async fn list<S: HasWorkService + HasFileService + HasIdentityLayerRepository>(
     State(state): State<S>,
     ctx: AuthContext,
     Query(pq): Query<crate::PaginationQuery>,
@@ -339,6 +599,16 @@ pub async fn list<S: HasWorkService + HasFileService>(
             pq.language.as_deref(),
         )
         .await?;
+
+    let work_ids: Vec<i64> = view.works.iter().map(|work| work.work.id).collect();
+    let identity_presentations: std::collections::HashMap<_, _> = state
+        .identity_layer_repository()
+        .read_identity_presentations(ctx.user.id, &work_ids)
+        .await
+        .map_err(map_identity_repository_error)?
+        .into_iter()
+        .map(|presentation| (presentation.work_id, presentation))
+        .collect();
 
     let all_item_ids: Vec<i64> = view
         .works
@@ -368,6 +638,9 @@ pub async fn list<S: HasWorkService + HasFileService>(
                 wv.cover_mtime,
                 wv.audiobook_cover_mtime,
             );
+            if let Some(presentation) = identity_presentations.get(&wv.work.id) {
+                crate::types::work::apply_work_identity_presentation(&mut detail, presentation);
+            }
             detail.library_items = wv
                 .library_items
                 .iter()
@@ -397,7 +670,7 @@ pub async fn list<S: HasWorkService + HasFileService>(
     }))
 }
 
-pub async fn get<S: HasWorkService + HasFileService>(
+pub async fn get<S: HasWorkService + HasFileService + HasIdentityLayerRepository>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -422,6 +695,40 @@ pub async fn get<S: HasWorkService + HasFileService>(
         view.cover_mtime,
         view.audiobook_cover_mtime,
     );
+    match state
+        .identity_layer_repository()
+        .read_captured_identity(ctx.user.id, id)
+        .await
+    {
+        Ok(captured) => {
+            let siblings = state
+                .identity_layer_repository()
+                .list_captured_identities_in_group(
+                    ctx.user.id,
+                    captured.identity_title.normalized_main.clone(),
+                    captured.primary_author_id,
+                )
+                .await
+                .map_err(map_identity_repository_error)?;
+            let author_name = state
+                .identity_layer_repository()
+                .read_primary_author_names(ctx.user.id, captured.primary_author_id)
+                .await
+                .map_err(map_identity_repository_error)?
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| view.work.author_name.clone());
+            crate::types::work::apply_identity_presentation(
+                &mut detail,
+                &view.work,
+                &captured,
+                siblings,
+                author_name,
+            );
+        }
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound) => {}
+        Err(error) => return Err(map_identity_repository_error(error)),
+    }
     detail.enriching = state.work_service().is_enriching(ctx.user.id, id);
     detail.library_items = view
         .library_items
@@ -444,12 +751,14 @@ pub async fn get<S: HasWorkService + HasFileService>(
     Ok(Json(detail))
 }
 
-pub async fn update<S: HasWorkService>(
+pub async fn update<
+    S: HasWorkService + HasAuthorService + HasIdentityRoadService + HasIdentityLayerRepository,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
     Json(req): Json<UpdateWorkRequest>,
-) -> Result<Json<WorkDetailResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     use crate::types::api_error::FieldError;
     use livrarr_domain::services::UpdateWorkRequest as DomainUpdateWorkRequest;
 
@@ -498,6 +807,67 @@ pub async fn update<S: HasWorkService>(
         return Err(ApiError::Validation { errors });
     }
 
+    if req.title.is_some() || req.author_name.is_some() {
+        let current = state.work_service().get(ctx.user.id, id).await?;
+        let requested_title = req.title.flatten().unwrap_or_else(|| current.title.clone());
+        let requested_author = req
+            .author_name
+            .flatten()
+            .unwrap_or_else(|| current.author_name.clone());
+        let author = state
+            .author_service()
+            .add(
+                ctx.user.id,
+                livrarr_domain::services::AddAuthorRequest {
+                    name: requested_author,
+                    sort_name: None,
+                    ol_key: None,
+                    monitored: true,
+                },
+            )
+            .await?
+            .into_author();
+        let outcome = state
+            .identity_road_service()
+            .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
+                user_id: ctx.user.id,
+                origin: livrarr_domain::identity_layer::IdentityRoadOrigin::WorkUpdateRekey,
+                evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                    user_choice: None,
+                    owned_files: Vec::new(),
+                    provider_identity: Vec::new(),
+                    minimum: Some(livrarr_domain::identity_layer::MinimumWorkEvidence {
+                        title: requested_title,
+                        authors: vec![author.id],
+                    }),
+                },
+                interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+                existing_work_id: Some(id),
+            })
+            .await
+            .map_err(map_identity_road_error)?;
+        let (card_id, expected_generation) = pending_review_claim(outcome)?;
+        state
+            .identity_road_service()
+            .resolve_review(
+                livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
+                    user_id: ctx.user.id,
+                },
+                livrarr_domain::identity_layer::ReviewResolutionCommand::GroupIdentity {
+                    card_id,
+                    expected_generation,
+                    action: livrarr_domain::identity_layer::GroupIdentityAction::DifferentFromAll,
+                },
+            )
+            .await
+            .map_err(map_identity_road_error)?;
+        let work = state.work_service().get(ctx.user.id, id).await?;
+        let mut detail = work_to_detail(&work);
+        project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
+            .await?;
+        return Ok(Json(detail).into_response());
+    }
+
     let work = state
         .work_service()
         .update(
@@ -514,7 +884,120 @@ pub async fn update<S: HasWorkService>(
         )
         .await?;
 
-    Ok(Json(work_to_detail(&work)))
+    let mut detail = work_to_detail(&work);
+    project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
+        .await?;
+    Ok(Json(detail).into_response())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingIdentityReviewResponse {
+    card_id: i64,
+    kind: livrarr_domain::identity_layer::ReviewKind,
+    expected_generation: i64,
+    provenance: &'static str,
+}
+
+fn pending_review_claim(
+    outcome: livrarr_domain::identity_layer::IdentityRoadOutcome,
+) -> Result<(i64, i64), ApiError> {
+    match outcome {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id,
+            expected_generation,
+            ..
+        } => Ok((review_id, expected_generation)),
+        other => Err(ApiError::Internal(format!(
+            "identity continuation did not originate a review: {other:?}"
+        ))),
+    }
+}
+
+fn pending_review_response(
+    outcome: livrarr_domain::identity_layer::IdentityRoadOutcome,
+) -> Result<PendingIdentityReviewResponse, ApiError> {
+    match outcome {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id,
+            kind,
+            expected_generation,
+            provenance,
+            ..
+        } => Ok(PendingIdentityReviewResponse {
+            card_id: review_id,
+            kind,
+            expected_generation,
+            provenance: match provenance {
+                livrarr_domain::identity_layer::EvidenceProvenance::User => "User",
+                livrarr_domain::identity_layer::EvidenceProvenance::OwnedFile => "OwnedFile",
+                livrarr_domain::identity_layer::EvidenceProvenance::Provider(_) => "Provider",
+                livrarr_domain::identity_layer::EvidenceProvenance::Migrated => "Migrated",
+            },
+        }),
+        other => Err(ApiError::Internal(format!(
+            "identity continuation did not originate a review: {other:?}"
+        ))),
+    }
+}
+
+fn map_identity_repository_error(
+    error: livrarr_domain::identity_layer::IdentityRepositoryError,
+) -> ApiError {
+    use livrarr_domain::identity_layer::IdentityRepositoryError;
+    match error {
+        IdentityRepositoryError::NotFound => ApiError::NotFound,
+        IdentityRepositoryError::StaleGeneration
+        | IdentityRepositoryError::ReviewProposalInvalidated(_)
+        | IdentityRepositoryError::RouteOwnershipCollision
+        | IdentityRepositoryError::KeyCollision
+        | IdentityRepositoryError::StillAmbiguous
+        | IdentityRepositoryError::ReviewKindMismatch => ApiError::Conflict {
+            reason: error.to_string(),
+        },
+        IdentityRepositoryError::UnauthorizedScope => ApiError::Forbidden,
+        IdentityRepositoryError::InvalidResolution => ApiError::BadRequest(error.to_string()),
+        IdentityRepositoryError::Cancelled => ApiError::ServiceUnavailable,
+        IdentityRepositoryError::AtomicRollback | IdentityRepositoryError::Database(_) => {
+            ApiError::Internal(error.to_string())
+        }
+    }
+}
+
+pub(crate) async fn project_work_identity_presentations<S: HasIdentityLayerRepository>(
+    state: &S,
+    user_id: livrarr_domain::UserId,
+    details: &mut [WorkDetailResponse],
+) -> Result<(), ApiError> {
+    let work_ids: Vec<_> = details.iter().map(|detail| detail.id).collect();
+    let presentations = read_work_identity_presentations(state, user_id, &work_ids).await?;
+    for detail in details {
+        if let Some(presentation) = presentations.get(&detail.id) {
+            crate::types::work::apply_work_identity_presentation(detail, presentation);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn read_work_identity_presentations<S: HasIdentityLayerRepository>(
+    state: &S,
+    user_id: livrarr_domain::UserId,
+    work_ids: &[livrarr_domain::WorkId],
+) -> Result<
+    std::collections::HashMap<
+        livrarr_domain::WorkId,
+        livrarr_domain::identity_layer::WorkIdentityPresentation,
+    >,
+    ApiError,
+> {
+    Ok(state
+        .identity_layer_repository()
+        .read_identity_presentations(user_id, work_ids)
+        .await
+        .map_err(map_identity_repository_error)?
+        .into_iter()
+        .map(|presentation| (presentation.work_id, presentation))
+        .collect())
 }
 
 pub async fn upload_cover<S: HasWorkService>(
@@ -578,12 +1061,14 @@ pub async fn preview_merge<S: HasWorkService>(
 /// survivor's canonical path is a separate, best-effort follow-up: it never
 /// blocks or reverses the transaction above, which is the guarantee the
 /// user actually needs (items/grabs moved, loser gone, zero deletions).
-pub async fn merge<S: HasWorkService + HasImportService>(
+pub async fn merge<
+    S: HasWorkService + HasImportService + HasIdentityLayerRepository + HasIdentityRoadService,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path((id, loser_id)): Path<(i64, i64)>,
     Json(req): Json<MergeWorksRequest>,
-) -> Result<Json<MergeWorksResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let choices = req
         .choices
         .into_iter()
@@ -591,12 +1076,78 @@ pub async fn merge<S: HasWorkService + HasImportService>(
             field: c.field,
             choice: c.choice,
         })
-        .collect();
-
-    let result = state
-        .work_service()
-        .merge_works(ctx.user.id, id, loser_id, choices)
-        .await?;
+        .collect::<Vec<_>>();
+    let current = state.work_service().get(ctx.user.id, id).await?;
+    // User-scope both sides before the road creates a card.
+    state.work_service().get(ctx.user.id, loser_id).await?;
+    let captured = state
+        .identity_layer_repository()
+        .read_captured_identity(ctx.user.id, id)
+        .await
+        .map_err(map_identity_repository_error)?;
+    let outcome = state
+        .identity_road_service()
+        .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
+            user_id: ctx.user.id,
+            origin: livrarr_domain::identity_layer::IdentityRoadOrigin::ManualWorkMerge {
+                loser_work_id: loser_id,
+                choices: choices.clone(),
+            },
+            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                user_choice: None,
+                owned_files: Vec::new(),
+                provider_identity: Vec::new(),
+                minimum: Some(livrarr_domain::identity_layer::MinimumWorkEvidence {
+                    title: current.title,
+                    authors: vec![captured.primary_author_id],
+                }),
+            },
+            interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+            existing_work_id: Some(id),
+        })
+        .await
+        .map_err(map_identity_road_error)?;
+    if choices.is_empty() {
+        let card = pending_review_response(outcome)?;
+        return Ok((StatusCode::ACCEPTED, Json(card)).into_response());
+    }
+    let (card_id, expected_generation) = pending_review_claim(outcome)?;
+    let resolved = state
+        .identity_road_service()
+        .resolve_review(
+            livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
+                user_id: ctx.user.id,
+            },
+            livrarr_domain::identity_layer::ReviewResolutionCommand::GroupIdentity {
+                card_id,
+                expected_generation,
+                action: livrarr_domain::identity_layer::GroupIdentityAction::AttachOrMerge {
+                    anchor: id,
+                },
+            },
+        )
+        .await
+        .map_err(map_identity_road_error)?;
+    let (library_items_moved, grabs_moved) = match resolved {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+            library_items_moved,
+            grabs_moved,
+            ..
+        } => (library_items_moved, grabs_moved),
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id, ..
+        } => {
+            return Err(ApiError::Conflict {
+                reason: format!("manual merge still requires review card {review_id}"),
+            });
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Deferred { reason } => {
+            return Err(ApiError::Conflict { reason: reason.0 });
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Rejected { reason } => {
+            return Err(map_identity_road_error(reason));
+        }
+    };
 
     let reorg_warnings = state
         .import_service()
@@ -604,32 +1155,55 @@ pub async fn merge<S: HasWorkService + HasImportService>(
         .await
         .unwrap_or_else(|e| vec![format!("file reorganization skipped: {e}")]);
 
-    let mut warnings = result.warnings;
-    warnings.extend(reorg_warnings);
+    let survivor = state.work_service().get(ctx.user.id, id).await?;
+    let mut survivor = work_to_detail(&survivor);
+    project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut survivor))
+        .await?;
 
     Ok(Json(MergeWorksResponse {
-        survivor: work_to_detail(&result.survivor),
-        library_items_moved: result.library_items_moved,
-        grabs_moved: result.grabs_moved,
-        warnings,
-    }))
+        survivor,
+        library_items_moved,
+        grabs_moved,
+        warnings: reorg_warnings,
+    })
+    .into_response())
 }
 
-pub async fn refresh<S: HasWorkService>(
+pub async fn refresh<S: HasWorkService + HasIdentityRoadService + HasIdentityLayerRepository>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Result<Json<RefreshWorkResponse>, ApiError> {
     // WorkService::refresh() runs the unified enrichment pipeline:
     // provider dispatch, merge, cover download, and tag sync are all handled inside.
-    let result = state
+    let mut result = state
         .work_service()
         .refresh(ctx.user.id, id, RefreshSurface::Interactive)
         .await?;
 
+    if let Some(handoff) = result.route_handoff.take() {
+        state
+            .identity_road_service()
+            .apply_captured_route_handoff(
+                ctx.user.id,
+                id,
+                livrarr_domain::identity_layer::IdentityRoadOrigin::ManualRefresh,
+                handoff,
+            )
+            .await
+            .map_err(map_identity_road_error)?;
+    }
+
+    let failure_reason = result
+        .provider_unavailable
+        .then_some(crate::types::work::RefreshFailureReason::ProviderUnavailable);
+    let mut detail = work_to_detail(&result.work);
+    project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
+        .await?;
     Ok(Json(RefreshWorkResponse {
-        work: work_to_detail(&result.work),
+        work: detail,
         messages: result.messages,
+        reason: failure_reason,
     }))
 }
 
@@ -751,7 +1325,9 @@ pub async fn refresh_all<S: HasWorkService + HasTagService + HasNotificationServ
 /// `try_start_bulk_refresh` guard with `refresh_all` so only one bulk sweep runs
 /// per user at a time; the work happens in a spawned one-shot and the response is
 /// an immediate 202.
-pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
+pub async fn retry_all_incomplete<
+    S: HasWorkService + HasNotificationService + HasIdentityRoadService + HasIdentityLayerRepository,
+>(
     State(state): State<S>,
     ctx: AuthContext,
 ) -> Result<axum::http::StatusCode, ApiError> {
@@ -768,7 +1344,21 @@ pub async fn retry_all_incomplete<S: HasWorkService + HasNotificationService>(
         // Owns the slot: every exit path releases via Drop (REQ-016).
         let _bulk_guard = bulk_guard;
         match s.work_service().retry_all_incomplete(user_id).await {
-            Ok(summary) => {
+            Ok(mut summary) => {
+                for (work_id, handoff) in std::mem::take(&mut summary.route_handoffs) {
+                    if let Err(error) = s
+                        .identity_road_service()
+                        .apply_captured_route_handoff(
+                            user_id,
+                            work_id,
+                            livrarr_domain::identity_layer::IdentityRoadOrigin::ConvergenceVisit,
+                            handoff,
+                        )
+                        .await
+                    {
+                        tracing::warn!(work_id, "retry route handoff failed: {error}");
+                    }
+                }
                 if let Err(e) = s
                     .notification_service()
                     .create(CreateNotificationRequest {
@@ -899,13 +1489,11 @@ pub async fn author_search<S: HasAuthorMonitorWorkflow>(
     axum::http::StatusCode::ACCEPTED
 }
 
-/// Anchor types already settled for this work: a confirmed ledger row, or a
-/// populated denormalized works column (pre-ledger works carry only the
-/// column). A pending guess for a settled slot is never offered and never
-/// affirmable — confirming it would silently replace the identifier the
-/// work's identity and enrichment already run on.
+/// Anchor types already settled for this work: a confirmed legacy-ledger row
+/// or an active identity-v2 route projected into the compatibility slots. A
+/// pending guess for a settled slot is never offered and never affirmable.
 fn settled_anchor_types(
-    work: &livrarr_domain::Work,
+    identifiers: &livrarr_domain::identity_layer::WorkIdentifierProjection,
     anchors: &[livrarr_domain::identity::WorkIdentityAnchor],
 ) -> std::collections::HashSet<String> {
     let mut settled: std::collections::HashSet<String> = anchors
@@ -914,11 +1502,11 @@ fn settled_anchor_types(
         .map(|a| a.anchor_type.as_str().to_string())
         .collect();
     for (anchor_type, value) in [
-        (AnchorType::OL_WORK, work.ol_key.as_deref()),
-        (AnchorType::GR_WORK, work.gr_key.as_deref()),
-        (AnchorType::HC_WORK, work.hc_key.as_deref()),
-        (AnchorType::ISBN_13, work.isbn_13.as_deref()),
-        (AnchorType::ASIN, work.asin.as_deref()),
+        (AnchorType::OL_WORK, identifiers.ol_key.as_deref()),
+        (AnchorType::GR_WORK, identifiers.gr_key.as_deref()),
+        (AnchorType::HC_WORK, identifiers.hc_key.as_deref()),
+        (AnchorType::ISBN_13, identifiers.isbn_13.as_deref()),
+        (AnchorType::ASIN, identifiers.asin.as_deref()),
     ] {
         if value.is_some_and(|v| !v.is_empty()) {
             settled.insert(anchor_type.to_string());
@@ -948,11 +1536,15 @@ fn anchor_setter_str(setter: AnchorSetter) -> &'static str {
 }
 
 /// List a work's pending (unaffirmed) identity guesses (REQ-005).
-pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>(
+pub async fn list_pending_anchors<S>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(work_id): Path<i64>,
-) -> Result<Json<Vec<PendingAnchorDto>>, ApiError> {
+) -> Result<Json<Vec<PendingAnchorDto>>, ApiError>
+where
+    S: HasWorkIdentityRepository + HasWorkService,
+    S::WorkIdentityRepo: livrarr_domain::identity_layer::WorkIdentityRepository + Send + Sync,
+{
     // R-3: the repo methods are work-id-only (no user scope), so verify ownership
     // via the user-scoped service first — another user's work must read as 404,
     // and a real service error must surface as 500, not be masked as not-found.
@@ -971,7 +1563,19 @@ pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let settled = settled_anchor_types(&work, &anchors);
+    let identifiers =
+        livrarr_domain::identity_layer::WorkIdentityRepository::read_identity_presentations(
+            state.work_identity_repo(),
+            ctx.user.id,
+            &[work.id],
+        )
+        .await
+        .map_err(map_identity_repository_error)?
+        .into_iter()
+        .next()
+        .map(|presentation| presentation.identifiers)
+        .unwrap_or_default();
+    let settled = settled_anchor_types(&identifiers, &anchors);
     let dtos = anchors
         .into_iter()
         .filter(|a| {
@@ -989,13 +1593,23 @@ pub async fn list_pending_anchors<S: HasWorkIdentityRepository + HasWorkService>
     Ok(Json(dtos))
 }
 
-pub async fn affirm_pending_anchor<
-    S: HasWorkIdentityRepository + HasWorkService + HasHistoryService,
->(
+pub async fn affirm_pending_anchor<S>(
     State(state): State<S>,
     ctx: AuthContext,
     Path((work_id, anchor_type)): Path<(i64, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError>
+where
+    S: HasWorkIdentityRepository
+        + HasWorkService
+        + HasIdentityRoadService
+        + HasHistoryService
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    S::WorkIdentityRepo: livrarr_domain::identity_layer::WorkIdentityRepository + Send + Sync,
+    S::WorkSvc: 'static,
+{
     let user_id = ctx.user.id;
 
     // R-3: confirm_anchor mutates works.* with no user scope — verify ownership
@@ -1008,13 +1622,12 @@ pub async fn affirm_pending_anchor<
             WorkServiceError::NotFound => ApiError::NotFound,
             other => ApiError::Internal(other.to_string()),
         })?;
-
     let anchor_type = AnchorType::new(anchor_type);
 
     // Pending value + identity generation read together (one transaction):
     // the coherent basis for the first-statement claim below (identity-edit
     // r4 §Writer coverage — pending affirm).
-    let (expected_generation, anchors) = state
+    let (_expected_generation, anchors) = state
         .work_identity_repo()
         .read_anchors_with_generation(work_id)
         .await
@@ -1023,7 +1636,19 @@ pub async fn affirm_pending_anchor<
     // Backstop to the settled-slot filter in `list_pending_anchors`: a stale or
     // hand-crafted affirm for a settled slot must not replace the identifier in
     // force (confirm_anchor overwrites works.* unconditionally).
-    if settled_anchor_types(&work, &anchors).contains(anchor_type.as_str()) {
+    let identifiers =
+        livrarr_domain::identity_layer::WorkIdentityRepository::read_identity_presentations(
+            state.work_identity_repo(),
+            user_id,
+            &[work.id],
+        )
+        .await
+        .map_err(map_identity_repository_error)?
+        .into_iter()
+        .next()
+        .map(|presentation| presentation.identifiers)
+        .unwrap_or_default();
+    if settled_anchor_types(&identifiers, &anchors).contains(anchor_type.as_str()) {
         return Err(ApiError::Conflict {
             reason: "an identifier of this type is already confirmed for this work".into(),
         });
@@ -1035,31 +1660,94 @@ pub async fn affirm_pending_anchor<
         .map(|a| a.anchor_value)
         .ok_or(ApiError::NotFound)?;
 
-    // The user verified it: promote pending→confirmed, sync works.*, and
-    // immediately recompute + write the identity_status badge in one atomic
-    // transaction (M-020 fix — badge must not wait for bg refresh). The
-    // transaction's first statement is the conditional generation claim; a
-    // lost claim means a different identity mutation won since the read.
-    state
+    let route_kind = match anchor_type.as_str() {
+        AnchorType::OL_WORK => livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsWork,
+        AnchorType::HC_WORK => livrarr_domain::identity_layer::RouteKind::HardcoverWork,
+        AnchorType::ISBN_13 => livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+        AnchorType::ASIN => livrarr_domain::identity_layer::RouteKind::AsinEdition,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "unsupported pending route kind".to_string(),
+            ))
+        }
+    };
+    let provider = match anchor_type.as_str() {
+        AnchorType::OL_WORK => livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+        AnchorType::GR_WORK => livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+        AnchorType::HC_WORK => livrarr_domain::identity_layer::IdentityProvider::Hardcover,
+        AnchorType::ISBN_13 => livrarr_domain::identity_layer::IdentityProvider::IsbnRegistry,
+        AnchorType::ASIN => livrarr_domain::identity_layer::IdentityProvider::Amazon,
+        _ => {
+            return Err(ApiError::BadRequest(
+                "unsupported pending route provider".to_string(),
+            ))
+        }
+    };
+    let route = livrarr_domain::identity_layer::RouteKey {
+        provider: provider.clone(),
+        kind: route_kind,
+        value,
+    };
+
+    // PM sweep F3: an already-owned pending value must be a stable 409 before
+    // the identity road can bump a generation, write a settlement audit, or
+    // mint a card. The repository lookup validates the route-ledger ∪ legacy
+    // projection and is same-user scoped.
+    if let Some(owner) = state
         .work_identity_repo()
-        .affirm_anchor_claimed(
-            work_id,
-            anchor_type.clone(),
-            &value,
-            AnchorSetter::User,
-            expected_generation,
+        .find_anchor_owner(user_id, &anchor_type, &route.value, work_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+    {
+        return Err(ApiError::ConflictDetailed {
+            message: format!(
+                "this identifier already belongs to \"{}\" — merge the works instead",
+                owner.owning_work_title
+            ),
+            details: crate::types::api_error::ErrorDetails {
+                code: "anchor_collision",
+                owning_work_id: Some(owner.owning_work_id),
+                owning_work_title: Some(owner.owning_work_title),
+            },
+        });
+    }
+    let outcome = state
+        .identity_road_service()
+        .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
+            user_id,
+            origin: livrarr_domain::identity_layer::IdentityRoadOrigin::AffirmPendingRoute,
+            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                user_choice: None,
+                owned_files: Vec::new(),
+                provider_identity: vec![livrarr_domain::identity_layer::ProviderIdentityEvidence {
+                    provider,
+                    route: route.clone(),
+                    work_core: None,
+                    provenance: Default::default(),
+                }],
+                minimum: None,
+            },
+            interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+            existing_work_id: Some(work_id),
+        })
+        .await
+        .map_err(map_identity_road_error)?;
+    let (card_id, expected_generation) = pending_review_claim(outcome)?;
+    state
+        .identity_road_service()
+        .resolve_review(
+            livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser { user_id },
+            livrarr_domain::identity_layer::ReviewResolutionCommand::PendingRoute {
+                card_id,
+                expected_generation,
+                action: livrarr_domain::identity_layer::PendingRouteAction::Affirm {
+                    surviving_routes: vec![route.clone()],
+                },
+            },
         )
         .await
-        .map_err(|e| match e {
-            livrarr_domain::services::WorkIdentityError::StaleIdentity => {
-                ApiError::ConflictDetailed {
-                    message: "identity changed; reload pending anchors".into(),
-                    details: crate::types::api_error::ErrorDetails::code("pending_anchor_stale"),
-                }
-            }
-            other => ApiError::Internal(other.to_string()),
-        })?;
-
+        .map_err(map_identity_road_error)?;
     state
         .history_service()
         .record(
@@ -1068,24 +1756,18 @@ pub async fn affirm_pending_anchor<
                 work_id,
                 &work.title,
                 "affirm",
-                format!("{} {}", anchor_type.as_str(), value),
+                format!("{:?}: {}", route.kind, route.value),
             ),
         )
         .await;
-
-    // Fire-and-forget the enrichment the newly-confirmed anchor unlocks.
-    let s = state.clone();
+    let refresh_state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = s
+        let _ = refresh_state
             .work_service()
             .refresh(user_id, work_id, RefreshSurface::Interactive)
-            .await
-        {
-            tracing::debug!(work_id, "post-affirm background enrichment skipped: {e}");
-        }
+            .await;
     });
-
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // =============================================================================
@@ -1239,7 +1921,9 @@ pub async fn preview_identity_edit<S: HasWorkService>(
 
 /// Phase 2 (§Commit): consume the snapshot atomically and commit (or detect
 /// the true no-op). Success returns the standard `WorkDetailResponse`.
-pub async fn commit_identity_edit<S: HasWorkService + HasHistoryService>(
+pub async fn commit_identity_edit<
+    S: HasWorkService + HasHistoryService + HasIdentityLayerRepository,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path((work_id, slot)): Path<(i64, String)>,
@@ -1288,13 +1972,16 @@ pub async fn commit_identity_edit<S: HasWorkService + HasHistoryService>(
     }
 
     let mut detail = work_to_detail(&commit.work);
+    project_work_identity_presentations(&state, user_id, std::slice::from_mut(&mut detail)).await?;
     detail.enriching = state.work_service().is_enriching(user_id, work_id);
     Ok(Json(detail))
 }
 
 /// Clear one identity slot (§Clear; all five slots). 404 when the slot is
 /// truly empty (no confirmed row, no nonempty column, no pending row).
-pub async fn clear_identity_slot<S: HasWorkService + HasHistoryService>(
+pub async fn clear_identity_slot<
+    S: HasWorkService + HasHistoryService + HasIdentityLayerRepository,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path((work_id, slot)): Path<(i64, String)>,
@@ -1337,6 +2024,31 @@ pub async fn clear_identity_slot<S: HasWorkService + HasHistoryService>(
     }
 
     let mut detail = work_to_detail(&cleared.work);
+    project_work_identity_presentations(&state, user_id, std::slice::from_mut(&mut detail)).await?;
     detail.enriching = state.work_service().is_enriching(user_id, work_id);
     Ok(Json(detail))
+}
+
+// ---------------------------------------------------------------------------
+// Identity-layer-rewrite (F2) additive handler. IR v1 `livrarr-handlers`
+// module (ir-v1-identity-layer-rewrite.yaml:1348-1351). Verbatim module path
+// (`work::manual_provider_search`) — no existing name collision here. No
+// behavior, no wiring (stub scope): body is `todo!()`; not router-registered.
+// ---------------------------------------------------------------------------
+
+pub async fn manual_provider_search<S: crate::context::HasIdentityRoadService>(
+    State(_state): State<S>,
+    _ctx: AuthContext,
+    Path(_work_id): Path<i64>,
+    Query(query): Query<crate::types::identity_layer::TitleAuthorQuery>,
+) -> Result<Json<Vec<crate::types::identity_layer::ProviderIdentityCandidate>>, ApiError> {
+    if query.title.trim().is_empty() || query.author.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "title and author are required".to_string(),
+        ));
+    }
+    // Candidate lookup is deliberately read-only. Provider-specific search is
+    // composed behind the identity road; until a provider yields a typed route,
+    // an empty candidate set is the complete, truthful response.
+    Ok(Json(Vec::new()))
 }

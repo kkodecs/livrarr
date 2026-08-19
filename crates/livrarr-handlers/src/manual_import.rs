@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::context::{
-    HasAppConfigService, HasAuthorService, HasDiscoveryService, HasHistoryService,
-    HasImportService, HasManualImportScan, HasManualImportService, HasMatchingService,
-    HasWorkService,
+    EditionEvidenceCapability, HasAppConfigService, HasAuthorService, HasDiscoveryService,
+    HasEditionRepository, HasHistoryService, HasIdentityRoadService, HasImportService,
+    HasManualImportScan, HasManualImportService, HasMatchingService, HasWorkService,
 };
 
 pub trait ManualImportHandlerContext:
@@ -20,6 +20,8 @@ pub trait ManualImportHandlerContext:
     + HasDiscoveryService
     + HasImportService
     + HasHistoryService
+    + HasIdentityRoadService
+    + HasEditionRepository
     + Clone
     + Send
     + Sync
@@ -37,6 +39,8 @@ impl<T> ManualImportHandlerContext for T where
         + HasDiscoveryService
         + HasImportService
         + HasHistoryService
+        + HasIdentityRoadService
+        + HasEditionRepository
         + Clone
         + Send
         + Sync
@@ -46,12 +50,14 @@ impl<T> ManualImportHandlerContext for T where
 use crate::middleware::RequireAdmin;
 use crate::ApiError;
 use livrarr_domain::history_events;
+use livrarr_domain::identity_layer::IdentityRoadService;
 use livrarr_domain::services::{
     AppConfigService, AuthorService, DiscoveryService, HistoryService, ImportFileResult,
     ImportService, ImportSingleFileRequest, ManualImportService, MatchingService, RefreshSurface,
     WorkService,
 };
 use livrarr_domain::{classify_file, MediaType};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1036,6 +1042,39 @@ async fn import_single_item<S: ManualImportHandlerContext>(
         }
     };
 
+    // Embedded file metadata is direct Edition evidence. Keep it downstream
+    // of the one Work settlement but upstream of file attachment, and never
+    // derive an Edition subtitle from the Work display title.
+    let embedded_language = state
+        .matching_service()
+        .extract_and_reconcile(&livrarr_domain::services::MatchInput {
+            file_path: Some(source.clone()),
+            grouped_paths: None,
+            parse_string: None,
+            media_type: None,
+            scan_root: None,
+        })
+        .await
+        .into_iter()
+        .find_map(|candidate| candidate.language);
+    let edition_format = match media_type {
+        MediaType::Ebook => livrarr_domain::identity_layer::EditionFormat::Ebook,
+        MediaType::Audiobook => livrarr_domain::identity_layer::EditionFormat::Audiobook,
+    };
+    if let Err(error) = state
+        .edition_repository()
+        .apply_evidence(user_id, work_id, edition_format, embedded_language)
+        .await
+    {
+        return ImportResult {
+            path: item.path.clone(),
+            status: ImportStatus::Failed,
+            work_id: Some(work_id),
+            error: Some(format!("edition evidence failed: {error}")),
+            media_type: Some(media_type),
+        };
+    }
+
     let target_path = state.import_service().build_target_path(
         &root_folder.path,
         user_id,
@@ -1134,17 +1173,34 @@ fn find_existing_work<'a>(
 }
 
 async fn find_or_create_work<
-    S: HasAuthorService + HasWorkService + HasManualImportService + HasMatchingService,
+    S: HasAuthorService
+        + HasWorkService
+        + HasManualImportService
+        + HasMatchingService
+        + HasIdentityRoadService,
 >(
     state: &S,
     user_id: i64,
     item: &ImportItem,
     existing_works: &[livrarr_domain::Work],
     author_ol_cache: &mut std::collections::HashMap<String, Option<String>>,
-    default_language: &str,
+    _default_language: &str,
 ) -> Result<i64, ApiError> {
     if let Some(work) = find_existing_work(existing_works, &item.ol_key, &item.title, &item.author)
     {
+        let author = state
+            .author_service()
+            .add(
+                user_id,
+                livrarr_domain::services::AddAuthorRequest {
+                    name: item.author.clone(),
+                    sort_name: None,
+                    ol_key: item.author_ol_key.clone(),
+                    monitored: true,
+                },
+            )
+            .await?;
+        settle_manual_import(state, user_id, item, author.author().id, Some(work.id)).await?;
         return Ok(work.id);
     }
 
@@ -1163,102 +1219,151 @@ async fn find_or_create_work<
         result
     };
 
-    use livrarr_domain::identity::{LatencyTier, RawHarvest};
-    // #97 (MatchCluster harvest): the file itself is the richest seed. Re-read
-    // its embedded metadata at import (EPUB dc:identifier ISBN, Audible ASIN,
-    // dc:language) and fill the identity gaps the picked candidate didn't carry.
-    // The user's explicit pick (work anchors below) still wins; the file only
-    // supplements a missing ISBN/ASIN and supplies the authoritative language.
-    let file_meta = state
-        .matching_service()
-        .extract_and_reconcile(&livrarr_domain::services::MatchInput {
-            file_path: Some(std::path::PathBuf::from(&item.path)),
-            grouped_paths: None,
-            parse_string: None,
-            media_type: None,
-            scan_root: None,
+    let author = state
+        .author_service()
+        .add(
+            user_id,
+            livrarr_domain::services::AddAuthorRequest {
+                name: item.author.clone(),
+                sort_name: None,
+                ol_key: item.author_ol_key.clone().or(author_ol_key.clone()),
+                monitored: true,
+            },
+        )
+        .await?;
+    settle_manual_import(state, user_id, item, author.author().id, None).await
+}
+
+async fn settle_manual_import<S: HasIdentityRoadService>(
+    state: &S,
+    user_id: i64,
+    item: &ImportItem,
+    author_id: i64,
+    existing_work_id: Option<i64>,
+) -> Result<i64, ApiError> {
+    let evidence = owned_file_evidence(&item.path).await?;
+    let minimum = livrarr_domain::identity_layer::MinimumWorkEvidence {
+        title: item.title.clone(),
+        authors: vec![author_id],
+    };
+    let provider_identity = import_provider_evidence(item);
+    let user_choice = existing_work_id.map_or_else(
+        || livrarr_domain::identity_layer::UserIdentityChoice::ExplicitCreate(minimum.clone()),
+        livrarr_domain::identity_layer::UserIdentityChoice::ExistingWork,
+    );
+    let outcome = state
+        .identity_road_service()
+        .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
+            user_id,
+            origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                livrarr_domain::identity_layer::DoorKind::ManualImport,
+            ),
+            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                user_choice: Some(user_choice),
+                owned_files: vec![evidence],
+                provider_identity,
+                minimum: existing_work_id.is_none().then_some(minimum),
+            },
+            interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+            existing_work_id,
         })
         .await
-        .into_iter()
-        .next();
-    let file_isbn = file_meta.as_ref().and_then(|c| c.isbn.clone());
-    let file_asin = file_meta.as_ref().and_then(|c| c.asin.clone());
-    let file_language = file_meta.as_ref().and_then(|c| c.language.clone());
-
-    // The file is the richest seed: the picked candidate's anchors plus the file's
-    // embedded IDs. Resolve identity through the shared resolver — the one place
-    // every door turns raw anchors into a Confirmed/Pending badge (P1). A user pick
-    // carrying a work anchor (OL/GR/HC) is trusted with no network; a bridge-only
-    // (ISBN/ASIN) or title-only pick fans out (interactive) to find a work anchor.
-    let ol_key = {
-        let k = item.ol_key.trim();
-        (!k.is_empty()).then(|| k.to_string())
-    };
-    let gr_key = item.gr_key.clone().filter(|s| !s.is_empty());
-    let hc_key = item.hc_key.clone().filter(|s| !s.is_empty());
-    let isbn_13 = item.isbn.clone().filter(|s| !s.is_empty()).or(file_isbn);
-    let asin = item.asin.clone().filter(|s| !s.is_empty()).or(file_asin);
-
-    // Language priority: the file's embedded dc:language (authoritative for this
-    // edition), then the picked candidate's language, then English.
-    let language = livrarr_domain::seed::SeedLanguage::resolve(
-        file_language.or_else(|| item.language.clone()).as_deref(),
-        default_language,
-    );
-
-    let resolved = state
-        .work_service()
-        .resolve_identity(
-            user_id,
-            RawHarvest {
-                ol_key,
-                gr_key,
-                hc_key,
-                isbn: isbn_13,
-                asin,
-                title: Some(item.title.clone()),
-                author_name: Some(item.author.clone()),
-                language: Some(language.as_str().to_string()),
-                series_name: item.series_name.clone(),
-                year: item.year,
-                user_confirmed: true,
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    match outcome {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Settled { work_id, .. } => Ok(work_id),
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending {
+            review_id,
+            unattached,
+            ..
+        } => Err(ApiError::Conflict {
+            reason: if unattached {
+                format!("manual import parked unattached review card {review_id}")
+            } else {
+                format!("manual import requires review card {review_id}")
             },
-            LatencyTier::Interactive,
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("identity resolve: {e}")))?;
-    let identity = resolved.identity;
-    let author_ol_key = item.author_ol_key.clone().or(author_ol_key);
-    let candidate = livrarr_domain::seed::seed_manual_import(
-        livrarr_domain::seed::SeedInput {
-            title: item.title.clone(),
-            author_name: item.author.clone(),
-            language,
-            author_ol_key,
-            year: item.year,
-            cover_url: item.cover_url.clone(),
-            detail_url: None,
-            description: item.description.clone(),
-            series_name: item.series_name.clone(),
-            series_position: item.series_position,
-        },
-        identity,
-        item.candidate_id.clone(),
-    );
-
-    match state.work_service().add(user_id, candidate).await {
-        Ok(result) => Ok(result.work.id),
-        Err(e) => {
-            let fresh_works = state
-                .manual_import_service()
-                .list_works(user_id)
-                .await
-                .map_err(ApiError::from)?;
-            find_existing_work(&fresh_works, &item.ol_key, &item.title, &item.author)
-                .map(|w| w.id)
-                .ok_or_else(|| ApiError::Internal(format!("work creation failed: {e}")))
+        }),
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Deferred { reason } => {
+            Err(ApiError::Conflict { reason: reason.0 })
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Rejected { reason } => {
+            Err(ApiError::BadRequest(reason.to_string()))
         }
     }
+}
+
+async fn owned_file_evidence(
+    path: &str,
+) -> Result<livrarr_domain::identity_layer::OwnedFileEvidence, ApiError> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("read import evidence: {error}")))?;
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("stat import evidence: {error}")))?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos() as i128);
+    let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    Ok(livrarr_domain::identity_layer::OwnedFileEvidence {
+        library_item_id: 0,
+        file_revision: livrarr_domain::identity_layer::FileRevision {
+            size_bytes: metadata.len(),
+            modified_ns,
+            sha256,
+        },
+    })
+}
+
+fn import_provider_evidence(
+    item: &ImportItem,
+) -> Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence> {
+    use livrarr_domain::identity_layer::{
+        IdentityProvider, ProviderIdentityEvidence, RouteKey, RouteKind,
+    };
+    [
+        (!item.ol_key.trim().is_empty()).then_some((
+            IdentityProvider::OpenLibrary,
+            RouteKind::OpenLibraryWork,
+            item.ol_key.as_str(),
+        )),
+        item.gr_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+        item.hc_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| (IdentityProvider::Hardcover, RouteKind::HardcoverWork, value)),
+        item.isbn
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                (
+                    IdentityProvider::IsbnRegistry,
+                    RouteKind::Isbn13Edition,
+                    value,
+                )
+            }),
+        item.asin
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| (IdentityProvider::Amazon, RouteKind::AsinEdition, value)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(provider, kind, value)| ProviderIdentityEvidence {
+        provider: provider.clone(),
+        route: RouteKey {
+            provider,
+            kind,
+            value: value.to_string(),
+        },
+        work_core: None,
+        provenance: Default::default(),
+    })
+    .collect()
 }
 
 // ---------------------------------------------------------------------------

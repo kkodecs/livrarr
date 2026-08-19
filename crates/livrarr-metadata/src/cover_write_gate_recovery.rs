@@ -174,11 +174,28 @@ async fn recover_one<D: WorkDb + Sync>(
         }
     };
 
-    let (row_url, row_source, row_trust, row_w, row_h) = if suffix == "_audio" {
+    let audiobook_manual = if suffix == "_audio" {
+        match db.get_audiobook_cover_manual(user_id, work_id).await {
+            Ok(manual) => manual,
+            Err(e) => {
+                tracing::warn!(
+                    work_id,
+                    error = %e,
+                    "cover recovery: audiobook manual state unreadable — candidate left for a later pass"
+                );
+                report.skipped += 1;
+                return;
+            }
+        }
+    } else {
+        false
+    };
+
+    let (row_url, row_source, row_manual, row_w, row_h) = if suffix == "_audio" {
         (
             work.audiobook_cover_url.clone(),
             work.audiobook_cover_source.clone(),
-            work.audiobook_cover_trust,
+            audiobook_manual,
             work.audiobook_cover_width,
             work.audiobook_cover_height,
         )
@@ -186,7 +203,7 @@ async fn recover_one<D: WorkDb + Sync>(
         (
             work.cover_url.clone(),
             work.cover_source.clone(),
-            work.cover_trust,
+            work.cover_manual,
             work.cover_width,
             work.cover_height,
         )
@@ -194,7 +211,7 @@ async fn recover_one<D: WorkDb + Sync>(
 
     let row_matches_meta = row_url.as_deref() == meta.url.as_deref()
         && row_source.as_deref() == Some(meta.source.as_str())
-        && row_trust == meta.trust
+        && row_manual == meta.manual
         && row_w == meta.width
         && row_h == meta.height;
 
@@ -236,7 +253,7 @@ async fn recover_one<D: WorkDb + Sync>(
                 work_id,
                 meta.url.as_deref(),
                 &meta.source,
-                meta.trust,
+                meta.manual,
                 meta.width,
                 meta.height,
             )
@@ -247,7 +264,7 @@ async fn recover_one<D: WorkDb + Sync>(
                 work_id,
                 meta.url.as_deref(),
                 &meta.source,
-                meta.trust,
+                meta.manual,
                 meta.width,
                 meta.height,
             )

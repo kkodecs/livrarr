@@ -8,12 +8,14 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use livrarr_behavioral::stubs::{
-    create_second_test_user, create_test_user, StubEnrichmentWorkflow, StubHttpFetcher,
+    create_second_test_user, create_test_user, SqlitePendingRouteRoad, StubEnrichmentWorkflow,
+    StubHttpFetcher,
 };
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    CreateWorkDbRequest, UpdateWorkEnrichmentDbRequest, UserDb, WorkDb, WorkDbCreate,
+    AuthorDb, CreateAuthorDbRequest, CreateWorkDbRequest, UpdateWorkEnrichmentDbRequest, UserDb,
+    WorkDb, WorkDbCreate,
 };
 use livrarr_domain::identity::{
     AnchorConfidence, AnchorProvenance, AnchorSetter, AnchorType, Candidate, CandidateId,
@@ -31,7 +33,9 @@ use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
-use livrarr_handlers::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
+use livrarr_handlers::context::{
+    HasHistoryService, HasIdentityRoadService, HasWorkIdentityRepository, HasWorkService,
+};
 use livrarr_handlers::work::{affirm_pending_anchor, list_pending_anchors};
 use livrarr_handlers::AuthContext;
 use livrarr_metadata::async_resolver::settle_identity;
@@ -72,6 +76,7 @@ struct TestState {
     work_service: Arc<TestWorkService>,
     identity_repo: SqliteDb,
     history_service: Arc<livrarr_server::history_service::HistoryServiceImpl<SqliteDb>>,
+    identity_road: SqlitePendingRouteRoad,
 }
 
 impl HasWorkService for TestState {
@@ -95,6 +100,14 @@ impl HasHistoryService for TestState {
 
     fn history_service(&self) -> &Self::HistorySvc {
         &self.history_service
+    }
+}
+
+impl HasIdentityRoadService for TestState {
+    type IdentityRoadSvc = SqlitePendingRouteRoad;
+
+    fn identity_road_service(&self) -> &Self::IdentityRoadSvc {
+        &self.identity_road
     }
 }
 
@@ -156,12 +169,25 @@ async fn seed_work(
     enrichment_status: EnrichmentStatus,
     anchors: SeedAnchors,
 ) -> Work {
+    let (author, _) = db
+        .create_author(CreateAuthorDbRequest {
+            user_id,
+            name: "Id Completeness Author".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("seed author");
     let (work, created) = db
         .create_work(CreateWorkDbRequest {
             ol_key: anchors.ol_key.map(str::to_string),
             gr_key: anchors.gr_key.map(str::to_string),
             isbn_13: anchors.isbn_13.map(str::to_string),
             asin: anchors.asin.map(str::to_string),
+            author_id: Some(author.id),
             ..work_req(user_id, title)
         })
         .await
@@ -283,6 +309,7 @@ fn test_state(db: SqliteDb) -> TestState {
         history_service: Arc::new(livrarr_server::history_service::HistoryServiceImpl::new(
             db.clone(),
         )),
+        identity_road: SqlitePendingRouteRoad::new(db.clone()),
         identity_repo: db,
     }
 }
@@ -408,6 +435,14 @@ async fn test_id_completeness_selector_branches_guards_and_next_clock() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;
     let now = chrono::Utc::now();
+
+    // This contract predates F2 and intentionally exercises the legacy
+    // scalar-anchor selector. Active-schema convergence has its own route-native
+    // coverage in test_ilr_contracts and must not read these frozen columns.
+    sqlx::query("DELETE FROM _livrarr_meta WHERE key='identity_authority_v2'")
+        .execute(db.pool())
+        .await
+        .expect("select the preactivation convergence implementation");
 
     let pending = seed_work(
         &db,
@@ -1361,7 +1396,9 @@ async fn test_id_completeness_pending_anchor_handlers_affirm_list_and_cross_user
     )
     .await
     .expect("affirm pending ASIN");
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Bug reproduction: identity-layer-rewrite — affirm is one user action and
+    // must complete the typed review continuation before returning.
+    assert_eq!(status.status(), StatusCode::NO_CONTENT);
     let after = db
         .get_work(user_a, work.id)
         .await

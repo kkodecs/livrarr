@@ -8,6 +8,23 @@ use std::time::{Duration, Instant};
 
 pub struct StubNoLlm;
 
+pub fn discovery_identity_authority_match(
+    left_title: &str,
+    left_author: &str,
+    right_title: &str,
+    right_author: &str,
+) -> bool {
+    livrarr_matching::identity_layer::find_matching_work(
+        crate::identity_consumer_match::authority_inputs(
+            left_title,
+            left_author,
+            right_title,
+            right_author,
+        ),
+    )
+    .is_match
+}
+
 impl LlmCaller for StubNoLlm {
     async fn call(&self, _req: LlmCallRequest) -> Result<LlmCallResponse, LlmError> {
         Err(LlmError::NotConfigured)
@@ -28,6 +45,9 @@ pub(crate) struct DiscoveryCtx<'a, C, H, L> {
     pub(crate) lookup_cache: &'a Arc<Mutex<HashMap<(String, String), CachedLookup>>>,
     pub(crate) resolver:
         &'a Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+    pub(crate) goodreads_base_url: &'a str,
+    pub(crate) openlibrary_base_url: &'a str,
+    pub(crate) request_timeout: Duration,
 }
 
 // Every field is a reference, which is always `Copy` regardless of whether
@@ -50,6 +70,9 @@ pub struct DiscoveryServiceImpl<C, H, L = StubNoLlm> {
     llm: L,
     lookup_cache: Arc<Mutex<HashMap<(String, String), CachedLookup>>>,
     resolver: Option<Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>>,
+    goodreads_base_url: String,
+    openlibrary_base_url: String,
+    request_timeout: Duration,
 }
 
 impl<C, H, L> DiscoveryServiceImpl<C, H, L> {
@@ -60,6 +83,9 @@ impl<C, H, L> DiscoveryServiceImpl<C, H, L> {
             llm: &self.llm,
             lookup_cache: &self.lookup_cache,
             resolver: &self.resolver,
+            goodreads_base_url: &self.goodreads_base_url,
+            openlibrary_base_url: &self.openlibrary_base_url,
+            request_timeout: self.request_timeout,
         }
     }
 
@@ -70,6 +96,9 @@ impl<C, H, L> DiscoveryServiceImpl<C, H, L> {
             llm,
             lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             resolver: None,
+            goodreads_base_url: "https://www.goodreads.com".to_string(),
+            openlibrary_base_url: "https://openlibrary.org".to_string(),
+            request_timeout: Duration::from_secs(10),
         }
     }
 
@@ -81,6 +110,21 @@ impl<C, H, L> DiscoveryServiceImpl<C, H, L> {
         resolver: Arc<crate::english_identity_resolver::LiveEnglishIdentityResolver>,
     ) -> Self {
         self.resolver = Some(resolver);
+        self
+    }
+
+    /// Override provider endpoints and the per-request timeout. This is an
+    /// integration seam for exercising the real router and outbound queue
+    /// against a hermetic HTTP server.
+    pub fn with_provider_transport(
+        mut self,
+        goodreads_base_url: impl Into<String>,
+        openlibrary_base_url: impl Into<String>,
+        request_timeout: Duration,
+    ) -> Self {
+        self.goodreads_base_url = goodreads_base_url.into();
+        self.openlibrary_base_url = openlibrary_base_url.into();
+        self.request_timeout = request_timeout;
         self
     }
 }
@@ -119,16 +163,17 @@ where
 fn take_lookup<E: std::fmt::Display>(
     provider: &str,
     term: &str,
-    res: Result<Result<Vec<LookupResult>, E>, tokio::time::error::Elapsed>,
+    res: Result<Vec<LookupResult>, E>,
 ) -> Vec<LookupResult> {
     match res {
-        Ok(Ok(found)) => found,
-        Ok(Err(e)) => {
-            tracing::warn!(provider, term, "discovery provider failed: {e}");
-            Vec::new()
-        }
-        Err(_) => {
-            tracing::warn!(provider, term, "discovery provider timed out");
+        Ok(found) => found,
+        Err(error) => {
+            tracing::warn!(
+                provider,
+                term,
+                cause = %error,
+                "discovery provider leg dropped"
+            );
             Vec::new()
         }
     }
@@ -267,14 +312,15 @@ where
 
     // #97 + WCC chunk A: query every provider in parallel and union the
     // results, instead of returning the first that answers. Goodreads joins
-    // as a co-equal provider via its WAF-free autocomplete endpoint. Each
-    // lookup is timeout-bounded so a slow scrape can't stall the search.
-    let provider_timeout = Duration::from_secs(10);
+    // as a co-equal provider via its WAF-free autocomplete endpoint. Request
+    // deadlines begin only after the shared outbound queue grants a
+    // permit. An outer timeout here used to cancel interactive legs while they
+    // were still queued, before any HTTP/provider-call evidence could exist.
     let (gb, ol, hc, gr) = tokio::join!(
-        tokio::time::timeout(provider_timeout, lookup_google_books(ctx, &term, lang)),
-        tokio::time::timeout(provider_timeout, lookup_openlibrary(ctx, &term, lang)),
-        tokio::time::timeout(provider_timeout, lookup_hardcover(ctx, &term, lang)),
-        tokio::time::timeout(provider_timeout, lookup_goodreads(ctx, &term, lang)),
+        lookup_google_books(ctx, &term, lang),
+        lookup_openlibrary(ctx, &term, lang),
+        lookup_hardcover(ctx, &term, lang),
+        lookup_goodreads(ctx, &term, lang),
     );
 
     // Cap each provider to its top 9 (relevance-ordered), then round-robin in
@@ -490,25 +536,20 @@ where
 
         // One author-scoped query per provider, in parallel. Google Books
         // (`inauthor:`) leads on coverage; OpenLibrary (`author:`) adds work
-        // anchors. Each is timeout-bounded so a slow provider can't stall the
-        // batch; a provider that errors or times out simply abstains. Google
+        // anchors. Each provider's HTTP request owns its post-queue timeout; a
+        // provider that errors abstains through the shared WARN boundary. Google
         // Books returns empty without a fetch when unconfigured (no API key),
         // which makes the pass OpenLibrary-only for keyless installs.
         let gb_term = format!("inauthor:\"{author}\"");
         let ol_term = format!("author:\"{author}\"");
-        let provider_timeout = Duration::from_secs(8);
         let gb_fut = async {
             let t = Instant::now();
-            let r =
-                tokio::time::timeout(provider_timeout, lookup_google_books(ctx, &gb_term, &lang))
-                    .await;
+            let r = lookup_google_books(ctx, &gb_term, &lang).await;
             (r, t.elapsed().as_millis() as u64)
         };
         let ol_fut = async {
             let t = Instant::now();
-            let r =
-                tokio::time::timeout(provider_timeout, lookup_openlibrary(ctx, &ol_term, &lang))
-                    .await;
+            let r = lookup_openlibrary(ctx, &ol_term, &lang).await;
             (r, t.elapsed().as_millis() as u64)
         };
         let ((gb, gb_ms), (ol, ol_ms)) = tokio::join!(gb_fut, ol_fut);
@@ -517,12 +558,8 @@ where
         // Union the author's corpus: Google Books first (coverage/covers),
         // then OpenLibrary (work anchors).
         let mut corpus: Vec<LookupResult> = Vec::new();
-        if let Ok(Ok(mut r)) = gb {
-            corpus.append(&mut r);
-        }
-        if let Ok(Ok(mut r)) = ol {
-            corpus.append(&mut r);
-        }
+        corpus.append(&mut take_lookup("GoogleBooks", &gb_term, gb));
+        corpus.append(&mut take_lookup("OpenLibrary", &ol_term, ol));
         if corpus.is_empty() {
             // The whole author corpus is empty (provider error/timeout, or no
             // author-facet hits). Every file in the group falls through to the
@@ -548,7 +585,7 @@ where
             // the corpus (Google Books carries isbn_13; OpenLibrary does not),
             // beating any title heuristic. Fall back to the strict title+author
             // cascade when there's no ISBN or no ISBN hit in the corpus.
-            let chosen = q
+            let isbn_chosen = q
                 .isbn
                 .as_deref()
                 .filter(|s| !s.is_empty())
@@ -556,16 +593,24 @@ where
                     corpus
                         .iter()
                         .position(|c| c.isbn_13.as_deref() == Some(isbn))
-                })
-                .or_else(|| {
-                    livrarr_matching::work_dedup::best_candidate_index_lang(
-                        &cand_refs,
-                        &cand_langs,
+                });
+            let chosen = isbn_chosen.or_else(|| {
+                livrarr_matching::work_dedup::best_candidate_index_lang(
+                    &cand_refs,
+                    &cand_langs,
+                    &q.title,
+                    &q.author,
+                    file_lang,
+                )
+                .filter(|index| {
+                    discovery_identity_authority_match(
                         &q.title,
                         &q.author,
-                        file_lang,
+                        &corpus[*index].title,
+                        &corpus[*index].author_name,
                     )
-                });
+                })
+            });
             match chosen {
                 Some(idx) => out.push((q.id, finalize_eager_pick(idx, &corpus, file_lang))),
                 // No confident author-batch match: defer to the per-file
@@ -621,7 +666,16 @@ where
                     &q.author,
                     file_lang,
                 );
-                chosen.map(|idx| (q.id, finalize_eager_pick(idx, &candidates, file_lang)))
+                chosen
+                    .filter(|index| {
+                        discovery_identity_authority_match(
+                            &q.title,
+                            &q.author,
+                            &candidates[*index].title,
+                            &candidates[*index].author_name,
+                        )
+                    })
+                    .map(|idx| (q.id, finalize_eager_pick(idx, &candidates, file_lang)))
             })
             .buffer_unordered(FALLBACK_CONCURRENCY)
             .collect()
@@ -714,7 +768,8 @@ where
     // term as-is — adding the author demotes the canonical book (author-in-
     // title substring matches rank study guides / adaptations first).
     let url = format!(
-        "https://www.goodreads.com/book/auto_complete?format=json&q={}",
+        "{}/book/auto_complete?format=json&q={}",
+        ctx.goodreads_base_url.trim_end_matches('/'),
         urlencoding::encode(term)
     );
 
@@ -723,37 +778,34 @@ where
         method: HttpMethod::Get,
         headers: vec![("Accept".into(), "application/json".into())],
         body: None,
-        timeout: std::time::Duration::from_secs(10),
+        timeout: ctx.request_timeout,
         rate_bucket: RateBucket::Goodreads,
         max_body_bytes: 2 * 1024 * 1024,
         anti_bot_check: true,
         user_agent: UserAgentProfile::Browser,
-        priority: RequestPriority::Normal,
+        priority: RequestPriority::Interactive,
     };
 
-    let resp = match ctx.http.fetch(fetch_req).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Goodreads autocomplete fetch failed: {e}");
-            return Ok(vec![]);
-        }
-    };
+    let resp = ctx.http.fetch(fetch_req).await.map_err(|error| {
+        WorkServiceError::Enrichment(format!("Goodreads autocomplete request: {error}"))
+    })?;
 
     // 200 is the only "door open" status; a 202 challenge / 4xx / 5xx are
     // transient blocks for discovery — the other providers carry the search.
     if resp.status != 200 {
-        tracing::warn!(
-            status = resp.status,
-            "Goodreads autocomplete returned non-200"
-        );
-        return Ok(vec![]);
+        return Err(WorkServiceError::Enrichment(format!(
+            "Goodreads autocomplete returned {}",
+            resp.status
+        )));
     }
 
     let body = String::from_utf8_lossy(&resp.body);
     // Discovery deliberately treats Goodreads as one optional union
     // contribution. The shared lenient wrapper owns the one error-to-empty
     // mapping; provider-client callers use the checked parser instead.
-    let parsed = livrarr_external_data::goodreads::parse_autocomplete_json(&body);
+    let parsed = livrarr_external_data::goodreads::parse_autocomplete_json_checked(&body).map_err(
+        |error| WorkServiceError::Enrichment(format!("Goodreads autocomplete parse: {error}")),
+    )?;
 
     let results = parsed
         .into_iter()
@@ -815,9 +867,16 @@ where
     H: HttpFetcher + Send + Sync,
     L: LlmCaller + Send + Sync,
 {
-    livrarr_external_data::openlibrary::search_openlibrary(ctx.http, term, lang)
-        .await
-        .map_err(WorkServiceError::Enrichment)
+    livrarr_external_data::openlibrary::search_openlibrary_with_options(
+        ctx.http,
+        ctx.openlibrary_base_url,
+        term,
+        lang,
+        RequestPriority::Interactive,
+        ctx.request_timeout,
+    )
+    .await
+    .map_err(WorkServiceError::Enrichment)
 }
 
 async fn lookup_google_books<C, H, L>(
@@ -844,7 +903,11 @@ where
                 return Ok(vec![]);
             }
         },
-        Err(_) => return Ok(vec![]),
+        Err(error) => {
+            return Err(WorkServiceError::Enrichment(format!(
+                "GoogleBooks configuration: {error}"
+            )))
+        }
     };
 
     let url = format!(
@@ -916,20 +979,6 @@ where
     Ok(results)
 }
 
-async fn fetch_hardcover_discovery_hits<H: HttpFetcher>(
-    http: &H,
-    term: &str,
-    token: &str,
-    priority: RequestPriority,
-) -> Result<Vec<serde_json::Value>, WorkServiceError> {
-    let body = livrarr_external_data::hardcover::hc_search_body(15, term);
-    let data = livrarr_external_data::hardcover::hc_post(http, body, token, priority)
-        .await
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;
-    livrarr_external_data::hardcover::hc_extract_hits(&data)
-        .map_err(|e| WorkServiceError::Enrichment(format!("HC search response: {e}")))
-}
-
 async fn lookup_hardcover<C, H, L>(
     ctx: DiscoveryCtx<'_, C, H, L>,
     term: &str,
@@ -942,7 +991,11 @@ where
 {
     let cfg = match ctx.config.get_metadata_config().await {
         Ok(c) => c,
-        Err(_) => return Ok(vec![]),
+        Err(error) => {
+            return Err(WorkServiceError::Enrichment(format!(
+                "Hardcover configuration: {error}"
+            )))
+        }
     };
 
     if !cfg.hardcover_enabled {
@@ -963,13 +1016,14 @@ where
         None => return Ok(vec![]),
     };
 
-    let hits = fetch_hardcover_discovery_hits(
+    let hits = livrarr_external_data::hardcover::fetch_hardcover_discovery_hits(
         ctx.http,
         term,
         &token,
-        livrarr_domain::RequestPriority::Normal,
+        livrarr_domain::RequestPriority::Interactive,
     )
-    .await?;
+    .await
+    .map_err(|e| WorkServiceError::Enrichment(format!("HC search: {e}")))?;
 
     let results: Vec<LookupResult> = hits
         .iter()
@@ -1250,20 +1304,20 @@ mod discovery_tests {
     }
 
     #[test]
-    fn discovery_goodreads_reuses_the_lenient_autocomplete_wrapper() {
+    fn discovery_goodreads_uses_checked_autocomplete_parser_for_observable_drops() {
         let compact_source: String = include_str!("discovery_service.rs")
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
         let expected_call = [
             "letparsed=livrarr_external_data::goodreads::parse_",
-            "autocomplete_json(&body);",
+            "autocomplete_json_checked(&body)",
         ]
         .concat();
 
         assert!(
             compact_source.contains(&expected_call),
-            "discovery must delegate its lenient invalid-response mapping to the shared wrapper"
+            "discovery must preserve invalid provider responses as errors for the shared WARN boundary"
         );
     }
 
@@ -1288,14 +1342,16 @@ mod discovery_tests {
             let fetcher = CannedDiscoveryFetcher::new(body);
 
             for _ in 0..5 {
-                assert!(fetch_hardcover_discovery_hits(
-                    &fetcher,
-                    "Dune",
-                    "test-token",
-                    RequestPriority::Normal,
-                )
-                .await
-                .is_err());
+                assert!(
+                    livrarr_external_data::hardcover::fetch_hardcover_discovery_hits(
+                        &fetcher,
+                        "Dune",
+                        "test-token",
+                        RequestPriority::Normal,
+                    )
+                    .await
+                    .is_err()
+                );
             }
             assert_eq!(fetcher.requests.lock().unwrap().len(), 5);
             assert!(matches!(
@@ -1312,10 +1368,14 @@ mod discovery_tests {
                 .to_string()
                 .into_bytes(),
         );
-        let hits =
-            fetch_hardcover_discovery_hits(&fetcher, "Dune", "test-token", RequestPriority::Normal)
-                .await
-                .expect("explicit empty hits is a healthy discovery miss");
+        let hits = livrarr_external_data::hardcover::fetch_hardcover_discovery_hits(
+            &fetcher,
+            "Dune",
+            "test-token",
+            RequestPriority::Normal,
+        )
+        .await
+        .expect("explicit empty hits is a healthy discovery miss");
         assert!(hits.is_empty());
         assert_eq!(fetcher.requests.lock().unwrap().len(), 1);
         assert!(!matches!(
@@ -1396,14 +1456,12 @@ mod discovery_tests {
 
     #[test]
     fn take_lookup_passes_ok_and_swallows_err() {
-        let ok: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
-            Ok(Ok(vec![lr("Hit", "a", None)]));
+        let ok: Result<Vec<LookupResult>, String> = Ok(vec![lr("Hit", "a", None)]);
         assert_eq!(take_lookup("P", "t", ok).len(), 1);
 
         // A provider error degrades to an empty contribution, never failing the
         // whole search (the timeout arm behaves identically).
-        let err: Result<Result<Vec<LookupResult>, String>, tokio::time::error::Elapsed> =
-            Ok(Err("provider boom".to_string()));
+        let err: Result<Vec<LookupResult>, String> = Err("provider boom".to_string());
         assert!(take_lookup("P", "t", err).is_empty());
     }
 

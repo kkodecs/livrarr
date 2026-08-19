@@ -578,6 +578,7 @@ fn empty_normalized() -> NormalizedWorkDetail {
         publish_date: None,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: None,
         asin: None,

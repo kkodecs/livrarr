@@ -5,7 +5,7 @@
 //! `EnrichmentServiceImpl` spine. Depends only on domain/db/external-data/http;
 //! it must not depend on livrarr-metadata or livrarr-identity.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use livrarr_domain::{
@@ -17,6 +17,7 @@ use livrarr_external_data::{NormalizedWorkDetail, ProviderOutcome};
 pub mod author_name_variant_observer;
 pub mod cover_rank;
 pub mod cover_resolution;
+pub mod identity_layer;
 mod merge_engine;
 pub mod provider_queue;
 
@@ -83,6 +84,19 @@ pub trait EnrichmentService: Send + Sync {
         data: livrarr_domain::services::SourceProviderData,
     );
 
+    /// Re-run the existing deterministic cover selection over successful
+    /// normalized payloads already stored in provider retry state. This is a
+    /// zero-provider-request seam used by narrowly-scoped startup repairs.
+    fn reselect_covers_from_persisted_payloads(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> impl std::future::Future<Output = Result<PersistedCoverReselection, EnrichmentError>> + Send
+    {
+        let _ = (user_id, work_id);
+        async move { Ok(PersistedCoverReselection::default()) }
+    }
+
     /// Thread one identity-edit preview fetch down to the queue's client
     /// registry (identity-edit r4 §Preview seam). Desugared stub default:
     /// `NotConfigured` for doubles without a queue.
@@ -96,6 +110,12 @@ pub trait EnrichmentService: Send + Sync {
         let _ = (provider, query, language, priority);
         async move { PreviewFetchOutcome::NotConfigured }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PersistedCoverReselection {
+    pub ebook: Option<livrarr_domain::CoverResolution>,
+    pub audiobook: Option<livrarr_domain::CoverResolution>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +149,9 @@ pub struct EnrichmentResult {
     /// returns an empty `provider_outcomes` map on a completed attempt, so
     /// emptiness is NOT a usable no-attempt signal.
     pub attempted: bool,
+    pub captured_provider_identity: Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>,
+    pub captured_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
+    pub provider_chase_attempted: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -177,6 +200,59 @@ pub struct ScatterGatherResult {
     pub outcomes: HashMap<livrarr_domain::MetadataProvider, ProviderOutcome<NormalizedWorkDetail>>,
     pub merge_eligible: bool,
     pub deferred: bool,
+    /// At least one anchored provider leg was dispatched or cache-served.
+    /// Policy/no-anchor/terminal skips do not count.
+    pub provider_chase_attempted: bool,
+    pub search_provider_identity: Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>,
+    pub search_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
+}
+
+fn captured_work_identities<'a>(
+    payloads: impl Iterator<Item = (livrarr_domain::MetadataProvider, &'a NormalizedWorkDetail)>,
+) -> Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence> {
+    use livrarr_domain::identity_layer::{
+        IdentityProvider, ProviderIdentityEvidence, RouteKey, RouteKind,
+    };
+
+    let mut seen = HashSet::new();
+    let mut captured = Vec::new();
+    for (_, detail) in payloads {
+        let candidates = [
+            detail.ol_key.as_ref().map(|value| {
+                (
+                    IdentityProvider::OpenLibrary,
+                    RouteKind::OpenLibraryWork,
+                    value,
+                )
+            }),
+            detail
+                .gr_work_key
+                .as_ref()
+                .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+            detail
+                .hc_key
+                .as_ref()
+                .map(|value| (IdentityProvider::Hardcover, RouteKind::HardcoverWork, value)),
+        ];
+        for (provider, kind, value) in candidates.into_iter().flatten() {
+            let value = value.trim();
+            if value.is_empty() || !seen.insert((provider.clone(), kind.clone(), value.to_string()))
+            {
+                continue;
+            }
+            captured.push(ProviderIdentityEvidence {
+                provider: provider.clone(),
+                route: RouteKey {
+                    provider,
+                    kind,
+                    value: value.to_string(),
+                },
+                work_core: None,
+                provenance: Default::default(),
+            });
+        }
+    }
+    captured
 }
 
 /// TEMP(pk-tdd): context passed to ProviderQueue::dispatch_enrichment.
@@ -206,6 +282,8 @@ pub struct ProviderQueueConfig {
 pub enum ProviderQueueError {
     #[error("database error: {0}")]
     Db(#[from] DbError),
+    #[error("identity route read failed: {0}")]
+    IdentityRouteRead(String),
 }
 
 /// Outcome of one identity-edit preview fetch (identity-edit r4 §Preview
@@ -264,35 +342,34 @@ pub struct ReconstructedOutcome {
 // =============================================================================
 
 /// Classify the final enrichment status after a merge (REQ-011):
-/// - `Enriched` when the merge produced ≥1 usable field (the merge engine
-///   already sets this via `has_meaningful_text`, so trust its verdict when
-///   Enriched or Thin).
-/// - `Thin` when ≥1 provider responded with a Success outcome (including empty
-///   payloads) but the merge produced no usable text.
 /// - `Failed` when NO provider returned a Success outcome — all were
 ///   NotConfigured, WillRetry, PermanentFailure, or NotFound. This
 ///   is the transient "try later" state; the background job will retry.
+/// - `Enriched` when ≥1 provider succeeded and the merge produced ≥1 usable
+///   field.
+/// - `Thin` when ≥1 provider responded with Success (including an empty
+///   payload) but the merge produced no usable text.
 ///
-/// The merge engine's own `enrichment_status` already handles Enriched/Thin
-/// correctly; this function only overrides to `Failed` when appropriate.
+/// The no-success rule is evaluated first. Otherwise pre-existing meaningful
+/// text can make the merge engine say `Enriched` even though every provider was
+/// skipped or failed, falsely presenting an all-skip pass as successful.
 /// (REQ-014: the whole-work Conflict outcome is retired — status is computed
 /// from surviving contributions; conflicted providers are dissent-isolated.)
 fn resolve_status(
     merge_status: EnrichmentStatus,
     provider_results: &HashMap<livrarr_domain::MetadataProvider, ReconstructedOutcome>,
 ) -> EnrichmentStatus {
-    if merge_status == EnrichmentStatus::Enriched {
-        return EnrichmentStatus::Enriched;
-    }
     // If ANY provider had a Success outcome (even an empty one), the work is at
     // most Thin — we know the book, we just found no useful metadata.
     let any_success = provider_results
         .values()
         .any(|o| o.class == livrarr_domain::OutcomeClass::Success);
-    if any_success {
-        EnrichmentStatus::Thin
-    } else {
+    if !any_success {
         EnrichmentStatus::Failed
+    } else if merge_status == EnrichmentStatus::Enriched {
+        EnrichmentStatus::Enriched
+    } else {
+        EnrichmentStatus::Thin
     }
 }
 
@@ -553,6 +630,57 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
 {
+    async fn reselect_covers_from_persisted_payloads(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<PersistedCoverReselection, EnrichmentError> {
+        let work = self
+            .db
+            .get_work(user_id, work_id)
+            .await
+            .map_err(|error| match error {
+                DbError::NotFound { .. } => EnrichmentError::WorkNotFound,
+                other => EnrichmentError::Db(other),
+            })?;
+        let provenance = self.db.list_work_provenance(user_id, work_id).await?;
+        let mut provider_results = HashMap::new();
+        for state in self.db.list_retry_states(user_id, work_id).await? {
+            let Some(json) = state.normalized_payload_json else {
+                continue;
+            };
+            let payload = serde_json::from_str::<NormalizedWorkDetail>(&json).map_err(|_| {
+                EnrichmentError::CorruptRetryPayload {
+                    work_id,
+                    provider: state.provider,
+                }
+            })?;
+            provider_results.insert(
+                state.provider,
+                ReconstructedOutcome {
+                    class: livrarr_domain::OutcomeClass::Success,
+                    payload: Some(payload),
+                },
+            );
+        }
+
+        let priority_model = PriorityModel::for_language(work.language.as_deref());
+        let output = self
+            .merge_engine
+            .merge(MergeInput {
+                current_work: work,
+                current_provenance: provenance,
+                provider_results,
+                mode: EnrichmentMode::Background,
+                priority_model,
+            })
+            .await?;
+        Ok(PersistedCoverReselection {
+            ebook: output.cover_resolution,
+            audiobook: output.audiobook_cover_resolution,
+        })
+    }
+
     async fn preview_fetch(
         &self,
         provider: livrarr_domain::MetadataProvider,
@@ -695,6 +823,13 @@ where
                         changed,
                         dissents,
                         attempted: true,
+                        captured_provider_identity: captured_work_identities(
+                            observed_names
+                                .iter()
+                                .map(|(provider, detail)| (*provider, detail)),
+                        ),
+                        captured_route_proposals: Vec::new(),
+                        provider_chase_attempted: !observed_names.is_empty(),
                     })
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -751,6 +886,15 @@ where
             .iter()
             .map(|(p, o)| (*p, o.class()))
             .collect();
+        let mut captured_provider_identity =
+            captured_work_identities(scatter_result.outcomes.iter().filter_map(
+                |(provider, outcome)| match outcome {
+                    ProviderOutcome::Success(detail) => Some((*provider, detail.as_ref())),
+                    _ => None,
+                },
+            ));
+        captured_provider_identity.extend(scatter_result.search_provider_identity.clone());
+        let captured_route_proposals = scatter_result.search_route_proposals.clone();
 
         // Step 7: Check if merge should be deferred
         let merge_deferred = scatter_result.deferred && mode == EnrichmentMode::Background;
@@ -785,6 +929,9 @@ where
                 changed: false,
                 dissents: Vec::new(),
                 attempted: true,
+                captured_provider_identity,
+                captured_route_proposals,
+                provider_chase_attempted: scatter_result.provider_chase_attempted,
             });
         }
 
@@ -960,6 +1107,9 @@ where
                         // attempted anything — REQ-002's "an attempt that
                         // never runs records nothing".
                         attempted: !scatter_result.outcomes.is_empty() || changed,
+                        captured_provider_identity: captured_provider_identity.clone(),
+                        captured_route_proposals: captured_route_proposals.clone(),
+                        provider_chase_attempted: scatter_result.provider_chase_attempted,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -1006,5 +1156,36 @@ where
         data: livrarr_domain::services::SourceProviderData,
     ) {
         self.pre_inject_source_data(user_id, work_id, data).await;
+    }
+}
+
+#[cfg(test)]
+mod resolve_status_tests {
+    use super::*;
+
+    #[test]
+    fn all_skipped_pass_is_failed_even_when_existing_text_makes_merge_look_enriched() {
+        let provider_results = HashMap::from([
+            (
+                livrarr_domain::MetadataProvider::OpenLibrary,
+                ReconstructedOutcome {
+                    class: livrarr_domain::OutcomeClass::NotFound,
+                    payload: None,
+                },
+            ),
+            (
+                livrarr_domain::MetadataProvider::Hardcover,
+                ReconstructedOutcome {
+                    class: livrarr_domain::OutcomeClass::NotFound,
+                    payload: None,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            resolve_status(EnrichmentStatus::Enriched, &provider_results),
+            EnrichmentStatus::Failed,
+            "pre-existing text must not turn a pass with zero provider successes into a successful enrichment"
+        );
     }
 }

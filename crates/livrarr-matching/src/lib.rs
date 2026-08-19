@@ -11,6 +11,7 @@
 //! - [`should_auto_confirm`] / [`should_try_combinatorial`] — post-scoring decisions
 //! - [`release_language_verdict`] — language gate for a background auto-grab decision
 
+pub mod identity_layer;
 mod m1_embedded;
 mod m2_path;
 mod m3_string;

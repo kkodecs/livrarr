@@ -13,6 +13,7 @@ import {
   Undo2,
   ExternalLink,
   Info,
+  Trash2,
 } from "lucide-react";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -21,6 +22,7 @@ import * as api from "@/api";
 import { formatBytes, formatRelativeDate } from "@/utils/format";
 import { cn } from "@/utils/cn";
 import { HelpTip } from "@/components/HelpTip";
+import { useAuthStore } from "@/stores/auth";
 import type {
   ReadarrRootFolder,
   ImportPreviewResponse,
@@ -41,21 +43,29 @@ type Phase =
 
 export default function ReadarrImportPage() {
   const queryClient = useQueryClient();
+  const isAdmin = useAuthStore((state) => state.isAdmin);
 
   // Connection form
   const [url, setUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [originUrl, setOriginUrl] = useState("");
 
   // State machine
   const [phase, setPhase] = useState<Phase>("idle");
 
   // Connected state
   const [readarrFolders, setReadarrFolders] = useState<ReadarrRootFolder[]>([]);
-  const [selectedReadarrFolder, setSelectedReadarrFolder] = useState<number | null>(null);
-  const [selectedLivrarrFolder, setSelectedLivrarrFolder] = useState<number | null>(null);
+  const [selectedReadarrFolder, setSelectedReadarrFolder] = useState<
+    number | null
+  >(null);
+  const [selectedLivrarrFolder, setSelectedLivrarrFolder] = useState<
+    number | null
+  >(null);
 
   // Import mode
-  const [importMode, setImportMode] = useState<"all" | "files_only">("files_only");
+  const [importMode, setImportMode] = useState<"all" | "files_only">(
+    "files_only",
+  );
 
   // Path translation
   const [containerPath, setContainerPath] = useState("");
@@ -87,6 +97,35 @@ export default function ReadarrImportPage() {
   const { data: history, refetch: refetchHistory } = useQuery({
     queryKey: ["readarrHistory"],
     queryFn: api.readarrHistory,
+  });
+
+  const {
+    data: approvedOrigins = [],
+    isLoading: originsLoading,
+    isError: originsFailed,
+  } = useQuery({
+    queryKey: ["readarrOrigins"],
+    queryFn: api.readarrOrigins,
+    enabled: isAdmin,
+  });
+
+  const addOriginMut = useMutation({
+    mutationFn: () => api.addReadarrOrigin(originUrl),
+    onSuccess: () => {
+      setOriginUrl("");
+      queryClient.invalidateQueries({ queryKey: ["readarrOrigins"] });
+      toast.success("Readarr origin approved");
+    },
+    onError: () => toast.error("Could not approve the Readarr origin"),
+  });
+
+  const removeOriginMut = useMutation({
+    mutationFn: (id: number) => api.removeReadarrOrigin(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["readarrOrigins"] });
+      toast.success("Readarr origin removed");
+    },
+    onError: () => toast.error("Could not remove the Readarr origin"),
   });
 
   // Poll progress during import
@@ -204,7 +243,9 @@ export default function ReadarrImportPage() {
   // Build AI help link
   const buildHelpLink = () => {
     const readarrPaths = readarrFolders.map((f) => f.path).join(", ");
-    const livrarrFolder = livrarrFolders?.find((f) => f.id === selectedLivrarrFolder);
+    const livrarrFolder = livrarrFolders?.find(
+      (f) => f.id === selectedLivrarrFolder,
+    );
     const livrarrPath = livrarrFolder?.path ?? "(not selected)";
     const question = `I need help configuring Docker volume mounts for Livrarr to access my Readarr library.\nReadarr root folders: ${readarrPaths || "(not connected yet)"}\nLivrarr root folder: ${livrarrPath}\nPlease show me the docker-compose volume configuration needed.`;
     return `/help?question=${encodeURIComponent(question)}`;
@@ -214,8 +255,12 @@ export default function ReadarrImportPage() {
   const progressPct =
     progress && progress.filesTotal > 0
       ? Math.round(
-          ((progress.authorsProcessed + progress.worksProcessed + progress.filesProcessed) /
-            (progress.authorsTotal + progress.worksTotal + progress.filesTotal)) *
+          ((progress.authorsProcessed +
+            progress.worksProcessed +
+            progress.filesProcessed) /
+            (progress.authorsTotal +
+              progress.worksTotal +
+              progress.filesTotal)) *
             100,
         )
       : 0;
@@ -230,10 +275,14 @@ export default function ReadarrImportPage() {
         <div className="mx-auto max-w-3xl space-y-6">
           {/* Warning banner */}
           <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
-            <AlertTriangle className="mt-0.5 shrink-0 text-amber-400" size={18} />
+            <AlertTriangle
+              className="mt-0.5 shrink-0 text-amber-400"
+              size={18}
+            />
             <div className="text-sm text-amber-200">
-              <span className="font-medium">Experimental feature.</span> This imports your Readarr
-              library into Livrarr. Your Readarr files and directories will never be modified.
+              <span className="font-medium">Experimental feature.</span> This
+              imports your Readarr library into Livrarr. Your Readarr files and
+              directories will never be modified.
             </div>
           </div>
 
@@ -241,8 +290,8 @@ export default function ReadarrImportPage() {
           <div className="flex items-start gap-3 rounded-lg border border-border bg-zinc-800/50 px-4 py-3">
             <Info className="mt-0.5 shrink-0 text-blue-400" size={18} />
             <div className="text-sm text-muted">
-              Readarr's library must be accessible from Livrarr's filesystem. If using Docker,
-              ensure volumes are mapped correctly.{" "}
+              Readarr's library must be accessible from Livrarr's filesystem. If
+              using Docker, ensure volumes are mapped correctly.{" "}
               <Link
                 to={buildHelpLink()}
                 className="inline-flex items-center gap-1 text-brand hover:text-brand-hover"
@@ -259,7 +308,9 @@ export default function ReadarrImportPage() {
             </h2>
             <div className="space-y-3">
               <div>
-                <label className="mb-1 block text-sm text-muted">Readarr URL</label>
+                <label className="mb-1 block text-sm text-muted">
+                  Readarr URL
+                </label>
                 <UrlInput
                   value={url}
                   onChange={setUrl}
@@ -287,8 +338,18 @@ export default function ReadarrImportPage() {
                   Connect
                 </button>
               )}
+              {connectMut.isError && (
+                <p className="text-xs text-amber-300">
+                  Private or local Readarr addresses must be approved{" "}
+                  {isAdmin ? "below" : "by an administrator"} before Livrarr can
+                  connect. Connection errors are intentionally generic.
+                </p>
+              )}
               {phase === "connecting" && (
-                <button disabled className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white opacity-50">
+                <button
+                  disabled
+                  className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white opacity-50"
+                >
                   <Loader2 size={14} className="animate-spin" />
                   Connecting...
                 </button>
@@ -316,6 +377,79 @@ export default function ReadarrImportPage() {
             </div>
           </div>
 
+          {isAdmin && (
+            <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
+              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wider text-muted">
+                Approved Readarr origins
+              </h2>
+              <p className="mb-3 text-xs text-muted">
+                Approve private or local Readarr hostnames that this server is
+                allowed to contact. Paths are removed and the normalized origin
+                is stored.
+              </p>
+              <div className="flex gap-2">
+                <div className="min-w-0 flex-1">
+                  <UrlInput
+                    value={originUrl}
+                    onChange={setOriginUrl}
+                    placeholder="readarr.internal:8787"
+                    disabled={addOriginMut.isPending}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => addOriginMut.mutate()}
+                  disabled={!originUrl.trim() || addOriginMut.isPending}
+                  className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
+                >
+                  {addOriginMut.isPending && (
+                    <Loader2 size={14} className="animate-spin" />
+                  )}
+                  Approve origin
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {originsLoading && (
+                  <p className="text-xs text-muted">
+                    Loading approved origins...
+                  </p>
+                )}
+                {originsFailed && (
+                  <p className="text-xs text-red-400">
+                    Could not load approved origins.
+                  </p>
+                )}
+                {!originsLoading &&
+                  !originsFailed &&
+                  approvedOrigins.length === 0 && (
+                    <p className="text-xs text-muted">
+                      No private Readarr origins are approved.
+                    </p>
+                  )}
+                {approvedOrigins.map((approved) => (
+                  <div
+                    key={approved.id}
+                    className="flex items-center justify-between gap-3 rounded border border-border bg-zinc-900/60 px-3 py-2"
+                  >
+                    <span className="min-w-0 truncate text-sm text-zinc-200">
+                      {approved.origin}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${approved.origin}`}
+                      title={`Remove ${approved.origin}`}
+                      onClick={() => removeOriginMut.mutate(approved.id)}
+                      disabled={removeOriginMut.isPending}
+                      className="shrink-0 text-muted hover:text-red-400 disabled:opacity-50"
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Root folder selection */}
           {phase !== "idle" && phase !== "connecting" && (
             <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
@@ -324,10 +458,14 @@ export default function ReadarrImportPage() {
               </h2>
               <div className="space-y-3">
                 <div>
-                  <label className="mb-1 block text-sm text-muted">Readarr Root Folder</label>
+                  <label className="mb-1 block text-sm text-muted">
+                    Readarr Root Folder
+                  </label>
                   <select
                     value={selectedReadarrFolder ?? ""}
-                    onChange={(e) => setSelectedReadarrFolder(Number(e.target.value))}
+                    onChange={(e) =>
+                      setSelectedReadarrFolder(Number(e.target.value))
+                    }
                     disabled={phase === "previewing" || phase === "importing"}
                     className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                   >
@@ -342,10 +480,14 @@ export default function ReadarrImportPage() {
                   </select>
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm text-muted">Livrarr Root Folder</label>
+                  <label className="mb-1 block text-sm text-muted">
+                    Livrarr Root Folder
+                  </label>
                   <select
                     value={selectedLivrarrFolder ?? ""}
-                    onChange={(e) => setSelectedLivrarrFolder(Number(e.target.value))}
+                    onChange={(e) =>
+                      setSelectedLivrarrFolder(Number(e.target.value))
+                    }
                     disabled={phase === "previewing" || phase === "importing"}
                     className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                   >
@@ -361,7 +503,10 @@ export default function ReadarrImportPage() {
                   {(!livrarrFolders || livrarrFolders.length === 0) && (
                     <p className="mt-1 text-xs text-amber-400">
                       No root folders configured in Livrarr.{" "}
-                      <Link to="/settings/mediamanagement" className="text-brand hover:text-brand-hover">
+                      <Link
+                        to="/settings/mediamanagement"
+                        className="text-brand hover:text-brand-hover"
+                      >
                         Add one first.
                       </Link>
                     </p>
@@ -371,7 +516,9 @@ export default function ReadarrImportPage() {
                 {/* Path translation */}
                 <div className="rounded border border-border bg-zinc-900/60 p-3">
                   <div className="mb-2 flex items-center gap-1.5">
-                    <span className="text-sm font-medium text-zinc-300">Path translation</span>
+                    <span className="text-sm font-medium text-zinc-300">
+                      Path translation
+                    </span>
                     <HelpTip text="When Readarr runs in Docker, its file paths reflect the container's internal filesystem (e.g. /books). Enter the equivalent path where Livrarr can access the same files on the host. Leave blank if both apps share the same filesystem." />
                     <Link
                       to={`/help?question=${encodeURIComponent("How do I configure Docker volume path translation for Readarr import in Livrarr? Readarr container path: " + (containerPath || "/books"))}`}
@@ -382,55 +529,94 @@ export default function ReadarrImportPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="mb-1 block text-xs text-muted">Container path</label>
+                      <label className="mb-1 block text-xs text-muted">
+                        Container path
+                      </label>
                       <input
                         type="text"
                         value={containerPath}
-                        onChange={(e) => { setContainerPath(e.target.value); setPreview(null); }}
-                        disabled={phase === "previewing" || phase === "importing"}
+                        onChange={(e) => {
+                          setContainerPath(e.target.value);
+                          setPreview(null);
+                        }}
+                        disabled={
+                          phase === "previewing" || phase === "importing"
+                        }
                         placeholder="/books"
                         className="w-full rounded border border-border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
                       />
                     </div>
                     <div>
-                      <label className="mb-1 block text-xs text-muted">Host path</label>
+                      <label className="mb-1 block text-xs text-muted">
+                        Host path
+                      </label>
                       <input
                         type="text"
                         value={hostPath}
-                        onChange={(e) => { setHostPath(e.target.value); setPreview(null); }}
-                        disabled={phase === "previewing" || phase === "importing"}
+                        onChange={(e) => {
+                          setHostPath(e.target.value);
+                          setPreview(null);
+                        }}
+                        disabled={
+                          phase === "previewing" || phase === "importing"
+                        }
                         placeholder="/mnt/data/books"
                         className="w-full rounded border border-border bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-600 focus:border-brand focus:outline-none disabled:opacity-50"
                       />
                     </div>
                   </div>
                 </div>
-                {(phase === "connected" || phase === "previewed" || phase === "completed" || phase === "failed") && (
+                {(phase === "connected" ||
+                  phase === "previewed" ||
+                  phase === "completed" ||
+                  phase === "failed") && (
                   <div className="space-y-3">
                     <div>
-                      <label className="mb-1.5 block text-sm text-muted">Import scope</label>
+                      <label className="mb-1.5 block text-sm text-muted">
+                        Import scope
+                      </label>
                       <div className="flex flex-col gap-2">
                         {(["files_only", "all"] as const).map((mode) => (
-                          <label key={mode} className="flex cursor-pointer items-start gap-2.5">
+                          <label
+                            key={mode}
+                            className="flex cursor-pointer items-start gap-2.5"
+                          >
                             <input
                               type="radio"
                               name="importMode"
                               value={mode}
                               checked={importMode === mode}
-                              onChange={() => { setImportMode(mode); setPreview(null); }}
-                              disabled={phase !== "connected" && phase !== "previewed" && phase !== "failed"}
+                              onChange={() => {
+                                setImportMode(mode);
+                                setPreview(null);
+                              }}
+                              disabled={
+                                phase !== "connected" &&
+                                phase !== "previewed" &&
+                                phase !== "failed"
+                              }
                               className="mt-0.5 accent-brand"
                             />
                             <span className="text-sm">
                               {mode === "files_only" ? (
                                 <>
-                                  <span className="font-medium text-zinc-100">Works with files</span>
-                                  <span className="ml-1 text-muted">— only import works that have book files in Readarr</span>
+                                  <span className="font-medium text-zinc-100">
+                                    Works with files
+                                  </span>
+                                  <span className="ml-1 text-muted">
+                                    — only import works that have book files in
+                                    Readarr
+                                  </span>
                                 </>
                               ) : (
                                 <>
-                                  <span className="font-medium text-zinc-100">All works</span>
-                                  <span className="ml-1 text-muted">— import entire Readarr library, including works without files</span>
+                                  <span className="font-medium text-zinc-100">
+                                    All works
+                                  </span>
+                                  <span className="ml-1 text-muted">
+                                    — import entire Readarr library, including
+                                    works without files
+                                  </span>
                                 </>
                               )}
                             </span>
@@ -440,7 +626,10 @@ export default function ReadarrImportPage() {
                     </div>
                     <button
                       onClick={() => previewMut.mutate()}
-                      disabled={selectedReadarrFolder === null || selectedLivrarrFolder === null}
+                      disabled={
+                        selectedReadarrFolder === null ||
+                        selectedLivrarrFolder === null
+                      }
                       className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50"
                     >
                       Preview Import
@@ -448,7 +637,10 @@ export default function ReadarrImportPage() {
                   </div>
                 )}
                 {phase === "previewing" && (
-                  <button disabled className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white opacity-50">
+                  <button
+                    disabled
+                    className="inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white opacity-50"
+                  >
                     <Loader2 size={14} className="animate-spin" />
                     Generating preview...
                   </button>
@@ -458,141 +650,216 @@ export default function ReadarrImportPage() {
           )}
 
           {/* Preview section */}
-          {preview && (phase === "previewed" || phase === "importing" || phase === "completed" || phase === "failed") && (
-            <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
-              <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
-                Import Preview
-              </h2>
+          {preview &&
+            (phase === "previewed" ||
+              phase === "importing" ||
+              phase === "completed" ||
+              phase === "failed") && (
+              <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
+                <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
+                  Import Preview
+                </h2>
 
-              {/* Summary stats */}
-              <div className="mb-4 flex flex-wrap gap-4 text-sm">
-                <span className="text-zinc-300">
-                  <span className="font-semibold text-zinc-100">{preview.authorsToCreate}</span> new authors
-                  {preview.authorsExisting > 0 && <span className="text-muted"> ({preview.authorsExisting} existing)</span>}
-                </span>
-                <span className="text-zinc-300">
-                  <span className="font-semibold text-zinc-100">{preview.worksToCreate}</span> new works
-                  {preview.worksExisting > 0 && <span className="text-muted"> ({preview.worksExisting} existing)</span>}
-                </span>
-                <span className="text-zinc-300">
-                  <span className="font-semibold text-zinc-100">{preview.filesToImport}</span> files
-                </span>
-                {preview.filesToSkip > 0 && (
-                  <span className="text-amber-400">
-                    <span className="font-semibold">{preview.filesToSkip}</span> skipped
+                {/* Summary stats */}
+                <div className="mb-4 flex flex-wrap gap-4 text-sm">
+                  <span className="text-zinc-300">
+                    <span className="font-semibold text-zinc-100">
+                      {preview.authorsToCreate}
+                    </span>{" "}
+                    new authors
+                    {preview.authorsExisting > 0 && (
+                      <span className="text-muted">
+                        {" "}
+                        ({preview.authorsExisting} existing)
+                      </span>
+                    )}
                   </span>
+                  <span className="text-zinc-300">
+                    <span className="font-semibold text-zinc-100">
+                      {preview.worksToCreate}
+                    </span>{" "}
+                    new works
+                    {preview.worksExisting > 0 && (
+                      <span className="text-muted">
+                        {" "}
+                        ({preview.worksExisting} existing)
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-zinc-300">
+                    <span className="font-semibold text-zinc-100">
+                      {preview.filesToImport}
+                    </span>{" "}
+                    files
+                  </span>
+                  {preview.filesToSkip > 0 && (
+                    <span className="text-amber-400">
+                      <span className="font-semibold">
+                        {preview.filesToSkip}
+                      </span>{" "}
+                      skipped
+                    </span>
+                  )}
+                </div>
+
+                {/* File list */}
+                {preview.importFiles.length > 0 && (
+                  <div className="mb-4 max-h-96 overflow-y-auto rounded border border-border">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-zinc-800">
+                        <tr className="border-b border-border text-left text-muted">
+                          <th className="px-3 py-2">Title</th>
+                          <th className="px-3 py-2">Author</th>
+                          <th className="px-3 py-2">Format</th>
+                          <th className="px-3 py-2">Status</th>
+                          <th className="px-3 py-2">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {preview.importFiles.map((item, i) => (
+                          <PreviewFileRow key={i} item={item} />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Skipped items */}
+                {preview.skippedItems.length > 0 && (
+                  <div className="mb-4">
+                    <button
+                      onClick={() => setSkippedExpanded(!skippedExpanded)}
+                      className="flex items-center gap-1.5 text-sm text-muted hover:text-zinc-100"
+                    >
+                      {skippedExpanded ? (
+                        <ChevronDown size={14} />
+                      ) : (
+                        <ChevronRight size={14} />
+                      )}
+                      {preview.skippedItems.length} skipped item
+                      {preview.skippedItems.length !== 1 ? "s" : ""}
+                    </button>
+                    {skippedExpanded && (
+                      <div className="mt-2 max-h-48 overflow-y-auto rounded border border-border bg-zinc-900 p-3">
+                        <div className="space-y-1.5">
+                          {preview.skippedItems.map((item, i) => (
+                            <div
+                              key={i}
+                              className="flex items-start gap-2 text-xs"
+                            >
+                              <XCircle
+                                size={12}
+                                className="mt-0.5 shrink-0 text-red-400"
+                              />
+                              <span className="text-zinc-300">
+                                {item.title}
+                              </span>
+                              {item.author && (
+                                <span className="text-zinc-500">
+                                  {item.author}
+                                </span>
+                              )}
+                              <span className="text-muted">
+                                — {item.reason}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Confirm button */}
+                {phase === "previewed" && (
+                  <button
+                    onClick={() => startMut.mutate()}
+                    disabled={startMut.isPending || preview.filesToImport === 0}
+                    className="inline-flex items-center gap-2 rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {startMut.isPending ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" />
+                        Starting...
+                      </>
+                    ) : (
+                      `Confirm & Import ${preview.filesToImport} file${preview.filesToImport !== 1 ? "s" : ""}`
+                    )}
+                  </button>
                 )}
               </div>
-
-              {/* File list */}
-              {preview.importFiles.length > 0 && (
-                <div className="mb-4 max-h-96 overflow-y-auto rounded border border-border">
-                  <table className="w-full text-xs">
-                    <thead className="sticky top-0 bg-zinc-800">
-                      <tr className="border-b border-border text-left text-muted">
-                        <th className="px-3 py-2">Title</th>
-                        <th className="px-3 py-2">Author</th>
-                        <th className="px-3 py-2">Format</th>
-                        <th className="px-3 py-2">Status</th>
-                        <th className="px-3 py-2">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {preview.importFiles.map((item, i) => (
-                        <PreviewFileRow key={i} item={item} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-
-              {/* Skipped items */}
-              {preview.skippedItems.length > 0 && (
-                <div className="mb-4">
-                  <button
-                    onClick={() => setSkippedExpanded(!skippedExpanded)}
-                    className="flex items-center gap-1.5 text-sm text-muted hover:text-zinc-100"
-                  >
-                    {skippedExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    {preview.skippedItems.length} skipped item{preview.skippedItems.length !== 1 ? "s" : ""}
-                  </button>
-                  {skippedExpanded && (
-                    <div className="mt-2 max-h-48 overflow-y-auto rounded border border-border bg-zinc-900 p-3">
-                      <div className="space-y-1.5">
-                        {preview.skippedItems.map((item, i) => (
-                          <div key={i} className="flex items-start gap-2 text-xs">
-                            <XCircle size={12} className="mt-0.5 shrink-0 text-red-400" />
-                            <span className="text-zinc-300">{item.title}</span>
-                            {item.author && <span className="text-zinc-500">{item.author}</span>}
-                            <span className="text-muted">— {item.reason}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Confirm button */}
-              {phase === "previewed" && (
-                <button
-                  onClick={() => startMut.mutate()}
-                  disabled={startMut.isPending || preview.filesToImport === 0}
-                  className="inline-flex items-center gap-2 rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
-                >
-                  {startMut.isPending ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" />
-                      Starting...
-                    </>
-                  ) : (
-                    `Confirm & Import ${preview.filesToImport} file${preview.filesToImport !== 1 ? "s" : ""}`
-                  )}
-                </button>
-              )}
-            </div>
-          )}
+            )}
 
           {/* Progress section */}
-          {(phase === "importing" || phase === "completed" || phase === "failed") && progress && (
-            <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
-              <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
-                Import Progress
-              </h2>
+          {(phase === "importing" ||
+            phase === "completed" ||
+            phase === "failed") &&
+            progress && (
+              <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
+                <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
+                  Import Progress
+                </h2>
 
-              {/* Progress bar */}
-              <div className="mb-4 h-3 overflow-hidden rounded-full bg-zinc-700">
-                <div
-                  className={cn(
-                    "h-full rounded-full transition-all duration-300",
-                    phase === "failed" ? "bg-red-500" : phase === "completed" ? "bg-green-500" : "bg-brand",
+                {/* Progress bar */}
+                <div className="mb-4 h-3 overflow-hidden rounded-full bg-zinc-700">
+                  <div
+                    className={cn(
+                      "h-full rounded-full transition-all duration-300",
+                      phase === "failed"
+                        ? "bg-red-500"
+                        : phase === "completed"
+                          ? "bg-green-500"
+                          : "bg-brand",
+                    )}
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+
+                {/* Status line */}
+                <div className="mb-3 flex items-center gap-2 text-sm">
+                  {phase === "importing" && (
+                    <Loader2 size={14} className="animate-spin text-brand" />
                   )}
-                  style={{ width: `${progressPct}%` }}
-                />
-              </div>
+                  {phase === "completed" && (
+                    <CheckCircle2 size={14} className="text-green-400" />
+                  )}
+                  {phase === "failed" && (
+                    <XCircle size={14} className="text-red-400" />
+                  )}
+                  <span className="text-zinc-200">
+                    {phase === "importing" && "Importing..."}
+                    {phase === "completed" && "Import completed"}
+                    {phase === "failed" &&
+                      (progress.errors[0] ?? "Import failed")}
+                  </span>
+                  <span className="ml-auto text-muted">{progressPct}%</span>
+                </div>
 
-              {/* Status line */}
-              <div className="mb-3 flex items-center gap-2 text-sm">
-                {phase === "importing" && <Loader2 size={14} className="animate-spin text-brand" />}
-                {phase === "completed" && <CheckCircle2 size={14} className="text-green-400" />}
-                {phase === "failed" && <XCircle size={14} className="text-red-400" />}
-                <span className="text-zinc-200">
-                  {phase === "importing" && "Importing..."}
-                  {phase === "completed" && "Import completed"}
-                  {phase === "failed" && (progress.errors[0] ?? "Import failed")}
-                </span>
-                <span className="ml-auto text-muted">{progressPct}%</span>
+                {/* Counters */}
+                <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                  <ProgressCounter
+                    label="Authors"
+                    done={progress.authorsProcessed}
+                    total={progress.authorsTotal}
+                  />
+                  <ProgressCounter
+                    label="Works"
+                    done={progress.worksProcessed}
+                    total={progress.worksTotal}
+                  />
+                  <ProgressCounter
+                    label="Files"
+                    done={progress.filesProcessed}
+                    total={progress.filesTotal}
+                  />
+                  <ProgressCounter
+                    label="Skipped"
+                    done={progress.filesSkipped}
+                    total={null}
+                  />
+                </div>
               </div>
-
-              {/* Counters */}
-              <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                <ProgressCounter label="Authors" done={progress.authorsProcessed} total={progress.authorsTotal} />
-                <ProgressCounter label="Works" done={progress.worksProcessed} total={progress.worksTotal} />
-                <ProgressCounter label="Files" done={progress.filesProcessed} total={progress.filesTotal} />
-                <ProgressCounter label="Skipped" done={progress.filesSkipped} total={null} />
-              </div>
-            </div>
-          )}
+            )}
 
           {/* Import history */}
           {history && history.length > 0 && (
@@ -615,7 +882,10 @@ export default function ReadarrImportPage() {
                   </thead>
                   <tbody>
                     {history.map((item) => (
-                      <tr key={item.id} className="border-b border-border/50 last:border-0">
+                      <tr
+                        key={item.id}
+                        className="border-b border-border/50 last:border-0"
+                      >
                         <td className="py-2 pr-3 text-zinc-300">
                           {formatRelativeDate(item.startedAt)}
                         </td>
@@ -634,20 +904,24 @@ export default function ReadarrImportPage() {
                         <td className="py-2 pr-3 text-right text-zinc-300">
                           {item.filesImported}
                           {item.filesSkipped > 0 && (
-                            <span className="text-muted"> ({item.filesSkipped} skipped)</span>
+                            <span className="text-muted">
+                              {" "}
+                              ({item.filesSkipped} skipped)
+                            </span>
                           )}
                         </td>
                         <td className="py-2 text-right">
-                          {item.status !== "running" && item.status !== "undone" && (
-                            <button
-                              onClick={() => setUndoTarget(item)}
-                              disabled={undoMut.isPending}
-                              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted hover:bg-zinc-700 hover:text-zinc-100 disabled:opacity-50"
-                            >
-                              <Undo2 size={12} />
-                              Undo
-                            </button>
-                          )}
+                          {item.status !== "running" &&
+                            item.status !== "undone" && (
+                              <button
+                                onClick={() => setUndoTarget(item)}
+                                disabled={undoMut.isPending}
+                                className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted hover:bg-zinc-700 hover:text-zinc-100 disabled:opacity-50"
+                              >
+                                <Undo2 size={12} />
+                                Undo
+                              </button>
+                            )}
                         </td>
                       </tr>
                     ))}
@@ -681,27 +955,37 @@ export default function ReadarrImportPage() {
 function PreviewFileRow({ item }: { item: ImportPreviewFileItem }) {
   return (
     <tr className="border-b border-border/40 last:border-0 hover:bg-zinc-700/30">
-      <td className="max-w-[200px] truncate px-3 py-1.5 text-zinc-200" title={item.title}>
+      <td
+        className="max-w-[200px] truncate px-3 py-1.5 text-zinc-200"
+        title={item.title}
+      >
         {item.title}
       </td>
-      <td className="max-w-[160px] truncate px-3 py-1.5 text-zinc-400" title={item.author}>
+      <td
+        className="max-w-[160px] truncate px-3 py-1.5 text-zinc-400"
+        title={item.author}
+      >
         {item.author}
       </td>
       <td className="px-3 py-1.5">
-        <span className={cn(
-          "inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium",
-          item.mediaType === "audiobook"
-            ? "bg-purple-500/15 text-purple-400"
-            : "bg-blue-500/15 text-blue-400",
-        )}>
+        <span
+          className={cn(
+            "inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium",
+            item.mediaType === "audiobook"
+              ? "bg-purple-500/15 text-purple-400"
+              : "bg-blue-500/15 text-blue-400",
+          )}
+        >
           {item.mediaType}
         </span>
       </td>
       <td className="px-3 py-1.5">
-        <span className={cn(
-          "text-xs",
-          item.workStatus === "new" ? "text-green-400" : "text-blue-400",
-        )}>
+        <span
+          className={cn(
+            "text-xs",
+            item.workStatus === "new" ? "text-green-400" : "text-blue-400",
+          )}
+        >
           {item.workStatus === "new" ? "New" : "In Library"}
         </span>
       </td>

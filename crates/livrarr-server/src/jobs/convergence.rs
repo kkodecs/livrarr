@@ -1,12 +1,8 @@
 //! Background identity/enrichment convergence sweep.
 
-use chrono::Duration as ChronoDuration;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 use crate::state::AppState;
-use livrarr_db::{UserDb, WorkDb};
-use livrarr_domain::services::{ConvergeOutcome, WorkService};
 
 /// Convergence sweep — drives incomplete works toward full identity + enrichment.
 ///
@@ -25,99 +21,13 @@ use livrarr_domain::services::{ConvergeOutcome, WorkService};
 /// reached the dead-end `attempt_threshold`, and `converge_work` terminalizes an
 /// exhausted pending work to needs-review — never an indefinite retry loop.
 pub async fn convergence_tick(state: AppState, cancel: CancellationToken) -> Result<(), String> {
-    let cfg = &state.config.convergence;
-    if !cfg.enabled {
-        return Ok(());
-    }
-
-    let threshold = cfg.attempt_threshold;
-    let batch = cfg.batch_size;
-    let cadence = ChronoDuration::seconds(cfg.interval_secs as i64);
-
-    let users = state
-        .db
-        .list_users()
+    let metadata_handoff = crate::identity_layer::run_identity_convergence_tick(state, cancel)
         .await
-        .map_err(|e| format!("convergence: list_users failed: {e}"))?;
-
-    for user in &users {
-        if cancel.is_cancelled() {
-            break;
-        }
-
-        let due = match state
-            .db
-            .list_convergence_due(user.id, chrono::Utc::now(), threshold, batch)
-            .await
-        {
-            Ok(d) => d,
-            Err(e) => {
-                // A per-user failure must not stop the sweep for other users.
-                warn!(
-                    user_id = user.id,
-                    "convergence: list_convergence_due failed: {e}"
-                );
-                continue;
-            }
-        };
-
-        for work_id in due {
-            if cancel.is_cancelled() {
-                break;
-            }
-
-            let outcome = match state
-                .work_service
-                .converge_work(user.id, work_id, threshold)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    warn!(
-                        user_id = user.id,
-                        work_id, "convergence: converge_work failed: {e}"
-                    );
-                    // Best-effort backoff so a persistently-failing work waits
-                    // one cadence instead of re-selecting every tick.
-                    if let Err(e) = state
-                        .db
-                        .set_next_convergence_at(
-                            user.id,
-                            work_id,
-                            Some(chrono::Utc::now() + cadence),
-                        )
-                        .await
-                    {
-                        warn!(
-                            user_id = user.id,
-                            work_id, "convergence: set_next_convergence_at failed: {e}"
-                        );
-                    }
-                    continue;
-                }
-            };
-
-            // Completed/Terminal works stop being selected (clear the clock) —
-            // Completed means no chaseable anchors remain, so no selection
-            // branch re-picks the work; a still-incomplete work backs off one
-            // cadence before re-selection.
-            let next = match outcome {
-                ConvergeOutcome::Completed | ConvergeOutcome::Terminal => None,
-                ConvergeOutcome::StillIncomplete => Some(chrono::Utc::now() + cadence),
-            };
-
-            if let Err(e) = state
-                .db
-                .set_next_convergence_at(user.id, work_id, next)
-                .await
-            {
-                warn!(
-                    user_id = user.id,
-                    work_id, "convergence: set_next_convergence_at failed: {e}"
-                );
-            }
-        }
-    }
-
+        .map_err(|error| error.to_string())?;
+    tracing::debug!(
+        visited = metadata_handoff.visited_work_count,
+        captured = metadata_handoff.captured_route_count,
+        "identity convergence metadata handoff"
+    );
     Ok(())
 }

@@ -104,7 +104,7 @@ pub trait WorkDb: Send + Sync {
         work_id: WorkId,
         cover_url: Option<&str>,
         cover_source: &str,
-        cover_trust: livrarr_domain::CoverTrust,
+        cover_manual: bool,
         cover_width: i32,
         cover_height: i32,
     ) -> Result<(), DbError>;
@@ -116,10 +116,19 @@ pub trait WorkDb: Send + Sync {
         work_id: WorkId,
         audiobook_cover_url: Option<&str>,
         audiobook_cover_source: &str,
-        audiobook_cover_trust: livrarr_domain::CoverTrust,
+        audiobook_cover_manual: bool,
         audiobook_cover_width: i32,
         audiobook_cover_height: i32,
     ) -> Result<(), DbError>;
+
+    /// Durable user-sovereignty bit for the audiobook cover slot. Kept out of
+    /// the public `Work` DTO; callers that arbitrate cover writes read it
+    /// explicitly under the per-slot lock.
+    async fn get_audiobook_cover_manual(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<bool, DbError>;
 
     async fn update_cover_dimensions(
         &self,

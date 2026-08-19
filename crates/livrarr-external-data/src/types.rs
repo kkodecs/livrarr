@@ -23,6 +23,10 @@ pub struct NormalizedWorkDetail {
     pub publish_date: Option<String>,
     pub hc_key: Option<String>,
     pub gr_key: Option<String>,
+    /// Goodreads Work legacy id parsed from the already-fetched Book page.
+    /// Distinct from `gr_key`, which is the Goodreads Book/edition id.
+    #[serde(default)]
+    pub gr_work_key: Option<String>,
     pub ol_key: Option<String>,
     pub isbn_13: Option<String>,
     pub asin: Option<String>,
@@ -55,6 +59,7 @@ impl From<livrarr_domain::services::SourceProviderData> for NormalizedWorkDetail
             publish_date: None,
             hc_key: None,
             gr_key: None,
+            gr_work_key: None,
             ol_key: None,
             isbn_13: src.isbn,
             asin: src.asin,

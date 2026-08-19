@@ -3,10 +3,13 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::context::HasIdentityConflictService;
+use crate::context::{
+    HasIdentityConflictService, HasIdentityLayerRepository, HasIdentityRoadService,
+};
 use crate::{ApiError, AuthContext};
 use livrarr_domain::identity::*;
-use livrarr_domain::services::{ConflictError, IdentityConflictService};
+use livrarr_domain::identity_layer::{IdentityRoadService, RouteKey, WorkIdentityRepository as _};
+use livrarr_domain::services::IdentityConflictService;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +46,12 @@ pub struct IdentityConflictDetailDto {
 pub struct ResolveRequest {
     pub action: ConflictResolutionAction,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub surviving_routes: Option<Vec<RouteKey>>,
+    #[serde(default)]
+    pub target_edition: Option<i64>,
+    #[serde(default)]
+    pub winning_work_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,16 +125,69 @@ pub async fn get_detail<S: HasIdentityConflictService>(
     }))
 }
 
-pub async fn resolve<S: HasIdentityConflictService>(
+pub async fn resolve<S: HasIdentityRoadService + HasIdentityLayerRepository>(
     State(ctx): State<S>,
     Path(id): Path<i64>,
     auth: AuthContext,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
-    ctx.identity_conflict_service()
-        .resolve(id, auth.user.id, body.action, body.notes)
+    let actor = livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
+        user_id: auth.user.id,
+    };
+    let pending = ctx
+        .identity_layer_repository()
+        .load_pending_conflict_review(actor.clone(), id)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(map_repository_error)?;
+    let current_routes = match pending.work_id {
+        Some(work_id) => ctx
+            .identity_layer_repository()
+            .read_captured_identity(auth.user.id, work_id)
+            .await
+            .map_err(map_repository_error)?
+            .active_routes
+            .into_iter()
+            .map(|route| RouteKey {
+                provider: route.provider,
+                kind: route.kind,
+                value: route.provider_scoped_id,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let surviving_routes = body.surviving_routes.unwrap_or(current_routes);
+    let action = match body.action {
+        ConflictResolutionAction::KeepExisting => {
+            livrarr_domain::identity_layer::IdentityConflictResolution::Reject { surviving_routes }
+        }
+        ConflictResolutionAction::AcceptSeparate => {
+            let winning_work_id = body.winning_work_id.ok_or_else(|| ApiError::Conflict {
+                reason: "accept-separate requires winningWorkId".to_string(),
+            })?;
+            livrarr_domain::identity_layer::IdentityConflictResolution::DifferentWork {
+                winning_work_id,
+                surviving_routes,
+                target_edition: body.target_edition,
+            }
+        }
+        ConflictResolutionAction::ReplaceAnchor | ConflictResolutionAction::Merge => {
+            livrarr_domain::identity_layer::IdentityConflictResolution::Accept {
+                surviving_routes,
+                target_edition: body.target_edition,
+            }
+        }
+    };
+    ctx.identity_road_service()
+        .resolve_review(
+            actor,
+            livrarr_domain::identity_layer::ReviewResolutionCommand::IdentityConflict {
+                card_id: pending.id,
+                expected_generation: pending.generation,
+                action,
+            },
+        )
+        .await
+        .map_err(map_road_error)?;
 
     Ok(Json(ResolveResponse {
         status: "resolved".to_string(),
@@ -133,15 +195,76 @@ pub async fn resolve<S: HasIdentityConflictService>(
     }))
 }
 
-pub async fn dismiss<S: HasIdentityConflictService>(
+pub async fn dismiss<S: HasIdentityRoadService + HasIdentityLayerRepository>(
     State(ctx): State<S>,
     Path(id): Path<i64>,
     auth: AuthContext,
 ) -> Result<StatusCode, ApiError> {
-    ctx.identity_conflict_service()
-        .dismiss(id, auth.user.id)
+    let actor = livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
+        user_id: auth.user.id,
+    };
+    let pending = ctx
+        .identity_layer_repository()
+        .load_pending_conflict_review(actor.clone(), id)
         .await
-        .map_err(|e: ConflictError| ApiError::from(e))?;
+        .map_err(map_repository_error)?;
+    let surviving_routes = match pending.work_id {
+        Some(work_id) => ctx
+            .identity_layer_repository()
+            .read_captured_identity(auth.user.id, work_id)
+            .await
+            .map_err(map_repository_error)?
+            .active_routes
+            .into_iter()
+            .map(|route| RouteKey {
+                provider: route.provider,
+                kind: route.kind,
+                value: route.provider_scoped_id,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    ctx.identity_road_service()
+        .resolve_review(
+            actor,
+            livrarr_domain::identity_layer::ReviewResolutionCommand::IdentityConflict {
+                card_id: pending.id,
+                expected_generation: pending.generation,
+                action: livrarr_domain::identity_layer::IdentityConflictResolution::Reject {
+                    surviving_routes,
+                },
+            },
+        )
+        .await
+        .map_err(map_road_error)?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn map_repository_error(
+    error: livrarr_domain::identity_layer::IdentityRepositoryError,
+) -> ApiError {
+    match error {
+        livrarr_domain::identity_layer::IdentityRepositoryError::NotFound => ApiError::NotFound,
+        livrarr_domain::identity_layer::IdentityRepositoryError::StaleGeneration => {
+            ApiError::Conflict {
+                reason: error.to_string(),
+            }
+        }
+        livrarr_domain::identity_layer::IdentityRepositoryError::UnauthorizedScope => {
+            ApiError::Forbidden
+        }
+        other => ApiError::Internal(other.to_string()),
+    }
+}
+
+fn map_road_error(error: livrarr_domain::identity_layer::IdentityRoadError) -> ApiError {
+    match error {
+        livrarr_domain::identity_layer::IdentityRoadError::NotFound => ApiError::NotFound,
+        livrarr_domain::identity_layer::IdentityRoadError::StaleGeneration => ApiError::Conflict {
+            reason: error.to_string(),
+        },
+        livrarr_domain::identity_layer::IdentityRoadError::UnauthorizedScope => ApiError::Forbidden,
+        other => ApiError::Internal(other.to_string()),
+    }
 }

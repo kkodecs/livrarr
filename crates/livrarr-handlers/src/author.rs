@@ -2,7 +2,8 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 
 use crate::context::{
-    HasAuthorService, HasAuthorViewService, HasSeriesQueryService, HasWorkService,
+    HasAuthorService, HasAuthorViewService, HasIdentityLayerRepository, HasSeriesQueryService,
+    HasWorkService,
 };
 use crate::types::api_error::ApiError;
 use crate::types::auth::AuthContext;
@@ -146,7 +147,9 @@ pub async fn list<S: HasAuthorService + HasAuthorViewService>(
     ))
 }
 
-pub async fn get<S: HasAuthorService + HasAuthorViewService + HasWorkService>(
+pub async fn get<
+    S: HasAuthorService + HasAuthorViewService + HasWorkService + HasIdentityLayerRepository,
+>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
@@ -169,7 +172,8 @@ pub async fn get<S: HasAuthorService + HasAuthorViewService + HasWorkService>(
         )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let author_works: Vec<WorkDetailResponse> = works.iter().map(work_to_detail).collect();
+    let mut author_works: Vec<WorkDetailResponse> = works.iter().map(work_to_detail).collect();
+    crate::work::project_work_identity_presentations(&state, user_id, &mut author_works).await?;
 
     Ok(Json(AuthorDetailResponse {
         author: author_response(&state, user_id, &author).await?,

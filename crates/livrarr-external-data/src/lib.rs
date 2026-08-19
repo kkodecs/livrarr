@@ -4,6 +4,7 @@
 //! store, or merge logic.
 
 pub mod author_link;
+pub mod identity_layer;
 pub mod types;
 
 pub mod audible;

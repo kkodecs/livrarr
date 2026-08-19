@@ -203,27 +203,98 @@ fn is_self_titled_bundle(lower_title: &str, author_name: &str) -> bool {
     saw_any
 }
 
-pub struct AuthorMonitorWorkflowImpl<D, W, H> {
+pub struct NoIdentityRoad;
+
+pub struct ConfiguredIdentityRoad<R>(Arc<R>);
+
+#[trait_variant::make(AuthorMonitorIdentityRoad: Send)]
+pub trait LocalAuthorMonitorIdentityRoad: Send + Sync {
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    >;
+}
+
+impl AuthorMonitorIdentityRoad for NoIdentityRoad {
+    async fn settle(
+        &self,
+        _request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        None
+    }
+}
+
+impl<R> AuthorMonitorIdentityRoad for ConfiguredIdentityRoad<R>
+where
+    R: livrarr_domain::identity_layer::IdentityRoadService + Send + Sync,
+{
+    async fn settle(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+    ) -> Option<
+        Result<
+            livrarr_domain::identity_layer::IdentityRoadOutcome,
+            livrarr_domain::identity_layer::IdentityRoadError,
+        >,
+    > {
+        Some(self.0.settle(request).await)
+    }
+}
+
+pub struct AuthorMonitorWorkflowImpl<D, W, H, R = NoIdentityRoad> {
     db: Arc<D>,
     work_service: Arc<W>,
     http: Arc<H>,
+    identity_road: R,
     backoff_duration: Duration,
     inter_author_delay: Duration,
     running: AtomicBool,
 }
 
-impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H> {
+impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H, NoIdentityRoad> {
     pub fn new(db: Arc<D>, work_service: Arc<W>, http: Arc<H>) -> Self {
         Self {
             db,
             work_service,
             http,
+            identity_road: NoIdentityRoad,
             backoff_duration: Duration::from_secs(60),
             inter_author_delay: Duration::from_secs(1),
             running: AtomicBool::new(false),
         }
     }
+}
 
+impl<D, W, H, R> AuthorMonitorWorkflowImpl<D, W, H, ConfiguredIdentityRoad<R>> {
+    pub fn with_identity_road(
+        db: Arc<D>,
+        work_service: Arc<W>,
+        http: Arc<H>,
+        identity_road: Arc<R>,
+    ) -> Self {
+        Self {
+            db,
+            work_service,
+            http,
+            identity_road: ConfiguredIdentityRoad(identity_road),
+            backoff_duration: Duration::from_secs(60),
+            inter_author_delay: Duration::from_secs(1),
+            running: AtomicBool::new(false),
+        }
+    }
+}
+
+impl<D, W, H, R> AuthorMonitorWorkflowImpl<D, W, H, R> {
     pub fn with_backoff(mut self, backoff: Duration, inter_author: Duration) -> Self {
         self.backoff_duration = backoff;
         self.inter_author_delay = inter_author;
@@ -231,11 +302,12 @@ impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H> {
     }
 }
 
-impl<D, W, H> AuthorMonitorWorkflow for AuthorMonitorWorkflowImpl<D, W, H>
+impl<D, W, H, R> AuthorMonitorWorkflow for AuthorMonitorWorkflowImpl<D, W, H, R>
 where
     D: WorkDb + livrarr_db::AuthorDb + NotificationDb + ConfigDb + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     H: HttpFetcher + Send + Sync + 'static,
+    R: AuthorMonitorIdentityRoad + Send + Sync + 'static,
 {
     async fn run_monitor(
         &self,
@@ -252,11 +324,12 @@ where
     }
 }
 
-impl<D, W, H> AuthorMonitorWorkflowImpl<D, W, H>
+impl<D, W, H, R> AuthorMonitorWorkflowImpl<D, W, H, R>
 where
     D: WorkDb + livrarr_db::AuthorDb + NotificationDb + ConfigDb + Send + Sync + 'static,
     W: WorkService + Send + Sync + 'static,
     H: HttpFetcher + Send + Sync + 'static,
+    R: AuthorMonitorIdentityRoad + Send + Sync + 'static,
 {
     async fn run_monitor_inner(
         &self,
@@ -479,6 +552,7 @@ where
             // the serial post-pass folds into `report`.
             let cleaned_author_ref = &cleaned_author;
             let author_ref = &author;
+            let identity_road_ref = &self.identity_road;
             let default_language_ref = &default_language;
             let mut entries_screened = 0usize;
             let eligible: Vec<(String, i32, String, Option<String>, String)> = works_response
@@ -553,6 +627,101 @@ where
                         );
 
                         if author_ref.monitor_new_items {
+                            let identity_title =
+                                match livrarr_domain::identity_layer::title_parts_from_provider(
+                                    work_title.clone(),
+                                    None,
+                                ) {
+                                    Ok(title) => title,
+                                    Err(error) => {
+                                        tracing::warn!(author_id = author_ref.id, %error, "author monitor: invalid provider title");
+                                        return EntryOutcome {
+                                            works_added: false,
+                                            notifications_created: false,
+                                        };
+                                    }
+                                };
+                            let road_request =
+                                livrarr_domain::identity_layer::IdentityRoadRequest {
+                                    user_id: author_ref.user_id,
+                                    origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                                        livrarr_domain::identity_layer::DoorKind::AuthorMonitor,
+                                    ),
+                                    evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                                        user_choice: None,
+                                        owned_files: Vec::new(),
+                                        provider_identity: vec![livrarr_domain::identity_layer::ProviderIdentityEvidence {
+                                            provider: livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+                                            route: livrarr_domain::identity_layer::RouteKey {
+                                                provider: livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+                                                kind: livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+                                                value: stripped_ol_key.clone(),
+                                            },
+                                            work_core: Some(livrarr_domain::identity_layer::ProviderWorkIdentityCore {
+                                                identity_title,
+                                                primary_author_id: author_ref.id,
+                                            }),
+                                            provenance: Default::default(),
+                                        }],
+                                        minimum: None,
+                                    },
+                                    interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::MachineAlone,
+                                    existing_work_id: None,
+                                };
+                            if let Some(road_result) = identity_road_ref.settle(road_request).await {
+                                let work_id = match road_result {
+                                    Ok(livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                                        work_id,
+                                        ..
+                                    }) => work_id,
+                                    Ok(other) => {
+                                        tracing::warn!(author_id = author_ref.id, outcome = ?other, "author monitor: identity road did not settle work");
+                                        return EntryOutcome {
+                                            works_added: false,
+                                            notifications_created: false,
+                                        };
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(author_id = author_ref.id, %error, "author monitor: identity road failed");
+                                        return EntryOutcome {
+                                            works_added: false,
+                                            notifications_created: false,
+                                        };
+                                    }
+                                };
+                                let ws = self.work_service.clone();
+                                let uid = author_ref.user_id;
+                                tokio::spawn(async move {
+                                    let _ = ws.converge_work(uid, work_id, 3).await;
+                                });
+                                let notif_ok = self
+                                    .db
+                                    .create_notification(CreateNotificationDbRequest {
+                                        user_id: author_ref.user_id,
+                                        notification_type: NotificationType::WorkAutoAdded,
+                                        ref_key: Some(stripped_ol_key.clone()),
+                                        message: format!(
+                                            "New work '{}' by {} auto-added to your library",
+                                            work_title, author_ref.name
+                                        ),
+                                        data: serde_json::json!({
+                                            "title": work_title,
+                                            "author": author_ref.name,
+                                            "year": year,
+                                            "ol_key": stripped_ol_key,
+                                        }),
+                                    })
+                                    .await
+                                    .map_err(|error| {
+                                        tracing::warn!("create_notification failed: {error}")
+                                    })
+                                    .is_ok();
+                                return EntryOutcome {
+                                    works_added: true,
+                                    notifications_created: notif_ok,
+                                };
+                            }
+
                             use livrarr_domain::identity::{IdentityMethod, IdentityState};
                             use livrarr_domain::seed::{
                                 seed_author_monitor, SeedInput, SeedLanguage,

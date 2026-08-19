@@ -5,4 +5,5 @@
 
 pub mod async_resolver;
 pub mod english_identity_resolver;
+pub mod identity_layer;
 pub mod title_cleanup;

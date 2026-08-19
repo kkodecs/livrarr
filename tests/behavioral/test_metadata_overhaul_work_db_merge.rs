@@ -9,9 +9,12 @@ use chrono::{Duration, Utc};
 use common::create_test_db;
 use livrarr_db::*;
 use livrarr_domain::{
-    ApplyMergeOutcome, CoverTrust, EnrichmentStatus, ExternalIdType, MergeResolved,
-    MetadataProvider, ProvenanceSetter, UserId, UserRole, Work, WorkField, WorkId,
+    ApplyMergeOutcome, EnrichmentStatus, ExternalIdType, MergeResolved, MetadataProvider,
+    ProvenanceSetter, UserId, UserRole, Work, WorkField, WorkId,
 };
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use std::str::FromStr;
+use std::time::Duration as StdDuration;
 
 const ORIGINAL_TITLE: &str = "Original Title";
 const ORIGINAL_AUTHOR: &str = "Original Author";
@@ -631,11 +634,9 @@ macro_rules! work_db_merge_tests {
         }
 
         #[tokio::test]
-        async fn test_work_db_merge_reset_for_manual_refresh_recovers_not_found_but_keeps_conflict() {
-            // REQ-014: NotFound is terminal *until* reset_for_manual_refresh, which must
-            // re-derive identity so the work can re-resolve/re-enrich (otherwise it is
-            // stuck forever). An open anchor Conflict is a dispute a refresh must NOT
-            // silently clear.
+        async fn test_work_db_merge_reset_for_manual_refresh_freezes_legacy_identity_badges() {
+            // Post-cutover identity derives from F2 routes/status. The retired
+            // legacy badge remains untouched for every old terminal value.
             let (db, u1, _) = $setup().await;
 
             let nf = create_new_work(&db, u1).await;
@@ -644,10 +645,10 @@ macro_rules! work_db_merge_tests {
                 .unwrap();
             db.reset_for_manual_refresh(u1, nf.id).await.unwrap();
             let nf_after = db.get_work(u1, nf.id).await.unwrap();
-            assert_ne!(
+            assert_eq!(
                 nf_after.identity_status,
                 livrarr_domain::IdentityStatus::NotFound,
-                "reset must recover a NotFound work, not leave it permanently stuck"
+                "reset must not mirror or reinterpret the retired NotFound badge"
             );
 
             let cf = create_new_work(&db, u1).await;
@@ -789,7 +790,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/41.jpg"),
                 "Goodreads",
-                CoverTrust::Validated,
+                false,
                 800,
                 1200,
             )
@@ -800,14 +801,13 @@ macro_rules! work_db_merge_tests {
 
             assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/41.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
-            assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
             assert_eq!(updated.cover_height, 1200);
         }
 
         #[tokio::test]
-        /// REQ-ID: REQ-004 | Contract: WorkDb::update_cover_metadata | Behavior: User trust keeps legacy cover_manual synchronized to true.
-        async fn test_multi_cover_update_cover_metadata_sets_cover_manual_for_user_trust() {
+        /// REQ-ID: REQ-004 | Contract: WorkDb::update_cover_metadata | Behavior: a user selection sets cover_manual.
+        async fn test_multi_cover_update_cover_metadata_sets_cover_manual() {
             let (db, u1, _) = $setup().await;
             let work = create_new_work(&db, u1).await;
 
@@ -816,7 +816,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/user-selected.jpg"),
                 "Picker",
-                CoverTrust::User,
+                true,
                 900,
                 1300,
             )
@@ -826,12 +826,11 @@ macro_rules! work_db_merge_tests {
             let updated = db.get_work(u1, work.id).await.unwrap();
 
             assert!(updated.cover_manual);
-            assert_eq!(updated.cover_trust, CoverTrust::User);
         }
 
         #[tokio::test]
-        /// REQ-ID: REQ-001 | Contract: WorkDb::update_cover_metadata | Behavior: Validated trust keeps legacy cover_manual synchronized to false.
-        async fn test_multi_cover_update_cover_metadata_clears_cover_manual_for_validated_trust() {
+        /// REQ-ID: REQ-001 | Contract: WorkDb::update_cover_metadata | Behavior: an automatic write clears cover_manual.
+        async fn test_multi_cover_update_cover_metadata_clears_cover_manual_for_automatic_write() {
             let (db, u1, _) = $setup().await;
             let work = create_new_work(&db, u1).await;
 
@@ -840,7 +839,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/validated.jpg"),
                 "Hardcover",
-                CoverTrust::Validated,
+                false,
                 640,
                 960,
             )
@@ -850,7 +849,6 @@ macro_rules! work_db_merge_tests {
             let updated = db.get_work(u1, work.id).await.unwrap();
 
             assert!(!updated.cover_manual);
-            assert_eq!(updated.cover_trust, CoverTrust::Validated);
         }
 
         #[tokio::test]
@@ -864,7 +862,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/ebook.jpg"),
                 "Goodreads",
-                CoverTrust::Validated,
+                false,
                 800,
                 1200,
             )
@@ -876,7 +874,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/audio.jpg"),
                 "Audnexus",
-                CoverTrust::User,
+                false,
                 1400,
                 1400,
             )
@@ -887,7 +885,6 @@ macro_rules! work_db_merge_tests {
 
             assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/ebook.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
-            assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
             assert_eq!(updated.cover_height, 1200);
             assert_eq!(
@@ -895,7 +892,6 @@ macro_rules! work_db_merge_tests {
                 Some("https://covers.example.com/audio.jpg")
             );
             assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
-            assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);
             assert_eq!(updated.audiobook_cover_width, 1400);
             assert_eq!(updated.audiobook_cover_height, 1400);
         }
@@ -911,7 +907,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/audio.jpg"),
                 "Audnexus",
-                CoverTrust::User,
+                false,
                 1400,
                 1400,
             )
@@ -923,7 +919,7 @@ macro_rules! work_db_merge_tests {
                 work.id,
                 Some("https://covers.example.com/ebook.jpg"),
                 "Goodreads",
-                CoverTrust::Validated,
+                false,
                 800,
                 1200,
             )
@@ -934,7 +930,6 @@ macro_rules! work_db_merge_tests {
 
             assert_eq!(updated.cover_url.as_deref(), Some("https://covers.example.com/ebook.jpg"));
             assert_eq!(updated.cover_source.as_deref(), Some("Goodreads"));
-            assert_eq!(updated.cover_trust, CoverTrust::Validated);
             assert_eq!(updated.cover_width, 800);
             assert_eq!(updated.cover_height, 1200);
             assert_eq!(
@@ -942,7 +937,6 @@ macro_rules! work_db_merge_tests {
                 Some("https://covers.example.com/audio.jpg")
             );
             assert_eq!(updated.audiobook_cover_source.as_deref(), Some("Audnexus"));
-            assert_eq!(updated.audiobook_cover_trust, CoverTrust::User);
             assert_eq!(updated.audiobook_cover_width, 1400);
             assert_eq!(updated.audiobook_cover_height, 1400);
         }
@@ -966,3 +960,75 @@ macro_rules! work_db_merge_tests {
 }
 
 work_db_merge_tests!(setup_sqlite);
+
+/// ROUND8-B1: enrichment merge writers must queue at transaction begin while
+/// another connection owns SQLite's write slot. A deferred transaction reads
+/// `merge_generation` first and then fails immediately on its UPDATE; a write
+/// transaction waits under `busy_timeout` and completes after the holder exits.
+#[tokio::test]
+async fn enrichment_merges_wait_for_a_held_writer_instead_of_failing_busy() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("round8-write-contention.sqlite");
+    let options = SqliteConnectOptions::from_str(db_path.to_str().unwrap())
+        .unwrap()
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(StdDuration::from_secs(5))
+        .pragma("foreign_keys", "ON");
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("../livrarr-db/migrations")
+        .run(&pool)
+        .await
+        .unwrap();
+    let db = livrarr_db::sqlite::SqliteDb::new(pool);
+    db.ensure_identity_authority_ready().await.unwrap();
+
+    let (user_id, _) = seed_users(&db).await;
+    let works = futures::future::join_all((0..12).map(|index| {
+        let db = db.clone();
+        async move {
+            db.create_work(make_work_req(
+                user_id,
+                &format!("Round 8 contention work {index}"),
+                ORIGINAL_AUTHOR,
+            ))
+            .await
+            .unwrap()
+            .0
+        }
+    }))
+    .await;
+
+    let mut holder = db.pool().acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let mut writers = Vec::new();
+    for work in works {
+        let db = db.clone();
+        writers.push(tokio::spawn(async move {
+            db.apply_enrichment_merge(sample_merge_request(user_id, work.id, 0))
+                .await
+        }));
+    }
+
+    tokio::time::sleep(StdDuration::from_millis(250)).await;
+    sqlx::query("COMMIT").execute(&mut *holder).await.unwrap();
+
+    for writer in writers {
+        let result = tokio::time::timeout(StdDuration::from_secs(5), writer)
+            .await
+            .expect("queued enrichment writer must finish inside busy_timeout")
+            .expect("enrichment writer task must not panic");
+        assert!(
+            matches!(result, Ok(ApplyMergeOutcome::Applied)),
+            "every enrichment outcome must survive the import-scale write burst; got {result:?}"
+        );
+    }
+}

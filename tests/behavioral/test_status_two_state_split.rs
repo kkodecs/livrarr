@@ -81,6 +81,7 @@ fn empty_detail() -> NormalizedWorkDetail {
         publish_date: None,
         hc_key: None,
         gr_key: None,
+        gr_work_key: None,
         ol_key: None,
         isbn_13: None,
         asin: None,
@@ -260,6 +261,9 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
             cover_resolution: None,
             audiobook_cover_resolution: None,
             attempted: true,
+            captured_provider_identity: Vec::new(),
+            captured_route_proposals: Vec::new(),
+            provider_chase_attempted: false,
         })
     }
 
@@ -318,6 +322,9 @@ impl ProviderQueue for TextlessProviderQueue {
             )]),
             merge_eligible: true,
             deferred: false,
+            provider_chase_attempted: true,
+            search_provider_identity: Vec::new(),
+            search_route_proposals: Vec::new(),
         })
     }
 }
