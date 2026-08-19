@@ -47,8 +47,10 @@ Project-wide datetime handling uses `chrono`. No mixing.
 
 Two HTTP clients live on `AppState`:
 
-- **`http_client`** — unrestricted; no SSRF resolver. Used for admin-configured infrastructure that is *expected* to live on private networks: download clients (qBittorrent, SABnzbd, Transmission), indexers (Prowlarr, NZBHydra2, Jackett, direct Torznab), the Readarr import workflow, LLM endpoints, etc.
+- **`http_client`** — unrestricted; no SSRF resolver. Used for admin-configured infrastructure that is *expected* to live on private networks: download clients (qBittorrent, SABnzbd, Transmission), indexers (Prowlarr, NZBHydra2, Jackett, direct Torznab), admin-approved Readarr origins, LLM endpoints, etc. Readarr's trusted client never follows redirects, so its API key cannot be forwarded to a redirected origin.
 - **`http_client_safe`** — wraps `SsrfSafeResolver`; rejects any private/loopback/link-local/reserved IP at DNS resolution time. Used for **runtime-derived** URLs whose value comes from outside admin configuration: cover proxy fetching metadata-provider image URLs, anything pulled from a scraper response, etc.
+
+Readarr has a two-stage trust boundary: an unapproved public origin may connect through the SSRF-safe no-redirect client; an origin on the admin-managed `readarr_origins` allowlist connects through the trusted no-redirect client and may intentionally resolve to private infrastructure. Approval therefore accepts DNS rebinding/private-answer risk for that exact normalized origin; removal restores the public-only rule.
 
 Plus `TrustedOrigins` (built from configured indexers + download clients at startup, rebuilt on config change) lets the grab flow allow private-IP download URLs that match a configured origin even when the called client is normally SSRF-safe.
 

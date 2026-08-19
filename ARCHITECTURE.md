@@ -47,14 +47,15 @@ The same honesty applies to failure: a provider timing out, an external dependen
 
 ### Identity Has One Confidence Hierarchy
 
-Book identity is resolved in this order, highest confidence first:
+Book identity is resolved in this order, highest confidence first (amended 2026-08-05 by identity-layer-rewrite, matching spec P5's evidence ladder):
 
 1. **User selection** — the user picked it; this is final and cannot be overridden
-2. **Known provider ID** — from import metadata or explicit pass-through; trust it fully
-3. **Title + author fuzzy match** — the universal fallback; every book has these fields
-4. **Unidentified** — goes to the review queue; never silent, never stuck
+2. **The user's own file** — embedded identifiers (ISBN/ASIN) and embedded cover from a file the user owns; outranks any provider answer
+3. **Known provider ID** — a provider route; trust it as a route to the work
+4. **Title + author** — the universal minimum; every book has these fields, and a work is fully creatable from them alone with zero provider routes
+5. **Unidentified** — goes to the review queue; never silent, never stuck
 
-ISBN is a hint, not an authority. It identifies an edition, not a work, and is brittle in practice.
+ISBN identifies an edition, not a work. Under the routes model it is an edition-scoped lookup key: a shared one may confirm sameness, a differing one proves nothing, and nothing may require or veto on it (spec P6 — this supersedes the pre-F2 "hint, not an authority" wording with an enforceable rule).
 
 This hierarchy must be implemented once, in one place, not re-derived per entry point.
 
@@ -177,15 +178,15 @@ Supporting: livrarr-matching (release parsing/scoring)
 | `livrarr-http` | domain |
 | `livrarr-matching` | domain |
 | `livrarr-external-data` | domain, http |
-| `livrarr-identity` | domain, http, db, external-data |
+| `livrarr-identity` | domain, http, external-data (no db — persistence via domain traits) |
 | `livrarr-enrichment` | domain, http, db, external-data |
-| `livrarr-materialize` | domain, http, db |
-| `livrarr-metadata` | domain, db, identity, enrichment, materialize, external-data |
+| `livrarr-materialize` | domain, http, tagwrite (no db) |
+| `livrarr-metadata` | domain, http, db, matching, identity, enrichment, materialize, external-data |
 | `livrarr-download` | domain, http, db |
-| `livrarr-library` | domain, db, matching |
+| `livrarr-library` | domain, db, materialize |
 | `livrarr-tagwrite` | domain |
 | `livrarr-jobs` | domain only |
-| `livrarr-handlers` | **domain + jobs only — COMPILE WALL** |
+| `livrarr-handlers` | **domain, http, matching, jobs only — COMPILE WALL** (never db/metadata/tagwrite/download) |
 | `livrarr-server` | everything (composition root) |
 
 Verify the compile wall: `cargo tree -p livrarr-handlers`
@@ -345,7 +346,7 @@ A feature that needs a side channel bypassing this flow is a design smell.
 
 ## Data Layer
 
-SQLite with WAL mode. Single write connection, multiple readers. Per-connection pragmas: `foreign_keys = ON`, `busy_timeout = 5000`. Migrations via sqlx — embedded, run at startup before serving traffic. Once a migration ships in any release, it is immutable.
+SQLite with WAL mode and a four-connection pool. SQLite still admits one writer at a time; every write-bearing transaction reserves that slot through the shared `BEGIN IMMEDIATE` authority so concurrent writers wait under `busy_timeout` instead of failing during a deferred upgrade. Per-connection pragmas include `foreign_keys = ON` and `busy_timeout = 5000`. Migrations via sqlx are embedded and run at startup before serving traffic. Once a migration ships in any release, it is immutable.
 
 ---
 

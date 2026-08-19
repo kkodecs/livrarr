@@ -45,8 +45,8 @@ universe: 1 site (`ImportWorkflow`).**
   | Direct add (search / GR link) | `crates/livrarr-handlers/src/work.rs::add` | yes |
   | Manual import (scan review) | `crates/livrarr-handlers/src/manual_import.rs::import` | yes (work creation; file handling: R6 manual-file door) |
   | List import (CSV) | `crates/livrarr-handlers/src/list_import.rs::confirm` | yes |
-  | Author monitor | `crates/livrarr-server/src/author_monitor_workflow.rs::run_monitor` | yes |
-  | Series monitor | `crates/livrarr-server/src/series_query_service.rs` (monitor worker) | yes (seeds Pending by design, per M9) |
+  | Author monitor | `crates/livrarr-metadata/src/author_monitor_workflow.rs::run_monitor` | yes |
+  | Series monitor | `crates/livrarr-metadata/src/series_query_service/service.rs` (monitor worker) | yes (seeds Pending by design, per M9) |
   | Readarr import | `crates/livrarr-server/src/readarr_import_workflow.rs::start` | yes (work creation; file handling: R6 Readarr door) |
 - **Invariant:** every door funnels into the single enrichment pipeline with a seed; no path writes
   enrichable metadata, covers, or tags by any other route (canonical-model invariant #1).
@@ -75,6 +75,9 @@ universe: 1 site (`ImportWorkflow`).**
   | Background convergence sweep | `crates/livrarr-server/src/jobs/convergence.rs::convergence_tick` → `WorkService::converge_work` | yes — enabled by default since 2026-07-04 (`1697bc7`; `[convergence] enabled = false` opts out) |
 - **Invariant:** all provider HTTP rides the one outbound queue (`livrarr-http/src/outbound_queue.rs`);
   merge respects provenance order User > Provider > System; null never overwrites populated.
+  Under active F2 authority, convergence selection is route-native: an unchanged settled Work with
+  a Work route falls out without a generation/audit claim, while an edition-only bridge consumes a
+  generation-scoped bounded attempt ledger and becomes unselectable at the configured threshold.
   A new R1/R2 door is not done until its row exists in `test_door_gate.rs`.
 - **Forbidden:** calling `enrich_work` / the provider queue / `apply_enrichment_merge` from anywhere
   but this chain; direct UPDATEs to enrichable columns.
@@ -106,13 +109,26 @@ universe: 1 site (`ImportWorkflow`).**
 ## R4 — Identity state changes
 
 - **Operation:** a Work's identity is affirmed, disputed, resolved, or merged.
-- **Road:** identity engine (`livrarr-identity` via `WorkService`) — one-way contract: identity
-  feeds enrichment via `CapturedIdentity`; enrichment never writes identity state.
-- **Doors (6):** `identity_conflicts.rs::resolve`, `identity_conflicts.rs::dismiss`,
-  `identity_review.rs::resolve`, `identity_review.rs::dismiss`, `work.rs::affirm_pending_anchor`,
-  `work.rs::merge` (work merge, all in `crates/livrarr-handlers/src/`).
+- **Road:** `IdentityRoadService::settle` creates one generation-claimed settlement and any typed
+  review card; `IdentityRoadService::resolve_review` continues that card through the same
+  repository transaction. Identity feeds enrichment via `CapturedIdentity`; enrichment returns
+  captured routes to this road and never writes identity state on the side.
+- **Doors:** creation/re-key settlements from R1/R2 plus authenticated typed-card
+  `identity_layer.rs::{list,resolve,dismiss}`, legacy conflict adapters in
+  `identity_conflicts.rs`, and the work mutation doors `work.rs::{update,merge,affirm_pending_anchor}`.
+- **Review-generation invariant:** a card's stored mint generation is immutable history, not a
+  permanent resolution claim. A pending `GroupIdentity` read exposes the anchor Work generation
+  observed for the user's decision. Resolution rechecks that generation and the stored proposal
+  (all proposed Works still exist; every snapshotted route still belongs to the group) inside the
+  write transaction. Generation drift alone is valid; a changed/deleted proposal returns a
+  specific conflict and leaves the card pending for dismissal.
+- **Dedup-review invariant:** when a creation door finds an established broad-group Work but needs
+  human review for added tuple/route evidence, settlement binds to that established Work and parks
+  the proposal; it never commits the proposal as a second Work behind `ReviewPending`. Equivalent
+  pending `GroupIdentity` proposals are identified by user, canonical cohort, normalized proposed
+  tuple/primary Author/routes, and merge choices, and reuse the oldest pending card.
 - **Invariant:** anchors are monotonic — ADD appends, CONFLICT raises to the user, only a user EDIT
-  mutates an established anchor.
+  mutates an established anchor. Every generation-changing settlement is audited atomically.
 - **Status:** CLEAN.
 
 ## R5 — Release grab

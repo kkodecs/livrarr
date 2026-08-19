@@ -22,7 +22,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 - [Metadata Principles](domain/metadata-principles.md) — M1-M10: the governing principles for all metadata handling
 - [BIG7 Overview](domain/big7.md) — the seven core entities and their relationships
-- [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics
+- [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics, and presentation fallback when a related Author is gone
 - [Author](domain/author.md) — lifecycle, monitoring, relationship to works
 - [Series](domain/series.md) — GR-backed rows + metadata stubs (sprint-c), reconcile arbitration, persisted rosters, promotion/silent resolution, ST-012 zero-/search
 - [Release](domain/release.md) — transient search results, protocol routing, RSS sync matching
@@ -57,5 +57,5 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Quick Reference
 
-- [Insights](insights.md) — 28 active learnings for every session
+- [Insights](insights.md) — 95 active learnings for every session
 - [Log](log.md) — wiki change log

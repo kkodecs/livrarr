@@ -1024,3 +1024,52 @@ PASS+PASS round 1, zero findings. Merged 9e97a13; merged-tree gates 1263/0.
 - 2026-07-25 — added insight 79 (outbound-queue dispatcher wedge). Evidence is unusually strong: three of four independent implementations of an unrelated feature converged on the same fix to `outbound_queue.rs`, plus a single-variable A/B that turned a 7-minute hang into 36.82s. Also corrected a claim carried earlier in that session that the fix was one entry's idiosyncratic scope creep — it was not; three entries made it.
 
 - 2026-07-26 — rewrote insight 58. It described a mystery ("a parallel test leaks into this one", fix pending a PO decision); the mechanism is now proven and the fix pattern is written down. Substance added: reset-at-end is insufficient (the window, not just the leak); the symptom is a HANG not a red test, which is why it read as an infrastructure mystery for weeks; two same-named mutexes in different modules serialize nothing; the premature `BreakerSignal::Success` on a bare 2xx was masking it, so removing that production defect is what made the latent test defect reliable — do not restore it. `livrarr-external-data` is fixed (private mutex + entry/drop reset guard, bounded server waits); `livrarr-enrichment` is confirmed to have the identical shape and is NOT fixed, with the reason it cannot reuse the same helper.
+
+- 2026-08-08 — insight 53 corrected: "all 7 work-creation doors" was a same-day miscount, the true count is 6 (six seed_* constructors since seed.rs creation, one production caller each; git -S history + WorkCandidate-literal sweep). Evidence: build/reviews/identity-layer-rewrite/BRIEF-doors-trace.md (identity-layer-rewrite design-stage doors survey). R1=6 / R2=7 in roads.md both re-confirmed accurate.
+- 2026-08-08 — insight 56 corrected: apply_gr_cover_gate no longer exists in MergeEngine::merge (deleted by the subtitle-matching fix-now wave 2026-07-26/27; merge() is now drop_language_incompatible_providers → merge_impl). Found by the identity-layer-rewrite capability survey (BRIEF-capability-survey.md), symbol absence Serena-verified.
+
+## [2026-08-10] update | Work presentation after Author deletion
+
+Updated `domain/work.md` and added insight 85: presentation reads degrade to surviving Work data when the primary Author is gone, while coherent identity settlement/decision reads remain fail-closed. Source: identity-layer-rewrite code-gate C-r3-01 fix and production-router regression.
+
+## [2026-08-10] update | Cutover staging cardinality and review-kind storage
+
+Added insight 87: migration report counts are executable approval constraints, report/staging must share one deterministic cohort derivation, and plain TEXT discriminators require one explicit shared codec plus a real operator-CLI round trip. Source: identity-layer-rewrite ILR-CUTOVER-002/003 red/green ceremony.
+
+## [2026-08-10] update | Cutover readiness and nonempty activation
+
+Added insight 88: readiness is an exact staged-key uniqueness probe, not an empty-database shortcut; nonempty clean Apply must hand off to startup activation, while every Blocked collision must carry its resolvable cohort card. Source: identity-layer-rewrite ILR-CUTOVER-004 red/green two-fixture production CLI ceremony.
+
+## [2026-08-11] update | Live-add identity seam and frozen legacy status
+
+Added insight 90: real live-add fan-out settles provider routes through F2, edition-scoped identifiers materialize Edition owners, parser-extracted parentheticals leave Work main, and post-marker identity status/audits derive exclusively from F2 settlement. Source: PACKET-FIX-LIVEADD D1/D2/D3 red/green regressions.
+
+## [2026-08-11] update | Delayed GroupIdentity review CAS
+
+Updated `architecture/roads.md` R4 and added insight 91: GroupIdentity mint generation is immutable history, while resolution claims the anchor generation observed on the refreshed card read and atomically revalidates the stored Work/route proposal. Source: PACKET-FIX-STALECARD live defect and red/green real-route regression.
+
+## [2026-08-11] update | Dedup review settlement and card idempotency
+
+Updated `architecture/roads.md` R4 and `domain/work.md`, and added insight 92: creation-door review binds to the established Work, equivalent pending GroupIdentity proposals reuse one card, and a conservative generation-marked startup heal folds proven orphan residue while cancelling invalid or duplicate cards. Source: PACKET-FIX-DEDUPRESIDUE S-11/S-12 live defects and activated-schema red/green regressions.
+
+## [2026-08-14] update | Convergence terminality, Work birth, and DTO completeness
+
+Updated `architecture/roads.md` R2 and added insight 93: active F2 convergence now treats an exact graph replay as a no-op, bounds genuine edition-only bridge attempts per identity generation, and makes terminal state unselectable; F2 creation atomically writes its typed door-labeled birth fact, history backfill generation 2 heals prior omissions, and presentation-overlay coverage enumerates shared DTO fields including `coverUrl`. Source: PACKET-FIX-CIDERHOUSE S-13/S-14/S-15 red/green regressions. S-16 remained the recorded not-a-bug.
+
+## [2026-08-14] update | Route-backed DTO identifiers and observable discovery drops
+
+Added insight 94: frozen Work identifier columns are never post-cutover presentation authority; one active-route projection now serves Work-bearing DTOs, pending-anchor slots, and tag ISBN metadata with deterministic edition selection and migrated Goodreads compatibility. Discovery request budgets now exclude outbound-queue wait, user searches use Interactive priority, and every failed provider leg reaches one provider/cause WARN. Source: PACKET-FIX-IDLOOKUP S-18/S-17 red/green regressions.
+
+## [2026-08-16] update | SQLite write admission and approved Readarr transport
+
+Updated insights 5 and 37, `crates/db.md`, and the key decisions: all `livrarr-db` write transactions now share one `BEGIN IMMEDIATE` authority so contenders wait at begin under `busy_timeout`; approved Readarr origins use the trusted no-redirect transport so private hostnames work, while unapproved public origins stay on the SSRF-safe no-redirect transport. Explicit approval accepts private-answer/rebinding risk for the exact normalized origin without permitting API-key redirects. Source: identity-layer-rewrite PACKET-FIX-ROUND8 B1/B2 red/green regressions.
+
+## 2026-08-18 — identity-layer-rewrite rounds 13-14 (machine search fallback)
+- insights.md: added insight 95 (REQ-027 machine search fallback semantics: corroboration-only machine settle, PendingRoute defer, ledger bounding incl. zero-route works, probe-eligibility-before-I/O, threshold now fully unselectable). index.md count 92→95.
+- Rounds 10-12 insight fold remains owed at feature close-out (per handoff).
+
+## 2026-08-18 — identity-layer-rewrite rounds 15-17 (decisive links, dead anchors, visible review)
+- insights.md: updated insight 95 to spec v10: unique Same+Agree results auto-link; terminal `not_found` derived anchors enter search without weakening the `will_retry`/reset guard; newly minted PendingRoute cards atomically notify and render book/provider context with direct catalog verification links.
+
+## 2026-08-18 — identity-layer-rewrite round 18 (route-generation standing)
+- insights.md: corrected insight 95's unsupported re-key-reset claim. Provider standing now survives ordinary convergence, manual Refresh clears it unconditionally, and settlement/certified-edit transactions clear it only when the active route graph changes; same-anchor `not_found` remains durable. Conflict-card loading/error headlines now stay plain-language, and a real-tick delete probe binds the `will_retry` no-reset invariant.

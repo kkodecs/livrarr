@@ -2,8 +2,8 @@
 feature: "identity-layer-rewrite"
 stage: spec
 status: draft
-version: 7
-req_ids: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026]
+version: 10
+req_ids: [REQ-001, REQ-002, REQ-003, REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, REQ-011, REQ-012, REQ-013, REQ-014, REQ-015, REQ-016, REQ-017, REQ-018, REQ-019, REQ-020, REQ-021, REQ-022, REQ-023, REQ-024, REQ-025, REQ-026, REQ-027]
 ---
 
 # Spec: identity-layer-rewrite
@@ -22,7 +22,31 @@ by the OpenAI family under the architect swap (`FOLD-SPEC-R3.md`). v5 folds r4
 v6 folds r5 (anthropic 4 residuals; xai verified with no findings), authored by
 the OpenAI family (`FOLD-SPEC-R5.md`). v7 folds the final r6 micro-review
 (anthropic 3 residuals; xai clean), authored by the OpenAI family
-(`FOLD-SPEC-R6.md`).
+(`FOLD-SPEC-R6.md`). v8 (2026-08-18) adds REQ-027 — the machine title+author
+search fallback at the shared chase's anchor seam — plus its REQ-013 carve-out
+and AC-024: the PO-initiated round-13 scope widening, folded from the PM prep
+ratified in the 2026-08-18 handoff. The amendment shipped without its own spec
+review round (PO may order one); the round-13 code review covers its semantics.
+v10 (2026-08-18 evening, PO decisions from the clean re-import): (1) REQ-027
+search-leg precondition widens — a provider whose derivable anchors have ALL
+dead-ended terminally (`not_found`) at the current generation counts as
+anchor-less for the search leg (the junk-ISBN starvation found live on Ender in
+Exile: a print-on-demand ISBN occupied the anchor slot, OL/HC fetched it
+not_found, and the search that would have auto-linked never fired). The
+no-work-route precondition and ledger bounding are unchanged. (2) REQ-027 card
+surfacing: minting a PendingRoute card raises a user notification (toast + the
+existing notification surface); the review card presents the book (title +
+author), the proposal in plain language (provider name + proposed catalog
+entry), and a clickable link to the proposed provider page so the user can
+verify before affirming — never a bare internal id string. Exact copy at
+design/implementation, plain-English rule binding.
+v9 (2026-08-18, PO live decision after first production day): REQ-027 revision —
+text-decisive unambiguous picks now AUTO-LINK (the card bar produced correct-but-
+frictional proposals at real-library scale; "the cure was worse than the problem" —
+PO); adds the PendingRoute card lifecycle rules (decision-time generation, satisfied-
+card cancellation — the sibling-card staleness defect found live), the REQ-014
+Goodreads cover-source containment (GR layout drift broke cover-image extraction,
+verified live), and AC-025. AC-024(b)/(c) fixtures move to near-miss shapes.
 
 ## 0a. Design Principles
 
@@ -292,6 +316,66 @@ the fix in F1; the works side, and the seams that join the two, are this feature
   an entry carrying no recognized sampled signal goes to the review surface
   (P4) — never a silent guess, never a title-keyword heuristic. Until
   ST-006(e) is captured, review is the only classification path.
+- **REQ-027**: Machine search fallback (v8 amendment; PO-initiated,
+  2026-08-18). Scope precondition: a work whose active route graph holds NO
+  work-level route (zero active routes, or edition-scoped only). For such a
+  work, each enrichment pass adds ONE title+author search-fallback leg per
+  applicable provider whose anchor derivation is empty — OpenLibrary
+  (`search.json`), Goodreads (`/book/auto_complete`), Hardcover (search) only;
+  never Google Books, Audible, or Audnexus (FP-ST-003 providers keep
+  anchor-only dispatch). The leg is a route-finding action (REQ-013's
+  vocabulary), the machine twin of the manual search: query = identity-tuple
+  main title + primary author record name, through the shared outbound queue at
+  the pass's priority, with honest chase accounting (a spawned search or probe
+  fetch sets the pass's chase flag; skips never do). Candidate selection rides
+  the one authority — `pick_best_candidate`, Same-tier only (`accept_grey` =
+  false); P9 stands (no LLM). Outcomes, exhaustive:
+  (a) *Corroborated settle* — the selected candidate's own edition evidence
+  contains an edition-scoped id already active on the work (ASIN / ISBN-13 /
+  GR book id): P6's confirm arm. The candidate's work-level id — plus, for
+  Goodreads, the corroborating book id as edition-homed evidence — enters the
+  identity road through the captured-route handoff and settles machine-alone
+  with an audit naming the search-fallback origin and the corroborating id
+  kind. A differing edition id remains no evidence and never vetoes (REQ-009).
+  (b) *Text-decisive auto-link (v9)* — with no corroborating id, an
+  UNAMBIGUOUSLY decisive pick still settles machine-alone: the winner's title
+  verdict is Same under the authority's parse AND its author verdict is Agree
+  (Abstain never qualifies) AND no other candidate proposing a DIFFERENT
+  provider work id clears that same Same+Agree bar. The decision function
+  lives in the matching authority (REQ-008), never inline in the queue. The
+  settlement audit and route provenance name the text-decisive origin,
+  distinguishable from (a). [PO 2026-08-18: at real-library scale the card
+  friction outweighed the wrong-book risk; a wrong link remains displaceable
+  and audited via REQ-007's conflict machinery.]
+  (c) *Proposal card* — a pick above the picker bar that is NOT text-decisive
+  (author Abstain, Grey title, or two distinct work-id candidates at the bar)
+  never writes a route: the road mints ONE `PendingRoute` review card carrying
+  the proposed route (semantic idempotency — an equivalent pending card is
+  reused, never duplicated); affirm connects through the existing resolve
+  continuation.
+  (d) *Miss* — no candidate clears the bar: an honest miss.
+  Card lifecycle (v9, the insight-91 rule applied to route cards): a
+  settlement that activates a route proposed by a pending `PendingRoute` card
+  cancels that card in the same transaction (satisfied); listing/loading a
+  pending card serves the CURRENT actionable generation (mint generation is
+  history); resolve proceeds on mere generation drift and rejects with a
+  specific 409 only on real proposal invalidation (work gone, or the proposed
+  route now actively owned by a different work); affirming a card whose route
+  is already active on this work is a success no-op.
+  Bounding: the generation-scoped machine-chase attempt ledger covers BOTH
+  no-work-route classes — the edition-only bridge (already selectable) and the
+  not-connected minimum work, which this REQ makes cadence-selectable for the
+  search leg only. A pass ending in (c) or (d) burns one attempt; (a) and (b)
+  do not. At threshold the work leaves automatic selection until its identity
+  generation changes. Works holding ANY work-level route never fire a search
+  leg (cross-provider completion stays payload-evidence-driven), and
+  applicability filtering is unchanged (a foreign work fires only Goodreads'
+  leg). A provider may spend at most one corroboration probe per leg, riding
+  its existing fetch machinery and rate bucket; an id already present in a
+  search/autocomplete response is never re-requested (FP-ST-002). Search legs
+  do not read or write the provider-response cache. REQ-013's manual search is
+  otherwise unchanged and remains the human tool at the same route-finding
+  trust bar.
 
 ### Badge and enrichment gate
 
@@ -314,13 +398,25 @@ the fix in F1; the works side, and the seams that join the two, are this feature
   declared kind makes the work enrichable; a kind not on the declared list
   does not count until deliberately added. Works with ZERO USABLE routes —
   whether they hold no routes at all or only undeclared-kind routes — are
-  excluded from automatic passes (no retry storms) and offer the manual
-  title+author provider search instead (a route-finding action; Q-001); their
+  excluded from automatic anchor passes (no retry storms) and offer the manual
+  title+author provider search instead (a route-finding action; Q-001);
+  REQ-027's bounded machine search-fallback selection is the sole automatic
+  carve-out. Their
   badge still reads per REQ-012 (a route of any kind shows connected). The
   old "no metadata until identity settles" gate must not starve zero-route or
   edition-route-only works (T1).
 
 ### Covers
+
+> **Containment (v9, PO 2026-08-18):** Goodreads is EXCLUDED as a cover
+> candidate source. The GR page layout drift broke cover-image extraction
+> while id extraction stayed correct — verified live: unrelated-book covers
+> at scale (51 ebook + 44 audiobook slots), identities independently
+> confirmed right. Machine-selected GR-sourced covers are re-selected by a
+> marker-gated one-shot heal; manual covers are never touched. Re-enabling
+> GR covers requires the parser fix pinned against a captured drifted page
+> (its own round). This note supersedes nothing in REQ-014's rank — GR is
+> simply absent from the candidate set until then.
 
 - **REQ-014**: Cover rank. For each target-format slot, cover selection follows,
   strictly: user's choice for that slot → the user's file cover whose edition
@@ -696,7 +792,7 @@ design; none exist yet.
 
 | ID | Question | Status | Resolution |
 |----|----------|--------|------------|
-| Q-001 | Badge states + enrichment threshold (T1) | resolved | PO 2026-08-02: any declared route kind counts — work-id OR edition-id (ISBN/ASIN/GR book id) — enriches; zero-usable-route works get the honest not-connected state (or connected, if they hold an undeclared-kind route) + a manual title+author provider search; no automatic passes for them. |
+| Q-001 | Badge states + enrichment threshold (T1) | resolved | PO 2026-08-02: any declared route kind counts — work-id OR edition-id (ISBN/ASIN/GR book id) — enriches; zero-usable-route works get the honest not-connected state (or connected, if they hold an undeclared-kind route) + a manual title+author provider search; no automatic passes for them. (v8: REQ-027 adds the bounded machine search-fallback carve-out.) |
 | Q-002 | Audio-first books with no work-concept provider | resolved | PO 2026-08-02: no special treatment. An ASIN route is a full connection; convergence quietly links text catalogs (and pulls their work metadata) when it finds the book there. |
 | Q-003 | Abridgement / omnibus definitions | resolved | PO 2026-08-02: BOTH are their own works. Abridgement never merges with the unabridged text (supersedes D11's abridgement arm). Omnibus never merges with its parts; contains-pointers stored when supplied. |
 | Q-004 | Re-key collision policy (O3) | resolved | PO 2026-08-02: authority-certain pairs auto-merge (predicate bound in REQ-024); everything else becomes a review card. Migration rehearsed on a snapshot first. |
@@ -729,3 +825,5 @@ design; none exist yet.
 - [ ] **AC-021** (REQ-024/Q-004): The snapshot rehearsal groups every active work by full identity tuple+primary author regardless of text distinction, reports every unresolved group, assigns resolved different-from-all distinctions before the unique-index test, and installs no index while an identity or field card remains unresolved; zero silent merges. Runtime group fixtures begin with an unabridged common anchor and an abridged non-common anchor: before ST-006(e), a second ingest of that same abridgement produces one card enumerating both, an audited attach-to-abridged outcome retains its distinction and creates no third work, and repeating that ingest+outcome leaves the active work/key/distinction graph byte-stable apart from its audit entry. A post-capture candidate that reads authority-certain same-text against both of two anchors whose audited different-from-all relation still survives never auto-merges either anchor: one card enumerates the complete group, and attach-to-one, affirm-different-from-all, and cancel retain the unselected anchor and its distinction. A separate post-capture fixture whose entire proposed merge cohort has sampled same-text/authority evidence and no surviving different-from-all pair converges automatically. A genuinely third text established different from every listed anchor receives exactly one new durable distinction. With multiple same-text anchors and no surviving different-from-all pair in their proposed merge cohort, the listed anchor with the lowest stable Livrarr work id survives and all plural state merges losslessly. Archived losers are retrievable but never re-enter the group. With no authority-certain same anchor and an unresolved comparison, one card lists the complete group and offers only attach/merge to a selected anchor, audited different-from-all, or cancel; edit-cancel retains the prior key and create-cancel discards the candidate. Refresh, display-projection change, and later identity-title edit preserve a surviving distinction until audited same-work merge. Merge fixtures also prove: a user-set singular beats a machine-set one; a user-vs-user singular conflict pauses field resolution without reopening identity; equal machine values and present-vs-absent merge deterministically; conflicting machine canonical pointers and per-format defaults pause likewise; covers and display subtitle recompute under REQ-014/003. Choosing left/right/allowed-absence resumes the authority-certain merge. All outcomes are audited and archived losers remain retrievable.
 - [ ] **AC-022** (REQ-025): When a work settles against a provider record naming its author by id, the PRIMARY author gains that route iff F1's name-agreement guard passes; a guard failure produces the F1 review surface entry, not a link; a settled record with NO author id produces no link, no fallback matching, and no error.
 - [ ] **AC-023** (REQ-026): Post-migration, every pre-existing provider id is present as a route OF THE MAPPED KIND (`gr_key` asserted an edition-id route, `ol_key`/`hc_key` work-id, `isbn_13`/`asin` edition-id), and every edition-scoped value is OWNED by an edition row linked to its work — grouped only where co-edition evidence existed, else separate provisional editions. An ISBN-only and an ASIN-only row with no direct format evidence both migrate as format-unknown/language-absent (no inference by id kind), project their routes, supply no per-format default/cover, and sort last for display; an attached cover is retained and appears in the single work-scoped format-needed panel while a target slot is uncovered, later direct evidence resolves format and reruns every slot, while contradictory evidence creates the REQ-005 review state. Legacy-title fixtures with structured subtitle present/absent produce REQ-003's exact identity tuple and preserve provenance; display projection is computed separately. A blank/invalid main blocks index installation with the original record/key intact until user repair and successful retry. Two rehearsals over identical inputs produce byte-identical tuples, text distinctions, and uniqueness keys; changing only an edition subtitle projection changes none of them. Badge states match REQ-012's rule for every legacy state × route combination (incl. the setter=user → user-confirmed-with-route invariant); convergence schedules are preserved; each of the four per-media-type monitoring combinations survives unchanged; the rehearsal ran on a snapshot first and its report is on record.
+- [ ] **AC-024** (REQ-027): Against the activated schema through the real convergence tick: (a) an ASIN-only bridge work whose scripted OpenLibrary search response carries its ASIN in `id_amazon` ends one tick with an active `OpenLibraryWork` route, a settlement audit naming search-fallback and the corroborating kind, generation advanced, and ZERO ledger burn; (b) the same shape whose response omits the work's ids (and includes a DIFFERENT ASIN, pinning no-veto) with a NEAR-MISS pick (author verdict Abstain — v9) writes no route, mints exactly one `PendingRoute` card carrying the proposed route, and burns one attempt — a second tick reuses that card (still one) and burns again, and at threshold the work stops being selected; (c) a not-connected title+author-only work is cadence-selected, a near-miss Goodreads autocomplete pick (`workId` taken from the response, no extra request for it; author Abstain — v9) mints the card, and affirming through the real resolve continuation settles the `GoodreadsWork` route and flips the badge to connected; (d) a work holding any work-level route fires zero search requests, and a foreign-language work fires only the Goodreads leg; (e) a Goodreads probe corroboration (book page carrying the work's ASIN) settles both the work route and the edition-homed book-id evidence, with no request issued solely to re-learn an id already present in a prior response.
+- [ ] **AC-025** (REQ-027 v9 + REQ-014 containment): (a) auto-link — an ASIN-only work whose single scripted search candidate is Same-title + author-Agree with NO corroborating id settles the work route machine-alone with a text-decisive audit/provenance distinct from corroborated, generation advanced, no card, no burn; (b) the boundary holds — author-Abstain cards, and two candidates proposing DIFFERENT work ids at Same+Agree card, and the decision function lives in the matching authority; (c) sibling-card staleness dead — a work with TWO pending route cards affirms one through the real door (route settles, generation moves), then affirms the second successfully; listing after the first shows the current actionable generation; (d) satisfied cancellation — a settlement activating a route proposed by a pending card cancels that card in the same transaction, and affirming an already-active proposal is a success no-op while a route now owned by a DIFFERENT work returns the specific 409; (e) the parked-ledger heal — marker-gated, deletes machine-chase attempts ONLY for works with no active work-level route, exact counts, second run zero; (f) cover containment — Goodreads absent from cover candidate assembly; the one-shot heal re-selects every machine-selected GR-sourced ebook/audiobook cover slot (manual covers byte-untouched), falling to the next rank or the honest placeholder, and forces re-materialization of changed slots.

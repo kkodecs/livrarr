@@ -2,6 +2,8 @@
 
 SQLite database layer. All SQL lives here. Implemented by `SqliteDb` (in `sqlite.rs`). Tests use `create_test_db()` which returns an in-memory SQLite instance.
 
+The WAL pool has four connections but SQLite permits only one writer. Every write-bearing transaction starts through `pool::begin_write` (`BEGIN IMMEDIATE`), which queues at transaction begin under the connection's five-second `busy_timeout`; plain deferred `pool.begin()` is not a write-transaction authority. Transactions contain database work only — network and filesystem operations stay outside them.
+
 All traits are implemented by `SqliteDb` unless noted otherwise. Trait contracts and their
 request structs live in `src/api/` (one module per entity), re-exported at the crate root.
 
