@@ -45,8 +45,10 @@ text-decisive unambiguous picks now AUTO-LINK (the card bar produced correct-but
 frictional proposals at real-library scale; "the cure was worse than the problem" —
 PO); adds the PendingRoute card lifecycle rules (decision-time generation, satisfied-
 card cancellation — the sibling-card staleness defect found live), the REQ-014
-Goodreads cover-source containment (GR layout drift broke cover-image extraction,
-verified live), and AC-025. AC-024(b)/(c) fixtures move to near-miss shapes.
+Goodreads cover-source containment (recorded then as "GR layout drift broke
+cover-image extraction" — that diagnosis was REVERSED 2026-08-19, see the Covers
+containment note; the containment itself remains correct), and AC-025.
+AC-024(b)/(c) fixtures move to near-miss shapes.
 v11 (2026-08-20, PO live order after the work-74 starvation): REQ-027
 eligibility becomes per-provider — a search-capable provider lacking its own
 work-level route fires the leg; one provider's id no longer disables
@@ -424,15 +426,20 @@ the fix in F1; the works side, and the seams that join the two, are this feature
 
 ### Covers
 
-> **Containment (v9, PO 2026-08-18):** Goodreads is EXCLUDED as a cover
-> candidate source. The GR page layout drift broke cover-image extraction
-> while id extraction stayed correct — verified live: unrelated-book covers
-> at scale (51 ebook + 44 audiobook slots), identities independently
-> confirmed right. Machine-selected GR-sourced covers are re-selected by a
-> marker-gated one-shot heal; manual covers are never touched. Re-enabling
-> GR covers requires the parser fix pinned against a captured drifted page
-> (its own round). This note supersedes nothing in REQ-014's rank — GR is
-> simply absent from the candidate set until then.
+> **Containment (v9, PO 2026-08-18; diagnosis corrected 2026-08-19/20):**
+> Goodreads is EXCLUDED as a cover candidate source. The wrong covers (51
+> ebook + 44 audiobook slots, identities independently confirmed right) were
+> caused by our own id-namespace conflation — `GoodreadsWork` route ids
+> fetched as `/book/show/` Book-page ids returned real but unrelated books —
+> NOT by GR page-layout drift as v9 originally recorded. The conflation is
+> fixed by the rounds 19-21 namespace split, and the "unreadable page"
+> failures are anti-bot response classes (zero-byte 200s, ~59KB Next-shell
+> bodies), not parser drift. Machine-selected GR-sourced covers were
+> re-selected by a marker-gated one-shot heal; manual covers are never
+> touched. Re-enabling GR covers requires anti-bot body detection on the
+> detail route (captured zero-byte fixtures banked; its own feature). This
+> note supersedes nothing in REQ-014's rank — GR is simply absent from the
+> candidate set until then.
 
 - **REQ-014**: Cover rank. For each target-format slot, cover selection follows,
   strictly: user's choice for that slot → the user's file cover whose edition

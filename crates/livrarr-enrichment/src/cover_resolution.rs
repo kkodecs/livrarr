@@ -6,11 +6,13 @@ use livrarr_domain::{CoverMediaType, CoverResolution, MetadataProvider};
 use crate::cover_rank::{rank_index, CoverRankModel};
 use crate::NormalizedWorkDetail;
 
-/// Emergency v9 containment: Goodreads' drifted book-page parser currently
-/// emits unrelated cover URLs while its identity fields remain usable. Keep
-/// Goodreads metadata/search/identity enabled, but exclude it at this one
-/// cover-candidate seam. Re-enabling this flag belongs to the next round and
-/// requires a parser fix pinned against a captured drifted-page fixture.
+/// Containment (spec v9, REQ-014): Goodreads is excluded as a cover source at
+/// this one cover-candidate seam; Goodreads metadata/search/identity stay
+/// enabled. The wrong covers this contained were Work-namespace ids fetched as
+/// `/book/show/` Book pages — real but unrelated books — since fixed by the
+/// route-kind namespace split. Re-enabling requires anti-bot body detection on
+/// the GR detail route (zero-byte and Next-shell 200 bodies; captured fixtures
+/// in hand), so blocked fetches stop reading as parser failures.
 pub const GOODREADS_COVER_CANDIDATES_ENABLED: bool = false;
 
 fn cover_candidate_enabled(provider: MetadataProvider) -> bool {

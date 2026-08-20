@@ -49,6 +49,14 @@ The endpoint rule is enforced at the consumer doors, not inferred from the legac
   the candidate-text search tiers;
 - generic Work-shaped Goodreads fetches also use candidate text and never read `works.gr_key`.
 
+The mint direction is enforced too (round 21): only autocomplete `workId` values and the Book
+page's referenced Work-entity `legacyId` may mint `GoodreadsWork` routes. Goodreads identifiers
+arriving from files, list imports, legacy `gr_key` columns, or direct user input are Book-page ids
+and mint edition-homed `GoodreadsBookEdition` routes. A provenance-aware, marker-gated startup heal
+relabels deployed mislabels only where typed provenance proves the Book channel (`OwnedFile`, or a
+migrated legacy `gr_key`); ambiguous UserChoice/Provider rows and genuine search provenance stay
+untouched.
+
 The `works.gr_key` compatibility mirror remains useful for display and migration compatibility,
 but its namespace is ambiguous after cutover and it is not provider-fetch authority.
 
@@ -183,6 +191,27 @@ Author agreement is enforced by the picker instead.
   GR-specific) and called by the GR client on every 2xx HTML body. A hit is **already** treated as
   worse than a 403: the client reports `BreakerSignal::TripImmediately` on the Goodreads bucket, so
   a soft-blocked 200 opens the breaker at once rather than counting toward a threshold (R-8).
+
+### Soft-block response classes on `/book/show/` (live-measured 2026-08-19/20)
+
+Two further anti-bot response shapes exist that `is_anti_bot_page` does NOT recognize. Neither is
+parser drift — re-fetching the same ids from the same host with the app's exact UA and headers
+returned full parseable pages minutes later:
+
+- **Empty-200:** HTTP 200 with a ZERO-BYTE body, served in bursts on `/book/show/` while
+  autocomplete stays unaffected. Five in a row read as unreadable payloads, reach the 5-failure
+  threshold, and trip the 1h GR breaker — and while the block lasts, GR re-trips it within seconds
+  of every half-open window. Ten zero-byte captures are banked (2026-08-20) via the capture writer
+  above.
+- **Next-shell:** ~58-60KB bodies carrying the `__NEXT_DATA__` script but no Apollo book payload
+  and no JSON-LD (real book pages run ~700-870KB). Served during sweep bursts; the 2026-08-18/19
+  "unreadable page" warns were this class (some of those ids were also conflated Work-namespace
+  ids, resolved separately by the namespace split).
+
+Both currently surface as unreadable-payload warns whose failures trip the breaker on threshold.
+Detecting them as anti-bot-class signals on the detail route (like `is_anti_bot_page`, no
+retry-into-trip) is owned by the planned GR feature; the banked captures are its fixtures. Until
+then, GR covers stay excluded at the `cover_resolution.rs` containment seam.
 
 ## Caching
 
