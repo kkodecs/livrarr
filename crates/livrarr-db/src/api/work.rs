@@ -293,6 +293,24 @@ pub trait WorkDb: Send + Sync {
         limit: i64,
     ) -> Result<Vec<WorkId>, DbError>;
 
+    /// Availability-aware REQ-027 selection. Production overrides this so the
+    /// connected search arm exactly matches the live provider queue. The
+    /// compatibility default preserves existing DB doubles and legacy callers.
+    fn list_convergence_due_with_search_availability(
+        &self,
+        user_id: UserId,
+        now: DateTime<Utc>,
+        threshold: u32,
+        limit: i64,
+        search_availability: livrarr_domain::services::IdentitySearchAvailability,
+    ) -> impl std::future::Future<Output = Result<Vec<WorkId>, DbError>> + Send {
+        let _ = search_availability;
+        async move {
+            self.list_convergence_due(user_id, now, threshold, limit)
+                .await
+        }
+    }
+
     /// Set (or clear, when `at` is `None`) a work's next-convergence-due time.
     async fn set_next_convergence_at(
         &self,

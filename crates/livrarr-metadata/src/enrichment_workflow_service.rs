@@ -87,7 +87,21 @@ where
             captured_provider_identity: result.captured_provider_identity,
             captured_route_proposals: result.captured_route_proposals,
             provider_chase_attempted: result.provider_chase_attempted,
+            search_leg_fired: result.search_leg_fired,
+            search_ledger_burnable: result.search_ledger_burnable,
         })
+    }
+
+    async fn search_work_routes(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        priority: RequestPriority,
+    ) -> Result<livrarr_domain::services::IdentityRouteSearchResult, EnrichmentWorkflowError> {
+        self.inner
+            .search_work_routes(user_id, work_id, priority)
+            .await
+            .map_err(convert_error)
     }
 
     async fn reset_for_manual_refresh(

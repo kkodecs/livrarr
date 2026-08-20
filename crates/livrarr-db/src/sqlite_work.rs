@@ -1418,12 +1418,30 @@ impl WorkDb for SqliteDb {
         threshold: u32,
         limit: i64,
     ) -> Result<Vec<WorkId>, DbError> {
+        self.list_convergence_due_with_search_availability(
+            user_id,
+            now,
+            threshold,
+            limit,
+            livrarr_domain::services::IdentitySearchAvailability::all(),
+        )
+        .await
+    }
+
+    async fn list_convergence_due_with_search_availability(
+        &self,
+        user_id: UserId,
+        now: DateTime<Utc>,
+        threshold: u32,
+        limit: i64,
+        search_availability: livrarr_domain::services::IdentitySearchAvailability,
+    ) -> Result<Vec<WorkId>, DbError> {
         // Before activation the three legacy branches retain their scalar-anchor
         // semantics below. After activation, frozen works.* ID columns are never
-        // read as authority: connected Works with a Work route are due only for
-        // incomplete enrichment. UserConfirmed, Connected, and NotConnected Works
-        // without a Work route enter the bounded machine-chase arm; every such visit
-        // is capped by identity_provider_attempts for the current identity generation.
+        // read as authority. In addition to the edition-only/no-work-route bridge,
+        // REQ-027 v11 admits a connected Work when at least one applicable search
+        // provider lacks its own Work route and has no anchor (or a terminal
+        // not_found anchor). The one shared generation ledger caps both shapes.
         let now_str = now.to_rfc3339();
         let identity_v2_active: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
@@ -1442,12 +1460,51 @@ impl WorkDb for SqliteDb {
                      AND EXISTS (SELECT 1 FROM identity_routes wr \
                                   WHERE wr.user_id=w.user_id AND wr.resolved_work_id=w.id \
                                     AND wr.state='active' \
-                                    AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"'))) \
+                                    AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"')) \
+                     AND (SELECT COUNT(*) FROM identity_provider_attempts ipa \
+                           WHERE ipa.user_id=w.user_id AND ipa.work_id=w.id \
+                             AND ipa.provider='livrarr-convergence' \
+                             AND ipa.route_kind='bridge-upgrade' \
+                             AND ipa.route_value=CAST(w.identity_generation AS TEXT)) < ?3) \
                     OR (w.identity_status_v2 IN ('user_confirmed','connected','not_connected') \
-                        AND NOT EXISTS (SELECT 1 FROM identity_routes wr \
-                                         WHERE wr.user_id=w.user_id AND wr.resolved_work_id=w.id \
-                                           AND wr.state='active' \
-                                           AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"')) \
+                        AND ( \
+                          NOT EXISTS (SELECT 1 FROM identity_routes wr \
+                                       WHERE wr.user_id=w.user_id AND wr.resolved_work_id=w.id \
+                                         AND wr.state='active' \
+                                         AND wr.kind IN ('\"OpenLibraryWork\"','\"GoodreadsWork\"','\"HardcoverWork\"')) \
+                          OR (w.identity_status_v2 IN ('user_confirmed','connected') AND ( \
+                            ((?5=1) AND NOT EXISTS (SELECT 1 FROM identity_routes grw \
+                                         WHERE grw.user_id=w.user_id AND grw.resolved_work_id=w.id \
+                                           AND grw.state='active' AND grw.kind='\"GoodreadsWork\"') \
+                             AND (NOT EXISTS (SELECT 1 FROM identity_routes gre \
+                                              WHERE gre.user_id=w.user_id AND gre.resolved_work_id=w.id \
+                                                AND gre.state='active' AND gre.kind='\"GoodreadsBookEdition\"') \
+                                  OR EXISTS (SELECT 1 FROM provider_retry_state prs \
+                                              WHERE prs.user_id=w.user_id AND prs.work_id=w.id \
+                                                AND prs.provider='goodreads' AND prs.last_outcome='not_found'))) \
+                            OR ((?6=1) AND (lower(trim(COALESCE(w.language,''))) IN ('','en','eng','english') \
+                                 OR substr(lower(trim(COALESCE(w.language,''))),1,3) IN ('en-','en_')) \
+                                AND NOT EXISTS (SELECT 1 FROM identity_routes olw \
+                                                 WHERE olw.user_id=w.user_id AND olw.resolved_work_id=w.id \
+                                                   AND olw.state='active' AND olw.kind='\"OpenLibraryWork\"') \
+                                AND (NOT EXISTS (SELECT 1 FROM identity_routes isbn \
+                                                 WHERE isbn.user_id=w.user_id AND isbn.resolved_work_id=w.id \
+                                                   AND isbn.state='active' AND isbn.kind='\"Isbn13Edition\"') \
+                                     OR EXISTS (SELECT 1 FROM provider_retry_state prs \
+                                                 WHERE prs.user_id=w.user_id AND prs.work_id=w.id \
+                                                   AND prs.provider='open_library' AND prs.last_outcome='not_found'))) \
+                            OR ((?7=1) AND (lower(trim(COALESCE(w.language,''))) IN ('','en','eng','english') \
+                                 OR substr(lower(trim(COALESCE(w.language,''))),1,3) IN ('en-','en_')) \
+                                AND NOT EXISTS (SELECT 1 FROM identity_routes hcw \
+                                                 WHERE hcw.user_id=w.user_id AND hcw.resolved_work_id=w.id \
+                                                   AND hcw.state='active' AND hcw.kind='\"HardcoverWork\"') \
+                                AND (NOT EXISTS (SELECT 1 FROM identity_routes isbn \
+                                                 WHERE isbn.user_id=w.user_id AND isbn.resolved_work_id=w.id \
+                                                   AND isbn.state='active' AND isbn.kind='\"Isbn13Edition\"') \
+                                     OR EXISTS (SELECT 1 FROM provider_retry_state prs \
+                                                 WHERE prs.user_id=w.user_id AND prs.work_id=w.id \
+                                                   AND prs.provider='hardcover' AND prs.last_outcome='not_found'))) \
+                          ))) \
                         AND (SELECT COUNT(*) FROM identity_provider_attempts ipa \
                               WHERE ipa.user_id=w.user_id AND ipa.work_id=w.id \
                                 AND ipa.provider='livrarr-convergence' \
@@ -1460,6 +1517,9 @@ impl WorkDb for SqliteDb {
             .bind(&now_str)
             .bind(threshold)
             .bind(limit)
+            .bind(search_availability.goodreads)
+            .bind(search_availability.open_library)
+            .bind(search_availability.hardcover)
             .fetch_all(self.pool())
             .await
             .map_err(map_db_err);

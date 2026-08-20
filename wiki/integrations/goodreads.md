@@ -25,6 +25,51 @@ This page is also a deprecation-tracking page. We should be actively reducing GR
 | `/author/show/<id>` | Author bio, bibliography links | Medium |
 | `/search?q=...` | Search results | **Volatile + disallowed by robots.txt** — risky to hit |
 
+## Book and Work identifier namespaces
+
+Goodreads exposes two disjoint numeric namespaces, and Livrarr preserves that distinction in its
+route kinds:
+
+- `GoodreadsBookEdition` is a Book-page identifier. It is the only Goodreads route kind that may
+  become `AnchorQuery::GrKey` and fetch `/book/show/<book-id>`.
+- `GoodreadsWork` is the legacy Work identifier harvested from a fetched Book payload. It is valid
+  Work identity evidence and remains the route kind proposed by title/Author search, but it is not a
+  detail-fetch anchor. A Work-only route therefore follows the normal no-anchor enrichment skip.
+
+Do not add a `/work/<id>` fetch to compensate. Bare Goodreads Work URLs redirect toward sign-in and
+do not provide the public detail-page contract Livrarr needs. A future fetchable Goodreads anchor
+must come from edition evidence such as `GoodreadsBookEdition`, not by reinterpreting a Work id.
+
+The endpoint rule is enforced at the consumer doors, not inferred from the legacy scalar:
+
+- settled-work author linking projects only an active `GoodreadsBookEdition`; a Work-only graph
+  quietly contributes no Goodreads key attempt;
+- cover alternatives and cover selection load the Work's active routes and pass them to the
+  provider client explicitly; a BookEdition route is a direct anchor, while a Work-only graph uses
+  the candidate-text search tiers;
+- generic Work-shaped Goodreads fetches also use candidate text and never read `works.gr_key`.
+
+The `works.gr_key` compatibility mirror remains useful for display and migration compatibility,
+but its namespace is ambiguous after cutover and it is not provider-fetch authority.
+
+## Unreadable detail-page captures
+
+When a Book detail request returns HTTP 200 but neither the deterministic parser nor configured LLM
+repair can produce a readable payload, production writes the exact response bytes under
+`<data_dir>/captures/goodreads/<utc-ts>_<book-id>.html`. This applies only at the shared unreadable
+detail boundary; autocomplete responses and readable detail pages are never captured.
+
+Capture is diagnostic observation, not provider control flow. It is disabled by default on the
+client, enabled explicitly by the production composition root, runs blocking file work away from
+the async executor, and retains only the newest ten HTML files. Directory creation, write, task,
+and prune failures emit warnings but never replace the provider outcome. The pages are already
+public and captures remain local; there is deliberately no configuration/TOML switch.
+
+Pruning is deliberately race-tolerant. Concurrent writers can select the same oldest capture;
+`remove_file` returning `NotFound` means another writer already completed that observation and is
+treated as success. A burst may transiently leave more than ten files, and the next write re-lists
+the directory and restores the newest-ten bound. No capture race can change the fetch outcome.
+
 ## Series pages (2026-07 React layout — N1, measured on 108562 + 43318)
 
 - Books ship as HTML-attribute-encoded JSON inside `data-react-props` mounts
@@ -243,7 +288,8 @@ This is part of why GR shouldn't remain our primary source — there's no symmet
 
 ## Related
 
-- `wiki/insights.md` insight #13 (Goodreads requires LLM)
+- `wiki/insights.md` insight #13 (deterministic matching and LLM repair boundary)
+- `wiki/insights.md` insight #96 (Book/Work namespace authority and raw-body capture)
 - `wiki/integrations/openlibrary.md` (contrast — opposite UA strategy)
 - `wiki/integrations/hardcover.md` (the replacement target)
 - `project_gr_llm_required.md` (memory)

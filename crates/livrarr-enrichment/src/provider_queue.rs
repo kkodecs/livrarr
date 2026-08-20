@@ -46,6 +46,16 @@ use livrarr_external_data::provider_client::{
 struct SearchFallbackCapture {
     provider_identity: Vec<ProviderIdentityEvidence>,
     route_proposals: Vec<RouteKey>,
+    ledger_burnable: bool,
+}
+
+impl SearchFallbackCapture {
+    fn honest_miss() -> Self {
+        Self {
+            ledger_burnable: true,
+            ..Self::default()
+        }
+    }
 }
 
 fn text_decisive_search_capture(
@@ -60,6 +70,7 @@ fn text_decisive_search_capture(
             provenance: ProviderIdentityEvidenceProvenance::TextDecisiveSearchFallback,
         }],
         route_proposals: Vec::new(),
+        ledger_burnable: false,
     }
 }
 
@@ -69,6 +80,7 @@ fn search_route_kind(provider: MetadataProvider) -> Option<(IdentityProvider, Ro
             Some((IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork))
         }
         MetadataProvider::Goodreads => {
+            // Goodreads autocomplete's `workId` is a Work-namespace id.
             Some((IdentityProvider::Goodreads, RouteKind::GoodreadsWork))
         }
         MetadataProvider::Hardcover => {
@@ -76,6 +88,17 @@ fn search_route_kind(provider: MetadataProvider) -> Option<(IdentityProvider, Ro
         }
         _ => None,
     }
+}
+
+fn has_provider_work_route(provider: MetadataProvider, routes: &[WorkRoute]) -> bool {
+    let Some((identity_provider, route_kind)) = search_route_kind(provider) else {
+        return false;
+    };
+    routes.iter().any(|route| {
+        route.state == WorkRouteState::Active
+            && route.provider == identity_provider
+            && route.kind == route_kind
+    })
 }
 
 fn edition_identifier_matches(route: &WorkRoute, identifier: &IdentitySearchIdentifier) -> bool {
@@ -130,7 +153,7 @@ async fn run_identity_search_fallback(
         false,
     );
     let Some(index) = decision.candidate_index() else {
-        return SearchFallbackCapture::default();
+        return SearchFallbackCapture::honest_miss();
     };
     let text_decisive = matches!(
         decision,
@@ -161,6 +184,7 @@ async fn run_identity_search_fallback(
             SearchFallbackCapture {
                 provider_identity: Vec::new(),
                 route_proposals: vec![work_route],
+                ledger_burnable: true,
             }
         };
     }
@@ -187,7 +211,7 @@ async fn run_identity_search_fallback(
             return if text_decisive {
                 text_decisive_search_capture(identity_provider, work_route)
             } else {
-                SearchFallbackCapture::default()
+                SearchFallbackCapture::honest_miss()
             };
         };
         candidate.edition_identifiers.extend(probed);
@@ -206,6 +230,7 @@ async fn run_identity_search_fallback(
             SearchFallbackCapture {
                 provider_identity: Vec::new(),
                 route_proposals: vec![work_route],
+                ledger_burnable: true,
             }
         };
     };
@@ -233,6 +258,7 @@ async fn run_identity_search_fallback(
     SearchFallbackCapture {
         provider_identity,
         route_proposals: Vec::new(),
+        ledger_burnable: false,
     }
 }
 
@@ -284,13 +310,13 @@ fn derive_route_anchor_query(
     };
 
     match provider {
-        // A Goodreads BookEdition id remains edition-scoped evidence, but it
-        // can fetch that Book page. The payload parser returns its distinct
-        // Book -> Work legacy id as fresh route evidence; the book id itself
-        // is never promoted to a Work route.
-        MetadataProvider::Goodreads => find(IdentityProvider::Goodreads, RouteKind::GoodreadsWork)
-            .or_else(|| find(IdentityProvider::Goodreads, RouteKind::GoodreadsBookEdition))
-            .map(AnchorQuery::GrKey),
+        // Goodreads Work and BookEdition ids occupy disjoint numeric
+        // namespaces. Only a BookEdition id can address `/book/show/<id>`;
+        // a GoodreadsWork route is identity evidence, not a fetch anchor.
+        MetadataProvider::Goodreads => {
+            find(IdentityProvider::Goodreads, RouteKind::GoodreadsBookEdition)
+                .map(AnchorQuery::GrKey)
+        }
         MetadataProvider::OpenLibrary => {
             find(IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork)
                 .map(AnchorQuery::OlKey)
@@ -564,28 +590,32 @@ where
             )
             .plan_from_routes(identity)
         });
-        let search_seed = if let Some(identity) = captured_identity.as_ref().filter(|identity| {
-            !identity.active_routes.iter().any(|route| {
-                route.state == WorkRouteState::Active
-                    && matches!(
-                        route.kind,
-                        RouteKind::OpenLibraryWork
-                            | RouteKind::GoodreadsWork
-                            | RouteKind::HardcoverWork
-                    )
-            })
-        }) {
-            let author_name = self
-                .retry_db
-                .read_primary_author_names(work.user_id, identity.primary_author_id)
-                .await
-                .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?
-                .into_iter()
-                .next();
-            author_name.map(|author| (identity.identity_title.main.clone(), author))
-        } else {
-            None
-        };
+        let active_routes = captured_identity
+            .as_ref()
+            .map(|identity| identity.active_routes.clone())
+            .unwrap_or_default();
+        // REQ-027 v11 is provider-local: a route owned by one provider is
+        // neutral to another provider's title+author route search. Only build
+        // the seed when a registered search provider is missing its own route.
+        let needs_search_seed = captured_identity.is_some()
+            && self.providers.iter().any(|(provider, entry)| {
+                search_route_kind(*provider).is_some()
+                    && entry.client.identity_search_available()
+                    && !has_provider_work_route(*provider, &active_routes)
+            });
+        let search_seed =
+            if let Some(identity) = captured_identity.as_ref().filter(|_| needs_search_seed) {
+                let author_name = self
+                    .retry_db
+                    .read_primary_author_names(work.user_id, identity.primary_author_id)
+                    .await
+                    .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?
+                    .into_iter()
+                    .next();
+                author_name.map(|author| (identity.identity_title.main.clone(), author))
+            } else {
+                None
+            };
 
         // Partition providers into: skip (not applicable / anchor-less /
         // restart-resumed) and dispatch. The dispatch tuple carries the
@@ -633,6 +663,7 @@ where
             );
             let search_eligible = search_seed.is_some()
                 && search_route_kind(provider).is_some()
+                && !has_provider_work_route(provider, &active_routes)
                 && entry.client.identity_search_available();
             let Some(anchor) = anchor else {
                 if search_eligible {
@@ -657,13 +688,11 @@ where
                 continue;
             };
 
-            // Spec v10 dead-anchor predicate: an applicable OL/GR/HC provider
-            // with a derivable anchor joins the search leg only when no active
-            // work-level route exists, provider search is available, and the
-            // anchor's current standing is terminal `not_found`. `will_retry`
-            // is non-terminal and therefore remains anchor-first. Explicit
-            // retry-state reset after a re-key/generation change removes this
-            // standing and likewise restores anchor-first dispatch.
+            // REQ-027 v11 dead-anchor predicate: an applicable OL/GR/HC
+            // provider with no route of its own joins the search leg when its
+            // derivable anchor has terminal `not_found` standing. Routes owned
+            // by other providers are neutral. `will_retry` remains anchor-first;
+            // a route-graph generation change clears the terminal standing.
             let terminal =
                 existing_terminal_outcome(self.retry_db.as_ref(), work.user_id, work.id, provider)
                     .await?;
@@ -678,6 +707,13 @@ where
 
             // Restart safety for every other terminal standing.
             if terminal.is_some() {
+                continue;
+            }
+
+            // REQ-027's connected entrance is evidence-only. Providers with
+            // live anchors may participate in a later full enrichment road,
+            // but this visit is forbidden from entering the anchored scatter.
+            if context.search_only {
                 continue;
             }
 
@@ -700,11 +736,9 @@ where
 
         let priority = context.priority;
         let language = work.language.clone();
-        let active_routes = captured_identity
-            .as_ref()
-            .map(|identity| identity.active_routes.clone())
-            .unwrap_or_default();
         let mut provider_chase_attempted = false;
+        let search_leg_fired = !to_search.is_empty();
+        let mut search_ledger_burnable = search_leg_fired;
         let mut search_provider_identity = Vec::new();
         let mut search_route_proposals = Vec::new();
         if let Some((seed_title, seed_author)) = search_seed {
@@ -724,10 +758,14 @@ where
             while let Some(joined) = search_set.join_next().await {
                 match joined {
                     Ok(capture) => {
+                        search_ledger_burnable &= capture.ledger_burnable;
                         search_provider_identity.extend(capture.provider_identity);
                         search_route_proposals.extend(capture.route_proposals);
                     }
-                    Err(error) => warn!("identity search fallback task failed: {error}"),
+                    Err(error) => {
+                        search_ledger_burnable = false;
+                        warn!("identity search fallback task failed: {error}");
+                    }
                 }
             }
         }
@@ -863,6 +901,8 @@ where
             merge_eligible,
             deferred,
             provider_chase_attempted,
+            search_leg_fired,
+            search_ledger_burnable,
             search_provider_identity,
             search_route_proposals,
         })
@@ -873,6 +913,25 @@ impl<DB> DefaultProviderQueue<DB>
 where
     DB: ProviderRetryStateDb + ProviderResponseCacheDb + Send + Sync + 'static,
 {
+    /// Snapshot the exact REQ-027 search fireability facts used by dispatch.
+    /// Credential-backed clients evaluate their live configuration on every
+    /// call, so the selector shares dispatch's authoring rule instead of asking
+    /// persistence to infer fireability from route shape.
+    pub fn identity_search_availability(
+        &self,
+    ) -> livrarr_domain::services::IdentitySearchAvailability {
+        let available = |provider| {
+            self.providers
+                .get(&provider)
+                .is_some_and(|entry| entry.client.identity_search_available())
+        };
+        livrarr_domain::services::IdentitySearchAvailability {
+            open_library: available(MetadataProvider::OpenLibrary),
+            goodreads: available(MetadataProvider::Goodreads),
+            hardcover: available(MetadataProvider::Hardcover),
+        }
+    }
+
     /// REQ-009: consult the persistent provider-response cache for a fresh
     /// (age < `cache_ttl`) success payload. `None` on any miss — no row, a
     /// stale row, a DB read error, or a payload that fails to deserialize.
@@ -1087,22 +1146,83 @@ mod identity_route_dispatch_tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use livrarr_db::{AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, UserDb, WorkDb};
+    use livrarr_db::{
+        AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, ProviderRetryStateDb, UserDb, WorkDb,
+    };
     use livrarr_domain::identity_layer::{
         EvidenceProvenance, IdentityProvider, IdentityTitleTuple, RouteKind, RouteOwner,
         RouteProvenance, SettlementCommit, WorkContributor, WorkIdentityRepository, WorkRoute,
         WorkRouteState,
     };
+    use livrarr_domain::services::{CallOutcomeClass, ProviderCallRecord, ProviderCallSink};
     use livrarr_domain::{Freshness, MetadataProvider, RequestPriority, UserRole};
     use livrarr_external_data::{ProviderClient, ProviderOutcome, StubProviderClient};
 
-    use crate::provider_queue::DefaultProviderQueueBuilder;
+    use crate::provider_queue::{derive_route_anchor_query, DefaultProviderQueueBuilder};
     use crate::{EnrichmentContext, EnrichmentMode, ProviderQueue, ProviderQueueConfig};
 
-    // Bug reproduction: identity-layer-rewrite — post-F2 Works carry provider
-    // routes only in identity_routes; live dispatch must not require works.gr_key.
+    #[derive(Default)]
+    struct RecordingCallSink(std::sync::Mutex<Vec<ProviderCallRecord>>);
+
+    impl ProviderCallSink for RecordingCallSink {
+        fn record(&self, record: ProviderCallRecord) {
+            self.0.lock().expect("call sink lock").push(record);
+        }
+    }
+
+    #[test]
+    fn goodreads_route_namespaces_derive_only_book_edition_anchors() {
+        let route = |kind, owner| WorkRoute {
+            id: 1,
+            user_id: 1,
+            owner,
+            resolved_work_id: 1,
+            provider: IdentityProvider::Goodreads,
+            kind,
+            provider_scoped_id: "12345".to_string(),
+            state: WorkRouteState::Active,
+            provenance: RouteProvenance::UserChoice,
+            user_confirmed: true,
+            observed_at: Utc::now(),
+        };
+
+        // Bug reproduction: identity-layer-rewrite — Goodreads Work ids and
+        // BookEdition ids are disjoint numeric namespaces. A Work id must
+        // never become the key in `/book/show/<key>`.
+        assert_eq!(
+            derive_route_anchor_query(
+                MetadataProvider::Goodreads,
+                &[route(RouteKind::GoodreadsWork, RouteOwner::Work(1))],
+            ),
+            None,
+        );
+        let edition_anchor = derive_route_anchor_query(
+            MetadataProvider::Goodreads,
+            &[route(
+                RouteKind::GoodreadsBookEdition,
+                RouteOwner::Edition(1),
+            )],
+        );
+        assert_eq!(
+            edition_anchor,
+            Some(livrarr_domain::AnchorQuery::GrKey("12345".to_string())),
+        );
+        let Some(livrarr_domain::AnchorQuery::GrKey(book_id)) = edition_anchor else {
+            panic!("Goodreads BookEdition must derive a GrKey");
+        };
+        assert_eq!(
+            livrarr_external_data::goodreads::detail_url_for_gr_key(
+                "https://www.goodreads.com",
+                &book_id,
+            ),
+            "https://www.goodreads.com/book/show/12345",
+        );
+    }
+
+    // Bug reproduction: identity-layer-rewrite — a Work-namespace Goodreads
+    // route is connected identity evidence, but it is not a fetchable Book id.
     #[tokio::test]
-    async fn post_f2_goodreads_route_dispatches_without_legacy_scalar() {
+    async fn post_f2_goodreads_work_route_is_gr_quiet_without_legacy_scalar() {
         let db = livrarr_db::create_test_db().await;
         let user_id = db
             .create_user(CreateUserDbRequest {
@@ -1176,8 +1296,10 @@ mod identity_route_dispatch_tests {
         assert_eq!(work.gr_key, None, "fixture must have no legacy GR scalar");
 
         let stub = StubProviderClient::new(MetadataProvider::Goodreads, ProviderOutcome::NotFound);
+        let call_sink = Arc::new(RecordingCallSink::default());
         let queue = DefaultProviderQueueBuilder::new()
             .with_identity_route_dispatch()
+            .with_call_sink(call_sink.clone())
             .add_provider(
                 MetadataProvider::Goodreads,
                 ProviderClient::Stub(stub.clone()),
@@ -1186,7 +1308,7 @@ mod identity_route_dispatch_tests {
                     max_attempts: 1,
                 },
             )
-            .build(Arc::new(db));
+            .build(Arc::new(db.clone()));
         let result = queue
             .dispatch_enrichment(
                 &work,
@@ -1194,16 +1316,38 @@ mod identity_route_dispatch_tests {
                     priority: RequestPriority::Normal,
                     mode: EnrichmentMode::Manual,
                     freshness: Freshness::Bypass,
+                    search_only: false,
                 },
             )
             .await
             .expect("dispatch from captured route");
 
-        assert_eq!(stub.call_count(), 1, "captured GR route must dispatch once");
+        assert_eq!(
+            stub.call_count(),
+            0,
+            "a GR Work id must not be fetched as a Book id"
+        );
+        assert!(
+            !result.provider_chase_attempted,
+            "an anchorless skip must not burn the machine-chase ledger"
+        );
         assert!(matches!(
             result.outcomes.get(&MetadataProvider::Goodreads),
             Some(ProviderOutcome::NotFound)
         ));
+        {
+            let records = call_sink.0.lock().expect("call sink lock");
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].provider, "goodreads");
+            assert_eq!(records[0].outcome, CallOutcomeClass::SkippedNoAnchor);
+        }
+        assert!(
+            db.get_retry_state(user_id, work.id, MetadataProvider::Goodreads)
+                .await
+                .expect("read provider standing")
+                .is_none(),
+            "an anchorless skip must not create not_found standing"
+        );
     }
 }
 
@@ -1302,6 +1446,7 @@ mod circuit_open_budget_tests {
             priority: RequestPriority::Normal,
             mode: EnrichmentMode::Background,
             freshness: Freshness::PreferCache,
+            search_only: false,
         };
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
         let outcome = result.outcomes.get(&MetadataProvider::OpenLibrary).unwrap();
@@ -1374,6 +1519,7 @@ mod circuit_open_budget_tests {
             priority: RequestPriority::Normal,
             mode: EnrichmentMode::Background,
             freshness: Freshness::PreferCache,
+            search_only: false,
         };
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
         let outcome = result.outcomes.get(&MetadataProvider::OpenLibrary).unwrap();

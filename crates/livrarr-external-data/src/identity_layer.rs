@@ -139,9 +139,10 @@ fn route_query(route: &WorkRoute) -> Result<AnchorQuery, ProviderEvidenceError> 
     }
     match route.kind {
         RouteKind::OpenLibraryWork => Ok(AnchorQuery::OlKey(value.to_string())),
-        RouteKind::GoodreadsWork | RouteKind::GoodreadsBookEdition => {
-            Ok(AnchorQuery::GrKey(value.to_string()))
-        }
+        RouteKind::GoodreadsBookEdition => Ok(AnchorQuery::GrKey(value.to_string())),
+        RouteKind::GoodreadsWork => Err(ProviderEvidenceError::Permanent(
+            "goodreads_work_route_not_fetchable".to_string(),
+        )),
         RouteKind::HardcoverWork => Ok(AnchorQuery::HcKey(value.to_string())),
         RouteKind::Isbn13Edition => Ok(AnchorQuery::Isbn13(value.to_string())),
         RouteKind::AsinEdition => Ok(AnchorQuery::Asin(value.to_string())),
@@ -156,10 +157,9 @@ fn client_serves_route(provider: MetadataProvider, route: &WorkRoute) -> bool {
         (IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork) => {
             provider == MetadataProvider::OpenLibrary
         }
-        (
-            IdentityProvider::Goodreads,
-            RouteKind::GoodreadsWork | RouteKind::GoodreadsBookEdition,
-        ) => provider == MetadataProvider::Goodreads,
+        (IdentityProvider::Goodreads, RouteKind::GoodreadsBookEdition) => {
+            provider == MetadataProvider::Goodreads
+        }
         (IdentityProvider::Hardcover, RouteKind::HardcoverWork) => {
             provider == MetadataProvider::Hardcover
         }
@@ -353,6 +353,9 @@ fn capture_goodreads_work_route(
         .filter(|value| value != &fetched_page.book_id)
         .ok_or_else(|| ProviderEvidenceError::LayoutDrift("invalid_work_legacy_id".to_string()))?;
 
+    // The Apollo Book record's `work.__ref` resolves to a distinct Work
+    // entity; this `legacyId` is therefore provably Work-namespace evidence,
+    // unlike the fetched Book record's legacyId checked above.
     Ok(Some(ProviderRouteEvidence {
         provider: IdentityProvider::Goodreads,
         kind: RouteKind::GoodreadsWork,

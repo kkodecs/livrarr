@@ -47,6 +47,11 @@ PO); adds the PendingRoute card lifecycle rules (decision-time generation, satis
 card cancellation — the sibling-card staleness defect found live), the REQ-014
 Goodreads cover-source containment (GR layout drift broke cover-image extraction,
 verified live), and AC-025. AC-024(b)/(c) fixtures move to near-miss shapes.
+v11 (2026-08-20, PO live order after the work-74 starvation): REQ-027
+eligibility becomes per-provider — a search-capable provider lacking its own
+work-level route fires the leg; one provider's id no longer disables
+completion for the others. One per-work ledger; AC-026 added. Shipped without
+its own spec review round (flagged, as v8–v10).
 
 ## 0a. Design Principles
 
@@ -317,10 +322,13 @@ the fix in F1; the works side, and the seams that join the two, are this feature
   (P4) — never a silent guess, never a title-keyword heuristic. Until
   ST-006(e) is captured, review is the only classification path.
 - **REQ-027**: Machine search fallback (v8 amendment; PO-initiated,
-  2026-08-18). Scope precondition: a work whose active route graph holds NO
-  work-level route (zero active routes, or edition-scoped only). For such a
-  work, each enrichment pass adds ONE title+author search-fallback leg per
-  applicable provider whose anchor derivation is empty — OpenLibrary
+  2026-08-18). Scope precondition (v11, PER-PROVIDER — supersedes v8's
+  work-level rule): the leg is evaluated per search-capable provider. Each
+  enrichment pass adds ONE title+author search-fallback leg for every
+  applicable provider that (i) holds NO active work-level route of its own on
+  the work AND (ii) has empty anchor derivation or (v10) only anchors whose
+  durable standing is terminal `not_found` at the current generation —
+  OpenLibrary
   (`search.json`), Goodreads (`/book/auto_complete`), Hardcover (search) only;
   never Google Books, Audible, or Audnexus (FP-ST-003 providers keep
   anchor-only dispatch). The leg is a route-finding action (REQ-013's
@@ -363,14 +371,22 @@ the fix in F1; the works side, and the seams that join the two, are this feature
   route now actively owned by a different work); affirming a card whose route
   is already active on this work is a success no-op.
   Bounding: the generation-scoped machine-chase attempt ledger covers BOTH
-  no-work-route classes — the edition-only bridge (already selectable) and the
-  not-connected minimum work, which this REQ makes cadence-selectable for the
-  search leg only. A pass ending in (c) or (d) burns one attempt; (a) and (b)
-  do not. At threshold the work leaves automatic selection until its identity
-  generation changes. Works holding ANY work-level route never fire a search
-  leg (cross-provider completion stays payload-evidence-driven), and
-  applicability filtering is unchanged (a foreign work fires only Goodreads'
-  leg). A provider may spend at most one corroboration probe per leg, riding
+  search-leg classes — the edition-only bridge (already selectable), the
+  not-connected minimum work, and (v11) the connected work with at least one
+  eligible search-capable provider — the latter two become cadence-selectable
+  for the search leg only. ONE per-work generation-scoped ledger, not
+  per-provider: a pass that fired at least one leg and ended every fired leg
+  in (c) or (d) burns one attempt; a pass reaching any (a) or (b) burns none.
+  At threshold the work leaves automatic selection until its identity
+  generation changes. A provider already holding an active work-level route
+  on the work never fires its own leg; on connected works, outcome (a)'s
+  corroboration draws on the work's full active edition-id set, and another
+  provider's work-level route is corroboration-neutral (neither confirms nor
+  vetoes — P6 unchanged). Applicability filtering is unchanged (a foreign
+  work fires only Goodreads' leg). [v8's "works holding ANY work-level route
+  never fire a search leg" is SUPERSEDED — PO live decision 2026-08-20 after
+  the work-74 starvation: one provider's id disabled completion for every
+  other provider.] A provider may spend at most one corroboration probe per leg, riding
   its existing fetch machinery and rate bucket; an id already present in a
   search/autocomplete response is never re-requested (FP-ST-002). Search legs
   do not read or write the provider-response cache. REQ-013's manual search is
@@ -827,3 +843,15 @@ design; none exist yet.
 - [ ] **AC-023** (REQ-026): Post-migration, every pre-existing provider id is present as a route OF THE MAPPED KIND (`gr_key` asserted an edition-id route, `ol_key`/`hc_key` work-id, `isbn_13`/`asin` edition-id), and every edition-scoped value is OWNED by an edition row linked to its work — grouped only where co-edition evidence existed, else separate provisional editions. An ISBN-only and an ASIN-only row with no direct format evidence both migrate as format-unknown/language-absent (no inference by id kind), project their routes, supply no per-format default/cover, and sort last for display; an attached cover is retained and appears in the single work-scoped format-needed panel while a target slot is uncovered, later direct evidence resolves format and reruns every slot, while contradictory evidence creates the REQ-005 review state. Legacy-title fixtures with structured subtitle present/absent produce REQ-003's exact identity tuple and preserve provenance; display projection is computed separately. A blank/invalid main blocks index installation with the original record/key intact until user repair and successful retry. Two rehearsals over identical inputs produce byte-identical tuples, text distinctions, and uniqueness keys; changing only an edition subtitle projection changes none of them. Badge states match REQ-012's rule for every legacy state × route combination (incl. the setter=user → user-confirmed-with-route invariant); convergence schedules are preserved; each of the four per-media-type monitoring combinations survives unchanged; the rehearsal ran on a snapshot first and its report is on record.
 - [ ] **AC-024** (REQ-027): Against the activated schema through the real convergence tick: (a) an ASIN-only bridge work whose scripted OpenLibrary search response carries its ASIN in `id_amazon` ends one tick with an active `OpenLibraryWork` route, a settlement audit naming search-fallback and the corroborating kind, generation advanced, and ZERO ledger burn; (b) the same shape whose response omits the work's ids (and includes a DIFFERENT ASIN, pinning no-veto) with a NEAR-MISS pick (author verdict Abstain — v9) writes no route, mints exactly one `PendingRoute` card carrying the proposed route, and burns one attempt — a second tick reuses that card (still one) and burns again, and at threshold the work stops being selected; (c) a not-connected title+author-only work is cadence-selected, a near-miss Goodreads autocomplete pick (`workId` taken from the response, no extra request for it; author Abstain — v9) mints the card, and affirming through the real resolve continuation settles the `GoodreadsWork` route and flips the badge to connected; (d) a work holding any work-level route fires zero search requests, and a foreign-language work fires only the Goodreads leg; (e) a Goodreads probe corroboration (book page carrying the work's ASIN) settles both the work route and the edition-homed book-id evidence, with no request issued solely to re-learn an id already present in a prior response.
 - [ ] **AC-025** (REQ-027 v9 + REQ-014 containment): (a) auto-link — an ASIN-only work whose single scripted search candidate is Same-title + author-Agree with NO corroborating id settles the work route machine-alone with a text-decisive audit/provenance distinct from corroborated, generation advanced, no card, no burn; (b) the boundary holds — author-Abstain cards, and two candidates proposing DIFFERENT work ids at Same+Agree card, and the decision function lives in the matching authority; (c) sibling-card staleness dead — a work with TWO pending route cards affirms one through the real door (route settles, generation moves), then affirms the second successfully; listing after the first shows the current actionable generation; (d) satisfied cancellation — a settlement activating a route proposed by a pending card cancels that card in the same transaction, and affirming an already-active proposal is a success no-op while a route now owned by a DIFFERENT work returns the specific 409; (e) the parked-ledger heal — marker-gated, deletes machine-chase attempts ONLY for works with no active work-level route, exact counts, second run zero; (f) cover containment — Goodreads absent from cover candidate assembly; the one-shot heal re-selects every machine-selected GR-sourced ebook/audiobook cover slot (manual covers byte-untouched), falling to the next rank or the honest placeholder, and forces re-materialization of changed slots.
+- [ ] **AC-026** (REQ-027 v11 per-provider eligibility): against the activated
+  schema through the real convergence tick: (a) a connected work holding ONLY
+  an active `GoodreadsWork` route (the work-74 shape) is cadence-selected and
+  fires OpenLibrary and Hardcover search legs; a scripted OL Same+Agree
+  candidate auto-links `OpenLibraryWork` ALONGSIDE the existing Goodreads
+  route, generation advanced, no burn; (b) a provider holding an active
+  work-level route on the work fires ZERO search HTTP of its own, pinned for
+  all three search-capable providers; (c) a pass whose fired legs all miss
+  burns exactly one attempt on the ONE per-work ledger, and at threshold the
+  connected work leaves automatic selection until its identity generation
+  changes; (d) applicability holds — a foreign connected work fires only the
+  Goodreads leg.

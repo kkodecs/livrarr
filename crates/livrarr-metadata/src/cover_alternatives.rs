@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use livrarr_domain::identity_layer::WorkRoute;
 use livrarr_domain::services::HttpFetcher;
 use livrarr_domain::{
     CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider,
@@ -60,6 +61,7 @@ fn media_type_for_provider(provider: MetadataProvider) -> CoverMediaType {
 
 pub async fn fetch_internal_alternatives<F: HttpFetcher>(
     work: &Work,
+    routes: &[WorkRoute],
     clients: &HashMap<MetadataProvider, ProviderClient>,
     http: &F,
 ) -> Vec<InternalCoverCandidate> {
@@ -78,7 +80,7 @@ pub async fn fetch_internal_alternatives<F: HttpFetcher>(
                 // an unverified High.
                 let result = tokio::time::timeout(
                     ALTERNATIVE_FETCH_TIMEOUT,
-                    client.fetch(&work_clone, RequestPriority::Normal),
+                    client.fetch_for_cover(&work_clone, routes, RequestPriority::Normal),
                 )
                 .await;
                 match result {

@@ -15,6 +15,42 @@ pub enum EnrichmentMode {
     HardRefresh,
 }
 
+/// Live availability of the three REQ-027 title+author route-search legs.
+///
+/// The provider queue authors these facts from its registered clients and
+/// current credential configuration. Persistence consumes them as query bind
+/// parameters; SQL must never infer runtime provider fireability from schema
+/// shape alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentitySearchAvailability {
+    pub open_library: bool,
+    pub goodreads: bool,
+    pub hardcover: bool,
+}
+
+impl IdentitySearchAvailability {
+    /// Compatibility value for callers that predate live availability binding.
+    pub const fn all() -> Self {
+        Self {
+            open_library: true,
+            goodreads: true,
+            hardcover: true,
+        }
+    }
+}
+
+/// Evidence-only result of a connected Work's REQ-027 search entrance.
+/// Anchored enrichment payloads and metadata merge state are deliberately
+/// absent: this result can only feed the identity-road handoff and chase ledger.
+#[derive(Debug, Clone, Default)]
+pub struct IdentityRouteSearchResult {
+    pub captured_provider_identity: Vec<crate::identity_layer::ProviderIdentityEvidence>,
+    pub captured_route_proposals: Vec<crate::identity_layer::RouteKey>,
+    pub provider_chase_attempted: bool,
+    pub search_leg_fired: bool,
+    pub search_ledger_burnable: bool,
+}
+
 #[derive(Debug)]
 pub struct EnrichmentResult {
     pub enrichment_status: EnrichmentStatus,
@@ -44,6 +80,12 @@ pub struct EnrichmentResult {
     pub captured_route_proposals: Vec<crate::identity_layer::RouteKey>,
     /// Honest provider chase marker (skips and source-only merges are false).
     pub provider_chase_attempted: bool,
+    /// REQ-027 v11 ledger discriminator. True only when at least one
+    /// title+author route-search leg was actually spawned in this pass.
+    pub search_leg_fired: bool,
+    /// True only when every spawned route-search leg concluded with an honest
+    /// miss or proposal card, making the shared generation ledger burnable.
+    pub search_ledger_burnable: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -86,6 +128,21 @@ pub trait EnrichmentWorkflow: Send + Sync {
         priority: RequestPriority,
         freshness: crate::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentWorkflowError>;
+
+    /// Run only REQ-027 route-search legs for an enrichment-complete connected
+    /// Work. The production workflow overrides this evidence-only default;
+    /// doubles without a provider registry truthfully report that no leg fired.
+    fn search_work_routes(
+        &self,
+        user_id: crate::UserId,
+        work_id: WorkId,
+        priority: RequestPriority,
+    ) -> impl std::future::Future<Output = Result<IdentityRouteSearchResult, EnrichmentWorkflowError>>
+           + Send {
+        let _ = (user_id, work_id, priority);
+        async move { Ok(IdentityRouteSearchResult::default()) }
+    }
+
     async fn reset_for_manual_refresh(
         &self,
         user_id: crate::UserId,

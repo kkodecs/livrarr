@@ -44,6 +44,7 @@ fn context() -> EnrichmentContext {
         priority: RequestPriority::High,
         mode: EnrichmentMode::Manual,
         freshness: livrarr_domain::Freshness::PreferCache,
+        search_only: false,
     }
 }
 

@@ -54,6 +54,8 @@ impl EnrichmentService for SuccessEnrichment {
             captured_provider_identity: Vec::new(),
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
         })
     }
     async fn reset_for_manual_refresh(
@@ -99,6 +101,8 @@ impl EnrichmentService for DeferredEnrichment {
             captured_provider_identity: Vec::new(),
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
         })
     }
     async fn reset_for_manual_refresh(
@@ -144,6 +148,8 @@ impl EnrichmentService for FailedEnrichment {
             captured_provider_identity: Vec::new(),
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
         })
     }
     async fn reset_for_manual_refresh(

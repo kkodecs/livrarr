@@ -1073,3 +1073,11 @@ Updated insights 5 and 37, `crates/db.md`, and the key decisions: all `livrarr-d
 
 ## 2026-08-18 — identity-layer-rewrite round 18 (route-generation standing)
 - insights.md: corrected insight 95's unsupported re-key-reset claim. Provider standing now survives ordinary convergence, manual Refresh clears it unconditionally, and settlement/certified-edit transactions clear it only when the active route graph changes; same-anchor `not_found` remains durable. Conflict-card loading/error headlines now stay plain-language, and a real-tick delete probe binds the `will_retry` no-reset invariant.
+
+## [2026-08-20] update | Goodreads identifier authority and failure specimens
+
+Updated `integrations/goodreads.md`, the index entry, and added insight 96. Goodreads Work ids are now recorded as non-fetchable identity evidence rather than reinterpreted as Book-page ids; only BookEdition routes may address `/book/show`. Unreadable detail responses retain an exact, local, newest-ten raw-body specimen through an optional production-only capture path whose failures cannot alter provider control flow. Source: identity-layer-rewrite PACKET-FIX-ROUND19 T-1/T-2 red/green regressions.
+
+## [2026-08-20] update | Goodreads Book-page authority completed across consumer doors
+
+Updated `integrations/goodreads.md` and insight 96. Settled-work author linking now projects only BookEdition routes; cover alternatives and selection receive the active route graph explicitly; generic Goodreads Work fetches no longer read the frozen `works.gr_key` mirror. Work-only routes therefore cannot address `/book/show`, while BookEdition routes remain exact direct anchors. Concurrent capture pruners now treat an already-removed file as benign and the next write reconverges retention to ten. Source: identity-layer-rewrite PACKET-FIX-ROUND20 T-1/T-2 red/green regressions.

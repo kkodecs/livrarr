@@ -7,6 +7,7 @@ use sha2::Sha256;
 
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::WorkDb;
+use livrarr_domain::identity_layer::{IdentityRepositoryError, WorkIdentityRepository, WorkRoute};
 use livrarr_domain::services::CoverServiceError;
 use livrarr_domain::{
     CoverCandidate, CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider,
@@ -42,6 +43,21 @@ impl LiveCoverService {
             clients,
             hmac_key,
             data_dir,
+        }
+    }
+
+    async fn active_routes_for_cover(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> Result<Vec<WorkRoute>, CoverServiceError> {
+        match self.db.read_captured_identity(user_id, work_id).await {
+            Ok(identity) => Ok(identity.active_routes),
+            // Presentation remains available when a related Author row is
+            // missing; without a readable graph, provider clients use their
+            // candidate-text path rather than a frozen scalar fallback.
+            Err(IdentityRepositoryError::NotFound) => Ok(Vec::new()),
+            Err(error) => Err(CoverServiceError::Internal(error.to_string())),
         }
     }
 }
@@ -148,9 +164,11 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             .get_work(user_id, work_id)
             .await
             .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
+        let routes = self.active_routes_for_cover(user_id, work_id).await?;
 
         let internals = livrarr_metadata::cover_alternatives::fetch_internal_alternatives(
             &work,
+            &routes,
             &self.clients,
             &self.http_fetcher,
         )
@@ -189,12 +207,14 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
 
         // Resolve the cover URL based on source type
         let url = match &source {
-            CoverCandidateSource::Provider(provider) => self
-                .resolve_provider_url(*provider, &work)
-                .await?
-                .ok_or_else(|| {
-                    CoverServiceError::Internal("provider returned no cover URL".into())
-                })?,
+            CoverCandidateSource::Provider(provider) => {
+                let routes = self.active_routes_for_cover(user_id, work_id).await?;
+                self.resolve_provider_url(*provider, &work, &routes)
+                    .await?
+                    .ok_or_else(|| {
+                        CoverServiceError::Internal("provider returned no cover URL".into())
+                    })?
+            }
             CoverCandidateSource::IsbnOl => livrarr_metadata::cover::resolve_cover_english(
                 &self.http_fetcher,
                 work.isbn_13.as_deref(),
@@ -288,6 +308,7 @@ impl LiveCoverService {
         &self,
         provider: MetadataProvider,
         work: &Work,
+        routes: &[WorkRoute],
     ) -> Result<Option<String>, CoverServiceError> {
         let client = self.clients.get(&provider).ok_or_else(|| {
             CoverServiceError::Internal(format!("no client for provider {provider:?}"))
@@ -295,7 +316,7 @@ impl LiveCoverService {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            client.fetch(work, livrarr_domain::RequestPriority::Normal),
+            client.fetch_for_cover(work, routes, livrarr_domain::RequestPriority::Normal),
         )
         .await
         .map_err(|_| CoverServiceError::Internal("provider timeout".into()))?;

@@ -313,6 +313,12 @@ pub struct ConvergencePass {
     /// True only when at least one provider anchor was actually dispatched or
     /// served from the provider-response cache during this pass.
     pub provider_chase_attempted: bool,
+    /// True only when at least one REQ-027 title+author search leg fired.
+    /// Kept separate from ordinary anchor fetches for the shared Work ledger.
+    pub search_leg_fired: bool,
+    /// True only when every fired search leg concluded in card/miss rather
+    /// than a provider/transport failure or a settlement.
+    pub search_ledger_burnable: bool,
 }
 
 /// Surface that triggered a [`WorkService::refresh`] call. `Interactive` — a
@@ -516,6 +522,8 @@ pub trait WorkService: Send + Sync {
                 outcome,
                 route_handoff: None,
                 provider_chase_attempted: false,
+                search_leg_fired: false,
+                search_ledger_burnable: false,
             })
         }
     }

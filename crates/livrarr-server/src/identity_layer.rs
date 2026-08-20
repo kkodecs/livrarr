@@ -468,7 +468,13 @@ pub async fn run_identity_convergence_tick(
         }
         let due = match state
             .db
-            .list_convergence_due(user.id, chrono::Utc::now(), threshold, batch)
+            .list_convergence_due_with_search_availability(
+                user.id,
+                chrono::Utc::now(),
+                threshold,
+                batch,
+                state.provider_queue.identity_search_availability(),
+            )
             .await
         {
             Ok(due) => due,
@@ -539,45 +545,58 @@ pub async fn run_identity_convergence_tick(
             }
             let bridge_attempt = if pass.provider_chase_attempted && !found_fresh_route {
                 match state.db.read_captured_identity(user.id, work_id).await {
-                    Ok(after)
-                        if !after.active_routes.iter().any(|route| {
+                    Ok(after) => {
+                        let has_work_route = after.active_routes.iter().any(|route| {
                             matches!(
                                 route.kind,
                                 livrarr_domain::identity_layer::RouteKind::OpenLibraryWork
                                     | livrarr_domain::identity_layer::RouteKind::GoodreadsWork
                                     | livrarr_domain::identity_layer::RouteKind::HardcoverWork
                             )
-                        }) =>
-                    {
-                        match state
-                            .db
-                            .record_identity_convergence_attempt(
-                                user.id,
-                                work_id,
-                                after.identity_generation,
-                            )
-                            .await
-                        {
-                            Ok(attempt) => Some(attempt),
-                            Err(error) => {
-                                tracing::warn!(
-                                    user_id = user.id,
+                        });
+                        // REQ-027 v11 uses one per-Work generation ledger. A
+                        // fired search pass burns once when every leg cards or
+                        // misses even if another provider already owns a Work
+                        // route. A provider/transport failure makes that search
+                        // pass non-burnable. The legacy edition-only bridge still
+                        // burns only while the Work has no Work-level route at all.
+                        let should_burn = if pass.search_leg_fired {
+                            pass.search_ledger_burnable
+                        } else {
+                            !has_work_route
+                        };
+                        if !should_burn {
+                            None
+                        } else {
+                            match state
+                                .db
+                                .record_identity_convergence_attempt(
+                                    user.id,
                                     work_id,
-                                    "convergence attempt checkpoint failed: {error}"
-                                );
-                                let _ = state
-                                    .db
-                                    .set_next_convergence_at(
-                                        user.id,
+                                    after.identity_generation,
+                                )
+                                .await
+                            {
+                                Ok(attempt) => Some(attempt),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        user_id = user.id,
                                         work_id,
-                                        Some(chrono::Utc::now() + cadence),
-                                    )
-                                    .await;
-                                continue;
+                                        "convergence attempt checkpoint failed: {error}"
+                                    );
+                                    let _ = state
+                                        .db
+                                        .set_next_convergence_at(
+                                            user.id,
+                                            work_id,
+                                            Some(chrono::Utc::now() + cadence),
+                                        )
+                                        .await;
+                                    continue;
+                                }
                             }
                         }
                     }
-                    Ok(_) => None,
                     Err(error) => {
                         tracing::warn!(
                             user_id = user.id,

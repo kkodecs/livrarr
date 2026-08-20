@@ -747,7 +747,7 @@ const SETTLED_WORK_V2_SQL: &str = "SELECT w.id, w.title, 'confirmed' AS identity
           AND r.kind='\"OpenLibraryWork\"' AND r.state='active' LIMIT 1) AS ol_key, \
         (SELECT r.provider_scoped_id FROM identity_routes r WHERE r.user_id=w.user_id \
           AND r.resolved_work_id=w.id AND r.provider='\"Goodreads\"' \
-          AND r.kind='\"GoodreadsWork\"' AND r.state='active' LIMIT 1) AS gr_key, \
+          AND r.kind='\"GoodreadsBookEdition\"' AND r.state='active' LIMIT 1) AS gr_key, \
         (SELECT r.provider_scoped_id FROM identity_routes r WHERE r.user_id=w.user_id \
           AND r.resolved_work_id=w.id AND r.provider='\"Hardcover\"' \
           AND r.kind='\"HardcoverWork\"' AND r.state='active' LIMIT 1) AS hc_key \

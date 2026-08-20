@@ -242,7 +242,6 @@ fn is_declared_fetch_route(provider: &IdentityProvider, kind: &RouteKind) -> boo
     matches!(
         (provider, kind),
         (IdentityProvider::OpenLibrary, RouteKind::OpenLibraryWork)
-            | (IdentityProvider::Goodreads, RouteKind::GoodreadsWork)
             | (IdentityProvider::Goodreads, RouteKind::GoodreadsBookEdition)
             | (IdentityProvider::Hardcover, RouteKind::HardcoverWork)
             | (IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition)

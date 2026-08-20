@@ -265,9 +265,12 @@ where
                         )
                     }),
                     captured.gr_key.as_ref().map(|value| {
+                        // List rows expose the legacy `gr_key` Book-page id.
+                        // Unknown historical sources are classified
+                        // conservatively as edition-scoped, never as workId.
                         (
                             ilr::IdentityProvider::Goodreads,
-                            ilr::RouteKind::GoodreadsWork,
+                            ilr::RouteKind::GoodreadsBookEdition,
                             value,
                         )
                     }),

@@ -1959,6 +1959,29 @@ mod tests {
         );
     }
 
+    // Bug reproduction: the author-link road must hand the Goodreads adapter
+    // a BookEdition id. Once projected, that id is the exact `/book/show/`
+    // target; a Goodreads Work id must never be substituted here.
+    #[tokio::test]
+    async fn goodreads_author_link_requests_the_projected_book_edition_id_exactly() {
+        let _guard = lock_breaker(RateBucket::Goodreads).await;
+        let page = goodreads_page(
+            r#""primaryContributorEdge":{"node":{"__ref":"Contributor:kca://author/1"},"role":"Author"}"#,
+        );
+        let fetcher = queued(vec![ok(&page)]);
+        let client = goodreads(fetcher.clone());
+
+        let refs = client
+            .fetch_work_authors("12345".to_string(), RequestPriority::Low)
+            .await
+            .expect("Goodreads contributor read from the projected BookEdition route");
+
+        assert_eq!(refs.len(), 1);
+        let requests = fetcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://www.goodreads.com/book/show/12345");
+    }
+
     /// An edge with no role said nothing about the credit. Dropping it is the
     /// only reading that cannot invent an author.
     #[tokio::test]

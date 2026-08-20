@@ -45,7 +45,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [Google Books](integrations/google-books.md) — API key, 1000/day quota, fields= and gzip, no contribution path
 - [Hardcover](integrations/hardcover.md) — 60/min, GraphQL depth ≤ 3, per-user token, beta API may break
 - [Audnexus](integrations/audnexus.md) — 300/min rate limit, 24h cache + 304 revalidation, self-hostable as fallback
-- [Goodreads](integrations/goodreads.md) — no API since 2020 (scraping); DataDome anti-bot; **we're currently 5-7x over the polite rate floor**
+- [Goodreads](integrations/goodreads.md) — public-page scraping, disjoint Book/Work id namespaces, bounded unreadable-detail captures, and DataDome constraints
 
 ## Deployment
 
@@ -57,5 +57,5 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Quick Reference
 
-- [Insights](insights.md) — 95 active learnings for every session
+- [Insights](insights.md) — 96 active learnings for every session
 - [Log](log.md) — wiki change log

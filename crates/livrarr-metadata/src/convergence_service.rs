@@ -66,12 +66,49 @@ where
                     | livrarr_domain::identity_layer::RouteKind::HardcoverWork
             )
         });
+        let has_route = |kind: livrarr_domain::identity_layer::RouteKind| {
+            captured
+                .active_routes
+                .iter()
+                .any(|route| route.kind == kind)
+        };
+        let normalized_language = work
+            .language
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let english_applicability =
+            matches!(normalized_language.as_str(), "" | "en" | "eng" | "english")
+                || normalized_language.starts_with("en-")
+                || normalized_language.starts_with("en_");
+        // REQ-027 v11 search-only visit: another provider's Work route no
+        // longer makes a connected/enriched Work a convergence no-op. The
+        // queue remains the authority for anchor standing and configured
+        // search availability; this gate merely ensures it is invoked.
+        let provider_search_chaseable =
+            !has_route(livrarr_domain::identity_layer::RouteKind::GoodreadsWork)
+                || (english_applicability
+                    && (!has_route(livrarr_domain::identity_layer::RouteKind::OpenLibraryWork)
+                        || !has_route(livrarr_domain::identity_layer::RouteKind::HardcoverWork)));
         let enrichment_incomplete = matches!(
             work.enrichment_status,
             EnrichmentStatus::Unenriched | EnrichmentStatus::Failed
         );
+        let search_only = !enrichment_incomplete
+            && !bridge_chaseable
+            && provider_search_chaseable
+            && source_provider_data.is_none();
         let mut enrichment_outcome = None;
-        if enrichment_incomplete || bridge_chaseable || source_provider_data.is_some() {
+        let mut search_outcome = None;
+        if search_only {
+            search_outcome = Some(
+                svc.enrichment
+                    .search_work_routes(user_id, work_id, livrarr_domain::RequestPriority::Low)
+                    .await
+                    .map_err(|error| WorkServiceError::Enrichment(error.to_string()))?,
+            );
+        } else if enrichment_incomplete || bridge_chaseable || source_provider_data.is_some() {
             // Normal convergence preserves provider retry standing. In
             // particular, spec v10 needs a prior terminal `not_found` anchor
             // to become eligible for the route-search leg on this visit.
@@ -93,11 +130,47 @@ where
             );
         }
         let after = svc.get(user_id, work_id).await?;
-        let outcome = if bridge_chaseable
+        let mut route_handoff = enrichment_outcome
+            .as_mut()
+            .and_then(|outcome| outcome.route_handoff.take());
+        if let Some(search) = search_outcome.as_mut() {
+            let fresh = std::mem::take(&mut search.captured_provider_identity)
+                .into_iter()
+                .filter(|evidence| {
+                    !captured.active_routes.iter().any(|route| {
+                        route.provider == evidence.route.provider
+                            && route.kind == evidence.route.kind
+                            && route.provider_scoped_id == evidence.route.value
+                    })
+                })
+                .collect::<Vec<_>>();
+            let route_proposals = std::mem::take(&mut search.captured_route_proposals);
+            if !fresh.is_empty() || !route_proposals.is_empty() {
+                route_handoff = Some(livrarr_domain::identity_layer::CapturedRouteHandoff {
+                    metadata_generation: captured.identity_generation,
+                    provider_identity: fresh,
+                    route_proposals,
+                });
+            }
+        }
+        let search_leg_fired = search_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.search_leg_fired)
             || enrichment_outcome
                 .as_ref()
-                .is_some_and(|o| o.route_handoff.is_some())
-        {
+                .is_some_and(|outcome| outcome.search_leg_fired);
+        let outcome = if search_only {
+            if search_leg_fired {
+                ConvergeOutcome::StillIncomplete
+            } else if matches!(
+                after.enrichment_status,
+                EnrichmentStatus::Enriched | EnrichmentStatus::Thin
+            ) {
+                ConvergeOutcome::Completed
+            } else {
+                ConvergeOutcome::StillIncomplete
+            }
+        } else if bridge_chaseable || provider_search_chaseable || route_handoff.is_some() {
             ConvergeOutcome::StillIncomplete
         } else if matches!(
             after.enrichment_status,
@@ -109,12 +182,20 @@ where
         };
         return Ok(ConvergencePass {
             outcome,
-            route_handoff: enrichment_outcome
-                .as_mut()
-                .and_then(|outcome| outcome.route_handoff.take()),
+            route_handoff,
             provider_chase_attempted: enrichment_outcome
                 .as_ref()
-                .is_some_and(|outcome| outcome.provider_chase_attempted),
+                .is_some_and(|outcome| outcome.provider_chase_attempted)
+                || search_outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.provider_chase_attempted),
+            search_leg_fired,
+            search_ledger_burnable: enrichment_outcome
+                .as_ref()
+                .is_some_and(|outcome| outcome.search_ledger_burnable)
+                || search_outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.search_ledger_burnable),
         });
     }
     let was_pending = work.identity_status == IdentityStatus::Pending;
@@ -166,6 +247,8 @@ where
             outcome: ConvergeOutcome::Terminal,
             route_handoff: None,
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
         });
     }
 
@@ -271,6 +354,8 @@ where
         outcome,
         route_handoff: None,
         provider_chase_attempted: false,
+        search_leg_fired: false,
+        search_ledger_burnable: false,
     })
 }
 

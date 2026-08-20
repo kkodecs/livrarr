@@ -5971,6 +5971,7 @@ async fn build_route_harness_with_open_library(
 struct DiscoveryTransportFixture {
     goodreads_base_url: String,
     openlibrary_base_url: String,
+    hardcover_search: bool,
     request_timeout: Duration,
     scripted_transport: Arc<
         dyn Fn(
@@ -6061,10 +6062,13 @@ async fn build_route_harness_with_provider_outcome(
         .user_agent(&user_agent)
         .build()
         .expect("LLM HTTP client");
+    let hardcover_search = discovery_transport
+        .as_ref()
+        .is_some_and(|transport| transport.hardcover_search);
     let live_metadata_config =
         livrarr_external_data::live_config::LiveMetadataConfig::new(livrarr_db::MetadataConfig {
-            hardcover_enabled: false,
-            hardcover_api_token: None,
+            hardcover_enabled: hardcover_search,
+            hardcover_api_token: hardcover_search.then(|| "round21-test-token".to_string()),
             llm_enabled: false,
             llm_provider: None,
             llm_endpoint: None,
@@ -6183,6 +6187,21 @@ async fn build_route_harness_with_provider_outcome(
                 max_attempts: 1,
             },
         );
+        if transport.hardcover_search {
+            queue_builder = queue_builder.add_provider(
+                livrarr_domain::MetadataProvider::Hardcover,
+                livrarr_external_data::ProviderClient::Hardcover(
+                    livrarr_external_data::HardcoverClient::new(
+                        http_fetcher.clone(),
+                        live_metadata_config.clone(),
+                    ),
+                ),
+                livrarr_enrichment::ProviderQueueConfig {
+                    provider: livrarr_domain::MetadataProvider::Hardcover,
+                    max_attempts: 1,
+                },
+            );
+        }
     }
     let (queue_builder, open_library_stub) = if let Some(outcome) = open_library_outcome {
         let stub = livrarr_external_data::StubProviderClient::new(
@@ -6639,6 +6658,7 @@ async fn discovery_real_route_queue_wait_budget_and_drop_observability() {
         Some(DiscoveryTransportFixture {
             goodreads_base_url: "https://goodreads.test".to_string(),
             openlibrary_base_url: "https://openlibrary.test".to_string(),
+            hardcover_search: false,
             request_timeout: Duration::from_millis(75),
             scripted_transport,
         }),
@@ -6921,6 +6941,7 @@ async fn refresh_real_route_upgrades_below_floor_cover_through_gate() {
         Some(DiscoveryTransportFixture {
             goodreads_base_url: "https://goodreads.test".to_string(),
             openlibrary_base_url: "https://openlibrary.test".to_string(),
+            hardcover_search: false,
             request_timeout: Duration::from_secs(1),
             scripted_transport,
         }),
@@ -6991,6 +7012,7 @@ async fn readarr_source_cover_reaches_the_real_import_enrichment_gate_before_ret
         Some(DiscoveryTransportFixture {
             goodreads_base_url: "https://goodreads.test".to_string(),
             openlibrary_base_url: "https://openlibrary.test".to_string(),
+            hardcover_search: false,
             request_timeout: Duration::from_secs(1),
             scripted_transport,
         }),
@@ -7268,7 +7290,7 @@ async fn red_direct_add_dedup_review_reuses_existing_work() {
     assert_eq!(proposed.title.normalized_volume, "1");
     assert!(proposed.routes.iter().any(|route| {
         route.provider == ilr::IdentityProvider::Goodreads
-            && route.kind == ilr::RouteKind::GoodreadsWork
+            && route.kind == ilr::RouteKind::GoodreadsBookEdition
             && route.provider_scoped_id == "15839976"
     }));
 
@@ -7748,8 +7770,9 @@ async fn red_live_add_fanout_routes_share_settlement() {
         harness.state.identity_road.test_recorder().outcome_snapshot(),
     );
     assert!(captured.active_routes.iter().any(|route| {
-        matches!(route.kind, ilr::RouteKind::GoodreadsWork)
+        matches!(route.kind, ilr::RouteKind::GoodreadsBookEdition)
             && route.provider_scoped_id == "15750692"
+            && matches!(route.owner, RouteOwner::Edition(_))
             && matches!(route.provenance, ilr::RouteProvenance::UserChoice)
             && route.user_confirmed
     }));
@@ -9261,16 +9284,22 @@ async fn affirm_collision_is_structured_and_writes_nothing() {
     let owner = seed_route_work(&harness, "affirm-collision-owner").await;
     let target = seed_route_work(&harness, "affirm-collision-target").await;
     let route_value = "GR-AFFIRM-COLLISION";
+    let owner_edition = harness
+        .db
+        .seed_transfer_target_for_tests(harness.user_id, owner, ilr::EditionFormat::Unknown)
+        .await
+        .expect("seed Goodreads Book owner Edition");
     sqlx::query(
         "INSERT INTO identity_routes \
             (user_id, owner_type, work_id, edition_id, resolved_work_id, provider, kind, \
              provider_scoped_id, state, provenance, user_confirmed, observed_at) \
-         VALUES (?1, 'work', ?2, NULL, ?2, ?3, ?4, ?5, 'active', ?6, 1, ?7)",
+         VALUES (?1, 'edition', NULL, ?2, ?3, ?4, ?5, ?6, 'active', ?7, 1, ?8)",
     )
     .bind(harness.user_id)
+    .bind(owner_edition)
     .bind(owner)
     .bind(serde_json::to_string(&ilr::IdentityProvider::Goodreads).unwrap())
-    .bind(serde_json::to_string(&ilr::RouteKind::GoodreadsWork).unwrap())
+    .bind(serde_json::to_string(&ilr::RouteKind::GoodreadsBookEdition).unwrap())
     .bind(route_value)
     .bind(serde_json::to_string(&ilr::RouteProvenance::UserChoice).unwrap())
     .bind(Utc::now().to_rfc3339())
@@ -9908,7 +9937,9 @@ async fn red_missing_composition(contract: CompositionContract) {
             .await
             .expect("read productive ListImport identity graph");
             assert!(list_identity.active_routes.iter().any(|route| {
-                route.kind == ilr::RouteKind::GoodreadsWork && route.provider_scoped_id == "81234"
+                route.kind == ilr::RouteKind::GoodreadsBookEdition
+                    && route.provider_scoped_id == "81234"
+                    && matches!(route.owner, RouteOwner::Edition(_))
             }));
             assert_eq!(list_generation, 1);
             let list_audits: i64 = sqlx::query_scalar(
@@ -10461,7 +10492,11 @@ async fn red_missing_composition(contract: CompositionContract) {
             let db = create_test_db().await;
             let mut snapshot = identity(1, 1);
             snapshot.active_routes = vec![
-                route(ilr::RouteKind::GoodreadsWork, "10884", RouteOwner::Work(1)),
+                route(
+                    ilr::RouteKind::GoodreadsBookEdition,
+                    "10884",
+                    RouteOwner::Edition(1),
+                ),
                 route(
                     ilr::RouteKind::Undeclared {
                         provider_kind: "future-kind".to_string(),
@@ -10482,7 +10517,7 @@ async fn red_missing_composition(contract: CompositionContract) {
             assert!(plan.manual_search_only);
             assert!(matches!(
                 plan.provider_calls[0].route.kind,
-                ilr::RouteKind::GoodreadsWork
+                ilr::RouteKind::GoodreadsBookEdition
             ));
         }
         CompositionContract::FetchRouteMatrix => {
@@ -10493,29 +10528,34 @@ async fn red_missing_composition(contract: CompositionContract) {
                     ilr::IdentityProvider::OpenLibrary,
                     ilr::RouteKind::OpenLibraryWork,
                     livrarr_domain::MetadataProvider::OpenLibrary,
+                    RouteOwner::Work(1),
                 ),
                 (
                     ilr::IdentityProvider::Goodreads,
-                    ilr::RouteKind::GoodreadsWork,
+                    ilr::RouteKind::GoodreadsBookEdition,
                     livrarr_domain::MetadataProvider::Goodreads,
+                    RouteOwner::Edition(1),
                 ),
                 (
                     ilr::IdentityProvider::Hardcover,
                     ilr::RouteKind::HardcoverWork,
                     livrarr_domain::MetadataProvider::Hardcover,
+                    RouteOwner::Work(1),
                 ),
                 (
                     ilr::IdentityProvider::IsbnRegistry,
                     ilr::RouteKind::Isbn13Edition,
                     livrarr_domain::MetadataProvider::OpenLibrary,
+                    RouteOwner::Edition(1),
                 ),
                 (
                     ilr::IdentityProvider::Amazon,
                     ilr::RouteKind::AsinEdition,
                     livrarr_domain::MetadataProvider::Audible,
+                    RouteOwner::Edition(1),
                 ),
             ];
-            for (identity_provider, kind, metadata_provider) in matrix {
+            for (identity_provider, kind, metadata_provider, owner) in matrix {
                 let stub = StubProviderClient::new(metadata_provider, ProviderOutcome::NotFound);
                 let client = ProviderClient::Stub(stub.clone());
                 let result = client
@@ -10523,7 +10563,7 @@ async fn red_missing_composition(contract: CompositionContract) {
                         ilr::WorkRoute {
                             id: 1,
                             user_id: 1,
-                            owner: RouteOwner::Work(1),
+                            owner,
                             resolved_work_id: 1,
                             provider: identity_provider,
                             kind,
@@ -10542,6 +10582,37 @@ async fn red_missing_composition(contract: CompositionContract) {
                 ));
                 assert_eq!(stub.call_count(), 1);
             }
+            let stub = StubProviderClient::new(
+                livrarr_domain::MetadataProvider::Goodreads,
+                ProviderOutcome::NotFound,
+            );
+            let client = ProviderClient::Stub(stub.clone());
+            assert!(matches!(
+                client
+                    .fetch_by_route(
+                        ilr::WorkRoute {
+                            id: 1,
+                            user_id: 1,
+                            owner: RouteOwner::Work(1),
+                            resolved_work_id: 1,
+                            provider: ilr::IdentityProvider::Goodreads,
+                            kind: ilr::RouteKind::GoodreadsWork,
+                            provider_scoped_id: "600815".to_string(),
+                            state: ilr::WorkRouteState::Active,
+                            provenance: ilr::RouteProvenance::UserChoice,
+                            user_confirmed: true,
+                            observed_at: Utc::now(),
+                        },
+                        livrarr_domain::RequestPriority::Normal,
+                    )
+                    .await,
+                Err(livrarr_external_data::identity_layer::ProviderEvidenceError::Permanent(_))
+            ));
+            assert_eq!(
+                stub.call_count(),
+                0,
+                "a Goodreads Work id must never reach /book/show/<id>"
+            );
             let stub = StubProviderClient::new(
                 livrarr_domain::MetadataProvider::Goodreads,
                 ProviderOutcome::NotFound,
@@ -12096,6 +12167,7 @@ fn round13_search_transport(
     DiscoveryTransportFixture {
         goodreads_base_url: "https://goodreads.test".to_string(),
         openlibrary_base_url: "https://openlibrary.test".to_string(),
+        hardcover_search: false,
         request_timeout: Duration::from_secs(5),
         scripted_transport,
     }
@@ -12216,6 +12288,43 @@ async fn seed_round13_search_work(
     (work_id, settled.identity.identity_generation)
 }
 
+async fn round22_add_work_route(
+    harness: &RouteHarness,
+    work_id: i64,
+    provider: ilr::IdentityProvider,
+    kind: ilr::RouteKind,
+    value: &str,
+) {
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .expect("read route graph before round-22 route addition");
+    harness
+        .state
+        .identity_road
+        .apply_captured_route_handoff(
+            harness.user_id,
+            work_id,
+            IdentityRoadOrigin::ConvergenceVisit,
+            ilr::CapturedRouteHandoff {
+                metadata_generation: captured.identity_generation,
+                provider_identity: vec![ilr::ProviderIdentityEvidence {
+                    provider: provider.clone(),
+                    route: RouteKey {
+                        provider,
+                        kind,
+                        value: value.to_string(),
+                    },
+                    work_core: None,
+                    provenance: Default::default(),
+                }],
+                route_proposals: Vec::new(),
+            },
+        )
+        .await
+        .expect("settle round-22 additional Work route");
+}
+
 async fn round13_run_tick(
     harness: &RouteHarness,
 ) -> livrarr_server::identity_layer::IdentityConvergenceReport {
@@ -12226,6 +12335,1165 @@ async fn round13_run_tick(
     )
     .await
     .expect("round-13 convergence tick")
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 — a Goodreads id carried
+// by owned-file/manual-import evidence is a Book-page legacy id, never a Work
+// legacy id. It must settle on an Edition and remain a usable GrKey anchor.
+async fn round21_owned_file_goodreads_id_is_edition_homed() {
+    let _breaker = lock_breaker().await;
+    let harness = build_route_harness().await;
+    harness
+        .db
+        .create_root_folder(
+            harness
+                ._tmp
+                .path()
+                .to_str()
+                .expect("UTF-8 round-21 import root"),
+            MediaType::Ebook,
+        )
+        .await
+        .expect("seed round-21 manual-import root");
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Wisdom Takes Work",
+        "Owned File Namespace Author",
+        "en",
+        None,
+    )
+    .await;
+    let path = harness._tmp.path().join("wisdom-takes-work.epub");
+    write_epub_with_metadata(
+        &path,
+        false,
+        "Wisdom Takes Work",
+        Some("en"),
+        Some("goodreads:230422186"),
+    );
+
+    let response = call_router_json(
+        &harness,
+        Method::POST,
+        "/api/v1/manualimport/import".to_string(),
+        Some(json!({"items": [{
+            "path": path,
+            "olKey": "",
+            "title": "Wisdom Takes Work",
+            "author": "Owned File Namespace Author",
+            "deleteExisting": false,
+            "language": "en",
+            "authorOlKey": null,
+            "year": 2026,
+            "coverUrl": null,
+            "isbn": null,
+            "description": null,
+            "seriesName": null,
+            "seriesPosition": null,
+            "candidateId": null,
+            "hcKey": null,
+            "grKey": "230422186",
+            "asin": null
+        }]})),
+    )
+    .await;
+    assert!(
+        response.status.is_success(),
+        "manual import: {}",
+        response.json
+    );
+    assert_eq!(response.json["results"][0]["workId"], work_id);
+
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .expect("read owned-file Goodreads route");
+    assert_eq!(captured.identity_generation, generation + 1);
+    assert!(!captured.active_routes.iter().any(|route| {
+        route.kind == ilr::RouteKind::GoodreadsWork && route.provider_scoped_id == "230422186"
+    }));
+    let route = captured
+        .active_routes
+        .iter()
+        .find(|route| {
+            route.kind == ilr::RouteKind::GoodreadsBookEdition
+                && route.provider_scoped_id == "230422186"
+        })
+        .expect("owned Goodreads Book id settles as edition evidence");
+    let RouteOwner::Edition(edition_id) = route.owner else {
+        panic!("GoodreadsBookEdition must be homed on an Edition")
+    };
+    assert!(matches!(
+        route.provenance,
+        ilr::RouteProvenance::OwnedFile { .. }
+    ));
+    let edition_work_id: i64 =
+        sqlx::query_scalar("SELECT work_id FROM editions WHERE user_id=?1 AND id=?2")
+            .bind(harness.user_id)
+            .bind(edition_id)
+            .fetch_one(harness.db.pool())
+            .await
+            .expect("read Goodreads Book route Edition home");
+    assert_eq!(edition_work_id, work_id);
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 — the startup repair is
+// provenance-gated, generation/audit complete, retry-resetting, and one-shot.
+async fn round21_owned_file_goodreads_work_heal_is_exact_and_idempotent() {
+    let harness = build_route_harness().await;
+    let (owned_work_id, owned_generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Owned Heal",
+        "Owned Heal Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "230422186",
+        )),
+    )
+    .await;
+    let owned_provenance = ilr::RouteProvenance::OwnedFile {
+        library_item_id: Some(74),
+        file_revision: revision(),
+    };
+    sqlx::query(
+        "UPDATE identity_routes SET provenance=?1 WHERE user_id=?2 AND resolved_work_id=?3 \
+         AND kind='\"GoodreadsWork\"' AND provider_scoped_id='230422186'",
+    )
+    .bind(serde_json::to_string(&owned_provenance).unwrap())
+    .bind(harness.user_id)
+    .bind(owned_work_id)
+    .execute(harness.db.pool())
+    .await
+    .expect("seed mislabeled OwnedFile Goodreads route");
+    ProviderRetryStateDb::record_terminal_outcome(
+        &harness.db,
+        harness.user_id,
+        owned_work_id,
+        MetadataProvider::OpenLibrary,
+        OutcomeClass::NotFound,
+        None,
+    )
+    .await
+    .expect("seed retry standing that graph heal must reset");
+
+    let (migrated_work_id, migrated_generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty Two Migrated Heal",
+        "Migrated Heal Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "220004",
+        )),
+    )
+    .await;
+    let migrated_provenance = ilr::RouteProvenance::Migrated {
+        legacy_field: "gr_key".to_string(),
+    };
+    sqlx::query(
+        "UPDATE identity_routes SET provenance=?1 WHERE user_id=?2 AND resolved_work_id=?3 \
+         AND kind='\"GoodreadsWork\"' AND provider_scoped_id='220004'",
+    )
+    .bind(serde_json::to_string(&migrated_provenance).unwrap())
+    .bind(harness.user_id)
+    .bind(migrated_work_id)
+    .execute(harness.db.pool())
+    .await
+    .expect("seed sanctioned migrated gr_key Goodreads route");
+
+    let (search_work_id, search_generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Search Route Control",
+        "Search Route Control Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "1254936",
+        )),
+    )
+    .await;
+    let search_provenance = ilr::RouteProvenance::TextDecisiveSearchFallback {
+        provider: ilr::IdentityProvider::Goodreads,
+    };
+    sqlx::query(
+        "UPDATE identity_routes SET provenance=?1 WHERE user_id=?2 AND resolved_work_id=?3 \
+         AND kind='\"GoodreadsWork\"' AND provider_scoped_id='1254936'",
+    )
+    .bind(serde_json::to_string(&search_provenance).unwrap())
+    .bind(harness.user_id)
+    .bind(search_work_id)
+    .execute(harness.db.pool())
+    .await
+    .expect("seed TextDecisiveSearchFallback control route");
+    let search_row_before: (
+        i64,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        String,
+        i64,
+        String,
+    ) = sqlx::query_as(
+        "SELECT id, owner_type, kind, work_id, edition_id, provenance, user_confirmed, \
+                    observed_at FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2 \
+                    AND provider_scoped_id='1254936' AND state='active'",
+    )
+    .bind(harness.user_id)
+    .bind(search_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("snapshot search-origin control route");
+    let owned_route_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2 \
+         AND provider_scoped_id='230422186' AND state='active'",
+    )
+    .bind(harness.user_id)
+    .bind(owned_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read mislabeled OwnedFile route id");
+
+    let first =
+        livrarr_db::identity_layer::heal_identity_round21_goodreads_namespace(harness.db.pool())
+            .await
+            .expect("run round-21 Goodreads namespace heal");
+    assert_eq!(first.owned_file_routes_relabelled, 1);
+    assert_eq!(first.migrated_gr_key_routes_relabelled, 1);
+    assert_eq!(first.editions_created, 2);
+    assert_eq!(first.works_advanced, 2);
+    assert_eq!(first.retry_works_reset, 2);
+
+    let healed: (i64, String, String, Option<i64>, Option<i64>, String) = sqlx::query_as(
+        "SELECT id, owner_type, kind, work_id, edition_id, provenance FROM identity_routes \
+         WHERE user_id=?1 AND resolved_work_id=?2 AND provider_scoped_id='230422186' \
+           AND state='active'",
+    )
+    .bind(harness.user_id)
+    .bind(owned_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read healed OwnedFile route");
+    assert_eq!(healed.0, owned_route_id, "the route is relabeled in place");
+    assert_eq!(healed.1, "edition");
+    assert_eq!(healed.2, "\"GoodreadsBookEdition\"");
+    assert_eq!(healed.3, None);
+    let edition_id = healed.4.expect("healed route has an Edition owner");
+    assert_eq!(healed.5, serde_json::to_string(&owned_provenance).unwrap());
+    let edition_work: i64 =
+        sqlx::query_scalar("SELECT work_id FROM editions WHERE user_id=?1 AND id=?2")
+            .bind(harness.user_id)
+            .bind(edition_id)
+            .fetch_one(harness.db.pool())
+            .await
+            .expect("read healed Edition home");
+    assert_eq!(edition_work, owned_work_id);
+    assert_eq!(
+        work_generation(&harness.db, owned_work_id).await,
+        owned_generation + 1
+    );
+    assert!(
+        harness
+            .db
+            .get_retry_state(
+                harness.user_id,
+                owned_work_id,
+                MetadataProvider::OpenLibrary,
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "route-graph change resets retry standing"
+    );
+    let migrated_healed: (String, String, Option<i64>, String) = sqlx::query_as(
+        "SELECT owner_type, kind, edition_id, provenance FROM identity_routes \
+         WHERE user_id=?1 AND resolved_work_id=?2 AND provider_scoped_id='220004' \
+           AND state='active'",
+    )
+    .bind(harness.user_id)
+    .bind(migrated_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read healed Migrated gr_key route");
+    assert_eq!(migrated_healed.0, "edition");
+    assert_eq!(migrated_healed.1, "\"GoodreadsBookEdition\"");
+    assert!(migrated_healed.2.is_some());
+    assert_eq!(
+        migrated_healed.3,
+        serde_json::to_string(&migrated_provenance).unwrap()
+    );
+    assert_eq!(
+        work_generation(&harness.db, migrated_work_id).await,
+        migrated_generation + 1
+    );
+    let heal_audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_audit_events WHERE user_id=?1 AND work_id=?2 \
+         AND event_kind='round21-goodreads-book-namespace-heal'",
+    )
+    .bind(harness.user_id)
+    .bind(owned_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count round-21 namespace audits");
+    assert_eq!(heal_audits, 1);
+
+    let search_row_after: (
+        i64,
+        String,
+        String,
+        Option<i64>,
+        Option<i64>,
+        String,
+        i64,
+        String,
+    ) = sqlx::query_as(
+        "SELECT id, owner_type, kind, work_id, edition_id, provenance, user_confirmed, \
+                    observed_at FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2 \
+                    AND provider_scoped_id='1254936' AND state='active'",
+    )
+    .bind(harness.user_id)
+    .bind(search_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read search-origin control route after heal");
+    assert_eq!(search_row_after, search_row_before);
+    assert_eq!(
+        work_generation(&harness.db, search_work_id).await,
+        search_generation
+    );
+
+    let second =
+        livrarr_db::identity_layer::heal_identity_round21_goodreads_namespace(harness.db.pool())
+            .await
+            .expect("rerun round-21 Goodreads namespace heal");
+    assert_eq!(
+        second,
+        livrarr_db::identity_layer::IdentityRound21GoodreadsNamespaceHealReport::default()
+    );
+    assert_eq!(
+        work_generation(&harness.db, owned_work_id).await,
+        owned_generation + 1
+    );
+    assert_eq!(
+        work_generation(&harness.db, migrated_work_id).await,
+        migrated_generation + 1
+    );
+    let audits_after_second: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_audit_events WHERE user_id=?1 AND work_id=?2 \
+         AND event_kind='round21-goodreads-book-namespace-heal'",
+    )
+    .bind(harness.user_id)
+    .bind(owned_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count audits after idempotent rerun");
+    assert_eq!(audits_after_second, 1);
+    let marker: String = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta \
+         WHERE key='identity_round21_goodreads_book_namespace_heal'",
+    )
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read round-21 namespace marker");
+    assert_eq!(marker, "1");
+}
+
+// Missing negative from C-r10-03: a cross-Work Goodreads Book collision aborts
+// the whole marker-gated transaction. A safe candidate is deliberately ordered
+// before the colliding candidate so the assertions prove rollback, not merely
+// early validation.
+async fn round22_goodreads_namespace_heal_collision_is_atomic_fixture() {
+    let harness = build_route_harness().await;
+    let owner_work_id = seed_route_work(&harness, "round22-heal-collision-owner").await;
+    let owner_edition_id = harness
+        .db
+        .seed_transfer_target_for_tests(harness.user_id, owner_work_id, ilr::EditionFormat::Unknown)
+        .await
+        .expect("seed collision-owner Edition");
+    let collision_value = "220005";
+    let goodreads = serde_json::to_string(&ilr::IdentityProvider::Goodreads).unwrap();
+    let book_kind = serde_json::to_string(&ilr::RouteKind::GoodreadsBookEdition).unwrap();
+    let work_kind = serde_json::to_string(&ilr::RouteKind::GoodreadsWork).unwrap();
+    let owner_provenance = serde_json::to_string(&ilr::RouteProvenance::UserChoice).unwrap();
+    sqlx::query(
+        "INSERT INTO identity_routes \
+            (user_id, owner_type, work_id, edition_id, resolved_work_id, provider, kind, \
+             provider_scoped_id, state, provenance, user_confirmed, observed_at) \
+         VALUES (?1, 'edition', NULL, ?2, ?3, ?4, ?5, ?6, 'active', ?7, 1, ?8)",
+    )
+    .bind(harness.user_id)
+    .bind(owner_edition_id)
+    .bind(owner_work_id)
+    .bind(&goodreads)
+    .bind(&book_kind)
+    .bind(collision_value)
+    .bind(owner_provenance)
+    .bind(Utc::now().to_rfc3339())
+    .execute(harness.db.pool())
+    .await
+    .expect("seed correct Goodreads Book route on collision owner");
+
+    let safe_value = "220006";
+    let (target_work_id, target_generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty Two Heal Collision Target",
+        "Heal Collision Target Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            safe_value,
+        )),
+    )
+    .await;
+    let owned_provenance = ilr::RouteProvenance::OwnedFile {
+        library_item_id: Some(2200),
+        file_revision: revision(),
+    };
+    let owned_provenance_json = serde_json::to_string(&owned_provenance).unwrap();
+    sqlx::query(
+        "UPDATE identity_routes SET provenance=?1 WHERE user_id=?2 AND resolved_work_id=?3 \
+         AND kind=?4 AND provider_scoped_id=?5",
+    )
+    .bind(&owned_provenance_json)
+    .bind(harness.user_id)
+    .bind(target_work_id)
+    .bind(&work_kind)
+    .bind(safe_value)
+    .execute(harness.db.pool())
+    .await
+    .expect("mark safe route as OwnedFile-proven");
+    sqlx::query(
+        "INSERT INTO identity_routes \
+            (user_id, owner_type, work_id, edition_id, resolved_work_id, provider, kind, \
+             provider_scoped_id, state, provenance, user_confirmed, observed_at) \
+         VALUES (?1, 'work', ?2, NULL, ?2, ?3, ?4, ?5, 'active', ?6, 0, ?7)",
+    )
+    .bind(harness.user_id)
+    .bind(target_work_id)
+    .bind(&goodreads)
+    .bind(&work_kind)
+    .bind(collision_value)
+    .bind(&owned_provenance_json)
+    .bind(Utc::now().to_rfc3339())
+    .execute(harness.db.pool())
+    .await
+    .expect("seed colliding OwnedFile-proven Goodreads Work route");
+
+    let error =
+        livrarr_db::identity_layer::heal_identity_round21_goodreads_namespace(harness.db.pool())
+            .await
+            .expect_err("cross-Work Goodreads Book collision must abort the heal");
+    assert!(
+        error.contains(collision_value),
+        "specific collision: {error}"
+    );
+
+    let marker_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM _livrarr_meta \
+         WHERE key='identity_round21_goodreads_book_namespace_heal'",
+    )
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count unstamped namespace-heal marker");
+    assert_eq!(marker_count, 0);
+    let target_routes: Vec<(String, String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT provider_scoped_id, kind, work_id, edition_id FROM identity_routes \
+         WHERE user_id=?1 AND resolved_work_id=?2 AND state='active' ORDER BY id",
+    )
+    .bind(harness.user_id)
+    .bind(target_work_id)
+    .fetch_all(harness.db.pool())
+    .await
+    .expect("read rolled-back target routes");
+    assert_eq!(target_routes.len(), 2);
+    assert!(target_routes.iter().all(|route| {
+        route.1 == work_kind && route.2 == Some(target_work_id) && route.3.is_none()
+    }));
+    assert_eq!(
+        work_generation(&harness.db, target_work_id).await,
+        target_generation
+    );
+    let safe_edition_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM editions WHERE user_id=?1 AND work_id=?2 \
+         AND source_provider=?3 AND provider_edition_id=?4",
+    )
+    .bind(harness.user_id)
+    .bind(target_work_id)
+    .bind(&goodreads)
+    .bind(safe_value)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count rolled-back safe Edition");
+    assert_eq!(safe_edition_count, 0);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_audit_events WHERE user_id=?1 AND work_id=?2 \
+         AND event_kind='round21-goodreads-book-namespace-heal'",
+    )
+    .bind(harness.user_id)
+    .bind(target_work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count rolled-back namespace-heal audits");
+    assert_eq!(audit_count, 0);
+}
+
+fn round21_hardcover_search_response() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "data": {"search": {"results": {"hits": []}}}
+    }))
+    .expect("encode empty Hardcover search response")
+}
+
+fn round21_is_hardcover_title_search(request: &livrarr_domain::services::FetchRequest) -> bool {
+    request.url.contains("api.hardcover.app")
+        && request
+            .body
+            .as_deref()
+            .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+            .and_then(|body| body.pointer("/variables/query").cloned())
+            .is_some()
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 / AC-026(a). One
+// provider's Work route must not starve the other applicable providers.
+async fn round21_connected_goodreads_route_searches_ol_and_hc_and_auto_links() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(
+                    serde_json::to_vec(&json!({"docs": [{
+                        "key": "/works/OL-ROUND21-WORK-74-W",
+                        "title": "Round Twenty One Work Seventy Four",
+                        "author_name": ["Work Seventy Four Author"]
+                    }]}))
+                    .unwrap(),
+                );
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Work Seventy Four",
+        "Work Seventy Four Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "1254936",
+        )),
+    )
+    .await;
+
+    let due = harness
+        .db
+        .list_convergence_due(harness.user_id, Utc::now(), 3, 100)
+        .await
+        .expect("read round-21 convergence selection");
+    assert!(
+        due.contains(&work_id),
+        "a GR-routed Work with eligible OL/HC providers is cadence-selectable"
+    );
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(ol_searches.load(Ordering::Relaxed), 1);
+    assert_eq!(hc_searches.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        gr_searches.load(Ordering::Relaxed),
+        0,
+        "the provider already holding its Work route never searches"
+    );
+
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .expect("read round-21 linked route graph");
+    assert_eq!(captured.identity_generation, generation + 1);
+    assert!(captured.active_routes.iter().any(|route| {
+        route.kind == ilr::RouteKind::GoodreadsWork && route.provider_scoped_id == "1254936"
+    }));
+    assert!(captured.active_routes.iter().any(|route| {
+        route.kind == ilr::RouteKind::OpenLibraryWork
+            && route.provider_scoped_id == "OL-ROUND21-WORK-74-W"
+    }));
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count round-21 successful-pass ledger burns");
+    assert_eq!(burns, 0);
+}
+
+async fn round21_owned_provider_search_counts(
+    provider: ilr::IdentityProvider,
+    kind: ilr::RouteKind,
+    value: &str,
+) -> (u64, u64, u64) {
+    reset_breakers();
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"{\"docs\":[]}".to_vec());
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        &format!("Round Twenty One Owned {kind:?}"),
+        "Provider Ownership Author",
+        "en",
+        Some((provider, kind, value)),
+    )
+    .await;
+    sqlx::query("UPDATE works SET enrichment_status='failed' WHERE user_id=?1 AND id=?2")
+        .bind(harness.user_id)
+        .bind(work_id)
+        .execute(harness.db.pool())
+        .await
+        .expect("make provider-ownership guard enrichment-due");
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    (
+        ol_searches.load(Ordering::Relaxed),
+        gr_searches.load(Ordering::Relaxed),
+        hc_searches.load(Ordering::Relaxed),
+    )
+}
+
+// AC-026(b) is a post-change boundary guard: the old all-or-none rule was
+// already quiet, but the provider-local broadening must stay quiet for the
+// provider that owns the route.
+async fn round21_each_provider_with_own_work_route_fires_zero_search_http() {
+    let _breaker = lock_breaker().await;
+    let ol = round21_owned_provider_search_counts(
+        ilr::IdentityProvider::OpenLibrary,
+        ilr::RouteKind::OpenLibraryWork,
+        "OL-ROUND21-OWNED-W",
+    )
+    .await;
+    assert_eq!(
+        ol.0, 0,
+        "OpenLibrary must not search around its own Work route"
+    );
+    assert_eq!(
+        (ol.1, ol.2),
+        (1, 1),
+        "the two non-owned providers must both fire beside an OL Work route"
+    );
+
+    let gr = round21_owned_provider_search_counts(
+        ilr::IdentityProvider::Goodreads,
+        ilr::RouteKind::GoodreadsWork,
+        "212121",
+    )
+    .await;
+    assert_eq!(
+        gr.1, 0,
+        "Goodreads must not search around its own Work route"
+    );
+    assert_eq!(
+        (gr.0, gr.2),
+        (1, 1),
+        "the two non-owned providers must both fire beside a GR Work route"
+    );
+
+    let hc = round21_owned_provider_search_counts(
+        ilr::IdentityProvider::Hardcover,
+        ilr::RouteKind::HardcoverWork,
+        "212122",
+    )
+    .await;
+    assert_eq!(
+        hc.2, 0,
+        "Hardcover must not search around its own Work route"
+    );
+    assert_eq!(
+        (hc.0, hc.1),
+        (1, 1),
+        "the two non-owned providers must both fire beside an HC Work route"
+    );
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 / AC-026(c). Two misses
+// in one pass are one per-Work burn, not zero and not one per provider.
+async fn round21_connected_all_fired_legs_miss_burn_once_and_park() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"{\"docs\":[]}".to_vec());
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Connected Miss",
+        "Connected Miss Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "212123",
+        )),
+    )
+    .await;
+
+    for expected_attempts in 1..=3_i64 {
+        WorkDb::set_next_convergence_at(
+            &harness.db,
+            harness.user_id,
+            work_id,
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+             AND provider='livrarr-convergence' AND route_kind='bridge-upgrade' \
+             AND route_value=CAST(?3 AS TEXT)",
+        )
+        .bind(harness.user_id)
+        .bind(work_id)
+        .bind(generation)
+        .fetch_one(harness.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            attempts, expected_attempts,
+            "every all-miss pass burns exactly one shared attempt"
+        );
+    }
+    assert_eq!(ol_searches.load(Ordering::Relaxed), 3);
+    assert_eq!(hc_searches.load(Ordering::Relaxed), 3);
+    assert_eq!(gr_searches.load(Ordering::Relaxed), 0);
+    WorkDb::set_next_convergence_at(
+        &harness.db,
+        harness.user_id,
+        work_id,
+        Some(Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        round13_run_tick(&harness).await.visited_work_count,
+        0,
+        "threshold parks the connected Work until its identity generation changes"
+    );
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 — a transport/provider
+// failure is neither a proposal card nor an honest miss, so one failed fired
+// leg must prevent the Work-local ledger burn for the entire pass.
+async fn round21_search_transport_failure_does_not_burn_shared_ledger() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round17_status_response(503, Vec::new());
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Failed Search Leg",
+        "Failed Search Leg Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "212124",
+        )),
+    )
+    .await;
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(ol_searches.load(Ordering::Relaxed), 1);
+    assert_eq!(hc_searches.load(Ordering::Relaxed), 1);
+    assert_eq!(gr_searches.load(Ordering::Relaxed), 0);
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count failed-search shared ledger burns");
+    assert_eq!(
+        burns, 0,
+        "a pass with any failed fired leg is not an all-card/miss pass"
+    );
+}
+
+// Bug reproduction: identity-layer-rewrite round 22 / C-r10-01. The SQL
+// selector must consume the same live provider availability as the queue. An
+// enriched OL+GR-routed Work cannot remain due solely because unconfigured
+// Hardcover has no route.
+async fn round22_unfireable_hardcover_work_is_absent_and_stays_unvisited() {
+    let _breaker = lock_breaker().await;
+    let scripted = Arc::new(|_request: &livrarr_domain::services::FetchRequest| {
+        round17_status_response(404, Vec::new())
+    });
+    let harness = build_route_harness_with_provider_details(
+        None,
+        Vec::new(),
+        Some(round13_search_transport(scripted)),
+    )
+    .await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Round Twenty Two Hardcover Unavailable",
+        "Unavailable Hardcover Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "220001",
+        )),
+    )
+    .await;
+    round22_add_work_route(
+        &harness,
+        work_id,
+        ilr::IdentityProvider::OpenLibrary,
+        ilr::RouteKind::OpenLibraryWork,
+        "OL-ROUND22-HC-OFF-W",
+    )
+    .await;
+
+    let due = harness
+        .db
+        .list_convergence_due_with_search_availability(
+            harness.user_id,
+            Utc::now(),
+            3,
+            100,
+            harness.state.provider_queue.identity_search_availability(),
+        )
+        .await
+        .expect("read round-22 HC-off due selection");
+    assert!(
+        !due.contains(&work_id),
+        "an OL+GR-routed Work with unavailable HC has no fireable search provider"
+    );
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 0);
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 0);
+    let ledger_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count HC-off convergence ledger rows");
+    assert_eq!(ledger_rows, 0);
+}
+
+// Bug reproduction: identity-layer-rewrite round 22 / C-r10-01/C-r10-02. The
+// positive availability complement selects HC, but an enrichment-complete
+// connected Work enters only the route-search partition: its owned OL route is
+// never re-fetched through `/works/`.
+async fn round22_hardcover_only_search_is_bounded_and_never_refetches_openlibrary() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let ol_work_fetches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let ol_work_fetches = ol_work_fetches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"{\"docs\":[]}".to_vec());
+            }
+            if request.url.contains("/works/") {
+                ol_work_fetches.fetch_add(1, Ordering::Relaxed);
+                return round17_status_response(404, Vec::new());
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Round Twenty Two Search Only",
+        "Search Only Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "220002",
+        )),
+    )
+    .await;
+    round22_add_work_route(
+        &harness,
+        work_id,
+        ilr::IdentityProvider::OpenLibrary,
+        ilr::RouteKind::OpenLibraryWork,
+        "OL-ROUND22-SEARCH-ONLY-W",
+    )
+    .await;
+    let generation = work_generation(&harness.db, work_id).await;
+
+    for expected_attempts in 1..=3_i64 {
+        WorkDb::set_next_convergence_at(
+            &harness.db,
+            harness.user_id,
+            work_id,
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+             AND provider='livrarr-convergence' AND route_kind='bridge-upgrade' \
+             AND route_value=CAST(?3 AS TEXT)",
+        )
+        .bind(harness.user_id)
+        .bind(work_id)
+        .bind(generation)
+        .fetch_one(harness.db.pool())
+        .await
+        .expect("count round-22 HC-only ledger burns");
+        assert_eq!(attempts, expected_attempts);
+    }
+    assert_eq!(hc_searches.load(Ordering::Relaxed), 3);
+    assert_eq!(ol_searches.load(Ordering::Relaxed), 0);
+    assert_eq!(gr_searches.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        ol_work_fetches.load(Ordering::Relaxed),
+        0,
+        "search-only convergence must never enter the anchored OL scatter"
+    );
+    assert_eq!(
+        work_generation(&harness.db, work_id).await,
+        generation,
+        "honest misses do not mutate the route graph"
+    );
+    WorkDb::set_next_convergence_at(
+        &harness.db,
+        harness.user_id,
+        work_id,
+        Some(Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 0);
+}
+
+// Missing negative from C-r10-03: even an enriched Work with a fresh ledger is
+// absent once every search-capable provider already owns a Work route.
+async fn round22_all_three_work_routes_are_absent_from_due_selection() {
+    let _breaker = lock_breaker().await;
+    let scripted = Arc::new(|_request: &livrarr_domain::services::FetchRequest| {
+        round17_status_response(404, Vec::new())
+    });
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Round Twenty Two Fully Routed",
+        "Fully Routed Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Goodreads,
+            ilr::RouteKind::GoodreadsWork,
+            "220003",
+        )),
+    )
+    .await;
+    round22_add_work_route(
+        &harness,
+        work_id,
+        ilr::IdentityProvider::OpenLibrary,
+        ilr::RouteKind::OpenLibraryWork,
+        "OL-ROUND22-FULL-W",
+    )
+    .await;
+    round22_add_work_route(
+        &harness,
+        work_id,
+        ilr::IdentityProvider::Hardcover,
+        ilr::RouteKind::HardcoverWork,
+        "HC-ROUND22-FULL-W",
+    )
+    .await;
+
+    let due = harness
+        .db
+        .list_convergence_due_with_search_availability(
+            harness.user_id,
+            Utc::now(),
+            3,
+            100,
+            harness.state.provider_queue.identity_search_availability(),
+        )
+        .await
+        .expect("read fully-routed round-22 due selection");
+    assert!(!due.contains(&work_id));
+}
+
+// Bug reproduction: identity-layer-rewrite round 21 / AC-026(d). A foreign
+// connected Work keeps the existing Goodreads-only applicability policy.
+async fn round21_foreign_connected_work_fires_only_goodreads_search() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let gr_searches = Arc::new(AtomicU64::new(0));
+    let hc_searches = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let gr_searches = gr_searches.clone();
+        let hc_searches = hc_searches.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"{\"docs\":[]}".to_vec());
+            }
+            if request.url.contains("auto_complete") {
+                gr_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            if round21_is_hardcover_title_search(request) {
+                hc_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(round21_hardcover_search_response());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let mut transport = round13_search_transport(scripted);
+    transport.hardcover_search = true;
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(transport)).await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Round Twenty One Foreign Connected",
+        "Foreign Connected Author",
+        "fr",
+        Some((
+            ilr::IdentityProvider::OpenLibrary,
+            ilr::RouteKind::OpenLibraryWork,
+            "OL-ROUND21-FOREIGN-W",
+        )),
+    )
+    .await;
+
+    let due = harness
+        .db
+        .list_convergence_due(harness.user_id, Utc::now(), 3, 100)
+        .await
+        .expect("read foreign connected convergence selection");
+    assert!(due.contains(&work_id));
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(ol_searches.load(Ordering::Relaxed), 0);
+    assert_eq!(hc_searches.load(Ordering::Relaxed), 0);
+    assert_eq!(gr_searches.load(Ordering::Relaxed), 1);
 }
 
 async fn round13_correlated_openlibrary_search_settles() {
@@ -12396,6 +13664,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
                 priority: livrarr_domain::RequestPriority::Low,
                 mode: livrarr_enrichment::EnrichmentMode::Background,
                 freshness: livrarr_domain::Freshness::PreferCache,
+                search_only: false,
             },
         )
         .await
@@ -12650,6 +13919,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
                 priority: livrarr_domain::RequestPriority::Low,
                 mode: livrarr_enrichment::EnrichmentMode::Background,
                 freshness: livrarr_domain::Freshness::PreferCache,
+                search_only: false,
             },
         )
         .await
@@ -12737,6 +14007,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
                 priority: livrarr_domain::RequestPriority::Low,
                 mode: livrarr_enrichment::EnrichmentMode::Background,
                 freshness: livrarr_domain::Freshness::PreferCache,
+                search_only: false,
             },
         )
         .await
@@ -14035,9 +15306,9 @@ async fn round13_goodreads_probe_corroboration_settles_work_and_book() {
 }
 
 async fn round13_search_fallback_precondition_and_applicability_boundary() {
-    // P-5 is intentionally a post-implementation guard (not a red-first pin):
-    // it prevents a future broadening from turning work-route completion into
-    // fuzzy search, and locks the unchanged production language policy.
+    // The original work-level suppression pin is superseded by REQ-027 v11.
+    // This now proves provider-local suppression (OL owns a route, GR does not)
+    // together with the unchanged foreign-language applicability policy.
     let _breaker = lock_breaker().await;
     let ol_searches = Arc::new(AtomicU64::new(0));
     let gr_searches = Arc::new(AtomicU64::new(0));
@@ -14090,7 +15361,7 @@ async fn round13_search_fallback_precondition_and_applicability_boundary() {
         .unwrap();
     assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
     assert_eq!(ol_searches.load(Ordering::Relaxed), 0);
-    assert_eq!(gr_searches.load(Ordering::Relaxed), 0);
+    assert_eq!(gr_searches.load(Ordering::Relaxed), 1);
     assert!(anchor_requests.load(Ordering::Relaxed) >= 1);
     drop(harness);
     drop(_breaker);
@@ -14304,6 +15575,17 @@ red_tests! {
     ac025g_dead_anchor_search_fallthrough_and_will_retry_guard => round18_route_graph_retry_invalidation_and_will_retry_tick_guard(),
     ac025c_pending_route_siblings_follow_current_generation => round15_sibling_pending_route_cards_use_current_generation(),
     ac025d_pending_route_satisfaction_noop_and_foreign_owner => round15_pending_route_satisfaction_noop_and_foreign_owner_lifecycle(),
+    ac026a_connected_work_searches_each_missing_provider_and_auto_links => round21_connected_goodreads_route_searches_ol_and_hc_and_auto_links(),
+    ac026b_provider_with_own_work_route_never_searches => round21_each_provider_with_own_work_route_fires_zero_search_http(),
+    ac026c_connected_all_miss_pass_burns_once_and_parks => round21_connected_all_fired_legs_miss_burn_once_and_park(),
+    ac026d_foreign_connected_work_searches_goodreads_only => round21_foreign_connected_work_fires_only_goodreads_search(),
+    round21_failed_search_leg_does_not_burn_shared_ledger => round21_search_transport_failure_does_not_burn_shared_ledger(),
+    round21_owned_file_goodreads_book_id_settles_on_edition => round21_owned_file_goodreads_id_is_edition_homed(),
+    round21_owned_file_goodreads_work_heal_is_exactly_once => round21_owned_file_goodreads_work_heal_is_exact_and_idempotent(),
+    round22_unfireable_hardcover_is_absent_and_unvisited => round22_unfireable_hardcover_work_is_absent_and_stays_unvisited(),
+    round22_hardcover_search_only_never_refetches_openlibrary => round22_hardcover_only_search_is_bounded_and_never_refetches_openlibrary(),
+    round22_all_three_work_routes_are_not_due => round22_all_three_work_routes_are_absent_from_due_selection(),
+    round22_goodreads_namespace_heal_collision_is_atomic => round22_goodreads_namespace_heal_collision_is_atomic_fixture(),
     direct_add_delayed_refresh_persists_first_work_route => red_direct_add_delayed_refresh_persists_first_work_route(),
     retry_incomplete_real_handler_uses_convergence_visit_and_no_side_channel_settle => red_missing_composition(CompositionContract::RetryConvergenceOnly),
     retry_incomplete_empty_capture_is_noop_and_per_work_failure_isolated => red_missing_composition(CompositionContract::RetryFailureIsolation),

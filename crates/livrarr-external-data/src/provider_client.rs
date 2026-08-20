@@ -12,10 +12,12 @@
 //!     `Llm(_)` variant requires the queue to grow dependent-step orchestration
 //!     first. Lands during the orchestration cutover.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use livrarr_domain::identity_layer::{IdentityProvider, RouteKind, WorkRoute, WorkRouteState};
 use livrarr_domain::services::{
     CallOperation, CallOutcomeClass, FetchRequest, HttpFetcher, HttpMethod, ProviderCallRecord,
     ProviderCallSink, RateBucket, UserAgentProfile,
@@ -33,6 +35,84 @@ use crate::goodreads::{self, GoodreadsDetailResult, GoodreadsFetchError, GOODREA
 use crate::hardcover::query_hardcover;
 use crate::openlibrary::query_ol_detail;
 use crate::{NormalizedWorkDetail, ProviderOutcome};
+
+const GOODREADS_CAPTURE_LIMIT: usize = 10;
+
+fn goodreads_capture_book_id(detail_url: &str) -> Option<String> {
+    let key = goodreads::extract_gr_key(detail_url)?;
+    let book_id = key.split('.').next()?;
+    (!book_id.is_empty() && book_id.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| book_id.to_string())
+}
+
+fn goodreads_book_edition_anchor(routes: &[WorkRoute]) -> Option<&str> {
+    routes.iter().find_map(|route| {
+        (route.state == WorkRouteState::Active
+            && route.provider == IdentityProvider::Goodreads
+            && route.kind == RouteKind::GoodreadsBookEdition)
+            .then(|| route.provider_scoped_id.trim())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn write_goodreads_capture(
+    capture_dir: &std::path::Path,
+    book_id: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    std::fs::create_dir_all(capture_dir)?;
+    let captured_at = Utc::now();
+    let mut capture_path = None;
+    for offset in 0..1_000 {
+        let timestamp =
+            (captured_at + chrono::Duration::nanoseconds(offset)).format("%Y%m%dT%H%M%S%.9fZ");
+        let path = capture_dir.join(format!("{timestamp}_{book_id}.html"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(body) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error);
+                }
+                capture_path = Some(path);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    if capture_path.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate a unique Goodreads capture timestamp",
+        ));
+    }
+
+    let mut captures = Vec::new();
+    for entry in std::fs::read_dir(capture_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.path().extension().and_then(|value| value.to_str()) == Some("html")
+        {
+            captures.push(entry.path());
+        }
+    }
+    captures.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    let remove_count = captures.len().saturating_sub(GOODREADS_CAPTURE_LIMIT);
+    for path in captures.into_iter().take(remove_count) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
 
 /// One provider-native candidate returned to the enrichment queue's REQ-027
 /// policy layer. External-data owns transport/parsing; selection and
@@ -94,6 +174,23 @@ impl ProviderClient {
             Self::Goodreads(g) => g.fetch(work, priority).await,
             Self::GoogleBooks(g) => g.fetch(work, priority).await,
             Self::Audible(a) => a.fetch(work, priority).await,
+        }
+    }
+
+    /// Cover lookup with the active route graph supplied explicitly.
+    ///
+    /// Goodreads may use only a BookEdition route for its Book endpoint. A
+    /// Work-only graph follows the client's candidate-text search tiers; the
+    /// frozen `Work::gr_key` compatibility field is never an input here.
+    pub async fn fetch_for_cover(
+        &self,
+        work: &Work,
+        routes: &[WorkRoute],
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match self {
+            Self::Goodreads(client) => client.fetch_for_cover(work, routes, priority).await,
+            _ => self.fetch(work, priority).await,
         }
     }
 
@@ -2590,28 +2687,32 @@ struct GrResolution {
 /// helpers and maps their errors onto `ProviderOutcome<NormalizedWorkDetail>`.
 ///
 /// Resolution order:
-///   1. If `work.gr_key` is populated, fetch the detail page directly
-///      (skips a search round-trip — see R-21 canonical-identity policy).
-///   2. Otherwise, search by `title author` and pick deterministically among
+///   1. Search by `title author` and pick deterministically among
 ///      hits (`gr_best_match`: junk-edition filter + the shared title+author
 ///      picker, REQ-012/D6/ST-07) — no LLM is involved in the pick. GR is a
 ///      hostile scraping target (anti-bot, HTML drift, noisy results full of
 ///      study guides and alternate editions), so a wrong pick is worse than
 ///      none: nothing clearing the bar means GR abstains rather than
 ///      adopting a fuzzy match.
-///   3. Resolve the chosen hit's (often relative) `detail_url` against
+///   2. Resolve the chosen hit's (often relative) `detail_url` against
 ///      `base_url` and fetch the detail page.
+///
+/// Route-aware consumers that hold an active `GoodreadsBookEdition` route use
+/// `fetch_for_cover`/`fetch_detail_by_key` explicitly. This generic Work-shaped
+/// surface never reads the frozen, namespace-ambiguous `Work::gr_key` field.
 ///
 /// Outcome mapping:
 ///   - Detail page parsed → `Success(payload)` with cover_url, description,
 ///     series, genres, year (derived from publish_date), rating, etc.
-///   - Empty search results / no `parse_detail_html` output → `NotFound`.
+///   - Empty search results → `NotFound`.
 ///   - `GoodreadsFetchError::AntiBot` → `WillRetry { AntiBotBlock }` per IR
 ///     (anti-bot challenges are typically transient/IP-based).
 ///   - HTTP 429 → `WillRetry { RateLimit }`.
 ///   - HTTP 5xx / network / body-read failures → `WillRetry { ServerError }`.
 ///   - HTTP 4xx (other than 429) → `NotFound` (typically 404 on a stale URL).
-///   - Detail page returned 200 OK but unparseable → `NotFound`.
+///   - Detail page returned 200 OK but unreadable → a breaker failure and
+///     `WillRetry { ServerError }`, except the established search-path
+///     key-only degrade; when configured, both paths also capture raw bytes.
 #[derive(Clone)]
 pub struct GoodreadsClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherImpl> {
     fetcher: F,
@@ -2626,6 +2727,9 @@ pub struct GoodreadsClient<F: HttpFetcher = livrarr_http::fetcher::HttpFetcherIm
     /// (test / smoke-test path); LLM fallback disabled.
     live_config: Option<crate::live_config::LiveMetadataConfig>,
     call_sink: Option<Arc<dyn ProviderCallSink>>,
+    /// Local diagnostic destination for unreadable detail responses. Disabled
+    /// unless the production composition root supplies it.
+    capture_dir: Option<PathBuf>,
 }
 
 impl<F: HttpFetcher> GoodreadsClient<F> {
@@ -2637,12 +2741,19 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             retry_backoff_secs: 5 * 60,
             live_config: None,
             call_sink: None,
+            capture_dir: None,
         }
     }
 
     /// Inject the call-record sink (REQ-001).
     pub fn with_call_sink(mut self, sink: Arc<dyn ProviderCallSink>) -> Self {
         self.call_sink = Some(sink);
+        self
+    }
+
+    /// Enable bounded raw-body capture at the unreadable-detail boundary.
+    pub fn with_capture_dir(mut self, capture_dir: PathBuf) -> Self {
+        self.capture_dir = Some(capture_dir);
         self
     }
 
@@ -2682,16 +2793,19 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
         let detail_url = goodreads::detail_url_for_gr_key(&self.base_url, gr_key);
-        let html = match goodreads::fetch_goodreads_html(&self.fetcher, &detail_url, priority).await
+        let body = match goodreads::fetch_goodreads_body(&self.fetcher, &detail_url, priority).await
         {
-            Ok(h) => h,
+            Ok(body) => body,
             Err(err) => return self.map_fetch_err(err),
         };
-        if let Some(detail) = goodreads::parse_detail_html(&html) {
+        if let Some(detail) = goodreads::parse_detail_html(&body.text) {
             self.report_gr_payload_usable();
             return ProviderOutcome::Success(Box::new(self.normalize(&detail_url, detail)));
         }
-        if let Some(res) = self.llm_extract_payload(&html, language, &detail_url).await {
+        if let Some(res) = self
+            .llm_extract_payload(&body.text, language, &detail_url)
+            .await
+        {
             return match res {
                 Ok(mut payload) => {
                     if payload.gr_key.is_none() {
@@ -2703,7 +2817,7 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
                 Err(err) => self.map_fetch_err(err),
             };
         }
-        self.unreadable_page_outcome(&detail_url)
+        self.unreadable_page_outcome(&detail_url, &body.raw).await
     }
 
     /// A readable book payload is the only real evidence Goodreads is working —
@@ -2721,7 +2835,8 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
     /// and both failed to read it, so both owe the breaker the same signal —
     /// reporting it only on the `WillRetry` path let a Goodreads layout break
     /// stay invisible for every work that reached GR by title search.
-    fn report_gr_page_unreadable(&self, detail_url: &str) {
+    async fn report_gr_page_unreadable(&self, detail_url: &str, body: &[u8]) {
+        self.capture_unreadable_body(detail_url, body).await;
         tracing::warn!(
             detail_url = %detail_url,
             "Goodreads: 200 with no readable book payload"
@@ -2734,11 +2849,44 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
     /// book off, left the provider status line dark, and taught the breaker
     /// nothing — so a layout change on their side would quietly empty a library
     /// one refresh at a time.
-    fn unreadable_page_outcome(&self, detail_url: &str) -> ProviderOutcome<NormalizedWorkDetail> {
-        self.report_gr_page_unreadable(detail_url);
+    async fn unreadable_page_outcome(
+        &self,
+        detail_url: &str,
+        body: &[u8],
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        self.report_gr_page_unreadable(detail_url, body).await;
         ProviderOutcome::WillRetry {
             reason: livrarr_domain::WillRetryReason::ServerError,
             next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
+        }
+    }
+
+    async fn capture_unreadable_body(&self, detail_url: &str, body: &[u8]) {
+        let Some(capture_dir) = self.capture_dir.clone() else {
+            return;
+        };
+        let Some(book_id) = goodreads_capture_book_id(detail_url) else {
+            tracing::warn!("Goodreads unreadable-body capture skipped: book id unavailable");
+            return;
+        };
+        let body = body.to_vec();
+        let log_book_id = book_id.clone();
+        match tokio::task::spawn_blocking(move || {
+            write_goodreads_capture(&capture_dir, &book_id, &body)
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                book_id = %log_book_id,
+                error = %error,
+                "Goodreads unreadable-body capture failed"
+            ),
+            Err(error) => tracing::warn!(
+                book_id = %log_book_id,
+                error = %error,
+                "Goodreads unreadable-body capture task failed"
+            ),
         }
     }
 
@@ -2806,7 +2954,6 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         work: &Work,
         priority: RequestPriority,
     ) -> ProviderOutcome<NormalizedWorkDetail> {
-        let had_gr_key = work.gr_key.as_deref().is_some_and(|k| !k.is_empty());
         let resolution = match self.resolve_detail_url(work, priority).await {
             Ok(resolution) => resolution,
             Err(err) => return self.map_fetch_err(err),
@@ -2830,56 +2977,48 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         // LLM extraction if configured (typical for foreign-language pages
         // where JSON-LD / regex don't match the locale-specific HTML).
         //
-        // Unit B4: when `work.gr_key` is unset, `resolved.url` came from
-        // `search_resolve_detail` — Goodreads' own scraped `bookUrl` field
+        // `resolved.url` came from `search_resolve_detail` — Goodreads' own
+        // scraped `bookUrl` field
         // (untrusted input). Fetch through the SSRF-safe method so a
         // valid-looking GR URL whose response redirects to a loopback/
-        // private address is still rejected (the established-gr_key branch
-        // above builds a trusted, self-constructed URL and stays on
+        // private address is still rejected (the explicit BookEdition/anchor
+        // paths build a trusted, self-constructed URL and stay on
         // `fetch_by_anchor`/`fetch_detail_by_key`'s unrestricted fetch).
-        let html =
-            match goodreads::fetch_goodreads_html_ssrf_safe(&self.fetcher, &detail_url, priority)
+        let body =
+            match goodreads::fetch_goodreads_body_ssrf_safe(&self.fetcher, &detail_url, priority)
                 .await
             {
-                Ok(h) => h,
+                Ok(body) => body,
                 Err(err) => {
-                    if !had_gr_key {
-                        if let Some(payload) = self
-                            .fallback_key_payload(
-                                work,
-                                &resolved_gr_key,
-                                &resolved.candidate,
-                                priority,
-                            )
-                            .await
-                        {
-                            // Unit B4 #12 (PO-accepted degrade, made
-                            // observable): an SSRF-rejected fetch must stay
-                            // distinguishable in logs from an ordinary fetch
-                            // failure, even though both degrade to the same
-                            // key-only Success below.
-                            if matches!(err, GoodreadsFetchError::SsrfRejected(_)) {
-                                tracing::warn!(
-                                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
-                                    "GR detail fetch blocked by SSRF guard (target or \
-                                     redirect resolved to a private/reserved address); \
-                                     degrading to key-only payload"
-                                );
-                            } else {
-                                tracing::info!(
-                                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
-                                    verified = payload.title.is_some(),
-                                    "GR page fetch failed; returning key payload"
-                                );
-                            }
-                            return ProviderOutcome::Success(Box::new(payload));
+                    if let Some(payload) = self
+                        .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
+                        .await
+                    {
+                        // Unit B4 #12 (PO-accepted degrade, made observable):
+                        // an SSRF-rejected fetch must stay distinguishable in
+                        // logs from an ordinary fetch failure, even though both
+                        // degrade to the same key-only Success below.
+                        if matches!(err, GoodreadsFetchError::SsrfRejected(_)) {
+                            tracing::warn!(
+                                gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                                "GR detail fetch blocked by SSRF guard (target or \
+                                 redirect resolved to a private/reserved address); \
+                                 degrading to key-only payload"
+                            );
+                        } else {
+                            tracing::info!(
+                                gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                                verified = payload.title.is_some(),
+                                "GR page fetch failed; returning key payload"
+                            );
                         }
+                        return ProviderOutcome::Success(Box::new(payload));
                     }
                     return self.map_fetch_err(err);
                 }
             };
 
-        if let Some(detail) = goodreads::parse_detail_html(&html) {
+        if let Some(detail) = goodreads::parse_detail_html(&body.text) {
             let mut payload = self.normalize(&detail_url, detail);
             // Detail page parsed but carried no cover — fall back to the cover
             // that came with the search hit (GR outranks OL, so this beats the
@@ -2897,7 +3036,7 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         // Direct parse yielded nothing. Try LLM extraction when live config
         // has LLM enabled + key + endpoint set.
         if let Some(res) = self
-            .llm_extract_payload(&html, work.language.as_deref(), &detail_url)
+            .llm_extract_payload(&body.text, work.language.as_deref(), &detail_url)
             .await
         {
             match res {
@@ -2917,27 +3056,25 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
 
         // All parse paths failed; fall back to a key payload carrying
         // whatever GR-sourced candidate text can vouch for the key.
-        if !had_gr_key {
-            if let Some(payload) = self
-                .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
-                .await
-            {
-                // The page WAS fetched and WAS unreadable. The key-only degrade
-                // stays (Unit B4, PO-accepted), but the breaker must still hear
-                // about it: returning a bare `Success` here meant a Goodreads
-                // layout break was silent for every work resolved by title
-                // search, which is exactly the class C3 exists to close.
-                self.report_gr_page_unreadable(&detail_url);
-                tracing::info!(
-                    gr_key = payload.gr_key.as_deref().unwrap_or(""),
-                    verified = payload.title.is_some(),
-                    "GR parse failed; returning key payload"
-                );
-                return ProviderOutcome::Success(Box::new(payload));
-            }
+        if let Some(payload) = self
+            .fallback_key_payload(work, &resolved_gr_key, &resolved.candidate, priority)
+            .await
+        {
+            // The page WAS fetched and WAS unreadable. The key-only degrade
+            // stays (Unit B4, PO-accepted), but the breaker must still hear
+            // about it: returning a bare `Success` here meant a Goodreads
+            // layout break was silent for every work resolved by title search,
+            // which is exactly the class C3 exists to close.
+            self.report_gr_page_unreadable(&detail_url, &body.raw).await;
+            tracing::info!(
+                gr_key = payload.gr_key.as_deref().unwrap_or(""),
+                verified = payload.title.is_some(),
+                "GR parse failed; returning key payload"
+            );
+            return ProviderOutcome::Success(Box::new(payload));
         }
 
-        self.unreadable_page_outcome(&detail_url)
+        self.unreadable_page_outcome(&detail_url, &body.raw).await
     }
 
     /// Build the parse-failure fallback payload for a freshly resolved key.
@@ -3015,17 +3152,6 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
         work: &Work,
         priority: RequestPriority,
     ) -> Result<GrResolution, GoodreadsFetchError> {
-        // 1. work.gr_key — canonical GR identity. No candidate text: the key
-        // is already established, nothing needs vouching.
-        if let Some(key) = work.gr_key.as_deref().filter(|k| !k.is_empty()) {
-            return Ok(GrResolution {
-                detail: Some(ResolvedGrDetail {
-                    url: goodreads::detail_url_for_gr_key(&self.base_url, key),
-                    candidate: None,
-                }),
-                all_legs_succeeded: true,
-            });
-        }
         search_resolve_detail_with_health(
             &self.fetcher,
             &self.base_url,
@@ -3035,6 +3161,21 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             priority,
         )
         .await
+    }
+
+    async fn fetch_for_cover(
+        &self,
+        work: &Work,
+        routes: &[WorkRoute],
+        priority: RequestPriority,
+    ) -> ProviderOutcome<NormalizedWorkDetail> {
+        match goodreads_book_edition_anchor(routes) {
+            Some(book_id) => {
+                self.fetch_detail_by_key(book_id, work.language.as_deref(), priority)
+                    .await
+            }
+            None => self.fetch(work, priority).await,
+        }
     }
 
     fn map_fetch_err(&self, err: GoodreadsFetchError) -> ProviderOutcome<NormalizedWorkDetail> {
@@ -3415,6 +3556,7 @@ impl GoodreadsClient {
 mod tests {
     use super::*;
     use crate::goodreads::GoodreadsSearchResult;
+    use livrarr_domain::identity_layer::{RouteOwner, RouteProvenance};
 
     async fn half_open_audnexus_client_probe() -> livrarr_http::outbound_queue::QueuePermit {
         use livrarr_http::breaker::CircuitBreakerConfig;
@@ -4081,6 +4223,25 @@ mod tests {
         }
     }
 
+    fn goodreads_route(kind: RouteKind, value: &str) -> WorkRoute {
+        WorkRoute {
+            id: 1,
+            user_id: 1,
+            owner: match kind {
+                RouteKind::GoodreadsBookEdition => RouteOwner::Edition(1),
+                _ => RouteOwner::Work(1),
+            },
+            resolved_work_id: 1,
+            provider: IdentityProvider::Goodreads,
+            kind,
+            provider_scoped_id: value.to_string(),
+            state: WorkRouteState::Active,
+            provenance: RouteProvenance::Provider(IdentityProvider::Goodreads),
+            user_confirmed: false,
+            observed_at: Utc::now(),
+        }
+    }
+
     fn goodreads_title_hit_body() -> &'static str {
         r#"[{"title":"Dune","bookTitleBare":"Dune","bookUrl":"/book/show/44767458","author":{"name":"Frank Herbert"}}]"#
     }
@@ -4354,6 +4515,61 @@ mod tests {
         ));
     }
 
+    // Bug reproduction: identity-layer-rewrite — `Work::gr_key` is frozen
+    // compatibility storage and may hold a Goodreads Work id, which must never
+    // be addressed as `/book/show/<id>`.
+    #[tokio::test]
+    async fn goodreads_fetch_never_uses_the_frozen_work_gr_key_as_a_book_id() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Ok(
+            goodreads_response(200, b"[]".to_vec()),
+        ));
+        let client = goodreads_recording_client(fetcher.clone());
+        let work = Work {
+            gr_key: Some("600815".to_string()),
+            ..goodreads_test_work(None)
+        };
+
+        let routes = [goodreads_route(RouteKind::GoodreadsWork, "600815")];
+        let _ = client
+            .fetch_for_cover(&work, &routes, RequestPriority::Normal)
+            .await;
+
+        let requests = fetcher.requests();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.contains("/book/show/600815")),
+            "a frozen Goodreads Work id must never reach the Book endpoint; requests={requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn goodreads_cover_fetch_uses_only_the_book_edition_route_as_its_direct_anchor() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Ok(
+            goodreads_response(200, goodreads_usable_detail_body()),
+        ));
+        let client = goodreads_recording_client(fetcher.clone());
+        let work = Work {
+            gr_key: Some("600815".to_string()),
+            ..goodreads_test_work(None)
+        };
+        let routes = [goodreads_route(RouteKind::GoodreadsBookEdition, "12345")];
+
+        let outcome = client
+            .fetch_for_cover(&work, &routes, RequestPriority::Normal)
+            .await;
+
+        assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        let requests = fetcher.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url, "https://www.goodreads.com/book/show/12345",
+            "the active BookEdition route must outrank the frozen scalar"
+        );
+    }
+
     /// The production door for an established Goodreads key, driven end to end
     /// against a real socket through the default concrete fetcher
     /// specialization.
@@ -4422,6 +4638,183 @@ mod tests {
         assert!(
             tripped,
             "an unreadable page must report a breaker failure, not a success"
+        );
+    }
+
+    async fn captured_html_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let mut entries = tokio::fs::read_dir(dir)
+            .await
+            .expect("read Goodreads capture directory");
+        while let Some(entry) = entries.next_entry().await.expect("read capture entry") {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("html") {
+                files.push(path);
+            }
+        }
+        files.sort();
+        files
+    }
+
+    // Bug reproduction: identity-layer-rewrite — production previously warned
+    // about an unreadable 200 but discarded the only real shell specimen.
+    #[tokio::test]
+    async fn unreadable_goodreads_detail_capture_is_byte_exact_and_append_only() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let temp = tempfile::tempdir().expect("capture tempdir");
+        let capture_dir = temp.path().join("captures/goodreads");
+        // Invalid UTF-8 makes this a binding raw-byte pin: a lossy String
+        // round-trip would replace these bytes and fail the equality check.
+        let body = b"<html><body>served shell bytes:\xff\xfe</body></html>".to_vec();
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Ok(
+            goodreads_response(200, body.clone()),
+        ));
+        let client = goodreads_recording_client(fetcher).with_capture_dir(capture_dir.clone());
+
+        let first = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+        assert!(matches!(first, ProviderOutcome::WillRetry { .. }));
+        let files = captured_html_files(&capture_dir).await;
+        assert_eq!(
+            files.len(),
+            1,
+            "one unreadable fetch must write one capture"
+        );
+        assert!(
+            files[0]
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.ends_with("_10884.html")),
+            "capture name must carry the fetched book id"
+        );
+        assert_eq!(
+            tokio::fs::read(&files[0])
+                .await
+                .expect("read first capture"),
+            body,
+        );
+
+        let second = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+        assert!(matches!(second, ProviderOutcome::WillRetry { .. }));
+        let files = captured_html_files(&capture_dir).await;
+        assert_eq!(files.len(), 2, "a second unreadable fetch must append");
+        for file in files {
+            assert_eq!(tokio::fs::read(file).await.expect("read capture"), body);
+        }
+    }
+
+    // Bug reproduction: identity-layer-rewrite — capture retention must be
+    // bounded and prune the oldest shell bodies first.
+    #[tokio::test]
+    async fn unreadable_goodreads_detail_capture_keeps_the_newest_ten() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let temp = tempfile::tempdir().expect("capture tempdir");
+        let capture_dir = temp.path().join("captures/goodreads");
+        let fetcher = crate::test_support::RecordingHttpFetcher::new();
+        for index in 0..12 {
+            fetcher.push_response(Ok(goodreads_response(
+                200,
+                format!("<html><body>shell-{index:02}</body></html>"),
+            )));
+        }
+        let client = goodreads_recording_client(fetcher).with_capture_dir(capture_dir.clone());
+
+        for _ in 0..12 {
+            let outcome = client
+                .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+                .await;
+            assert!(matches!(outcome, ProviderOutcome::WillRetry { .. }));
+        }
+
+        let files = captured_html_files(&capture_dir).await;
+        assert_eq!(files.len(), 10);
+        let mut bodies = Vec::new();
+        for file in files {
+            bodies.push(
+                String::from_utf8(tokio::fs::read(file).await.expect("read capture"))
+                    .expect("capture is UTF-8 test data"),
+            );
+        }
+        assert!(!bodies.iter().any(|body| body.contains("shell-00")));
+        assert!(!bodies.iter().any(|body| body.contains("shell-01")));
+        for index in 2..12 {
+            assert!(
+                bodies
+                    .iter()
+                    .any(|body| body.contains(&format!("shell-{index:02}"))),
+                "newest shell {index:02} must be retained"
+            );
+        }
+    }
+
+    // Bug reproduction: identity-layer-rewrite — readable pages and clients
+    // without an explicit capture directory must remain filesystem-silent.
+    #[tokio::test]
+    async fn goodreads_detail_capture_is_silent_on_success_and_when_disabled() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let temp = tempfile::tempdir().expect("capture tempdir");
+        let capture_dir = temp.path().join("captures/goodreads");
+        let readable = crate::test_support::RecordingHttpFetcher::with_response(Ok(
+            goodreads_response(200, goodreads_usable_detail_body()),
+        ));
+        let client = goodreads_recording_client(readable).with_capture_dir(capture_dir.clone());
+
+        let outcome = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+        assert!(matches!(outcome, ProviderOutcome::Success(_)));
+        assert!(
+            !tokio::fs::try_exists(&capture_dir)
+                .await
+                .expect("check capture directory"),
+            "a readable page must not create the capture directory"
+        );
+
+        let disabled = goodreads_recording_client(
+            crate::test_support::RecordingHttpFetcher::with_response(Ok(goodreads_response(
+                200,
+                "<html><body>disabled shell</body></html>",
+            ))),
+        );
+        assert!(
+            disabled.capture_dir.is_none(),
+            "capture must default to disabled"
+        );
+        let outcome = disabled
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+        assert!(matches!(outcome, ProviderOutcome::WillRetry { .. }));
+        assert!(disabled.capture_dir.is_none());
+        assert!(
+            !tokio::fs::try_exists(&capture_dir)
+                .await
+                .expect("check disabled capture directory"),
+            "capture_dir=None must not write a fallback capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn goodreads_detail_capture_failure_never_changes_the_fetch_outcome() {
+        let _guard = crate::test_support::lock_gr_breaker().await;
+        let temp = tempfile::tempdir().expect("capture tempdir");
+        let capture_dir = temp.path().join("not-a-directory");
+        tokio::fs::write(&capture_dir, b"occupied")
+            .await
+            .expect("create capture-path blocker");
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_response(Ok(
+            goodreads_response(200, "<html><body>unreadable shell</body></html>"),
+        ));
+        let client = goodreads_recording_client(fetcher).with_capture_dir(capture_dir);
+
+        let outcome = client
+            .fetch_detail_by_key("10884", Some("en"), RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(outcome, ProviderOutcome::WillRetry { .. }),
+            "capture is an infallible observer and must not replace the provider outcome"
         );
     }
 
@@ -4879,6 +5272,46 @@ mod tests {
 
             assert!(resolved.url.ends_with("/book/show/23692271"));
         }
+    }
+
+    // Bug reproduction: identity-layer-rewrite — overlapping capture pruners
+    // may race to delete the same oldest file. A lost deletion is benign, and
+    // the next write must restore the newest-ten bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_goodreads_capture_prunes_are_benign_and_next_write_converges() {
+        const WRITERS: usize = 32;
+
+        let temp = tempfile::tempdir().expect("capture tempdir");
+        let capture_dir = temp.path().join("captures/goodreads");
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+        let mut tasks = Vec::new();
+        for index in 0..WRITERS {
+            let capture_dir = capture_dir.clone();
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                write_goodreads_capture(
+                    &capture_dir,
+                    &format!("{index:05}"),
+                    format!("capture-{index:05}").as_bytes(),
+                )
+            }));
+        }
+
+        for task in tasks {
+            let result = task.await.expect("capture writer task must join");
+            assert!(
+                result.is_ok(),
+                "a concurrent prune race must be a successful observation: {result:?}"
+            );
+        }
+
+        write_goodreads_capture(&capture_dir, "99999", b"convergence capture")
+            .expect("the next capture must reconverge retention");
+        assert!(
+            captured_html_files(&capture_dir).await.len() <= GOODREADS_CAPTURE_LIMIT,
+            "the next write must restore the newest-ten retention bound"
+        );
     }
 
     #[tokio::test]

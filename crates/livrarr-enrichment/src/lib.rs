@@ -66,6 +66,21 @@ pub trait EnrichmentService: Send + Sync {
         freshness: livrarr_domain::Freshness,
     ) -> Result<EnrichmentResult, EnrichmentError>;
 
+    /// Evidence-only REQ-027 dispatch. The implementation shares the normal
+    /// per-Work lock and provider queue but forbids the anchored scatter, merge,
+    /// cover gate, materialization, and enrichment history road.
+    fn search_work_routes(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        priority: RequestPriority,
+    ) -> impl std::future::Future<
+        Output = Result<livrarr_domain::services::IdentityRouteSearchResult, EnrichmentError>,
+    > + Send {
+        let _ = (user_id, work_id, priority);
+        async move { Ok(livrarr_domain::services::IdentityRouteSearchResult::default()) }
+    }
+
     /// TEMP(pk-tdd): compile-only scaffold — reset work for manual refresh.
     async fn reset_for_manual_refresh(
         &self,
@@ -152,6 +167,8 @@ pub struct EnrichmentResult {
     pub captured_provider_identity: Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>,
     pub captured_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
     pub provider_chase_attempted: bool,
+    pub search_leg_fired: bool,
+    pub search_ledger_burnable: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +220,11 @@ pub struct ScatterGatherResult {
     /// At least one anchored provider leg was dispatched or cache-served.
     /// Policy/no-anchor/terminal skips do not count.
     pub provider_chase_attempted: bool,
+    /// At least one REQ-027 title+author route-search leg was spawned.
+    pub search_leg_fired: bool,
+    /// True only when at least one search leg fired and every fired leg ended
+    /// in an honest miss or proposal card. Provider/transport failures are false.
+    pub search_ledger_burnable: bool,
     pub search_provider_identity: Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>,
     pub search_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
 }
@@ -228,6 +250,8 @@ fn captured_work_identities<'a>(
             detail
                 .gr_work_key
                 .as_ref()
+                // Provider detail parsing names this explicitly: it is the
+                // response-carried Goodreads Work legacyId, not a Book id.
                 .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
             detail
                 .hc_key
@@ -263,6 +287,9 @@ pub struct EnrichmentContext {
     /// REQ-009: whether this dispatch may satisfy provider fetches from the
     /// persistent provider-response cache (D-004 — orthogonal to `priority`).
     pub freshness: livrarr_domain::Freshness,
+    /// REQ-027 connected entrance: populate `to_search` only and never enter
+    /// the anchored `to_dispatch` scatter.
+    pub search_only: bool,
 }
 
 /// Per-provider queue configuration.
@@ -630,6 +657,53 @@ where
     Q: ProviderQueue + Send + Sync + 'static,
     ME: MergeEngine + Send + Sync + 'static,
 {
+    async fn search_work_routes(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        priority: RequestPriority,
+    ) -> Result<livrarr_domain::services::IdentityRouteSearchResult, EnrichmentError> {
+        let _search_span = livrarr_domain::perf::StageTimer::start("identity_search", work_id);
+        let _sweep = SweepLocksOnDrop {
+            locks: self.locks.clone(),
+        };
+        let per_work_lock = {
+            let mut lock_map = self.locks.lock().await;
+            lock_map
+                .entry((user_id, work_id))
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = per_work_lock.lock().await;
+        let work = self
+            .db
+            .get_work(user_id, work_id)
+            .await
+            .map_err(|error| match error {
+                DbError::NotFound { .. } => EnrichmentError::WorkNotFound,
+                other => EnrichmentError::Db(other),
+            })?;
+        let result = self
+            .queue
+            .dispatch_enrichment(
+                &work,
+                EnrichmentContext {
+                    priority,
+                    mode: EnrichmentMode::Background,
+                    freshness: livrarr_domain::Freshness::Bypass,
+                    search_only: true,
+                },
+            )
+            .await?;
+        Ok(livrarr_domain::services::IdentityRouteSearchResult {
+            captured_provider_identity: result.search_provider_identity,
+            captured_route_proposals: result.search_route_proposals,
+            provider_chase_attempted: result.provider_chase_attempted,
+            search_leg_fired: result.search_leg_fired,
+            search_ledger_burnable: result.search_ledger_burnable,
+        })
+    }
+
     async fn reselect_covers_from_persisted_payloads(
         &self,
         user_id: UserId,
@@ -830,6 +904,8 @@ where
                         ),
                         captured_route_proposals: Vec::new(),
                         provider_chase_attempted: !observed_names.is_empty(),
+                        search_leg_fired: false,
+                        search_ledger_burnable: false,
                     })
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -855,6 +931,7 @@ where
             priority,
             mode,
             freshness,
+            search_only: false,
         };
         let mut scatter_result = self.queue.dispatch_enrichment(&work, context).await?;
 
@@ -932,6 +1009,8 @@ where
                 captured_provider_identity,
                 captured_route_proposals,
                 provider_chase_attempted: scatter_result.provider_chase_attempted,
+                search_leg_fired: scatter_result.search_leg_fired,
+                search_ledger_burnable: scatter_result.search_ledger_burnable,
             });
         }
 
@@ -1110,6 +1189,8 @@ where
                         captured_provider_identity: captured_provider_identity.clone(),
                         captured_route_proposals: captured_route_proposals.clone(),
                         provider_chase_attempted: scatter_result.provider_chase_attempted,
+                        search_leg_fired: scatter_result.search_leg_fired,
+                        search_ledger_burnable: scatter_result.search_ledger_burnable,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {

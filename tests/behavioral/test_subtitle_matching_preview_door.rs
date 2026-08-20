@@ -241,7 +241,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 owner: RouteOwner::Work(0),
                 resolved_work_id: 0,
                 provider: IdentityProvider::Goodreads,
-                kind: RouteKind::GoodreadsWork,
+                kind: RouteKind::GoodreadsBookEdition,
                 provider_scoped_id: "12345".to_string(),
                 state: WorkRouteState::Active,
                 provenance: RouteProvenance::Provider(IdentityProvider::Goodreads),
@@ -262,7 +262,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
     assert_eq!(settled.identity.primary_author_id, author.id);
     assert!(settled.identity.active_routes.iter().any(|route| {
         route.provider == IdentityProvider::Goodreads
-            && route.kind == RouteKind::GoodreadsWork
+            && route.kind == RouteKind::GoodreadsBookEdition
             && route.provider_scoped_id == "12345"
     }));
     let work_id = settled.identity.own_work_id;

@@ -151,10 +151,16 @@ async fn main() {
     let job_runner = livrarr_server::jobs::JobRunner::new();
     let (call_sink, call_sink_handle) = spawn_call_sink_service(&db, &job_runner);
     let (live_metadata_config, transport_cache) = build_metadata_config_and_cache(&db).await;
+    let enrichment_goodreads_client = livrarr_external_data::GoodreadsClient::production(
+        http_fetcher.clone(),
+        http_client.clone(),
+    )
+    .with_capture_dir(data_dir.join("captures/goodreads"))
+    .with_live_config(live_metadata_config.clone());
     let (provider_queue, enrichment_service) = build_enrichment_pipeline(
         &db,
         &http_fetcher,
-        &http_client,
+        enrichment_goodreads_client,
         &live_metadata_config,
         &call_sink,
         &transport_cache,
@@ -260,6 +266,7 @@ async fn main() {
                     http_fetcher.clone(),
                     http_client.clone(),
                 )
+                .with_capture_dir(data_dir.join("captures/goodreads"))
                 .with_live_config(live_metadata_config.clone()),
             ),
         );
@@ -575,6 +582,7 @@ async fn main() {
                         http_fetcher.clone(),
                         http_client.clone(),
                     )
+                    .with_capture_dir(data_dir.join("captures/goodreads"))
                     .with_live_config(live_metadata_config.clone()),
                 ),
             );
@@ -881,6 +889,22 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
         }
     }
 
+    match livrarr_db::identity_layer::heal_identity_round21_goodreads_namespace(&pool).await {
+        Ok(report) => info!(
+            owned_file_routes_relabelled = report.owned_file_routes_relabelled,
+            migrated_gr_key_routes_relabelled = report.migrated_gr_key_routes_relabelled,
+            editions_created = report.editions_created,
+            works_advanced = report.works_advanced,
+            retry_works_reset = report.retry_works_reset,
+            "identity round-21 Goodreads Book namespace heal complete"
+        ),
+        Err(error) => {
+            error!("identity round-21 Goodreads Book namespace heal failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    }
+
     // Identity authority is active here. Legacy startup identity writers 9b
     // through 9e are intentionally unreachable after activation; exclusive
     // cutover owns any legacy preparation needed by a non-empty old library.
@@ -1032,7 +1056,7 @@ async fn build_metadata_config_and_cache(
 fn build_enrichment_pipeline(
     db: &livrarr_db::sqlite::SqliteDb,
     http_fetcher: &livrarr_http::fetcher::HttpFetcherImpl,
-    http_client: &livrarr_http::HttpClient,
+    goodreads_client: livrarr_external_data::GoodreadsClient,
     live_metadata_config: &livrarr_external_data::live_config::LiveMetadataConfig,
     call_sink: &Arc<dyn livrarr_domain::services::ProviderCallSink>,
     transport_cache: &Arc<livrarr_external_data::transport_cache::TransportCache>,
@@ -1096,14 +1120,9 @@ fn build_enrichment_pipeline(
 
     // Goodreads — always registered. The LLM extraction fallback for
     // foreign-language pages reads live config per-fetch.
-    let gr_client = livrarr_external_data::GoodreadsClient::production(
-        http_fetcher.clone(),
-        http_client.clone(),
-    )
-    .with_live_config(live_metadata_config.clone());
     builder = builder.add_provider(
         P::Goodreads,
-        livrarr_external_data::ProviderClient::Goodreads(gr_client)
+        livrarr_external_data::ProviderClient::Goodreads(goodreads_client)
             .with_call_sink(call_sink.clone()),
         queue_cfg(P::Goodreads),
     );

@@ -530,7 +530,15 @@ fn candidate_provider_evidence(
         anchors
             .gr_key
             .as_ref()
-            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+            // The direct-add `gr_key` slot carries a Goodreads Book-page id;
+            // autocomplete `workId` evidence travels through the search handoff.
+            .map(|value| {
+                (
+                    IdentityProvider::Goodreads,
+                    RouteKind::GoodreadsBookEdition,
+                    value,
+                )
+            }),
         anchors
             .hc_key
             .as_ref()
@@ -1662,7 +1670,9 @@ where
 
     let route_kind = match anchor_type.as_str() {
         AnchorType::OL_WORK => livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
-        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsWork,
+        // The legacy editable `gr_work` slot is populated by Goodreads Book
+        // URLs/ids. Keep its external name, but settle its value edition-homed.
+        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
         AnchorType::HC_WORK => livrarr_domain::identity_layer::RouteKind::HardcoverWork,
         AnchorType::ISBN_13 => livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
         AnchorType::ASIN => livrarr_domain::identity_layer::RouteKind::AsinEdition,

@@ -1331,7 +1331,15 @@ fn import_provider_evidence(
         item.gr_key
             .as_deref()
             .filter(|value| !value.is_empty())
-            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+            // Discovery/manual-import `gr_key` is sourced from a Goodreads
+            // `/book/show` identifier embedded in or attached to the file.
+            .map(|value| {
+                (
+                    IdentityProvider::Goodreads,
+                    RouteKind::GoodreadsBookEdition,
+                    value,
+                )
+            }),
         item.hc_key
             .as_deref()
             .filter(|value| !value.is_empty())

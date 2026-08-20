@@ -90,6 +90,7 @@ fn work_service(db: SqliteDb, label: &str) -> RealWorkService {
 struct WorkKeys {
     ol: Option<&'static str>,
     gr: Option<&'static str>,
+    gr_book: Option<&'static str>,
     hc: Option<&'static str>,
 }
 
@@ -115,10 +116,18 @@ impl WorkKeys {
         }
     }
 
-    fn gr_and_hc(gr: &'static str, hc: &'static str) -> Self {
+    fn gr_book(key: &'static str) -> Self {
+        Self {
+            gr_book: Some(key),
+            ..Self::default()
+        }
+    }
+
+    fn gr_book_and_hc(gr: &'static str, hc: &'static str) -> Self {
         Self {
             ol: None,
-            gr: Some(gr),
+            gr: None,
+            gr_book: Some(gr),
             hc: Some(hc),
         }
     }
@@ -332,6 +341,11 @@ async fn settled_author(
             RouteKind::GoodreadsWork,
         ),
         (
+            keys.gr_book,
+            IdentityProvider::Goodreads,
+            RouteKind::GoodreadsBookEdition,
+        ),
+        (
             keys.hc,
             IdentityProvider::Hardcover,
             RouteKind::HardcoverWork,
@@ -452,6 +466,87 @@ async fn observe_name(
     )
     .await
     .expect("production name-variant writer");
+}
+
+// Bug reproduction: identity-layer-rewrite — the post-cutover author-link
+// projection treated a Goodreads Work id as the Book-page key and ignored the
+// actual Goodreads BookEdition route.
+#[tokio::test]
+async fn post_f2_author_link_projects_only_goodreads_book_edition_routes() {
+    let db = create_test_db().await;
+    let user_id = create_test_user(&db).await;
+
+    let (work_route_author_id, work_route_work_id) = settled_author(
+        &db,
+        user_id,
+        "gr-work-namespace",
+        "Work Namespace Book",
+        "Work Namespace Author",
+        WorkKeys::gr("600815"),
+    )
+    .await;
+    let work_route_claim = claim_author(&db, work_route_author_id, Utc::now()).await;
+    let work_route_input = db
+        .load_road_input(work_route_claim.clone())
+        .await
+        .expect("load author-link input for Goodreads Work route");
+    let work_route_projection = work_route_input
+        .settled_works
+        .iter()
+        .find(|work| work.work_id == work_route_work_id)
+        .expect("settled Work-route fixture");
+    assert_eq!(
+        work_route_projection.gr_key, None,
+        "a Goodreads Work id must not mint a Goodreads Book-page key attempt"
+    );
+    let fetcher = StubHttpFetcher::with_ok(200, open_library_author_search(&[]));
+    AuthorLinkingServiceImpl {
+        db: db.clone(),
+        gateway: real_gateway(fetcher.clone()),
+    }
+    .run_author(work_route_claim)
+    .await
+    .expect("a Work-only Goodreads graph is a quiet key skip");
+    let goodreads_attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM author_link_key_attempts WHERE author_id = ? AND provider = 'goodreads'",
+    )
+    .bind(work_route_author_id)
+    .fetch_one(db.pool())
+    .await
+    .expect("Goodreads attempt count");
+    assert_eq!(
+        goodreads_attempts, 0,
+        "a Goodreads Work route must not burn the Book-key attempt ledger"
+    );
+    assert_eq!(
+        fetcher.call_count(),
+        1,
+        "the unrelated OpenLibrary Tier-2 search remains available"
+    );
+
+    let (book_route_author_id, book_route_work_id) = settled_author(
+        &db,
+        user_id,
+        "gr-book-namespace",
+        "Book Namespace Book",
+        "Book Namespace Author",
+        WorkKeys::gr_book("12345"),
+    )
+    .await;
+    let book_route_input = db
+        .load_road_input(claim_author(&db, book_route_author_id, Utc::now()).await)
+        .await
+        .expect("load author-link input for Goodreads BookEdition route");
+    let book_route_projection = book_route_input
+        .settled_works
+        .iter()
+        .find(|work| work.work_id == book_route_work_id)
+        .expect("settled BookEdition-route fixture");
+    assert_eq!(
+        book_route_projection.gr_key.as_deref(),
+        Some("12345"),
+        "the active Goodreads BookEdition id is the author-link Book-page key"
+    );
 }
 
 // ===========================================================================
@@ -648,7 +743,7 @@ async fn an_asserted_credit_with_a_latin_mismatch_still_cards() {
         "asserted-mismatch",
         "Asserted Work",
         "Asserted Author",
-        WorkKeys::gr("9300"),
+        WorkKeys::gr_book("9300"),
     )
     .await;
 
@@ -701,7 +796,7 @@ async fn a_dropped_credit_keeps_tier_two_shut_on_a_later_pass() {
         "durable-observation",
         "Two Key Work",
         "Two Key Author",
-        WorkKeys::gr_and_hc("9301", "4203"),
+        WorkKeys::gr_book_and_hc("9301", "4203"),
     )
     .await;
 
@@ -837,7 +932,7 @@ async fn goodreads_json_ld_is_an_unlabeled_placement() {
         "json-ld-drop",
         "Fallback Work",
         "Fallback Author",
-        WorkKeys::gr("9302"),
+        WorkKeys::gr_book("9302"),
     )
     .await;
 
@@ -869,7 +964,7 @@ async fn goodreads_json_ld_is_an_unlabeled_placement() {
         "json-ld-link",
         "Fallback Agree Work",
         "Fallback Agree Author",
-        WorkKeys::gr("9303"),
+        WorkKeys::gr_book("9303"),
     )
     .await;
 
@@ -975,7 +1070,7 @@ async fn a_compatible_but_distinct_name_still_reads_as_grey() {
         "dedupe-control",
         "Rowling Control Work",
         "J. K. Rowling",
-        WorkKeys::gr("9304"),
+        WorkKeys::gr_book("9304"),
     )
     .await;
     observe_name(

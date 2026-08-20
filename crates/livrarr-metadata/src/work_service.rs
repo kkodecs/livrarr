@@ -45,7 +45,15 @@ fn captured_provider_routes(
         captured
             .gr_key
             .as_ref()
-            .map(|value| (IdentityProvider::Goodreads, RouteKind::GoodreadsWork, value)),
+            // `CapturedIdentity.gr_key` is the legacy/file Goodreads Book-page
+            // slot. It is never an autocomplete `workId`.
+            .map(|value| {
+                (
+                    IdentityProvider::Goodreads,
+                    RouteKind::GoodreadsBookEdition,
+                    value,
+                )
+            }),
         captured
             .hc_key
             .as_ref()
@@ -247,6 +255,8 @@ impl EnrichmentWorkflow for StubNoEnrichment {
             captured_provider_identity: Vec::new(),
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
             enrichment_status: EnrichmentStatus::Unenriched,
             enrichment_source: None,
             work: Work::default(),
@@ -3479,6 +3489,8 @@ pub(crate) struct UnifiedEnrichmentOutcome {
     pub provider_unavailable: bool,
     pub route_handoff: Option<livrarr_domain::identity_layer::CapturedRouteHandoff>,
     pub provider_chase_attempted: bool,
+    pub search_leg_fired: bool,
+    pub search_ledger_burnable: bool,
 }
 
 impl<D, E, H> WorkServiceImpl<D, E, H>
@@ -3609,6 +3621,8 @@ where
                     provider_unavailable: true,
                     route_handoff: None,
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 };
             }
         };
@@ -3635,6 +3649,8 @@ where
                     provider_unavailable: false,
                     route_handoff: None,
                     provider_chase_attempted: enrich_result.provider_chase_attempted,
+                    search_leg_fired: enrich_result.search_leg_fired,
+                    search_ledger_burnable: enrich_result.search_ledger_burnable,
                 };
             }
         };
@@ -3886,6 +3902,8 @@ where
             provider_unavailable,
             route_handoff,
             provider_chase_attempted: enrich_result.provider_chase_attempted,
+            search_leg_fired: enrich_result.search_leg_fired,
+            search_ledger_burnable: enrich_result.search_ledger_burnable,
         }
     }
 }

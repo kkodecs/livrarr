@@ -264,6 +264,8 @@ impl EnrichmentWorkflow for SpyEnrichmentWorkflow {
             captured_provider_identity: Vec::new(),
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
         })
     }
 
@@ -323,6 +325,8 @@ impl ProviderQueue for TextlessProviderQueue {
             merge_eligible: true,
             deferred: false,
             provider_chase_attempted: true,
+            search_leg_fired: false,
+            search_ledger_burnable: false,
             search_provider_identity: Vec::new(),
             search_route_proposals: Vec::new(),
         })

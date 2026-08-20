@@ -308,6 +308,8 @@ pub mod tests {
                     captured_provider_identity: Vec::new(),
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -328,6 +330,8 @@ pub mod tests {
                     captured_provider_identity: Vec::new(),
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -352,6 +356,8 @@ pub mod tests {
                     captured_provider_identity: Vec::new(),
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -373,6 +379,8 @@ pub mod tests {
                     captured_provider_identity: Vec::new(),
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -390,6 +398,8 @@ pub mod tests {
                     captured_provider_identity: Vec::new(),
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
+                    search_leg_fired: false,
+                    search_ledger_burnable: false,
                 }),
             }
         }

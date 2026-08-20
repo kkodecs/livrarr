@@ -153,7 +153,9 @@ pub async fn fetch_goodreads_html<F: HttpFetcher>(
     url: &str,
     priority: RequestPriority,
 ) -> Result<String, GoodreadsFetchError> {
-    fetch_goodreads_html_via(fetcher, url, priority, GrFetchMode::Unrestricted).await
+    fetch_goodreads_body_via(fetcher, url, priority, GrFetchMode::Unrestricted)
+        .await
+        .map(|body| body.text)
 }
 
 /// Same as [`fetch_goodreads_html`], but routes through `fetch_ssrf_safe`
@@ -166,15 +168,42 @@ pub async fn fetch_goodreads_html_ssrf_safe<F: HttpFetcher>(
     url: &str,
     priority: RequestPriority,
 ) -> Result<String, GoodreadsFetchError> {
-    fetch_goodreads_html_via(fetcher, url, priority, GrFetchMode::SsrfSafe).await
+    fetch_goodreads_body_via(fetcher, url, priority, GrFetchMode::SsrfSafe)
+        .await
+        .map(|body| body.text)
 }
 
-async fn fetch_goodreads_html_via<F: HttpFetcher>(
+/// A fetched Goodreads page retains the response bytes alongside the lossy
+/// text view used by the existing HTML parsers. The byte view is required for
+/// diagnostic capture: a malformed encoding must not be rewritten before it
+/// reaches disk.
+pub(crate) struct GoodreadsHtmlBody {
+    pub(crate) raw: Vec<u8>,
+    pub(crate) text: String,
+}
+
+pub(crate) async fn fetch_goodreads_body<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    priority: RequestPriority,
+) -> Result<GoodreadsHtmlBody, GoodreadsFetchError> {
+    fetch_goodreads_body_via(fetcher, url, priority, GrFetchMode::Unrestricted).await
+}
+
+pub(crate) async fn fetch_goodreads_body_ssrf_safe<F: HttpFetcher>(
+    fetcher: &F,
+    url: &str,
+    priority: RequestPriority,
+) -> Result<GoodreadsHtmlBody, GoodreadsFetchError> {
+    fetch_goodreads_body_via(fetcher, url, priority, GrFetchMode::SsrfSafe).await
+}
+
+async fn fetch_goodreads_body_via<F: HttpFetcher>(
     fetcher: &F,
     url: &str,
     priority: RequestPriority,
     mode: GrFetchMode,
-) -> Result<String, GoodreadsFetchError> {
+) -> Result<GoodreadsHtmlBody, GoodreadsFetchError> {
     let req = FetchRequest {
         url: url.to_string(),
         method: HttpMethod::Get,
@@ -223,7 +252,10 @@ async fn fetch_goodreads_html_via<F: HttpFetcher>(
     // at this point told the breaker a provider was healthy while every page it
     // served was unreadable, AND cleared any accumulated failures on the way
     // past. The callers that actually parse a payload report success instead.
-    Ok(html)
+    Ok(GoodreadsHtmlBody {
+        raw: resp.body,
+        text: html,
+    })
 }
 
 /// Search Goodreads by TITLE ONLY via the WAF-free autocomplete JSON endpoint.

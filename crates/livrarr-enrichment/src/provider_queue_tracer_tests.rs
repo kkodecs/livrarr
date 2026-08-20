@@ -108,6 +108,7 @@ mod audnexus_tracer_tests {
             priority: RequestPriority::Low,
             mode: EnrichmentMode::Background,
             freshness: livrarr_domain::Freshness::PreferCache,
+            search_only: false,
         };
 
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
@@ -155,6 +156,7 @@ mod audnexus_tracer_tests {
             priority: RequestPriority::Low,
             mode: EnrichmentMode::Background,
             freshness: livrarr_domain::Freshness::PreferCache,
+            search_only: false,
         };
 
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
@@ -283,6 +285,7 @@ mod goodreads_tracer_tests {
             priority: RequestPriority::Low,
             mode: EnrichmentMode::Background,
             freshness: livrarr_domain::Freshness::PreferCache,
+            search_only: false,
         };
 
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();
@@ -345,6 +348,7 @@ mod goodreads_tracer_tests {
             priority: RequestPriority::Low,
             mode: EnrichmentMode::Background,
             freshness: livrarr_domain::Freshness::PreferCache,
+            search_only: false,
         };
 
         let result = queue.dispatch_enrichment(&work, ctx).await.unwrap();

@@ -3693,6 +3693,8 @@ const IDENTITY_ROUND15_SEARCH_LEDGER_RESET_GENERATION: i64 = 1;
 
 const IDENTITY_ROUND15_GR_COVER_RESELECT_GENERATION: i64 = 1;
 
+const IDENTITY_ROUND21_GOODREADS_NAMESPACE_HEAL_GENERATION: i64 = 1;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdentityRound10ResidueHealReport {
     pub bridge_attempts_cleared: usize,
@@ -3812,6 +3814,15 @@ pub struct IdentityRound15SearchLedgerResetReport {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityRound21GoodreadsNamespaceHealReport {
+    pub owned_file_routes_relabelled: usize,
+    pub migrated_gr_key_routes_relabelled: usize,
+    pub editions_created: usize,
+    pub works_advanced: usize,
+    pub retry_works_reset: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdentityRound15GrCoverReselectTarget {
     pub user_id: UserId,
     pub work_id: WorkId,
@@ -3838,6 +3849,308 @@ pub struct IdentityRound15GrCoverSlotsCleared {
 pub struct IdentityRound15GrCoverReselectCompletion {
     pub queued_works: usize,
     pub automatic_target_works: usize,
+}
+
+/// Repair only Goodreads Work routes whose provenance proves that the value
+/// came from the legacy Book-page namespace. SearchFallback and
+/// TextDecisiveSearchFallback routes are intentionally excluded: their values
+/// are genuine autocomplete `workId`s. Route re-homing, generation changes,
+/// retry invalidation, audit rows, and the one-shot marker are one transaction.
+pub async fn heal_identity_round21_goodreads_namespace(
+    pool: &SqlitePool,
+) -> Result<IdentityRound21GoodreadsNamespaceHealReport, String> {
+    #[derive(Debug, Clone, Copy)]
+    enum ProvenBookSource {
+        OwnedFile,
+        MigratedGrKey,
+    }
+
+    let mut tx = crate::pool::begin_write(pool)
+        .await
+        .map_err(|error| format!("begin identity round-21 Goodreads namespace heal: {error}"))?;
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta \
+          WHERE key='identity_round21_goodreads_book_namespace_heal'",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("read identity round-21 Goodreads namespace marker: {error}"))?;
+    if marker
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|generation| {
+            generation >= IDENTITY_ROUND21_GOODREADS_NAMESPACE_HEAL_GENERATION
+        })
+    {
+        tx.rollback()
+            .await
+            .map_err(|error| format!("close completed round-21 namespace heal: {error}"))?;
+        return Ok(IdentityRound21GoodreadsNamespaceHealReport::default());
+    }
+
+    let goodreads = serde_json::to_string(&IdentityProvider::Goodreads)
+        .map_err(|error| format!("encode round-21 Goodreads provider: {error}"))?;
+    let work_kind = serde_json::to_string(&RouteKind::GoodreadsWork)
+        .map_err(|error| format!("encode round-21 Goodreads Work kind: {error}"))?;
+    let book_kind = serde_json::to_string(&RouteKind::GoodreadsBookEdition)
+        .map_err(|error| format!("encode round-21 Goodreads Book kind: {error}"))?;
+    let unknown_format = serde_json::to_string(&EditionFormat::Unknown)
+        .map_err(|error| format!("encode round-21 unknown Edition format: {error}"))?;
+    let candidates = sqlx::query(
+        "SELECT id, user_id, resolved_work_id, provider_scoped_id, provenance \
+           FROM identity_routes \
+          WHERE provider=?1 AND kind=?2 AND state='active' \
+          ORDER BY user_id, resolved_work_id, id",
+    )
+    .bind(&goodreads)
+    .bind(&work_kind)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("list round-21 Goodreads namespace candidates: {error}"))?;
+
+    let mut report = IdentityRound21GoodreadsNamespaceHealReport::default();
+    let mut route_graphs: BTreeMap<(UserId, WorkId), ActiveRouteGraph> = BTreeMap::new();
+    let mut work_counts: BTreeMap<(UserId, WorkId), (usize, usize)> = BTreeMap::new();
+
+    for row in candidates {
+        let provenance_json: String = row
+            .try_get("provenance")
+            .map_err(|error| format!("decode round-21 route provenance: {error}"))?;
+        let provenance: RouteProvenance = serde_json::from_str(&provenance_json)
+            .map_err(|error| format!("parse round-21 route provenance: {error}"))?;
+        let source = match provenance {
+            RouteProvenance::OwnedFile { .. } => ProvenBookSource::OwnedFile,
+            RouteProvenance::Migrated { ref legacy_field } if legacy_field == "gr_key" => {
+                ProvenBookSource::MigratedGrKey
+            }
+            _ => continue,
+        };
+        let route_id: i64 = row
+            .try_get("id")
+            .map_err(|error| format!("decode round-21 route id: {error}"))?;
+        let user_id: UserId = row
+            .try_get("user_id")
+            .map_err(|error| format!("decode round-21 route user: {error}"))?;
+        let work_id: WorkId = row
+            .try_get("resolved_work_id")
+            .map_err(|error| format!("decode round-21 route work: {error}"))?;
+        let value: String = row
+            .try_get("provider_scoped_id")
+            .map_err(|error| format!("decode round-21 Goodreads Book id: {error}"))?;
+
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            route_graphs.entry((user_id, work_id))
+        {
+            let before = read_active_route_graph(&mut tx, user_id, work_id)
+                .await
+                .map_err(|error| format!("snapshot round-21 route graph: {error}"))?;
+            entry.insert(before);
+        }
+
+        let active_book_routes = sqlx::query(
+            "SELECT id, resolved_work_id, edition_id FROM identity_routes \
+              WHERE user_id=?1 AND provider=?2 AND kind=?3 AND provider_scoped_id=?4 \
+                AND state='active' AND id<>?5 ORDER BY id",
+        )
+        .bind(user_id)
+        .bind(&goodreads)
+        .bind(&book_kind)
+        .bind(&value)
+        .bind(route_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("read existing round-21 Goodreads Book route: {error}"))?;
+
+        let edition_id = if let Some(existing) = active_book_routes.first() {
+            for route in &active_book_routes {
+                let existing_work: WorkId = route.try_get("resolved_work_id").map_err(|error| {
+                    format!("decode existing round-21 Goodreads Book owner: {error}")
+                })?;
+                if existing_work != work_id {
+                    return Err(format!(
+                        "round-21 Goodreads Book id {value} is already active on work {existing_work}"
+                    ));
+                }
+            }
+            let edition_id: Option<EditionId> = existing
+                .try_get("edition_id")
+                .map_err(|error| format!("decode existing round-21 Edition owner: {error}"))?;
+            let edition_id = edition_id.ok_or_else(|| {
+                format!("round-21 Goodreads Book route for {value} has no Edition owner")
+            })?;
+            let edition_work: Option<WorkId> = sqlx::query_scalar(
+                "SELECT work_id FROM editions \
+                  WHERE user_id=?1 AND id=?2 AND state='active'",
+            )
+            .bind(user_id)
+            .bind(edition_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("verify existing round-21 Edition owner: {error}"))?;
+            if edition_work != Some(work_id) {
+                return Err(format!(
+                    "round-21 Goodreads Book Edition {edition_id} is not active on work {work_id}"
+                ));
+            }
+            // Preserve the proven-Book route row and its provenance in place;
+            // any already-correct duplicate becomes retained history.
+            sqlx::query(
+                "UPDATE identity_routes SET state='retired' \
+                  WHERE user_id=?1 AND provider=?2 AND kind=?3 AND provider_scoped_id=?4 \
+                    AND state='active' AND id<>?5",
+            )
+            .bind(user_id)
+            .bind(&goodreads)
+            .bind(&book_kind)
+            .bind(&value)
+            .bind(route_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("retire duplicate round-21 Goodreads Book route: {error}"))?;
+            edition_id
+        } else {
+            let existing_editions = sqlx::query(
+                "SELECT id, work_id FROM editions \
+                  WHERE user_id=?1 AND source_provider=?2 AND provider_edition_id=?3 \
+                    AND state='active' ORDER BY id",
+            )
+            .bind(user_id)
+            .bind(&goodreads)
+            .bind(&value)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| format!("read existing round-21 Goodreads Edition: {error}"))?;
+            if let Some(existing) = existing_editions.first() {
+                for edition in &existing_editions {
+                    let edition_work: WorkId = edition.try_get("work_id").map_err(|error| {
+                        format!("decode existing round-21 Goodreads Edition work: {error}")
+                    })?;
+                    if edition_work != work_id {
+                        return Err(format!(
+                            "round-21 Goodreads Edition id {value} already belongs to work {edition_work}"
+                        ));
+                    }
+                }
+                existing
+                    .try_get("id")
+                    .map_err(|error| format!("decode existing round-21 Edition id: {error}"))?
+            } else {
+                report.editions_created += 1;
+                sqlx::query(
+                    "INSERT INTO editions \
+                        (user_id, work_id, format, source_provider, provider_edition_id, state) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 'active')",
+                )
+                .bind(user_id)
+                .bind(work_id)
+                .bind(&unknown_format)
+                .bind(&goodreads)
+                .bind(&value)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| format!("create round-21 Goodreads Edition: {error}"))?
+                .last_insert_rowid()
+            }
+        };
+
+        let updated = sqlx::query(
+            "UPDATE identity_routes \
+                SET owner_type='edition', work_id=NULL, edition_id=?1, kind=?2 \
+              WHERE id=?3 AND user_id=?4 AND resolved_work_id=?5 \
+                AND provider=?6 AND kind=?7 AND state='active'",
+        )
+        .bind(edition_id)
+        .bind(&book_kind)
+        .bind(route_id)
+        .bind(user_id)
+        .bind(work_id)
+        .bind(&goodreads)
+        .bind(&work_kind)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("relabel round-21 Goodreads Book route: {error}"))?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "round-21 Goodreads route {route_id} changed during namespace repair"
+            ));
+        }
+        let counts = work_counts.entry((user_id, work_id)).or_default();
+        match source {
+            ProvenBookSource::OwnedFile => {
+                report.owned_file_routes_relabelled += 1;
+                counts.0 += 1;
+            }
+            ProvenBookSource::MigratedGrKey => {
+                report.migrated_gr_key_routes_relabelled += 1;
+                counts.1 += 1;
+            }
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for ((user_id, work_id), before) in route_graphs {
+        let (owned_count, migrated_count) = work_counts
+            .get(&(user_id, work_id))
+            .copied()
+            .unwrap_or_default();
+        if owned_count + migrated_count == 0 {
+            continue;
+        }
+        let advanced = sqlx::query(
+            "UPDATE works SET identity_generation=identity_generation+1 \
+              WHERE user_id=?1 AND id=?2",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("advance round-21 identity generation: {error}"))?;
+        if advanced.rows_affected() != 1 {
+            return Err(format!("round-21 namespace repair lost work {work_id}"));
+        }
+        report.works_advanced += 1;
+        if invalidate_retry_state_if_route_graph_changed(&mut tx, user_id, work_id, &before)
+            .await
+            .map_err(|error| format!("reset round-21 provider retry standing: {error}"))?
+        {
+            report.retry_works_reset += 1;
+        }
+        let generation: i64 =
+            sqlx::query_scalar("SELECT identity_generation FROM works WHERE user_id=?1 AND id=?2")
+                .bind(user_id)
+                .bind(work_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| format!("read round-21 repaired generation: {error}"))?;
+        sqlx::query(
+            "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'round21-goodreads-book-namespace-heal', \
+                     'startup-heal', ?3, ?4)",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .bind(format!(
+            "generation={generation};owned_file_routes={owned_count};migrated_gr_key_routes={migrated_count};from=GoodreadsWork;to=GoodreadsBookEdition"
+        ))
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("audit round-21 Goodreads namespace heal: {error}"))?;
+    }
+
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('identity_round21_goodreads_book_namespace_heal', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .bind(IDENTITY_ROUND21_GOODREADS_NAMESPACE_HEAL_GENERATION.to_string())
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("stamp identity round-21 Goodreads namespace marker: {error}"))?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit identity round-21 Goodreads namespace heal: {error}"))?;
+    Ok(report)
 }
 
 /// Snapshot the exact automatic Goodreads-sourced slots the startup repair

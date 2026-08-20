@@ -1789,7 +1789,9 @@ where
 {
     let route_kind = match anchor_type.as_str() {
         AnchorType::OL_WORK => livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
-        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsWork,
+        // The legacy gr_work slot stores a Goodreads Book-page id. Collision
+        // preview must use the same edition namespace as the write path.
+        AnchorType::GR_WORK => livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
         AnchorType::HC_WORK => livrarr_domain::identity_layer::RouteKind::HardcoverWork,
         AnchorType::ISBN_13 => livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
         AnchorType::ASIN => livrarr_domain::identity_layer::RouteKind::AsinEdition,
