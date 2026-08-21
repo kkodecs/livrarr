@@ -183,6 +183,7 @@ where
         return Ok(ConvergencePass {
             outcome,
             route_handoff,
+            observed_identity_generation: Some(captured.identity_generation),
             provider_chase_attempted: enrichment_outcome
                 .as_ref()
                 .is_some_and(|outcome| outcome.provider_chase_attempted)
@@ -246,6 +247,7 @@ where
         return Ok(ConvergencePass {
             outcome: ConvergeOutcome::Terminal,
             route_handoff: None,
+            observed_identity_generation: None,
             provider_chase_attempted: false,
             search_leg_fired: false,
             search_ledger_burnable: false,
@@ -353,6 +355,7 @@ where
     Ok(ConvergencePass {
         outcome,
         route_handoff: None,
+        observed_identity_generation: None,
         provider_chase_attempted: false,
         search_leg_fired: false,
         search_ledger_burnable: false,

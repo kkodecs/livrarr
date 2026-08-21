@@ -310,6 +310,11 @@ pub enum ConvergeOutcome {
 pub struct ConvergencePass {
     pub outcome: ConvergeOutcome,
     pub route_handoff: Option<crate::identity_layer::CapturedRouteHandoff>,
+    /// `works.identity_generation` observed by this pass's single pre-chase
+    /// captured-identity read. The attempt checkpoint records only against
+    /// this value; `None` when the pass made no route-authoritative capture
+    /// (legacy road).
+    pub observed_identity_generation: Option<i64>,
     /// True only when at least one provider anchor was actually dispatched or
     /// served from the provider-response cache during this pass.
     pub provider_chase_attempted: bool,
@@ -521,6 +526,7 @@ pub trait WorkService: Send + Sync {
             Ok(ConvergencePass {
                 outcome,
                 route_handoff: None,
+                observed_identity_generation: None,
                 provider_chase_attempted: false,
                 search_leg_fired: false,
                 search_ledger_burnable: false,
