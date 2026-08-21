@@ -3,72 +3,67 @@
 ## Commits
 
 - Red (test-only, on frozen base 4b4acf25): 43f6b07b
-- Implementation: 3f5d441e
+- Implementation: 3f5d441e; r1 review fixes (EXP-SEM-R1-01/02/03): see log
+- Notes: this commit
 
-## Red evidence
+## Red evidence (r1)
 
 Four cases failed by assertion on the frozen base, all driving the real
-convergence tick (`run_identity_convergence_tick`) with scripted transports /
-stub clients at the ProviderClient seam:
-
-- `ac025b_goodreads_propose_probe_failure_remains_a_miss` — defect pin amended
-  (cards, burns) (0,1) → contract (0,0); failed with left (0,1)
-- `aud_p1_10_probe_failure_leg_beside_honest_miss_never_burns` — left (0,1)
-- `aud_p1_10_anchored_provider_failure_blocks_pass_burn` — left 1, right 0
-- `aud_p1_10_bridge_arm_anchored_failure_never_burns` — left 1, right 0
-- `aud_p1_10_clean_miss_threshold_and_settle_semantics_unchanged` — green on
-  the frozen base: clean miss burns once per pass, threshold parks, settle
-  burns none
-
-Tests live in the already-registered `tests/behavioral/test_ilr_contracts.rs`
-(no new root file — its route harness is file-local), committed with
-`git add -f`. `create_activated_test_db()` is the activated-schema variant of
-the real in-memory test DB; the route-authoritative road requires it.
+convergence tick with scripted transports / stub clients at the ProviderClient
+seam and the activated real test DB: the amended round15 probe pin (0,1)→(0,0),
+probe-failure beside an honest miss, anchored 5xx beside a search miss, and a
+bridge-arm case later re-pinned (below). The clean-miss/threshold/settle
+control test was green on base.
 
 ## Chosen fold shape
 
 One typed value replaces the `search_ledger_burnable` bool at every accounting
 boundary: `livrarr_domain::services::LedgerPassAccounting { Idle, CardOrMiss,
-Settled, LegFailed }` with one commutative fold `combine` — `Idle` the
-identity; `LegFailed` absorbs, then `Settled`, then `CardOrMiss`. Every leg
-contributes one value (search leg: card/miss, settle, or failed;
-proposal-grade probe failure: `LegFailed`, no card; anchored fetch:
-`LegFailed` on WillRetry/PermanentFailure, nothing on completed verdicts;
-cache hits and skips: nothing), and every layer — queue, convergence, server —
-folds with the same `combine`. "One leg failed" stays visible at the burn site
-and can never be OR-collapsed away by a burnable sibling — the common shape of
-all three finding legs. The burn site charges only `CardOrMiss` on the search
-arm; the legacy bridge arm keeps its `!has_work_route` policy, now gated by
-`!leg_failed()` — the missing failure discrimination was the defect, the
-policy stays per the out-of-scope list. A second boolean would reopen the same
-drift (a future fold site can OR the wrong one); the enum makes the fold total
-and the compiler enumerates every accounting site.
+Settled, LegFailed }` with one commutative fold `combine` — `Idle` identity;
+`LegFailed` absorbs, then `Settled`, then `CardOrMiss`. Every leg contributes
+one value (search leg: card/miss, settle, or failed; ANY failed probe:
+`LegFailed` — a text-decisive pick still emits its settlement evidence beside
+the failed-leg fact, and a proposal-grade pick mints no card; anchored fetch:
+`LegFailed` on WillRetry/PermanentFailure; cache hits and skips: nothing).
+Queue, convergence, and server all fold with the same `combine`, so "one leg
+failed" reaches the burn site un-collapsible. A second boolean would reopen
+the OR-drift; the enum makes the fold total and compiler-enumerated.
+
+Burn decision: a fired search pass burns iff the fold is `CardOrMiss`. The
+legacy edition-only bridge arm (no search leg fired) is OUT OF SCOPE and
+stands byte-equivalent to its frozen policy: burn iff no Work-level route,
+provider failure or not (EXP-SEM-R1-01 corrected r1's over-reach; the pin
+`aud_p1_10_bridge_arm_legacy_burn_survives_anchored_failure` proves it burns).
+
+## r1 review fixes
+
+- R1-01 (P1): failure gate now applies only to the search arm; bridge test
+  re-pinned to legacy burns=1; notes corrected.
+- R1-02 (P2): text-decisive probe failure folds `LegFailed` while still
+  settling; provider-client comment no longer calls a transport/parse failure
+  an honest miss.
+- R1-03 (P2): zero-network candidate reuse reports
+  `provider_chase_attempted=false` + `Idle`; asserted in the real reuse test.
 
 ## Changed files
 
-- domain: `services/enrichment.rs` (new type; two fields), `services/work.rs`
-- enrichment: `provider_queue.rs` (typed capture, probe-failure fix, pass fold
-  incl. anchored legs), `lib.rs`
-- metadata: `convergence_service.rs` (combine replaces the OR fold),
-  `work_service.rs`, `enrichment_workflow_service.rs`, `lib.rs` (test stubs)
-- server: `identity_layer.rs` (failure-discriminated burn decision)
-- behavioral stubs + 11 test files (mechanical field adaptation; the only
-  amended expectation is the defect pin above)
+domain services/{enrichment,work}.rs; enrichment provider_queue.rs + lib.rs;
+metadata convergence_service.rs, work_service.rs, enrichment_workflow_service
+.rs, lib.rs stubs; server identity_layer.rs; external-data provider_client.rs
+(comment); behavioral stubs + test adaptations (only the round15 defect pin
+changed expectation).
 
-## Gates (inside the worktree)
+## Gates (inside the worktree, after r1 fixes)
 
 - `cargo fmt --all -- --check`: 0 diffs
 - `cargo clippy --workspace --all-targets`: 0 warnings
-- `cargo test --no-fail-fast`: exit 0, zero failures
-  (`test_ilr_contracts` 196/196)
+- `cargo test --no-fail-fast`: exit 0, zero failures (`test_ilr_contracts`
+  196/196)
 
 ## Limitations
 
-- A permanently failing provider/probe suppresses burns indefinitely: the work
-  stays cadence-selectable, never parking until the provider recovers — the
-  contract's intended trade.
+- On the search arm a permanently failing provider/probe suppresses burns
+  indefinitely (never parks until recovery) — the contract's intended trade;
+  the legacy bridge arm still parks such works.
 - Anchored `Conflict`/`NotConfigured` count as completed verdicts, not
-  failures (the contract lists provider error, probe, task, breaker/queue
-  pause).
-- `Settled` vs `LegFailed` precedence is unobservable at the one existing burn
-  site (settled evidence also routes through the fresh-handoff gate).
+  failures (contract lists provider error, probe, task, breaker/queue pause).
