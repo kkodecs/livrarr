@@ -13255,9 +13255,12 @@ async fn aud_p1_10_probe_failure_beside_honest_miss_never_burns() {
             round17_status_response(404, Vec::new())
         }) as Arc<_>
     };
-    let harness =
-        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
-            .await;
+    let harness = build_route_harness_with_provider_details(
+        None,
+        Vec::new(),
+        Some(round13_search_transport(scripted)),
+    )
+    .await;
     let (work_id, generation) = seed_round13_search_work(
         &harness,
         "Ledger Probe Failure Sibling",
@@ -13334,9 +13337,12 @@ async fn aud_p1_10_anchored_provider_failure_poisons_pass_burn() {
             round17_status_response(404, Vec::new())
         }) as Arc<_>
     };
-    let harness =
-        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
-            .await;
+    let harness = build_route_harness_with_provider_details(
+        None,
+        Vec::new(),
+        Some(round13_search_transport(scripted)),
+    )
+    .await;
     let (work_id, _) = seed_round13_search_work(
         &harness,
         "Ledger Anchored Outage",
@@ -13444,9 +13450,12 @@ async fn aud_p1_10_clean_miss_and_settle_semantics_unchanged() {
             round17_status_response(404, Vec::new())
         }) as Arc<_>
     };
-    let harness =
-        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
-            .await;
+    let harness = build_route_harness_with_provider_details(
+        None,
+        Vec::new(),
+        Some(round13_search_transport(scripted)),
+    )
+    .await;
     let (work_id, generation) = seed_round13_search_work(
         &harness,
         "Ledger Clean Miss Cadence",
@@ -13531,9 +13540,12 @@ async fn aud_p1_10_clean_miss_and_settle_semantics_unchanged() {
             round17_status_response(404, Vec::new())
         }) as Arc<_>
     };
-    let harness =
-        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
-            .await;
+    let harness = build_route_harness_with_provider_details(
+        None,
+        Vec::new(),
+        Some(round13_search_transport(scripted)),
+    )
+    .await;
     let (work_id, generation) = seed_round13_search_work(
         &harness,
         "Ledger Clean Settle",

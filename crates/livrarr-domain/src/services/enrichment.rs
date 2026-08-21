@@ -39,6 +39,61 @@ impl IdentitySearchAvailability {
     }
 }
 
+/// REQ-027 pass-level accounting toward the generation-scoped attempt ledger,
+/// folded across every leg one dispatch pass spawns: title+author search
+/// legs, their corroboration probes, and anchored provider fetches. The rule
+/// it types: a card/miss-only pass burns once; any settle or provider failure
+/// burns none. Cache-served payloads and skips contribute nothing (`Idle`).
+///
+/// [`Self::combine`] is the one fold every orchestration layer uses, so the
+/// "one leg failed" fact stays visible at every burn site instead of being
+/// OR-collapsed away by a sibling leg's honest miss.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LedgerPassAccounting {
+    /// Identity element of the fold: no burn-relevant leg contributed.
+    #[default]
+    Idle,
+    /// A fired search leg reached an honest proposal card or miss — the only
+    /// state a burn may be charged from.
+    CardOrMiss,
+    /// A search leg settled identity evidence (corroborated or
+    /// text-decisive). A settling pass never burns.
+    Settled,
+    /// A spawned leg failed: provider error, probe failure, task failure, or
+    /// a breaker/queue pause. Absorbing — a pass with any failed leg never
+    /// burns, no matter what its sibling legs concluded.
+    LegFailed,
+}
+
+impl LedgerPassAccounting {
+    /// Fold two leg (or sub-pass) contributions. Commutative and
+    /// associative with `Idle` as identity; `LegFailed` absorbs, then
+    /// `Settled`, then `CardOrMiss`.
+    #[must_use]
+    pub fn combine(self, other: Self) -> Self {
+        use LedgerPassAccounting as A;
+        match (self, other) {
+            (A::LegFailed, _) | (_, A::LegFailed) => A::LegFailed,
+            (A::Settled, _) | (_, A::Settled) => A::Settled,
+            (A::CardOrMiss, _) | (_, A::CardOrMiss) => A::CardOrMiss,
+            (A::Idle, A::Idle) => A::Idle,
+        }
+    }
+
+    /// True only for a pass whose fired legs all reached card-or-miss with no
+    /// failure and no settlement — the sole burnable shape.
+    #[must_use]
+    pub fn is_burnable(self) -> bool {
+        matches!(self, Self::CardOrMiss)
+    }
+
+    /// True when at least one spawned leg of the pass failed.
+    #[must_use]
+    pub fn leg_failed(self) -> bool {
+        matches!(self, Self::LegFailed)
+    }
+}
+
 /// Evidence-only result of a connected Work's REQ-027 search entrance.
 /// Anchored enrichment payloads and metadata merge state are deliberately
 /// absent: this result can only feed the identity-road handoff and chase ledger.
@@ -48,7 +103,8 @@ pub struct IdentityRouteSearchResult {
     pub captured_route_proposals: Vec<crate::identity_layer::RouteKey>,
     pub provider_chase_attempted: bool,
     pub search_leg_fired: bool,
-    pub search_ledger_burnable: bool,
+    /// REQ-027 accounting folded across every leg this search pass spawned.
+    pub ledger_accounting: LedgerPassAccounting,
 }
 
 #[derive(Debug)]
@@ -83,9 +139,10 @@ pub struct EnrichmentResult {
     /// REQ-027 v11 ledger discriminator. True only when at least one
     /// title+author route-search leg was actually spawned in this pass.
     pub search_leg_fired: bool,
-    /// True only when every spawned route-search leg concluded with an honest
-    /// miss or proposal card, making the shared generation ledger burnable.
-    pub search_ledger_burnable: bool,
+    /// REQ-027 accounting folded across every leg this pass spawned — search
+    /// legs, probes, and anchored fetches. The shared generation ledger is
+    /// burnable only from [`LedgerPassAccounting::CardOrMiss`].
+    pub ledger_accounting: LedgerPassAccounting,
 }
 
 #[derive(Debug, thiserror::Error)]

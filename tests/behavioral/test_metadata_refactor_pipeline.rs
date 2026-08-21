@@ -209,7 +209,7 @@ fn scatter(
         deferred: false,
         provider_chase_attempted: true,
         search_leg_fired: false,
-        search_ledger_burnable: false,
+        ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         search_provider_identity: Vec::new(),
         search_route_proposals: Vec::new(),
     }

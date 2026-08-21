@@ -168,7 +168,8 @@ pub struct EnrichmentResult {
     pub captured_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
     pub provider_chase_attempted: bool,
     pub search_leg_fired: bool,
-    pub search_ledger_burnable: bool,
+    /// REQ-027 accounting folded across every leg this pass spawned.
+    pub ledger_accounting: livrarr_domain::services::LedgerPassAccounting,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -222,9 +223,11 @@ pub struct ScatterGatherResult {
     pub provider_chase_attempted: bool,
     /// At least one REQ-027 title+author route-search leg was spawned.
     pub search_leg_fired: bool,
-    /// True only when at least one search leg fired and every fired leg ended
-    /// in an honest miss or proposal card. Provider/transport failures are false.
-    pub search_ledger_burnable: bool,
+    /// REQ-027 accounting folded across every leg this dispatch spawned:
+    /// search legs and probes contribute card/miss, settle, or failure;
+    /// anchored fetch failures fold in as failed legs; cache hits and skips
+    /// contribute nothing.
+    pub ledger_accounting: livrarr_domain::services::LedgerPassAccounting,
     pub search_provider_identity: Vec<livrarr_domain::identity_layer::ProviderIdentityEvidence>,
     pub search_route_proposals: Vec<livrarr_domain::identity_layer::RouteKey>,
 }
@@ -700,7 +703,7 @@ where
             captured_route_proposals: result.search_route_proposals,
             provider_chase_attempted: result.provider_chase_attempted,
             search_leg_fired: result.search_leg_fired,
-            search_ledger_burnable: result.search_ledger_burnable,
+            ledger_accounting: result.ledger_accounting,
         })
     }
 
@@ -905,7 +908,7 @@ where
                         captured_route_proposals: Vec::new(),
                         provider_chase_attempted: !observed_names.is_empty(),
                         search_leg_fired: false,
-                        search_ledger_burnable: false,
+                        ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                     })
                 }
                 ApplyMergeOutcome::Superseded => {
@@ -1010,7 +1013,7 @@ where
                 captured_route_proposals,
                 provider_chase_attempted: scatter_result.provider_chase_attempted,
                 search_leg_fired: scatter_result.search_leg_fired,
-                search_ledger_burnable: scatter_result.search_ledger_burnable,
+                ledger_accounting: scatter_result.ledger_accounting,
             });
         }
 
@@ -1190,7 +1193,7 @@ where
                         captured_route_proposals: captured_route_proposals.clone(),
                         provider_chase_attempted: scatter_result.provider_chase_attempted,
                         search_leg_fired: scatter_result.search_leg_fired,
-                        search_ledger_burnable: scatter_result.search_ledger_burnable,
+                        ledger_accounting: scatter_result.ledger_accounting,
                     });
                 }
                 ApplyMergeOutcome::Superseded => {

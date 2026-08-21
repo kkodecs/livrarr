@@ -225,7 +225,7 @@ impl EnrichmentWorkflow for SleepingWorkflow {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
 
@@ -318,7 +318,7 @@ impl EnrichmentWorkflow for GatedWorkflow {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
 
@@ -402,7 +402,7 @@ impl EnrichmentWorkflow for RecordingPersistingWorkflow {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
 
@@ -952,7 +952,7 @@ impl livrarr_domain::services::EnrichmentWorkflow for RecordingDelayedWorkflow {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
 

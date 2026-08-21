@@ -11,7 +11,8 @@ use livrarr_db::{
 use livrarr_domain::identity::{AnchorConfidence, AnchorType, ConflictSource, IdentityMode};
 use livrarr_domain::services::{
     ConvergeOutcome, ConvergencePass, EnrichmentMode, EnrichmentWorkflow, HttpFetcher,
-    RefreshSurface, RetrySummary, SourceProviderData, WorkService, WorkServiceError,
+    LedgerPassAccounting, RefreshSurface, RetrySummary, SourceProviderData, WorkService,
+    WorkServiceError,
 };
 use livrarr_domain::{EnrichmentStatus, IdentityStatus, UserId, Work, WorkId};
 
@@ -190,12 +191,21 @@ where
                     .as_ref()
                     .is_some_and(|outcome| outcome.provider_chase_attempted),
             search_leg_fired,
-            search_ledger_burnable: enrichment_outcome
+            // REQ-027: the pass-level ledger fold. `combine` keeps one
+            // sub-outcome's failed leg visible at the burn site — a burnable
+            // sibling can never OR it away.
+            ledger_accounting: enrichment_outcome
                 .as_ref()
-                .is_some_and(|outcome| outcome.search_ledger_burnable)
-                || search_outcome
-                    .as_ref()
-                    .is_some_and(|outcome| outcome.search_ledger_burnable),
+                .map_or(LedgerPassAccounting::Idle, |outcome| {
+                    outcome.ledger_accounting
+                })
+                .combine(
+                    search_outcome
+                        .as_ref()
+                        .map_or(LedgerPassAccounting::Idle, |outcome| {
+                            outcome.ledger_accounting
+                        }),
+                ),
         });
     }
     let was_pending = work.identity_status == IdentityStatus::Pending;
@@ -248,7 +258,7 @@ where
             route_handoff: None,
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: LedgerPassAccounting::Idle,
         });
     }
 
@@ -355,7 +365,7 @@ where
         route_handoff: None,
         provider_chase_attempted: false,
         search_leg_fired: false,
-        search_ledger_burnable: false,
+        ledger_accounting: LedgerPassAccounting::Idle,
     })
 }
 

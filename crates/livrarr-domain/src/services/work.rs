@@ -316,9 +316,10 @@ pub struct ConvergencePass {
     /// True only when at least one REQ-027 title+author search leg fired.
     /// Kept separate from ordinary anchor fetches for the shared Work ledger.
     pub search_leg_fired: bool,
-    /// True only when every fired search leg concluded in card/miss rather
-    /// than a provider/transport failure or a settlement.
-    pub search_ledger_burnable: bool,
+    /// REQ-027 accounting folded across every leg this pass spawned (search
+    /// legs, probes, anchored fetches): burnable only when every fired search
+    /// leg concluded in card/miss and no spawned leg failed or settled.
+    pub ledger_accounting: crate::services::LedgerPassAccounting,
 }
 
 /// Surface that triggered a [`WorkService::refresh`] call. `Interactive` — a
@@ -523,7 +524,7 @@ pub trait WorkService: Send + Sync {
                 route_handoff: None,
                 provider_chase_attempted: false,
                 search_leg_fired: false,
-                search_ledger_burnable: false,
+                ledger_accounting: crate::services::LedgerPassAccounting::Idle,
             })
         }
     }

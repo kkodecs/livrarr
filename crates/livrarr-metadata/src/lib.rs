@@ -309,7 +309,7 @@ pub mod tests {
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
                     search_leg_fired: false,
-                    search_ledger_burnable: false,
+                    ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                 }),
                 StubEnrichmentMode::Partial => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -331,7 +331,7 @@ pub mod tests {
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
                     search_leg_fired: false,
-                    search_ledger_burnable: false,
+                    ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                 }),
                 StubEnrichmentMode::AllFail => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -357,7 +357,7 @@ pub mod tests {
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
                     search_leg_fired: false,
-                    search_ledger_burnable: false,
+                    ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                 }),
                 StubEnrichmentMode::NotFound => Err(EnrichmentError::WorkNotFound),
                 StubEnrichmentMode::ManualCover => Ok(EnrichmentResult {
@@ -380,7 +380,7 @@ pub mod tests {
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
                     search_leg_fired: false,
-                    search_ledger_burnable: false,
+                    ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                 }),
                 StubEnrichmentMode::LlmFallback => Ok(EnrichmentResult {
                     identity_not_found: false,
@@ -399,7 +399,7 @@ pub mod tests {
                     captured_route_proposals: Vec::new(),
                     provider_chase_attempted: false,
                     search_leg_fired: false,
-                    search_ledger_burnable: false,
+                    ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                 }),
             }
         }
