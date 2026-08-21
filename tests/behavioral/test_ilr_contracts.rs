@@ -4449,8 +4449,9 @@ async fn red_convergence_concurrent_edit_supersedes_attempt_checkpoint() {
         .clone()
         .expect("NotFound OpenLibrary stub");
 
-    let report = {
+    let (report, time_before_tick, time_after_tick) = {
         let _contract_lock = CONVERGENCE_CONTRACT_LOCK.lock().await;
+        let time_before_tick = Utc::now();
         let tick = tokio::spawn(
             livrarr_server::identity_layer::run_identity_convergence_tick(
                 harness.state.clone(),
@@ -4475,7 +4476,9 @@ async fn red_convergence_concurrent_edit_supersedes_attempt_checkpoint() {
             .await
             .expect("land concurrent identity edit during chase");
         assert_eq!(edited.identity.identity_generation, generation_before + 1);
-        tick.await.expect("tick task").expect("tick completes")
+        let report = tick.await.expect("tick task").expect("tick completes");
+        let time_after_tick = Utc::now();
+        (report, time_before_tick, time_after_tick)
     };
     assert_eq!(report.visited_work_count, 1);
     let attempts: i64 = sqlx::query_scalar(
@@ -4501,16 +4504,53 @@ async fn red_convergence_concurrent_edit_supersedes_attempt_checkpoint() {
     .await
     .expect("count drifted-generation convergence attempts");
     assert_eq!(drifted, 0);
-    let next_convergence_at: Option<String> =
+    let scheduled_raw: Option<String> =
         sqlx::query_scalar("SELECT next_convergence_at FROM works WHERE user_id = ?1 AND id = ?2")
             .bind(harness.user_id)
             .bind(work_id)
             .fetch_one(harness.db.pool())
             .await
             .expect("read next_convergence_at after superseded pass");
+    let scheduled_raw = scheduled_raw.expect("superseded pass reschedules one cadence ahead");
+    let scheduled_at = chrono::DateTime::parse_from_rfc3339(&scheduled_raw)
+        .expect("next cadence is RFC3339")
+        .with_timezone(&Utc);
+    let cadence = chrono::Duration::seconds(harness.state.config.convergence.interval_secs as i64);
     assert!(
-        next_convergence_at.is_some(),
-        "superseded pass stays selectable"
+        scheduled_at >= time_before_tick + cadence - chrono::Duration::seconds(2),
+        "superseded pass must not reschedule before one cadence from tick start"
+    );
+    assert!(
+        scheduled_at <= time_after_tick + cadence + chrono::Duration::seconds(2),
+        "superseded pass must not reschedule beyond one cadence from tick end"
+    );
+    let due_before = livrarr_db::WorkDb::list_convergence_due_with_search_availability(
+        &harness.db,
+        harness.user_id,
+        scheduled_at - chrono::Duration::seconds(1),
+        harness.state.config.convergence.attempt_threshold,
+        harness.state.config.convergence.batch_size as i64,
+        harness.state.provider_queue.identity_search_availability(),
+    )
+    .await
+    .expect("due selector before cadence");
+    assert!(
+        !due_before.contains(&work_id),
+        "superseded work is not selectable before its cadence"
+    );
+    let due_after = livrarr_db::WorkDb::list_convergence_due_with_search_availability(
+        &harness.db,
+        harness.user_id,
+        scheduled_at + chrono::Duration::seconds(1),
+        harness.state.config.convergence.attempt_threshold,
+        harness.state.config.convergence.batch_size as i64,
+        harness.state.provider_queue.identity_search_availability(),
+    )
+    .await
+    .expect("due selector after cadence");
+    assert!(
+        due_after.contains(&work_id),
+        "superseded work is selectable at its cadence"
     );
     let captured =
         WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
