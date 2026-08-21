@@ -287,7 +287,7 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
         HashMap::from([(MetadataProvider::Hardcover, cached_payload)]),
     );
 
-    service
+    let reuse_result = service
         .enrich_work(
             user_id,
             author_page_work.id,
@@ -303,6 +303,18 @@ async fn add_box_and_author_page_paths_converge_on_same_metadata_and_covers() {
         queue_probe.dispatch_count().await,
         1,
         "the candidate-reuse door should use cached payloads instead of re-dispatching providers"
+    );
+    // EXP-SEM-R1-03: candidate reuse is zero-network — cache-served payloads
+    // never count as a provider fetch, so the cached continuation reports
+    // zero fetch attempts and can never charge the REQ-027 attempt ledger.
+    assert!(
+        !reuse_result.provider_chase_attempted,
+        "a cache-served continuation must not report an attempted provider chase"
+    );
+    assert_eq!(
+        reuse_result.ledger_accounting,
+        livrarr_domain::services::LedgerPassAccounting::Idle,
+        "a cache-served continuation contributes nothing to the ledger fold"
     );
 
     let add_box = db.get_work(user_id, add_box_work.id).await.unwrap();

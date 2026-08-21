@@ -906,7 +906,11 @@ where
                                 .map(|(provider, detail)| (*provider, detail)),
                         ),
                         captured_route_proposals: Vec::new(),
-                        provider_chase_attempted: !observed_names.is_empty(),
+                        // Candidate reuse is zero-network by definition:
+                        // cache-served payloads never count as a provider
+                        // fetch, so no caller can reconstruct attempted-fetch
+                        // semantics (or a ledger burn) from this arm.
+                        provider_chase_attempted: false,
                         search_leg_fired: false,
                         ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
                     })
