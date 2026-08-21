@@ -557,16 +557,16 @@ pub async fn run_identity_convergence_tick(
                         // REQ-027 v11 uses one per-Work generation ledger. A
                         // fired search pass burns once when every leg cards or
                         // misses even if another provider already owns a Work
-                        // route. A failed spawned leg ANYWHERE in the pass —
+                        // route; a failed spawned leg anywhere in that pass —
                         // provider error, probe failure, task failure,
-                        // breaker/queue pause — makes the whole pass
-                        // non-burnable on both arms: the miss was the
-                        // provider's, not the books'. The legacy edition-only
-                        // bridge otherwise keeps its policy of burning only
-                        // while the Work has no Work-level route at all.
-                        let should_burn = if pass.ledger_accounting.leg_failed() {
-                            false
-                        } else if pass.search_leg_fired {
+                        // breaker/queue pause — folds absorbing and makes the
+                        // search pass non-burnable (the miss was the
+                        // provider's, not the books'). The legacy edition-only
+                        // bridge arm is deliberate legacy policy and stands
+                        // untouched: with no search leg fired it burns exactly
+                        // while the Work has no Work-level route at all,
+                        // failure or not.
+                        let should_burn = if pass.search_leg_fired {
                             pass.ledger_accounting.is_burnable()
                         } else {
                             !has_work_route

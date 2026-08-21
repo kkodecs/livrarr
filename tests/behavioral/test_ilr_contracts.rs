@@ -13381,12 +13381,14 @@ async fn aud_p1_10_anchored_provider_failure_poisons_pass_burn() {
     );
 }
 
-// Bug reproduction: AUD-P1-10 at the server burn site's legacy bridge arm.
-// The edition-only bridge keeps burning CLEAN no-work-route passes (pinned by
-// convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase), but a
-// pass whose only spawned leg FAILED is a provider outage, not a consumed
-// chase — it must not step the work toward threshold.
-async fn aud_p1_10_bridge_anchored_failure_never_burns() {
+// Frozen-policy pin (EXP-SEM-R1-01): the legacy edition-only bridge arm is
+// OUT OF SCOPE for AUD-P1-10 and stands untouched — with no search leg fired
+// it burns exactly while the Work holds no Work-level route, provider
+// failure or not (clean-pass twin:
+// convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase).
+// AUD-P1-10's failure discrimination applies only to fired search passes;
+// this pin proves the fix did not leak into the legacy arm.
+async fn aud_p1_10_bridge_arm_legacy_burn_survives_anchored_failure() {
     let harness = build_route_harness_with_provider_outcome(
         Some(livrarr_external_data::ProviderOutcome::WillRetry {
             reason: livrarr_domain::WillRetryReason::ServerError,
@@ -13429,8 +13431,8 @@ async fn aud_p1_10_bridge_anchored_failure_never_burns() {
     .await
     .expect("count bridge-outage ledger burns");
     assert_eq!(
-        burns, 0,
-        "a failed-leg bridge pass never burns the generation-scoped ledger"
+        burns, 1,
+        "the legacy no-search bridge arm still burns a failed anchored-only pass"
     );
 }
 
@@ -15957,7 +15959,7 @@ red_tests! {
     round21_failed_search_leg_does_not_burn_shared_ledger => round21_search_transport_failure_does_not_burn_shared_ledger(),
     aud_p1_10_probe_failure_leg_beside_honest_miss_never_burns => aud_p1_10_probe_failure_beside_honest_miss_never_burns(),
     aud_p1_10_anchored_provider_failure_blocks_pass_burn => aud_p1_10_anchored_provider_failure_poisons_pass_burn(),
-    aud_p1_10_bridge_arm_anchored_failure_never_burns => aud_p1_10_bridge_anchored_failure_never_burns(),
+    aud_p1_10_bridge_arm_legacy_burn_stands_untouched => aud_p1_10_bridge_arm_legacy_burn_survives_anchored_failure(),
     aud_p1_10_clean_miss_threshold_and_settle_semantics_unchanged => aud_p1_10_clean_miss_and_settle_semantics_unchanged(),
     round21_owned_file_goodreads_book_id_settles_on_edition => round21_owned_file_goodreads_id_is_edition_homed(),
     round21_owned_file_goodreads_work_heal_is_exactly_once => round21_owned_file_goodreads_work_heal_is_exact_and_idempotent(),
