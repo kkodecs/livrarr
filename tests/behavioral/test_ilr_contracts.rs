@@ -13214,6 +13214,364 @@ async fn round21_search_transport_failure_does_not_burn_shared_ledger() {
     );
 }
 
+// Bug reproduction: merged audit finding AUD-P1-10 (IA-D02 + IA-E04). A
+// failed corroboration probe on a proposal-grade pick is a FAILED leg, never
+// an honest miss: one failed leg beside a clean sibling miss must keep the
+// entire REQ-027 pass non-burnable, and the failure can never mint a card or
+// settle a route ("a card/miss-only pass burns once; any settle or provider
+// failure burns none" — wiki insight 97).
+async fn aud_p1_10_probe_failure_beside_honest_miss_never_burns() {
+    let _breaker = lock_breaker().await;
+    let ol_searches = Arc::new(AtomicU64::new(0));
+    let auto_calls = Arc::new(AtomicU64::new(0));
+    let page_calls = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let ol_searches = ol_searches.clone();
+        let auto_calls = auto_calls.clone();
+        let page_calls = page_calls.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("search.json") {
+                ol_searches.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"{\"docs\":[]}".to_vec());
+            }
+            if request.url.contains("auto_complete") {
+                auto_calls.fetch_add(1, Ordering::Relaxed);
+                return round13_response(
+                    serde_json::to_vec(&json!([{
+                        "title": "Ledger Probe Failure Sibling",
+                        "bookTitleBare": "Ledger Probe Failure Sibling",
+                        "bookUrl": "/book/show/16161",
+                        "bookId": "16161",
+                        "workId": "616161",
+                        "author": {}
+                    }]))
+                    .unwrap(),
+                );
+            }
+            if request.url.contains("/book/show/") {
+                page_calls.fetch_add(1, Ordering::Relaxed);
+                return round17_status_response(500, b"probe failed".to_vec());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
+            .await;
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Ledger Probe Failure Sibling",
+        "Ledger Probe Sibling Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::Amazon,
+            ilr::RouteKind::AsinEdition,
+            "B0LEDGERPRB1",
+        )),
+    )
+    .await;
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(
+        (
+            ol_searches.load(Ordering::Relaxed),
+            auto_calls.load(Ordering::Relaxed),
+            page_calls.load(Ordering::Relaxed)
+        ),
+        (1, 1, 1),
+        "both search legs and exactly one corroboration probe must fire"
+    );
+    assert_eq!(
+        work_generation(&harness.db, work_id).await,
+        generation,
+        "a failed probe on a proposal-grade pick settles nothing"
+    );
+    let cards: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_review_cards WHERE user_id=?1 AND work_id=?2 \
+         AND kind='PendingRoute' AND status='pending'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .unwrap();
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (cards, burns),
+        (0, 0),
+        "a failed probe leg blocks the shared REQ-027 burn and mints no card"
+    );
+}
+
+// Bug reproduction: AUD-P1-10 pass-level fold. The failure fact must travel
+// from the anchored scatter into the same pass's ledger accounting: a 5xx
+// anchored provider leg beside an honest search-leg miss is NOT an
+// all-card/miss pass, so the generation-scoped ledger must not burn.
+async fn aud_p1_10_anchored_provider_failure_poisons_pass_burn() {
+    let _breaker = lock_breaker().await;
+    let anchor_calls = Arc::new(AtomicU64::new(0));
+    let auto_calls = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let anchor_calls = anchor_calls.clone();
+        let auto_calls = auto_calls.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("/isbn/9780000009111") {
+                anchor_calls.fetch_add(1, Ordering::Relaxed);
+                return round17_status_response(503, Vec::new());
+            }
+            if request.url.contains("auto_complete") {
+                auto_calls.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
+            .await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Ledger Anchored Outage",
+        "Ledger Anchored Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::IsbnRegistry,
+            ilr::RouteKind::Isbn13Edition,
+            "9780000009111",
+        )),
+    )
+    .await;
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert!(
+        anchor_calls.load(Ordering::Relaxed) >= 1,
+        "the anchored OpenLibrary leg must genuinely fetch and fail"
+    );
+    assert_eq!(
+        auto_calls.load(Ordering::Relaxed),
+        1,
+        "the clean Goodreads search miss must fire in the same pass"
+    );
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count anchored-outage ledger burns");
+    assert_eq!(
+        burns, 0,
+        "an anchored provider failure in the pass blocks the shared REQ-027 burn"
+    );
+}
+
+// Bug reproduction: AUD-P1-10 at the server burn site's legacy bridge arm.
+// The edition-only bridge keeps burning CLEAN no-work-route passes (pinned by
+// convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase), but a
+// pass whose only spawned leg FAILED is a provider outage, not a consumed
+// chase — it must not step the work toward threshold.
+async fn aud_p1_10_bridge_anchored_failure_never_burns() {
+    let harness = build_route_harness_with_provider_outcome(
+        Some(livrarr_external_data::ProviderOutcome::WillRetry {
+            reason: livrarr_domain::WillRetryReason::ServerError,
+            next_attempt_at: Utc::now(),
+        }),
+        Vec::new(),
+        None,
+    )
+    .await;
+    let (work_id, _) = seed_round13_search_work(
+        &harness,
+        "Ledger Bridge Outage",
+        "Ledger Bridge Outage Author",
+        "en",
+        Some((
+            ilr::IdentityProvider::IsbnRegistry,
+            ilr::RouteKind::Isbn13Edition,
+            "9780140328721",
+        )),
+    )
+    .await;
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(
+        harness
+            .open_library_stub
+            .as_ref()
+            .expect("WillRetry OpenLibrary stub")
+            .call_count(),
+        1,
+        "the failed visit must include a real provider dispatch"
+    );
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count bridge-outage ledger burns");
+    assert_eq!(
+        burns, 0,
+        "a failed-leg bridge pass never burns the generation-scoped ledger"
+    );
+}
+
+// Preserved-semantics pins for AUD-P1-10 (REQ-027 unchanged behavior): a
+// clean single-leg honest miss burns exactly one shared attempt per pass and
+// threshold still parks the work; a text-decisive settle burns none.
+async fn aud_p1_10_clean_miss_and_settle_semantics_unchanged() {
+    let _breaker = lock_breaker().await;
+    let auto_calls = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let auto_calls = auto_calls.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("auto_complete") {
+                auto_calls.fetch_add(1, Ordering::Relaxed);
+                return round13_response(b"[]".to_vec());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
+            .await;
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Ledger Clean Miss Cadence",
+        "Ledger Clean Miss Author",
+        "fr",
+        Some((
+            ilr::IdentityProvider::Amazon,
+            ilr::RouteKind::AsinEdition,
+            "B0LEDGERCLN1",
+        )),
+    )
+    .await;
+
+    for expected_attempts in 1..=3_i64 {
+        WorkDb::set_next_convergence_at(
+            &harness.db,
+            harness.user_id,
+            work_id,
+            Some(Utc::now() - chrono::Duration::seconds(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+             AND provider='livrarr-convergence' AND route_kind='bridge-upgrade' \
+             AND route_value=CAST(?3 AS TEXT)",
+        )
+        .bind(harness.user_id)
+        .bind(work_id)
+        .bind(generation)
+        .fetch_one(harness.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            attempts, expected_attempts,
+            "every clean honest-miss pass burns exactly one shared attempt"
+        );
+    }
+    WorkDb::set_next_convergence_at(
+        &harness.db,
+        harness.user_id,
+        work_id,
+        Some(Utc::now() - chrono::Duration::seconds(1)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        round13_run_tick(&harness).await.visited_work_count,
+        0,
+        "threshold still parks the work until its identity generation changes"
+    );
+    assert_eq!(auto_calls.load(Ordering::Relaxed), 3);
+    drop(harness);
+    drop(_breaker);
+
+    let _breaker = lock_breaker().await;
+    let auto_calls = Arc::new(AtomicU64::new(0));
+    let page_calls = Arc::new(AtomicU64::new(0));
+    let scripted = {
+        let auto_calls = auto_calls.clone();
+        let page_calls = page_calls.clone();
+        Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+            if request.url.contains("auto_complete") {
+                auto_calls.fetch_add(1, Ordering::Relaxed);
+                return round13_response(
+                    serde_json::to_vec(&json!([{
+                        "title": "Ledger Clean Settle",
+                        "bookTitleBare": "Ledger Clean Settle",
+                        "bookUrl": "/book/show/17171",
+                        "bookId": "17171",
+                        "workId": "717171",
+                        "author": {"name": "Ledger Settle Author"}
+                    }]))
+                    .unwrap(),
+                );
+            }
+            if request.url.contains("/book/show/") {
+                page_calls.fetch_add(1, Ordering::Relaxed);
+                return round17_status_response(500, Vec::new());
+            }
+            round17_status_response(404, Vec::new())
+        }) as Arc<_>
+    };
+    let harness =
+        build_route_harness_with_provider_details(None, Vec::new(), Some(round13_search_transport(scripted)))
+            .await;
+    let (work_id, generation) = seed_round13_search_work(
+        &harness,
+        "Ledger Clean Settle",
+        "Ledger Settle Author",
+        "fr",
+        None,
+    )
+    .await;
+
+    assert_eq!(round13_run_tick(&harness).await.visited_work_count, 1);
+    assert_eq!(
+        (
+            auto_calls.load(Ordering::Relaxed),
+            page_calls.load(Ordering::Relaxed)
+        ),
+        (1, 0),
+        "a zero-route decisive pick settles from search evidence without a probe"
+    );
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .unwrap();
+    assert_eq!(captured.identity_generation, generation + 1);
+    assert!(captured.active_routes.iter().any(|route| {
+        route.kind == ilr::RouteKind::GoodreadsWork && route.provider_scoped_id == "717171"
+    }));
+    let burns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts WHERE user_id=?1 AND work_id=?2 \
+         AND provider='livrarr-convergence' AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(burns, 0, "a settling pass burns none");
+}
+
 // Bug reproduction: identity-layer-rewrite round 22 / C-r10-01. The SQL
 // selector must consume the same live provider availability as the queue. An
 // enriched OL+GR-routed Work cannot remain due solely because unconfigured
@@ -15213,7 +15571,12 @@ async fn round15_goodreads_propose_grade_probe_failure_remains_miss() {
     .fetch_one(harness.db.pool())
     .await
     .unwrap();
-    assert_eq!((cards, burns), (0, 1));
+    // AUD-P1-10: a failed probe is a FAILED leg. The proposal-grade pick still
+    // mints no card and settles no route (a failure cannot manufacture card
+    // confidence), and the failed leg keeps the shared REQ-027 ledger unburned
+    // ("any settle or provider failure burns none" — wiki insight 97). This
+    // expectation was (0, 1) while the defect pinned burn-on-probe-failure.
+    assert_eq!((cards, burns), (0, 0));
 }
 
 async fn round13_goodreads_probe_corroboration_settles_work_and_book() {
@@ -15580,6 +15943,10 @@ red_tests! {
     ac026c_connected_all_miss_pass_burns_once_and_parks => round21_connected_all_fired_legs_miss_burn_once_and_park(),
     ac026d_foreign_connected_work_searches_goodreads_only => round21_foreign_connected_work_fires_only_goodreads_search(),
     round21_failed_search_leg_does_not_burn_shared_ledger => round21_search_transport_failure_does_not_burn_shared_ledger(),
+    aud_p1_10_probe_failure_leg_beside_honest_miss_never_burns => aud_p1_10_probe_failure_beside_honest_miss_never_burns(),
+    aud_p1_10_anchored_provider_failure_blocks_pass_burn => aud_p1_10_anchored_provider_failure_poisons_pass_burn(),
+    aud_p1_10_bridge_arm_anchored_failure_never_burns => aud_p1_10_bridge_anchored_failure_never_burns(),
+    aud_p1_10_clean_miss_threshold_and_settle_semantics_unchanged => aud_p1_10_clean_miss_and_settle_semantics_unchanged(),
     round21_owned_file_goodreads_book_id_settles_on_edition => round21_owned_file_goodreads_id_is_edition_homed(),
     round21_owned_file_goodreads_work_heal_is_exactly_once => round21_owned_file_goodreads_work_heal_is_exact_and_idempotent(),
     round22_unfireable_hardcover_is_absent_and_unvisited => round22_unfireable_hardcover_work_is_absent_and_stays_unvisited(),
