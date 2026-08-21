@@ -216,16 +216,21 @@ async fn run_identity_search_fallback(
                 });
         }
         // A probe is solely an opportunity to upgrade the result to
-        // corroborated outcome (a). Failure retains a text-decisive (b); on a
-        // proposal-grade pick it is a FAILED leg: no card (a failed probe
-        // cannot manufacture card confidence) and no burn — the ledger only
-        // charges passes whose every fired leg honestly reached card-or-miss.
+        // corroborated outcome (a). A failed probe is a FAILED leg on every
+        // path — the accounting folds `LegFailed` absorbing, so the pass can
+        // never burn. A text-decisive pick still settles (b): the route
+        // evidence is emitted alongside the failed-leg fact. A proposal-grade
+        // pick additionally mints no card — a failed probe cannot manufacture
+        // card confidence.
         let Ok(probed) = client
             .probe_identity_candidate(probe, language.as_deref(), priority)
             .await
         else {
             return if text_decisive {
-                text_decisive_search_capture(identity_provider, work_route)
+                SearchFallbackCapture {
+                    accounting: LedgerPassAccounting::LegFailed,
+                    ..text_decisive_search_capture(identity_provider, work_route)
+                }
             } else {
                 SearchFallbackCapture::leg_failed()
             };

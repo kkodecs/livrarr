@@ -321,8 +321,9 @@ impl ProviderClient {
         }
     }
 
-    /// Provider-native title search. A transport or parse failure is an honest
-    /// miss for this pass; the caller has already counted the spawned fetch.
+    /// Provider-native title search. A transport or parse failure returns
+    /// `Err` — a FAILED leg the caller folds as non-burnable, never an honest
+    /// miss; the caller has already counted the spawned fetch.
     pub async fn search_identity_candidates(
         &self,
         title: &str,
