@@ -585,6 +585,31 @@ fn queue_full_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDe
     }
 }
 
+/// Hardcover pause/retry classification (IA-E05). `None` is a genuine miss
+/// (`NoResults`/`NoMatch`) so each caller can report breaker success / fall
+/// through to a weaker tier. QueueFull and RateLimited must not ride the
+/// `Http` → `ServerError` path.
+fn hardcover_error_outcome(
+    err: crate::hardcover::HardcoverError,
+    retry_backoff_secs: i64,
+) -> Option<ProviderOutcome<NormalizedWorkDetail>> {
+    match err {
+        crate::hardcover::HardcoverError::CircuitOpen(retry_after) => {
+            Some(circuit_open_outcome(retry_after))
+        }
+        crate::hardcover::HardcoverError::QueueFull(retry_after) => {
+            Some(queue_full_outcome(retry_after))
+        }
+        crate::hardcover::HardcoverError::RateLimited => Some(rate_limit_outcome()),
+        crate::hardcover::HardcoverError::Http(_) => Some(ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
+        }),
+        crate::hardcover::HardcoverError::NoResults
+        | crate::hardcover::HardcoverError::NoMatch(_) => None,
+    }
+}
+
 /// Common `WillRetry { RateLimit }` mapping (Unit A): a live 429 is a real
 /// provider verdict (unlike `CircuitOpen`), so it consumes one retry-budget
 /// attempt. Backoff mirrors `google_books::map_http_error`'s quota-exhaustion
@@ -1026,15 +1051,8 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                         crate::hardcover::report_hardcover_success();
                         ProviderOutcome::NotFound
                     }
-                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                        circuit_open_outcome(retry_after)
-                    }
-                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    },
-                    Err(_) => ProviderOutcome::NotFound,
+                    Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs)
+                        .unwrap_or(ProviderOutcome::NotFound),
                 }
             }
             AnchorQuery::HcKey(key) => {
@@ -1061,15 +1079,8 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                         crate::hardcover::report_hardcover_success();
                         ProviderOutcome::NotFound
                     }
-                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                        circuit_open_outcome(retry_after)
-                    }
-                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    },
-                    Err(_) => ProviderOutcome::NotFound,
+                    Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs)
+                        .unwrap_or(ProviderOutcome::NotFound),
                 }
             }
             _ => ProviderOutcome::NotFound,
@@ -1125,18 +1136,13 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                     // surface: title/author fallback still runs below.
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
                 }
-                Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                    return circuit_open_outcome(retry_after);
-                }
-                Err(crate::hardcover::HardcoverError::Http(e)) => {
-                    tracing::debug!(isbn = %normalized, error = %e, "HC ISBN search failed");
-                    return ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    };
-                }
-                Err(_) => {
+                Err(e) => {
+                    if let crate::hardcover::HardcoverError::Http(ref msg) = e {
+                        tracing::debug!(isbn = %normalized, error = %msg, "HC ISBN search failed");
+                    }
+                    if let Some(outcome) = hardcover_error_outcome(e, self.retry_backoff_secs) {
+                        return outcome;
+                    }
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no results");
                 }
             }
@@ -1154,22 +1160,12 @@ impl<F: HttpFetcher> HardcoverClient<F> {
 
         match result {
             Ok(hc) => self.build_success(hc, &token, priority).await,
-            Err(
-                crate::hardcover::HardcoverError::NoResults
-                | crate::hardcover::HardcoverError::NoMatch(_),
-            ) => {
+            Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs).unwrap_or_else(|| {
                 // The provider answered fine; it just has no match. One leg,
                 // succeeded — report the operation healthy.
                 crate::hardcover::report_hardcover_success();
                 ProviderOutcome::NotFound
-            }
-            Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
-            Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            }),
         }
     }
 

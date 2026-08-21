@@ -20,6 +20,14 @@ pub enum HardcoverError {
     /// HTTP was attempted. Carries the retry-after duration (R-11: the
     /// enrichment-surface caller must map this to `WillRetryReason::CircuitOpen`).
     CircuitOpen(Duration),
+    /// The outbound queue's local admission cap rejected the request — no
+    /// HTTP was attempted (D3: the caller must map this to
+    /// `WillRetryReason::QueueFull`, never burn retry budget on it).
+    QueueFull(Duration),
+    /// Transport-intercepted HTTP 429 (`FetchError::RateLimited` or
+    /// `FetchError::HttpError { status: 429 }`). Callers map this to
+    /// `WillRetryReason::RateLimit`.
+    RateLimited,
 }
 
 impl std::fmt::Display for HardcoverError {
@@ -29,6 +37,8 @@ impl std::fmt::Display for HardcoverError {
             Self::NoMatch(detail) => write!(f, "no match: {detail}"),
             Self::Http(msg) => write!(f, "{msg}"),
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
+            Self::QueueFull(d) => write!(f, "queue full, retry after {d:?}"),
+            Self::RateLimited => write!(f, "rate limited"),
         }
     }
 }
@@ -93,6 +103,15 @@ pub async fn hc_post<F: HttpFetcher>(
         Ok(r) => r,
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(HardcoverError::CircuitOpen(retry_after));
+        }
+        Err(FetchError::QueueFull { retry_after }) => {
+            return Err(HardcoverError::QueueFull(retry_after));
+        }
+        Err(FetchError::RateLimited) => {
+            return Err(HardcoverError::RateLimited);
+        }
+        Err(FetchError::HttpError { status: 429, .. }) => {
+            return Err(HardcoverError::RateLimited);
         }
         Err(e) => return Err(HardcoverError::Http(e.to_string())),
     };
@@ -1539,7 +1558,8 @@ mod tests {
 
     // -------------------------------------------------------------------
     // Error mapping: HttpFetcher failures map onto the HardcoverError
-    // shapes callers match on (provider_client.rs WillRetry{ServerError}).
+    // shapes callers match on (QueueFull/RateLimited/CircuitOpen pauses,
+    // Http → WillRetry{ServerError}).
     // -------------------------------------------------------------------
 
     #[tokio::test]
@@ -1591,12 +1611,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            !matches!(err, HardcoverError::Http(_)),
-            "queue full must not collapse into Http (ServerError budget burn), got {err:?}"
-        );
-        assert!(
-            !matches!(err, HardcoverError::CircuitOpen(_)),
-            "queue full is not CircuitOpen, got {err:?}"
+            matches!(err, HardcoverError::QueueFull(_)),
+            "queue full must be the typed pause, got {err:?}"
         );
     }
 
@@ -1613,8 +1629,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            !matches!(err, HardcoverError::Http(_)),
-            "transport RateLimited must not collapse into Http (ServerError), got {err:?}"
+            matches!(err, HardcoverError::RateLimited),
+            "transport RateLimited must stay RateLimited, got {err:?}"
         );
     }
 
@@ -1634,8 +1650,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            !matches!(err, HardcoverError::Http(_)),
-            "wrapped 429 must not collapse into Http (ServerError), got {err:?}"
+            matches!(err, HardcoverError::RateLimited),
+            "wrapped 429 must classify as RateLimited, got {err:?}"
         );
     }
 
