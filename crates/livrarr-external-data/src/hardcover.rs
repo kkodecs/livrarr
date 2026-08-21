@@ -1576,6 +1576,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn hc_post_maps_fetcher_queue_full_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: std::time::Duration::from_secs(1),
+            },
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            !matches!(err, HardcoverError::Http(_)),
+            "queue full must not collapse into Http (ServerError budget burn), got {err:?}"
+        );
+        assert!(
+            !matches!(err, HardcoverError::CircuitOpen(_)),
+            "queue full is not CircuitOpen, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_fetcher_rate_limited_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            !matches!(err, HardcoverError::Http(_)),
+            "transport RateLimited must not collapse into Http (ServerError), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_wrapped_http_429_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::HttpError {
+                status: 429,
+                classification: "rate_limited".to_string(),
+            },
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            !matches!(err, HardcoverError::Http(_)),
+            "wrapped 429 must not collapse into Http (ServerError), got {err:?}"
+        );
+    }
+
     // -------------------------------------------------------------------
     // query_hardcover_by_key: hc_key anchor fetch (GetBookByKey), used by
     // provider_client.rs's AnchorQuery::HcKey arm.

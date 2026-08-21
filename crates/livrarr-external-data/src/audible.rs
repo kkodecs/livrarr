@@ -1106,9 +1106,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn search_audible_maps_fetcher_rate_limited_to_err() {
-        // Drives a request through the shared Audible bucket, so it emits or
-        // depends on breaker state (C4) — hold the lock.
+    async fn search_audible_maps_fetcher_rate_limited_to_rate_limited() {
+        // The fetcher intercepts HTTP 429 as `FetchError::RateLimited` before
+        // a status is ever seen. That must surface as RateLimited so the
+        // client can schedule WillRetry{RateLimit}, not a generic ServerError.
         let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
         let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
             livrarr_domain::services::FetchError::RateLimited,
@@ -1124,7 +1125,193 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("Audible search failed"));
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_maps_fetcher_rate_limited_to_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+
+        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn search_audible_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        // D3: local admission-cap rejection (no HTTP attempted) must surface
+        // as typed QueueFull, not the Other catch-all (budget-consuming).
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            },
+        );
+
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::QueueFull(_)));
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_maps_fetcher_queue_full_to_queue_full() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            },
+        );
+
+        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::QueueFull(_)));
+    }
+
+    #[tokio::test]
+    async fn search_audible_maps_wrapped_http_429_to_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::HttpError {
+                status: 429,
+                classification: "rate_limited".to_string(),
+            },
+        );
+
+        let err = search_audible(
+            &fetcher,
+            "Dune",
+            "Frank Herbert",
+            10,
+            RequestPriority::Normal,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn lookup_audible_by_asin_maps_wrapped_http_429_to_rate_limited() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::HttpError {
+                status: 429,
+                classification: "rate_limited".to_string(),
+            },
+        );
+
+        let err = lookup_audible_by_asin(&fetcher, "B000FC0PBC", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ProviderFetchError::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn audible_client_maps_queue_full_to_budget_exempt_will_retry() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            },
+        );
+        let client = AudibleCatalogClient::new(fetcher, 300);
+
+        let by_asin = client
+            .fetch_by_asin("B000FC0PBC", RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(
+                by_asin,
+                crate::ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::QueueFull,
+                    ..
+                }
+            ),
+            "fetch_by_asin QueueFull must be budget-exempt, got {by_asin:?}"
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: Duration::from_secs(1),
+            },
+        );
+        let client = AudibleCatalogClient::new(fetcher, 300);
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Default::default()
+        };
+        let search = client.fetch(&work, RequestPriority::Normal).await;
+        assert!(
+            matches!(
+                search,
+                crate::ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::QueueFull,
+                    ..
+                }
+            ),
+            "search-path QueueFull must be budget-exempt, got {search:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn audible_client_maps_rate_limited_to_will_retry_rate_limit() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Audible).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+        let client = AudibleCatalogClient::new(fetcher, 300);
+
+        let by_asin = client
+            .fetch_by_asin("B000FC0PBC", RequestPriority::Normal)
+            .await;
+        assert!(
+            matches!(
+                by_asin,
+                crate::ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::RateLimit,
+                    ..
+                }
+            ),
+            "fetch_by_asin RateLimited must be RateLimit-class, got {by_asin:?}"
+        );
+
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+        let client = AudibleCatalogClient::new(fetcher, 300);
+        let work = livrarr_domain::Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Default::default()
+        };
+        let search = client.fetch(&work, RequestPriority::Normal).await;
+        assert!(
+            matches!(
+                search,
+                crate::ProviderOutcome::WillRetry {
+                    reason: livrarr_domain::WillRetryReason::RateLimit,
+                    ..
+                }
+            ),
+            "search-path RateLimited must be RateLimit-class, got {search:?}"
+        );
     }
 
     #[tokio::test]

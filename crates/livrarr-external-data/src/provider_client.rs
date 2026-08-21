@@ -2503,6 +2503,102 @@ mod unit_a_retry_classification {
         assert_queue_full(&outcome, "OL seeded/isbn13");
     }
 
+    fn hc_live_config() -> crate::live_config::LiveMetadataConfig {
+        crate::live_config::LiveMetadataConfig::new(livrarr_domain::settings::MetadataConfig {
+            hardcover_enabled: true,
+            hardcover_api_token: Some("test-token".to_string()),
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: String::new(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        })
+    }
+
+    fn hc_work() -> Work {
+        Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Work::default()
+        }
+    }
+
+    /// IA-E05: Hardcover's transport catch-all used to fold QueueFull into
+    /// `HardcoverError::Http` → `WillRetry{ServerError}`, consuming retry
+    /// budget for a local admission pause. Both anchor arms and the seeded
+    /// title search must emit the D3-exempt QueueFull class.
+    #[tokio::test]
+    async fn hardcover_queue_full_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::HcKey("42".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "HC anchor/hckey");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9780441172719".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "HC anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client.fetch(&hc_work(), RequestPriority::Normal).await;
+        assert_queue_full(&outcome, "HC seeded/title");
+    }
+
+    /// IA-E05: transport-intercepted 429 / `FetchError::RateLimited` must
+    /// classify as `WillRetry{RateLimit}`, not generic ServerError.
+    #[tokio::test]
+    async fn hardcover_rate_limited_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::HcKey("42".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "HC anchor/hckey RateLimited");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::HttpError {
+            status: 429,
+            classification: "rate_limited".to_string(),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9780441172719".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "HC anchor/isbn13 wrapped 429");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client.fetch(&hc_work(), RequestPriority::Normal).await;
+        assert_rate_limit(&outcome, "HC seeded/title RateLimited");
+    }
+
     // -----------------------------------------------------------------
     // Audnexus: `AudnexusClient` is hard-wired to the concrete
     // `HttpFetcherImpl` (not generic over `HttpFetcher`), so it cannot be
