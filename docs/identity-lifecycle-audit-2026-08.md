@@ -181,8 +181,13 @@ above is unchanged (snapshot: `docs/design-history/identity-lifecycle-audit-2026
    branches also collided semantically in `test_ilr_contracts.rs` — a
    harness parameter added by one and a call site added by the other — fixed
    by `fb301367`, the "small rebase" the handoff predicted). Contest
-   entry A (AUD-P1-18): one normal codex review round first
-   (`build/contest-p118/PACKET-REVIEW-A-R1.md`), then merge. Full gate on
+   entry A (AUD-P1-18): its normal codex review round
+   (`build/contest-p118/REVIEW-A-r1.md`) returned FAIL — 8 P1 + 1 P2: the
+   namespace split reached the new matching/capture seam but not the generic
+   add path, the ListImport door, enrichment capture, the candidate-reuse
+   gate, the conflict payloads, or the public projection (which it regresses
+   by serializing a Work id into `gr_key`). NOT merged; branch kept as the
+   wave-4 basis pending the PO's call (park / fix-round / override). Full gate on
    the merged tree at `fb301367` (2026-08-22T23:13Z): fmt 0 diffs, clippy 0
    warnings, `cargo test --no-fail-fast` 2,289 passed / 0 failed / 297
    ignored across 177 suites.
