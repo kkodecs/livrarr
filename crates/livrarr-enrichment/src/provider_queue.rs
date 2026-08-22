@@ -27,7 +27,9 @@ use livrarr_domain::identity_layer::{
     IdentityProvider, ProviderIdentityEvidence, ProviderIdentityEvidenceProvenance, RouteKey,
     RouteKind, WorkIdentityRepository, WorkRoute, WorkRouteState,
 };
-use livrarr_domain::services::{CallOperation, CallOutcomeClass, ProviderCallRecord};
+use livrarr_domain::services::{
+    CallOperation, CallOutcomeClass, LedgerPassAccounting, ProviderCallRecord,
+};
 use livrarr_domain::{
     AnchorQuery, Freshness, MetadataProvider, OutcomeClass, PermanentFailureReason, Work, WorkId,
 };
@@ -46,13 +48,24 @@ use livrarr_external_data::provider_client::{
 struct SearchFallbackCapture {
     provider_identity: Vec<ProviderIdentityEvidence>,
     route_proposals: Vec<RouteKey>,
-    ledger_burnable: bool,
+    /// This leg's contribution to the pass's REQ-027 ledger fold.
+    accounting: LedgerPassAccounting,
 }
 
 impl SearchFallbackCapture {
     fn honest_miss() -> Self {
         Self {
-            ledger_burnable: true,
+            accounting: LedgerPassAccounting::CardOrMiss,
+            ..Self::default()
+        }
+    }
+
+    /// A failed leg (search fetch or corroboration probe): no evidence, no
+    /// card — a failure cannot manufacture card confidence — and the pass it
+    /// belongs to is never burnable.
+    fn leg_failed() -> Self {
+        Self {
+            accounting: LedgerPassAccounting::LegFailed,
             ..Self::default()
         }
     }
@@ -70,7 +83,7 @@ fn text_decisive_search_capture(
             provenance: ProviderIdentityEvidenceProvenance::TextDecisiveSearchFallback,
         }],
         route_proposals: Vec::new(),
-        ledger_burnable: false,
+        accounting: LedgerPassAccounting::Settled,
     }
 }
 
@@ -130,7 +143,9 @@ async fn run_identity_search_fallback(
         .search_identity_candidates(&seed_title, &seed_author, language.as_deref(), priority)
         .await
     else {
-        return SearchFallbackCapture::default();
+        // Provider/transport failure on the search fetch itself: a failed
+        // leg, not a miss — it keeps the whole pass non-burnable.
+        return SearchFallbackCapture::leg_failed();
     };
     let decision_candidates: Vec<livrarr_domain::identity_matching::SearchFallbackCandidate<'_>> =
         candidates
@@ -184,7 +199,7 @@ async fn run_identity_search_fallback(
             SearchFallbackCapture {
                 provider_identity: Vec::new(),
                 route_proposals: vec![work_route],
-                ledger_burnable: true,
+                accounting: LedgerPassAccounting::CardOrMiss,
             }
         };
     }
@@ -201,17 +216,23 @@ async fn run_identity_search_fallback(
                 });
         }
         // A probe is solely an opportunity to upgrade the result to
-        // corroborated outcome (a). Failure retains a text-decisive (b), but a
-        // proposal-grade pick remains an honest miss: the failed probe cannot
-        // manufacture confidence for a card.
+        // corroborated outcome (a). A failed probe is a FAILED leg on every
+        // path — the accounting folds `LegFailed` absorbing, so the pass can
+        // never burn. A text-decisive pick still settles (b): the route
+        // evidence is emitted alongside the failed-leg fact. A proposal-grade
+        // pick additionally mints no card — a failed probe cannot manufacture
+        // card confidence.
         let Ok(probed) = client
             .probe_identity_candidate(probe, language.as_deref(), priority)
             .await
         else {
             return if text_decisive {
-                text_decisive_search_capture(identity_provider, work_route)
+                SearchFallbackCapture {
+                    accounting: LedgerPassAccounting::LegFailed,
+                    ..text_decisive_search_capture(identity_provider, work_route)
+                }
             } else {
-                SearchFallbackCapture::honest_miss()
+                SearchFallbackCapture::leg_failed()
             };
         };
         candidate.edition_identifiers.extend(probed);
@@ -230,7 +251,7 @@ async fn run_identity_search_fallback(
             SearchFallbackCapture {
                 provider_identity: Vec::new(),
                 route_proposals: vec![work_route],
-                ledger_burnable: true,
+                accounting: LedgerPassAccounting::CardOrMiss,
             }
         };
     };
@@ -258,7 +279,7 @@ async fn run_identity_search_fallback(
     SearchFallbackCapture {
         provider_identity,
         route_proposals: Vec::new(),
-        ledger_burnable: false,
+        accounting: LedgerPassAccounting::Settled,
     }
 }
 
@@ -738,7 +759,10 @@ where
         let language = work.language.clone();
         let mut provider_chase_attempted = false;
         let search_leg_fired = !to_search.is_empty();
-        let mut search_ledger_burnable = search_leg_fired;
+        // REQ-027: the pass's ledger accounting folds every spawned leg —
+        // search legs and probes here, anchored fetches below. One failed leg
+        // anywhere makes the pass non-burnable (`LegFailed` absorbs).
+        let mut ledger_accounting = LedgerPassAccounting::Idle;
         let mut search_provider_identity = Vec::new();
         let mut search_route_proposals = Vec::new();
         if let Some((seed_title, seed_author)) = search_seed {
@@ -758,12 +782,13 @@ where
             while let Some(joined) = search_set.join_next().await {
                 match joined {
                     Ok(capture) => {
-                        search_ledger_burnable &= capture.ledger_burnable;
+                        ledger_accounting = ledger_accounting.combine(capture.accounting);
                         search_provider_identity.extend(capture.provider_identity);
                         search_route_proposals.extend(capture.route_proposals);
                     }
                     Err(error) => {
-                        search_ledger_burnable = false;
+                        ledger_accounting =
+                            ledger_accounting.combine(LedgerPassAccounting::LegFailed);
                         warn!("identity search fallback task failed: {error}");
                     }
                 }
@@ -854,6 +879,20 @@ where
                 ),
             };
 
+            // REQ-027: an anchored leg that failed (provider error, panic,
+            // budget exhaustion, breaker/queue pause) folds into the pass
+            // accounting — a pass with any failed spawned leg never burns
+            // the generation-scoped attempt ledger. Completed verdicts
+            // (Success/NotFound/Conflict) contribute nothing here. A
+            // cache-served success was never a fetch (insight 99 r11) and
+            // cannot reach the failure classes.
+            if matches!(
+                final_outcome,
+                ProviderOutcome::WillRetry { .. } | ProviderOutcome::PermanentFailure { .. }
+            ) {
+                ledger_accounting = ledger_accounting.combine(LedgerPassAccounting::LegFailed);
+            }
+
             // Durable persistence.
             self.persist_phase1_outcome(work, provider, &final_outcome)
                 .await?;
@@ -902,7 +941,7 @@ where
             deferred,
             provider_chase_attempted,
             search_leg_fired,
-            search_ledger_burnable,
+            ledger_accounting,
             search_provider_identity,
             search_route_proposals,
         })

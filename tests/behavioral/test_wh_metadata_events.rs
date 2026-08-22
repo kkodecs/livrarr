@@ -119,7 +119,7 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 captured_route_proposals: Vec::new(),
                 provider_chase_attempted: false,
                 search_leg_fired: false,
-                search_ledger_burnable: false,
+                ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
             }),
             ScriptedOutcome::MergeDeferred => Ok(EnrichmentResult {
                 enrichment_status: EnrichmentStatus::Unenriched,
@@ -143,7 +143,7 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 captured_route_proposals: Vec::new(),
                 provider_chase_attempted: false,
                 search_leg_fired: false,
-                search_ledger_burnable: false,
+                ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
             }),
             ScriptedOutcome::NoAttempt => Ok(EnrichmentResult {
                 enrichment_status: EnrichmentStatus::Unenriched,
@@ -164,7 +164,7 @@ impl EnrichmentWorkflow for ScriptedWorkflow {
                 captured_route_proposals: Vec::new(),
                 provider_chase_attempted: false,
                 search_leg_fired: false,
-                search_ledger_burnable: false,
+                ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
             }),
         }
     }

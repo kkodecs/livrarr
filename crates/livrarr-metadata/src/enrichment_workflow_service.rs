@@ -88,7 +88,7 @@ where
             captured_route_proposals: result.captured_route_proposals,
             provider_chase_attempted: result.provider_chase_attempted,
             search_leg_fired: result.search_leg_fired,
-            search_ledger_burnable: result.search_ledger_burnable,
+            ledger_accounting: result.ledger_accounting,
         })
     }
 

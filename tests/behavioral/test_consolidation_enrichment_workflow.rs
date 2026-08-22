@@ -55,7 +55,7 @@ impl EnrichmentService for SuccessEnrichment {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
     async fn reset_for_manual_refresh(
@@ -102,7 +102,7 @@ impl EnrichmentService for DeferredEnrichment {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
     async fn reset_for_manual_refresh(
@@ -149,7 +149,7 @@ impl EnrichmentService for FailedEnrichment {
             captured_route_proposals: Vec::new(),
             provider_chase_attempted: false,
             search_leg_fired: false,
-            search_ledger_burnable: false,
+            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
         })
     }
     async fn reset_for_manual_refresh(
