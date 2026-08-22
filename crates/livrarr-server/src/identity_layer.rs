@@ -566,6 +566,9 @@ pub async fn run_identity_convergence_tick(
                         // untouched: with no search leg fired it burns exactly
                         // while the Work has no Work-level route at all,
                         // failure or not.
+                        // The attempt is recorded against the generation the pass
+                        // observed before the chase; a superseding edit makes the
+                        // checkpoint a no-write.
                         let should_burn = if pass.search_leg_fired {
                             pass.ledger_accounting.is_burnable()
                         } else {
@@ -573,17 +576,26 @@ pub async fn run_identity_convergence_tick(
                         };
                         if !should_burn {
                             None
-                        } else {
+                        } else if let Some(observed_generation) = pass.observed_identity_generation
+                        {
                             match state
                                 .db
-                                .record_identity_convergence_attempt(
-                                    user.id,
-                                    work_id,
-                                    after.identity_generation,
-                                )
+                                .record_identity_convergence_attempt(user.id, work_id, observed_generation)
                                 .await
                             {
                                 Ok(attempt) => Some(attempt),
+                                Err(livrarr_domain::identity_layer::IdentityRepositoryError::StaleGeneration) => {
+                                    tracing::info!(
+                                        user_id = user.id,
+                                        work_id,
+                                        "convergence attempt superseded: identity changed during the chase; no ledger burn"
+                                    );
+                                    let _ = state
+                                        .db
+                                        .set_next_convergence_at(user.id, work_id, Some(chrono::Utc::now() + cadence))
+                                        .await;
+                                    continue;
+                                }
                                 Err(error) => {
                                     tracing::warn!(
                                         user_id = user.id,
@@ -601,6 +613,15 @@ pub async fn run_identity_convergence_tick(
                                     continue;
                                 }
                             }
+                        } else {
+                            // A burnable pass without a decision-time generation cannot be charged
+                            // to any ledger; the legacy road never reaches this arm.
+                            tracing::warn!(
+                                user_id = user.id,
+                                work_id,
+                                "burnable convergence pass carried no observed generation; skipping attempt checkpoint"
+                            );
+                            None
                         }
                     }
                     Err(error) => {

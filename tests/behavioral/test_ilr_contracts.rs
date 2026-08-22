@@ -4285,6 +4285,7 @@ async fn convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase() {
         Some(livrarr_external_data::ProviderOutcome::NotFound),
         Vec::new(),
         None,
+        None,
     )
     .await;
     let (author, _) = harness
@@ -4389,6 +4390,270 @@ async fn convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase() {
     .await
     .expect("count honest-attempt audits after tick");
     assert_eq!(audits_after, audits_before);
+}
+
+async fn red_convergence_concurrent_edit_supersedes_attempt_checkpoint() {
+    let harness = build_route_harness_with_provider_outcome(
+        Some(livrarr_external_data::ProviderOutcome::NotFound),
+        Vec::new(),
+        None,
+        Some(Duration::from_millis(2000)),
+    )
+    .await;
+    let (author, _) = harness
+        .db
+        .create_author(CreateAuthorDbRequest {
+            user_id: harness.user_id,
+            name: "Drift Chase Author".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("seed drift-chase author");
+    let mut bridge = settlement_commit(harness.user_id, author.id, None);
+    bridge.identity_title = title("Drift Chase Bridge");
+    bridge.routes = vec![ilr::WorkRoute {
+        id: 0,
+        user_id: harness.user_id,
+        owner: RouteOwner::Work(0),
+        resolved_work_id: 0,
+        provider: ilr::IdentityProvider::IsbnRegistry,
+        kind: ilr::RouteKind::Isbn13Edition,
+        provider_scoped_id: "9780000000255".to_string(),
+        state: ilr::WorkRouteState::Active,
+        provenance: ilr::RouteProvenance::Provider(ilr::IdentityProvider::IsbnRegistry),
+        user_confirmed: false,
+        observed_at: Utc::now(),
+    }];
+    let seeded = WorkIdentityRepository::commit_settlement(&harness.db, bridge)
+        .await
+        .expect("seed drift-chase bridge");
+    let work_id = seeded.identity.own_work_id;
+    WorkDb::update_work_enrichment(
+        &harness.db,
+        harness.user_id,
+        work_id,
+        UpdateWorkEnrichmentDbRequest {
+            enrichment_status: livrarr_domain::EnrichmentStatus::Enriched,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mark drift-chase bridge enriched");
+    let generation_before = seeded.identity.identity_generation;
+    let stub = harness
+        .open_library_stub
+        .clone()
+        .expect("NotFound OpenLibrary stub");
+
+    let (report, time_before_tick, time_after_tick) = {
+        let _contract_lock = CONVERGENCE_CONTRACT_LOCK.lock().await;
+        let time_before_tick = Utc::now();
+        let tick = tokio::spawn(
+            livrarr_server::identity_layer::run_identity_convergence_tick(
+                harness.state.clone(),
+                CancellationToken::new(),
+            ),
+        );
+        for _ in 0..500 {
+            if stub.call_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            stub.call_count(),
+            1,
+            "chase must be in flight before the concurrent edit"
+        );
+        let mut edit = settlement_commit(harness.user_id, author.id, Some(work_id));
+        edit.identity_title = title("Drift Chase Bridge Retitled");
+        edit.expected_generation = generation_before;
+        let edited = WorkIdentityRepository::commit_settlement(&harness.db, edit)
+            .await
+            .expect("land concurrent identity edit during chase");
+        assert_eq!(edited.identity.identity_generation, generation_before + 1);
+        let report = tick.await.expect("tick task").expect("tick completes");
+        let time_after_tick = Utc::now();
+        (report, time_before_tick, time_after_tick)
+    };
+    assert_eq!(report.visited_work_count, 1);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts \
+          WHERE user_id=?1 AND work_id=?2 AND provider='livrarr-convergence' \
+            AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count drift-chase convergence attempts");
+    assert_eq!(attempts, 0);
+    let drifted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts \
+          WHERE user_id=?1 AND work_id=?2 AND provider='livrarr-convergence' \
+            AND route_kind='bridge-upgrade' AND route_value=?3",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .bind((generation_before + 1).to_string())
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count drifted-generation convergence attempts");
+    assert_eq!(drifted, 0);
+    let scheduled_raw: Option<String> =
+        sqlx::query_scalar("SELECT next_convergence_at FROM works WHERE user_id = ?1 AND id = ?2")
+            .bind(harness.user_id)
+            .bind(work_id)
+            .fetch_one(harness.db.pool())
+            .await
+            .expect("read next_convergence_at after superseded pass");
+    let scheduled_raw = scheduled_raw.expect("superseded pass reschedules one cadence ahead");
+    let scheduled_at = chrono::DateTime::parse_from_rfc3339(&scheduled_raw)
+        .expect("next cadence is RFC3339")
+        .with_timezone(&Utc);
+    let cadence = chrono::Duration::seconds(harness.state.config.convergence.interval_secs as i64);
+    assert!(
+        scheduled_at >= time_before_tick + cadence - chrono::Duration::seconds(2),
+        "superseded pass must not reschedule before one cadence from tick start"
+    );
+    assert!(
+        scheduled_at <= time_after_tick + cadence + chrono::Duration::seconds(2),
+        "superseded pass must not reschedule beyond one cadence from tick end"
+    );
+    let due_before = livrarr_db::WorkDb::list_convergence_due_with_search_availability(
+        &harness.db,
+        harness.user_id,
+        scheduled_at - chrono::Duration::seconds(1),
+        harness.state.config.convergence.attempt_threshold,
+        harness.state.config.convergence.batch_size as i64,
+        harness.state.provider_queue.identity_search_availability(),
+    )
+    .await
+    .expect("due selector before cadence");
+    assert!(
+        !due_before.contains(&work_id),
+        "superseded work is not selectable before its cadence"
+    );
+    let due_after = livrarr_db::WorkDb::list_convergence_due_with_search_availability(
+        &harness.db,
+        harness.user_id,
+        scheduled_at + chrono::Duration::seconds(1),
+        harness.state.config.convergence.attempt_threshold,
+        harness.state.config.convergence.batch_size as i64,
+        harness.state.provider_queue.identity_search_availability(),
+    )
+    .await
+    .expect("due selector after cadence");
+    assert!(
+        due_after.contains(&work_id),
+        "superseded work is selectable at its cadence"
+    );
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .expect("read identity after concurrent edit");
+    assert_eq!(captured.identity_generation, generation_before + 1);
+}
+
+async fn red_convergence_checkpoint_records_decision_time_generation() {
+    let harness = build_route_harness_with_provider_outcome(
+        Some(livrarr_external_data::ProviderOutcome::NotFound),
+        Vec::new(),
+        None,
+        None,
+    )
+    .await;
+    let (author, _) = harness
+        .db
+        .create_author(CreateAuthorDbRequest {
+            user_id: harness.user_id,
+            name: "Decision Time Author".to_string(),
+            sort_name: None,
+            ol_key: None,
+            gr_key: None,
+            hc_key: None,
+            import_id: None,
+        })
+        .await
+        .expect("seed decision-time author");
+    let mut bridge = settlement_commit(harness.user_id, author.id, None);
+    bridge.identity_title = title("Decision Time Bridge");
+    bridge.routes = vec![ilr::WorkRoute {
+        id: 0,
+        user_id: harness.user_id,
+        owner: RouteOwner::Work(0),
+        resolved_work_id: 0,
+        provider: ilr::IdentityProvider::IsbnRegistry,
+        kind: ilr::RouteKind::Isbn13Edition,
+        provider_scoped_id: "9780000000262".to_string(),
+        state: ilr::WorkRouteState::Active,
+        provenance: ilr::RouteProvenance::Provider(ilr::IdentityProvider::IsbnRegistry),
+        user_confirmed: false,
+        observed_at: Utc::now(),
+    }];
+    let seeded = WorkIdentityRepository::commit_settlement(&harness.db, bridge)
+        .await
+        .expect("seed decision-time bridge");
+    let work_id = seeded.identity.own_work_id;
+    WorkDb::update_work_enrichment(
+        &harness.db,
+        harness.user_id,
+        work_id,
+        UpdateWorkEnrichmentDbRequest {
+            enrichment_status: livrarr_domain::EnrichmentStatus::Enriched,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mark decision-time bridge enriched");
+    let generation_before = seeded.identity.identity_generation;
+    let stub = harness
+        .open_library_stub
+        .clone()
+        .expect("NotFound OpenLibrary stub");
+
+    let report = {
+        let _contract_lock = CONVERGENCE_CONTRACT_LOCK.lock().await;
+        livrarr_server::identity_layer::run_identity_convergence_tick(
+            harness.state.clone(),
+            CancellationToken::new(),
+        )
+        .await
+    }
+    .expect("run decision-time chase");
+    assert_eq!(report.visited_work_count, 1);
+    assert_eq!(stub.call_count(), 1);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_provider_attempts \
+          WHERE user_id=?1 AND work_id=?2 AND provider='livrarr-convergence' \
+            AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count decision-time convergence attempts");
+    assert_eq!(attempts, 1);
+    let route_value: String = sqlx::query_scalar(
+        "SELECT route_value FROM identity_provider_attempts \
+          WHERE user_id=?1 AND work_id=?2 AND provider='livrarr-convergence' \
+            AND route_kind='bridge-upgrade'",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read decision-time attempt generation");
+    assert_eq!(route_value, generation_before.to_string());
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
+            .await
+            .expect("read decision-time identity");
+    assert_eq!(captured.identity_generation, generation_before);
 }
 
 // Bug reproduction: identity-layer-rewrite C-r4-02 — a PreferCache replay is
@@ -5994,6 +6259,7 @@ async fn build_route_harness_with_provider_details(
         detail.map(|detail| livrarr_external_data::ProviderOutcome::Success(Box::new(detail))),
         identity_details,
         discovery_transport,
+        None,
     )
     .await
 }
@@ -6007,6 +6273,7 @@ async fn build_route_harness_with_provider_outcome(
         livrarr_external_data::NormalizedWorkDetail,
     )>,
     discovery_transport: Option<DiscoveryTransportFixture>,
+    open_library_stub_delay: Option<std::time::Duration>,
 ) -> RouteHarness {
     // Bug reproduction: identity-layer-rewrite F-1 — every real-route seam in
     // this harness runs against the activated production index set.
@@ -6204,10 +6471,13 @@ async fn build_route_harness_with_provider_outcome(
         }
     }
     let (queue_builder, open_library_stub) = if let Some(outcome) = open_library_outcome {
-        let stub = livrarr_external_data::StubProviderClient::new(
+        let mut stub = livrarr_external_data::StubProviderClient::new(
             livrarr_domain::MetadataProvider::OpenLibrary,
             outcome,
         );
+        if let Some(delay) = open_library_stub_delay {
+            stub = stub.with_delay(delay);
+        }
         (
             queue_builder.add_provider(
                 livrarr_domain::MetadataProvider::OpenLibrary,
@@ -15937,6 +16207,8 @@ red_tests! {
     convergence_no_change_terminalizes_on_the_v2_axis => red_convergence_no_change_terminalizes_on_the_v2_axis(),
     convergence_attempt_ledger_counts_only_a_real_unsuccessful_provider_chase => convergence_attempt_ledger_counts_only_a_real_unsuccessful_chase(),
     convergence_cache_only_second_visit_does_not_burn_bridge_attempt => red_convergence_cache_only_second_visit_does_not_burn_bridge_attempt(),
+    convergence_checkpoint_claims_only_the_prechase_generation_on_concurrent_edit => red_convergence_concurrent_edit_supersedes_attempt_checkpoint(),
+    convergence_checkpoint_records_against_the_decision_time_generation => red_convergence_checkpoint_records_decision_time_generation(),
     ac024a_machine_search_fallback_openlibrary_corroborates_and_settles => round13_correlated_openlibrary_search_settles(),
     ac024b_machine_search_fallback_cards_idempotently_and_is_bounded => round13_uncorroborated_search_cards_once_and_burns_to_threshold(),
     ac024c_machine_search_fallback_zero_route_affirms_end_to_end => round13_zero_route_goodreads_card_affirms_end_to_end(),
