@@ -13666,6 +13666,7 @@ async fn aud_p1_10_bridge_arm_legacy_burn_survives_anchored_failure() {
         }),
         Vec::new(),
         None,
+        None,
     )
     .await;
     let (work_id, _) = seed_round13_search_work(
