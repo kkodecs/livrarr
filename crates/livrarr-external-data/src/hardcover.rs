@@ -20,6 +20,14 @@ pub enum HardcoverError {
     /// HTTP was attempted. Carries the retry-after duration (R-11: the
     /// enrichment-surface caller must map this to `WillRetryReason::CircuitOpen`).
     CircuitOpen(Duration),
+    /// The outbound queue's local admission cap rejected the request — no
+    /// HTTP was attempted (D3: the caller must map this to
+    /// `WillRetryReason::QueueFull`, never burn retry budget on it).
+    QueueFull(Duration),
+    /// Transport-intercepted HTTP 429 (`FetchError::RateLimited` or
+    /// `FetchError::HttpError { status: 429 }`). Callers map this to
+    /// `WillRetryReason::RateLimit`.
+    RateLimited,
 }
 
 impl std::fmt::Display for HardcoverError {
@@ -29,6 +37,8 @@ impl std::fmt::Display for HardcoverError {
             Self::NoMatch(detail) => write!(f, "no match: {detail}"),
             Self::Http(msg) => write!(f, "{msg}"),
             Self::CircuitOpen(d) => write!(f, "circuit open, retry after {d:?}"),
+            Self::QueueFull(d) => write!(f, "queue full, retry after {d:?}"),
+            Self::RateLimited => write!(f, "rate limited"),
         }
     }
 }
@@ -93,6 +103,15 @@ pub async fn hc_post<F: HttpFetcher>(
         Ok(r) => r,
         Err(FetchError::CircuitOpen { retry_after }) => {
             return Err(HardcoverError::CircuitOpen(retry_after));
+        }
+        Err(FetchError::QueueFull { retry_after }) => {
+            return Err(HardcoverError::QueueFull(retry_after));
+        }
+        Err(FetchError::RateLimited) => {
+            return Err(HardcoverError::RateLimited);
+        }
+        Err(FetchError::HttpError { status: 429, .. }) => {
+            return Err(HardcoverError::RateLimited);
         }
         Err(e) => return Err(HardcoverError::Http(e.to_string())),
     };
@@ -1539,7 +1558,8 @@ mod tests {
 
     // -------------------------------------------------------------------
     // Error mapping: HttpFetcher failures map onto the HardcoverError
-    // shapes callers match on (provider_client.rs WillRetry{ServerError}).
+    // shapes callers match on (QueueFull/RateLimited/CircuitOpen pauses,
+    // Http → WillRetry{ServerError}).
     // -------------------------------------------------------------------
 
     #[tokio::test]
@@ -1574,6 +1594,65 @@ mod tests {
             HardcoverError::Http(msg) => assert!(msg.contains("timeout")),
             other => panic!("expected Http variant, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_fetcher_queue_full_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::QueueFull {
+                retry_after: std::time::Duration::from_secs(1),
+            },
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, HardcoverError::QueueFull(_)),
+            "queue full must be the typed pause, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_fetcher_rate_limited_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::RateLimited,
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, HardcoverError::RateLimited),
+            "transport RateLimited must stay RateLimited, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hc_post_maps_wrapped_http_429_off_the_http_catchall() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = crate::test_support::RecordingHttpFetcher::with_error(
+            livrarr_domain::services::FetchError::HttpError {
+                status: 429,
+                classification: "rate_limited".to_string(),
+            },
+        );
+        let body = hc_search_body(25, "\"x\"");
+
+        let err = hc_post(&fetcher, body, "tok", RequestPriority::Normal)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, HardcoverError::RateLimited),
+            "wrapped 429 must classify as RateLimited, got {err:?}"
+        );
     }
 
     // -------------------------------------------------------------------

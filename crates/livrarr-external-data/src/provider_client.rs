@@ -585,6 +585,31 @@ fn queue_full_outcome(retry_after: Duration) -> ProviderOutcome<NormalizedWorkDe
     }
 }
 
+/// Hardcover pause/retry classification (IA-E05). `None` is a genuine miss
+/// (`NoResults`/`NoMatch`) so each caller can report breaker success / fall
+/// through to a weaker tier. QueueFull and RateLimited must not ride the
+/// `Http` → `ServerError` path.
+fn hardcover_error_outcome(
+    err: crate::hardcover::HardcoverError,
+    retry_backoff_secs: i64,
+) -> Option<ProviderOutcome<NormalizedWorkDetail>> {
+    match err {
+        crate::hardcover::HardcoverError::CircuitOpen(retry_after) => {
+            Some(circuit_open_outcome(retry_after))
+        }
+        crate::hardcover::HardcoverError::QueueFull(retry_after) => {
+            Some(queue_full_outcome(retry_after))
+        }
+        crate::hardcover::HardcoverError::RateLimited => Some(rate_limit_outcome()),
+        crate::hardcover::HardcoverError::Http(_) => Some(ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: Utc::now() + chrono::Duration::seconds(retry_backoff_secs),
+        }),
+        crate::hardcover::HardcoverError::NoResults
+        | crate::hardcover::HardcoverError::NoMatch(_) => None,
+    }
+}
+
 /// Common `WillRetry { RateLimit }` mapping (Unit A): a live 429 is a real
 /// provider verdict (unlike `CircuitOpen`), so it consumes one retry-budget
 /// attempt. Backoff mirrors `google_books::map_http_error`'s quota-exhaustion
@@ -1026,15 +1051,8 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                         crate::hardcover::report_hardcover_success();
                         ProviderOutcome::NotFound
                     }
-                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                        circuit_open_outcome(retry_after)
-                    }
-                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    },
-                    Err(_) => ProviderOutcome::NotFound,
+                    Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs)
+                        .unwrap_or(ProviderOutcome::NotFound),
                 }
             }
             AnchorQuery::HcKey(key) => {
@@ -1061,15 +1079,8 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                         crate::hardcover::report_hardcover_success();
                         ProviderOutcome::NotFound
                     }
-                    Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                        circuit_open_outcome(retry_after)
-                    }
-                    Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    },
-                    Err(_) => ProviderOutcome::NotFound,
+                    Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs)
+                        .unwrap_or(ProviderOutcome::NotFound),
                 }
             }
             _ => ProviderOutcome::NotFound,
@@ -1125,18 +1136,13 @@ impl<F: HttpFetcher> HardcoverClient<F> {
                     // surface: title/author fallback still runs below.
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no verified match");
                 }
-                Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                    return circuit_open_outcome(retry_after);
-                }
-                Err(crate::hardcover::HardcoverError::Http(e)) => {
-                    tracing::debug!(isbn = %normalized, error = %e, "HC ISBN search failed");
-                    return ProviderOutcome::WillRetry {
-                        reason: livrarr_domain::WillRetryReason::ServerError,
-                        next_attempt_at: Utc::now()
-                            + chrono::Duration::seconds(self.retry_backoff_secs),
-                    };
-                }
-                Err(_) => {
+                Err(e) => {
+                    if let crate::hardcover::HardcoverError::Http(ref msg) = e {
+                        tracing::debug!(isbn = %normalized, error = %msg, "HC ISBN search failed");
+                    }
+                    if let Some(outcome) = hardcover_error_outcome(e, self.retry_backoff_secs) {
+                        return outcome;
+                    }
                     tracing::debug!(isbn = %normalized, "HC ISBN search: no results");
                 }
             }
@@ -1154,22 +1160,12 @@ impl<F: HttpFetcher> HardcoverClient<F> {
 
         match result {
             Ok(hc) => self.build_success(hc, &token, priority).await,
-            Err(
-                crate::hardcover::HardcoverError::NoResults
-                | crate::hardcover::HardcoverError::NoMatch(_),
-            ) => {
+            Err(e) => hardcover_error_outcome(e, self.retry_backoff_secs).unwrap_or_else(|| {
                 // The provider answered fine; it just has no match. One leg,
                 // succeeded — report the operation healthy.
                 crate::hardcover::report_hardcover_success();
                 ProviderOutcome::NotFound
-            }
-            Err(crate::hardcover::HardcoverError::CircuitOpen(retry_after)) => {
-                circuit_open_outcome(retry_after)
-            }
-            Err(crate::hardcover::HardcoverError::Http(_)) => ProviderOutcome::WillRetry {
-                reason: livrarr_domain::WillRetryReason::ServerError,
-                next_attempt_at: Utc::now() + chrono::Duration::seconds(self.retry_backoff_secs),
-            },
+            }),
         }
     }
 
@@ -2501,6 +2497,102 @@ mod unit_a_retry_classification {
             )
             .await;
         assert_queue_full(&outcome, "OL seeded/isbn13");
+    }
+
+    fn hc_live_config() -> crate::live_config::LiveMetadataConfig {
+        crate::live_config::LiveMetadataConfig::new(livrarr_domain::settings::MetadataConfig {
+            hardcover_enabled: true,
+            hardcover_api_token: Some("test-token".to_string()),
+            llm_enabled: false,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: String::new(),
+            languages: vec!["en".to_string()],
+            google_books_api_key: None,
+        })
+    }
+
+    fn hc_work() -> Work {
+        Work {
+            title: "Dune".to_string(),
+            author_name: "Frank Herbert".to_string(),
+            ..Work::default()
+        }
+    }
+
+    /// IA-E05: Hardcover's transport catch-all used to fold QueueFull into
+    /// `HardcoverError::Http` → `WillRetry{ServerError}`, consuming retry
+    /// budget for a local admission pause. Both anchor arms and the seeded
+    /// title search must emit the D3-exempt QueueFull class.
+    #[tokio::test]
+    async fn hardcover_queue_full_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::HcKey("42".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "HC anchor/hckey");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9780441172719".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_queue_full(&outcome, "HC anchor/isbn13");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::QueueFull {
+            retry_after: Duration::from_secs(1),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client.fetch(&hc_work(), RequestPriority::Normal).await;
+        assert_queue_full(&outcome, "HC seeded/title");
+    }
+
+    /// IA-E05: transport-intercepted 429 / `FetchError::RateLimited` must
+    /// classify as `WillRetry{RateLimit}`, not generic ServerError.
+    #[tokio::test]
+    async fn hardcover_rate_limited_matches_across_anchor_and_seeded() {
+        let _guard = crate::test_support::lock_breaker(RateBucket::Hardcover).await;
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::HcKey("42".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "HC anchor/hckey RateLimited");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::HttpError {
+            status: 429,
+            classification: "rate_limited".to_string(),
+        });
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client
+            .fetch_by_anchor_query(
+                &AnchorQuery::Isbn13("9780441172719".to_string()),
+                RequestPriority::Normal,
+            )
+            .await;
+        assert_rate_limit(&outcome, "HC anchor/isbn13 wrapped 429");
+
+        let fetcher = RecordingHttpFetcher::with_error(FetchError::RateLimited);
+        let client = HardcoverClient::new(fetcher, hc_live_config());
+        let outcome = client.fetch(&hc_work(), RequestPriority::Normal).await;
+        assert_rate_limit(&outcome, "HC seeded/title RateLimited");
     }
 
     // -----------------------------------------------------------------

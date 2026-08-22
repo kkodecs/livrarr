@@ -893,6 +893,8 @@ fn goodreads_certified_credit(label: &str) -> ProviderCredit {
 fn map_hardcover_error(error: HardcoverError) -> ProviderFetchError {
     match error {
         HardcoverError::CircuitOpen(retry_after) => ProviderFetchError::CircuitOpen(retry_after),
+        HardcoverError::QueueFull(retry_after) => ProviderFetchError::QueueFull(retry_after),
+        HardcoverError::RateLimited => ProviderFetchError::RateLimited,
         HardcoverError::Http(detail) if is_retryable_hardcover_failure(&detail) => {
             ProviderFetchError::Retryable {
                 error: detail,
