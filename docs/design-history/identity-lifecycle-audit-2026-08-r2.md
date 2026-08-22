@@ -137,58 +137,6 @@ evidence pointers. One-line versions:
 - **Docs**: spec-fold the fileless door-matrix precedent (IA-005); oasis check
   for the two epubs (IA-001).
 
-## PO rulings (2026-08-22) — amendment to the frozen r2
-
-The PO read the report and ruled "go all" on its open items. The r2 body
-above is unchanged (snapshot: `docs/design-history/identity-lifecycle-audit-2026-08-r2.md`).
-
-1. **AUD-P0-7 → P1.** A dismissed review card can come back, but the attempt
-   ledger bounds how often, no data is damaged, and the user can dismiss
-   again. It stays in fix-wave 1 (durable dismissals), so the ruling changes
-   the ledger line, not the work.
-2. **Fix-wave grouping blessed as proposed** (§ Backlog handoff), with one
-   re-ordering: AUD-P1-18 leaves wave 4 early — the reviewed contest fix
-   merges on its own review round (item 4).
-3. **IA-001 closed with a root cause — the files were never missing.**
-   "oasis" is this host, the only livrarr deployment (the `:8787`/`:8788`
-   containers are Readarr/Bookshelf, not livrarr), so there was no second
-   deployment to check. Both epubs are on disk at their recorded paths. The
-   "missing file" signal is the enrichment materialize step's tag write:
-   `crates/livrarr-metadata/src/work_service.rs:3782-3785` (and
-   `crates/livrarr-metadata/src/cover_startup.rs:272-275`) hand
-   `MaterializeRequest.file_paths` the library-RELATIVE `library_items.path`
-   (`1/Jim Butcher/White Night.epub`) with no root-folder join;
-   `crates/livrarr-materialize/src/lib.rs:343` passes them to
-   `write_tags_batch`, and `crates/livrarr-tagwrite/src/lib.rs:144-149`
-   checks `Path::new(file_path).exists()` against the server's working
-   directory → `FileNotFound` → `crates/livrarr-materialize/src/lib.rs:345`
-   propagates it with `?` (the comment at `:334-336` promises best-effort;
-   the code is not) → `run_unified_enrichment: materialize failed`. The OTHER
-   tag-write road, `crates/livrarr-server/src/tag_service.rs:41`
-   (`{root}/{item.path}`), composes the absolute path and is the one that
-   actually writes the files: White Night's on-disk mtime (2026-08-20
-   13:22:51Z) sits inside the same refresh whose materialize step reported
-   not-found at 13:23:05Z, and 20+ works show the identical import → not-found
-   pair in the 2026-08-17..19 logs. Two roads for one concern (PRINCIPLES §1);
-   the materialize road is structurally dead for every work that has files.
-   **New backlog row AUD-P1-24 (P1, L1/L5): the materialize tag-write road
-   passes library-relative paths — unify onto the one path-composing road.**
-   Fix-wave 2. This also closes the "missing-files investigation" carried
-   since identity-layer-rewrite.
-4. **Merges (PO word 2026-08-22):** `exp/e05-queuefull` → `684adbba`
-   (IA-E05); `exp/p110-ledger-burn` → `986f7498` (AUD-P1-10); `exp/ae-p109`
-   → `269a8269` (AUD-P1-9; one comment-only conflict, PM-resolved; the two
-   branches also collided semantically in `test_ilr_contracts.rs` — a
-   harness parameter added by one and a call site added by the other — fixed
-   by `fb301367`, the "small rebase" the handoff predicted). Contest
-   entry A (AUD-P1-18): one normal codex review round first
-   (`build/contest-p118/PACKET-REVIEW-A-R1.md`), then merge. Full gate on
-   the merged tree at `fb301367` (2026-08-22T23:13Z): fmt 0 diffs, clippy 0
-   warnings, `cargo test --no-fail-fast` 2,289 passed / 0 failed / 297
-   ignored across 177 suites.
-5. Spec + frozen report committed (`dd966b55`); `gr.jpg` left untouched (PO
-   scratch, untracked).
-
 ## Method notes (for the next audit)
 
 The machine-built coverage ledger caught its own generator truncating files at
