@@ -592,6 +592,7 @@ async fn mint_refused_card(db: &SqliteDb, user_id: i64, kind: ilr::ReviewKind) -
         ilr::ReviewKind::EditionEvidence => {
             // Production mint: contradictory Work-level edition evidence is
             // one of the two live EditionEvidence writers named by ST-007.
+            // U7 keeps this refused-card fixture; it is not a U5 suppression test.
             let (work_id, _) = seed_work(db, user_id, "edition-evidence").await;
             EditionRepository::apply_work_evidence(
                 db,

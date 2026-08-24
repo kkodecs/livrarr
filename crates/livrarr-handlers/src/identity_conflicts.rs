@@ -47,7 +47,6 @@ pub struct IdentityConflictDetailDto {
 #[serde(rename_all = "camelCase")]
 pub struct ResolveRequest {
     pub action: ConflictResolutionAction,
-    pub notes: Option<String>,
     #[serde(default)]
     pub surviving_routes: Option<Vec<RouteKey>>,
     #[serde(default)]

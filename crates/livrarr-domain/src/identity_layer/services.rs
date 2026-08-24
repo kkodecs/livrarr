@@ -458,6 +458,22 @@ pub trait WorkIdentityRepository: Send + Sync {
         command: SettlementCommit,
     ) -> Result<SettlementCommitOutcome, IdentityRepositoryError>;
 
+    /// Compatibility `commit_settlement` plus the road's exact origin and the
+    /// already-validated explicit-choice fact. Live road settlement must use
+    /// this; low-level callers may keep `commit_settlement`.
+    fn commit_settlement_with_review_context(
+        &self,
+        command: SettlementCommit,
+        origin: IdentityRoadOrigin,
+        validated_explicit_choice: bool,
+    ) -> impl std::future::Future<Output = Result<SettlementCommitOutcome, IdentityRepositoryError>> + Send
+    {
+        async move {
+            let _ = (origin, validated_explicit_choice);
+            self.commit_settlement(command).await
+        }
+    }
+
     /// One `BEGIN IMMEDIATE` transaction owning hint revalidation, Author
     /// resolution, complete-group reads, the one decision, and commit/rollback.
     fn settle_manual_import_minimum(
@@ -486,6 +502,27 @@ pub trait WorkIdentityRepository: Send + Sync {
             Err(IdentityRepositoryError::Database(
                 "pending-route review persistence is not implemented".to_string(),
             ))
+        }
+    }
+
+    /// Compatibility `commit_pending_route_review` plus the road's exact
+    /// origin and already-validated explicit-choice fact. Live captured-route
+    /// persistence must use this; low-level callers may keep the unadorned
+    /// method.
+    fn commit_pending_route_review_with_review_context(
+        &self,
+        user_id: crate::UserId,
+        work_id: crate::WorkId,
+        expected_generation: i64,
+        candidate: ParkedRouteCandidate,
+        origin: IdentityRoadOrigin,
+        validated_explicit_choice: bool,
+    ) -> impl std::future::Future<Output = Result<MintedReviewCard, IdentityRepositoryError>> + Send
+    {
+        async move {
+            let _ = (origin, validated_explicit_choice);
+            self.commit_pending_route_review(user_id, work_id, expected_generation, candidate)
+                .await
         }
     }
 

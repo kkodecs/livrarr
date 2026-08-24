@@ -10,13 +10,13 @@ use livrarr_domain::identity_layer::{
     EditionRepository, EditionRepositoryError, EditionState, EditionWorkEvidenceCommand,
     EmbeddedCoverInspectionOutcome, EmbeddedCoverInspectionRecord, EvidenceProvenance,
     FileRevision, IdentityAuthorityReadiness, IdentityCutoverService, IdentityMigrationError,
-    IdentityMigrationReport, IdentityProvider, IdentityRepositoryError, IdentityRoadOutcome,
-    IdentityStatus, MachineSubtitleProjection, ManualImportMinimumCommand, MintedReviewCard,
-    PendingReviewCard, ResolveIdentityConflictCommand, ReviewActor, ReviewContinuationOutcome,
-    ReviewKind, ReviewResolutionCommand, RouteKey, RouteKind, RouteOwner, RouteProvenance,
-    SettlementCommit, SettlementCommitOutcome, SettlementReviewCard, SnapshotDatabase,
-    WorkContributor, WorkCoverPresentation, WorkIdentityPresentation, WorkIdentityRepository,
-    WorkRoute, WorkRouteState,
+    IdentityMigrationReport, IdentityProvider, IdentityRepositoryError, IdentityRoadOrigin,
+    IdentityRoadOutcome, IdentityStatus, MachineSubtitleProjection, ManualImportMinimumCommand,
+    MintedReviewCard, PendingReviewCard, ResolveIdentityConflictCommand, ReviewActor,
+    ReviewContinuationOutcome, ReviewKind, ReviewResolutionCommand, RouteKey, RouteKind,
+    RouteOwner, RouteProvenance, SettlementCommit, SettlementCommitOutcome, SettlementReviewCard,
+    SnapshotDatabase, WorkContributor, WorkCoverPresentation, WorkIdentityPresentation,
+    WorkIdentityRepository, WorkRoute, WorkRouteState,
 };
 use livrarr_domain::{
     history_events, AuthorId, AuthorLinkTrigger, AuthorNameSource, AuthorRouteKey, LibraryItemId,
@@ -291,6 +291,202 @@ pub struct WorkProjectionSnapshot {
     pub generation: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewCardMintOutcome {
+    Minted(MintedReviewCard),
+    ReusedPending(MintedReviewCard),
+    SuppressedByDismissal,
+}
+
+macro_rules! review_card_mint_site {
+    (
+        $(#[$meta:meta])*
+        enum $name:ident { $($variant:ident),+ $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[cfg(any(test, feature = "test-helpers"))]
+        pub enum $name { $($variant),+ }
+
+        $(#[$meta])*
+        #[cfg(not(any(test, feature = "test-helpers")))]
+        pub(crate) enum $name { $($variant),+ }
+    };
+}
+
+review_card_mint_site! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ReviewCardMintSite {
+        GenericSettlement,
+        CapturedRouteHandoff,
+        ApplyEvidence,
+        ApplyWorkEvidence,
+        StartupTitleHeal,
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+#[derive(Debug, Clone)]
+pub struct ReviewCardMintObservation {
+    pub site: ReviewCardMintSite,
+    pub kind: ReviewKind,
+    pub outcome: ReviewCardMintOutcome,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ReviewCardMintOrigin {
+    Road(IdentityRoadOrigin),
+    CompatibilityGenericSettlement,
+    CallerlessApplyEvidence,
+    ManualImportApplyWorkEvidence,
+    StartupTitleHeal,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReviewCardMintProposal<'a> {
+    pub site: ReviewCardMintSite,
+    pub user_id: UserId,
+    pub work_id: Option<WorkId>,
+    pub generation: i64,
+    pub card: &'a SettlementReviewCard,
+    pub origin: ReviewCardMintOrigin,
+    pub validated_explicit_choice: bool,
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+static REVIEW_CARD_MINT_OBSERVATIONS: std::sync::Mutex<Vec<ReviewCardMintObservation>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn clear_review_card_mint_observations_for_tests() {
+    REVIEW_CARD_MINT_OBSERVATIONS
+        .lock()
+        .expect("review-card mint observation lock")
+        .clear();
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn take_review_card_mint_observations_for_tests() -> Vec<ReviewCardMintObservation> {
+    std::mem::take(
+        &mut *REVIEW_CARD_MINT_OBSERVATIONS
+            .lock()
+            .expect("review-card mint observation lock"),
+    )
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn record_review_card_mint_observation(
+    proposal: &ReviewCardMintProposal<'_>,
+    outcome: &ReviewCardMintOutcome,
+) {
+    REVIEW_CARD_MINT_OBSERVATIONS
+        .lock()
+        .expect("review-card mint observation lock")
+        .push(ReviewCardMintObservation {
+            site: proposal.site,
+            kind: proposal.card.kind(),
+            outcome: *outcome,
+        });
+}
+
+pub(crate) async fn mint_reuse_or_suppress_review_card_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    proposal: ReviewCardMintProposal<'_>,
+) -> Result<ReviewCardMintOutcome, IdentityRepositoryError> {
+    let _ = proposal.validated_explicit_choice;
+    let kind = proposal.card.kind();
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let reuse_key = review_card_reuse_key(proposal.user_id, proposal.card, proposal.work_id)?;
+    let mut reusable_id = None;
+    if let Some(reuse_key) = reuse_key {
+        let pending = sqlx::query(
+            "SELECT id, work_id, payload FROM identity_review_cards \
+              WHERE user_id=?1 AND kind=?2 AND status='pending' ORDER BY id",
+        )
+        .bind(proposal.user_id)
+        .bind(kind.storage_code())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+        let mut matches = Vec::new();
+        for row in pending {
+            let card_id: i64 = row.try_get("id").map_err(repo_decode)?;
+            let stored_work_id: Option<WorkId> = row
+                .try_get::<Option<i64>, _>("work_id")
+                .map_err(repo_decode)?;
+            let payload: String = row.try_get("payload").map_err(repo_decode)?;
+            let pending_card: SettlementReviewCard =
+                serde_json::from_str(&payload).map_err(repo_json)?;
+            if review_card_reuse_key(proposal.user_id, &pending_card, stored_work_id)?.as_ref()
+                == Some(&reuse_key)
+            {
+                matches.push(card_id);
+            }
+        }
+        if let Some((&survivor_id, duplicates)) = matches.split_first() {
+            if !duplicates.is_empty() {
+                cancel_equivalent_duplicate_review_cards(
+                    tx,
+                    &proposal,
+                    survivor_id,
+                    duplicates,
+                    &created_at,
+                )
+                .await?;
+            }
+            reusable_id = Some(survivor_id);
+        }
+    }
+    let outcome = if let Some(survivor_id) = reusable_id {
+        ReviewCardMintOutcome::ReusedPending(MintedReviewCard {
+            id: survivor_id,
+            kind,
+            generation: proposal.generation,
+        })
+    } else {
+        let work_id = durable_review_card_work_scope(proposal.card, proposal.work_id);
+        let inserted = sqlx::query(
+            "INSERT INTO identity_review_cards \
+                (user_id, work_id, kind, generation, status, payload, created_at) \
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+        )
+        .bind(proposal.user_id)
+        .bind(work_id)
+        .bind(kind.storage_code())
+        .bind(proposal.generation)
+        .bind(serde_json::to_string(proposal.card).map_err(repo_json)?)
+        .bind(&created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+        let card_id = inserted.last_insert_rowid();
+        if kind == ReviewKind::PendingRoute && !review_mint_origin_is_inline(&proposal.origin) {
+            maybe_insert_pending_route_notification(tx, &proposal, card_id, &created_at).await?;
+        }
+        if proposal.site == ReviewCardMintSite::CapturedRouteHandoff {
+            sqlx::query(
+                "INSERT INTO identity_audit_events \
+                    (user_id, work_id, event_kind, actor, payload, created_at) \
+                 VALUES (?1, ?2, 'pending-route-proposal', 'identity-road', ?3, ?4)",
+            )
+            .bind(proposal.user_id)
+            .bind(proposal.work_id)
+            .bind(format!("card_id={card_id};origin=search-fallback"))
+            .bind(&created_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+        }
+        ReviewCardMintOutcome::Minted(MintedReviewCard {
+            id: card_id,
+            kind,
+            generation: proposal.generation,
+        })
+    };
+    #[cfg(any(test, feature = "test-helpers"))]
+    record_review_card_mint_observation(&proposal, &outcome);
+    Ok(outcome)
+}
+
 // ---------------------------------------------------------------------------
 // Domain trait impls on the existing `SqliteDb` (NEW shadow
 // `WorkIdentityRepository`; `EditionRepository`; `IdentityCutoverService`).
@@ -306,6 +502,8 @@ struct SettlementTxResult {
 async fn commit_settlement_in_tx(
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     command: &SettlementCommit,
+    origin: ReviewCardMintOrigin,
+    validated_explicit_choice: bool,
 ) -> Result<SettlementTxResult, IdentityRepositoryError> {
     let primary = command
         .contributors
@@ -579,60 +777,20 @@ async fn commit_settlement_in_tx(
     let audit_id = audit.last_insert_rowid();
     let mut review_cards = Vec::with_capacity(command.review_cards.len());
     for card in &command.review_cards {
-        let kind = card.kind();
-        if let Some(proposal_key) = group_identity_proposal_key(card)? {
-            let pending = sqlx::query(
-                "SELECT id, payload FROM identity_review_cards \
-                      WHERE user_id=?1 AND kind=?2 AND status='pending' ORDER BY id",
-            )
-            .bind(command.user_id)
-            .bind(ReviewKind::GroupIdentity.storage_code())
-            .fetch_all(&mut **tx)
-            .await
-            .map_err(repo_db)?;
-            let mut reusable_id = None;
-            for row in pending {
-                let card_id: i64 = row.try_get("id").map_err(repo_decode)?;
-                let payload: String = row.try_get("payload").map_err(repo_decode)?;
-                let pending_card: SettlementReviewCard =
-                    serde_json::from_str(&payload).map_err(repo_json)?;
-                if group_identity_proposal_key(&pending_card)?.as_ref() == Some(&proposal_key) {
-                    reusable_id = Some(card_id);
-                    break;
-                }
-            }
-            if let Some(id) = reusable_id {
-                review_cards.push(MintedReviewCard {
-                    id,
-                    kind,
-                    generation,
-                });
-                continue;
-            }
-        }
-        let row = sqlx::query(
-            "INSERT INTO identity_review_cards \
-                    (user_id, work_id, kind, generation, status, payload, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+        let outcome = mint_reuse_or_suppress_review_card_in_tx(
+            tx,
+            ReviewCardMintProposal {
+                site: ReviewCardMintSite::GenericSettlement,
+                user_id: command.user_id,
+                work_id: Some(work_id),
+                generation,
+                card,
+                origin: origin.clone(),
+                validated_explicit_choice,
+            },
         )
-        .bind(command.user_id)
-        .bind(
-            review_card_work_id(card)
-                .filter(|candidate| *candidate > 0)
-                .or(Some(work_id)),
-        )
-        .bind(kind.storage_code())
-        .bind(generation)
-        .bind(serde_json::to_string(card).map_err(repo_json)?)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&mut **tx)
-        .await
-        .map_err(repo_db)?;
-        review_cards.push(MintedReviewCard {
-            id: row.last_insert_rowid(),
-            kind,
-            generation,
-        });
+        .await?;
+        review_cards.push(minted_or_reused_review_card(outcome)?);
     }
     commit_settlement_failpoint("reviews")?;
     Ok(SettlementTxResult {
@@ -640,6 +798,27 @@ async fn commit_settlement_in_tx(
         created,
         audit_id,
         review_cards,
+    })
+}
+
+async fn persist_settlement(
+    db: &SqliteDb,
+    command: SettlementCommit,
+    origin: ReviewCardMintOrigin,
+    validated_explicit_choice: bool,
+) -> Result<SettlementCommitOutcome, IdentityRepositoryError> {
+    let mut tx = crate::pool::begin_write(db.pool()).await.map_err(repo_db)?;
+    let written =
+        commit_settlement_in_tx(&mut tx, &command, origin, validated_explicit_choice).await?;
+    tx.commit().await.map_err(repo_db)?;
+    let identity =
+        WorkIdentityRepository::read_captured_identity(db, command.user_id, written.work_id)
+            .await?;
+    Ok(SettlementCommitOutcome {
+        identity,
+        created: written.created,
+        audit_id: written.audit_id,
+        review_cards: written.review_cards,
     })
 }
 
@@ -946,20 +1125,28 @@ impl WorkIdentityRepository for SqliteDb {
         &self,
         command: SettlementCommit,
     ) -> Result<SettlementCommitOutcome, IdentityRepositoryError> {
-        let mut tx = crate::pool::begin_write(self.pool())
-            .await
-            .map_err(repo_db)?;
-        let written = commit_settlement_in_tx(&mut tx, &command).await?;
-        tx.commit().await.map_err(repo_db)?;
-        let identity = self
-            .read_captured_identity(command.user_id, written.work_id)
-            .await?;
-        Ok(SettlementCommitOutcome {
-            identity,
-            created: written.created,
-            audit_id: written.audit_id,
-            review_cards: written.review_cards,
-        })
+        persist_settlement(
+            self,
+            command,
+            ReviewCardMintOrigin::CompatibilityGenericSettlement,
+            false,
+        )
+        .await
+    }
+
+    async fn commit_settlement_with_review_context(
+        &self,
+        command: SettlementCommit,
+        origin: IdentityRoadOrigin,
+        validated_explicit_choice: bool,
+    ) -> Result<SettlementCommitOutcome, IdentityRepositoryError> {
+        persist_settlement(
+            self,
+            command,
+            ReviewCardMintOrigin::Road(origin),
+            validated_explicit_choice,
+        )
+        .await
     }
 
     async fn settle_manual_import_minimum(
@@ -1131,6 +1318,8 @@ impl WorkIdentityRepository for SqliteDb {
                         expected_generation: identity.identity_generation,
                         review_cards: Vec::new(),
                     },
+                    ReviewCardMintOrigin::CompatibilityGenericSettlement,
+                    false,
                 )
                 .await?;
                 tx.commit().await.map_err(repo_db)?;
@@ -1185,6 +1374,8 @@ impl WorkIdentityRepository for SqliteDb {
                         expected_generation: 0,
                         review_cards: Vec::new(),
                     },
+                    ReviewCardMintOrigin::CompatibilityGenericSettlement,
+                    false,
                 )
                 .await?;
                 tx.commit().await.map_err(repo_db)?;
@@ -1213,110 +1404,74 @@ impl WorkIdentityRepository for SqliteDb {
         let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(repo_db)?;
-        let current: Option<(i64, String, String)> = sqlx::query_as(
-            "SELECT identity_generation, title, author_name \
-               FROM works WHERE user_id=?1 AND id=?2",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let (current_generation, work_title, work_author) =
-            current.ok_or(IdentityRepositoryError::NotFound)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT identity_generation FROM works WHERE user_id=?1 AND id=?2")
+                .bind(user_id)
+                .bind(work_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(repo_db)?;
+        let current_generation = current.ok_or(IdentityRepositoryError::NotFound)?;
         if current_generation != expected_generation {
             return Err(IdentityRepositoryError::StaleGeneration);
         }
         let card = SettlementReviewCard::PendingRoute { work_id, candidate };
-        let proposal_key =
-            pending_route_proposal_key(&card).ok_or(IdentityRepositoryError::InvalidResolution)?;
-        let pending = sqlx::query(
-            "SELECT id, generation, payload FROM identity_review_cards \
-              WHERE user_id=?1 AND work_id=?2 AND kind=?3 AND status='pending' ORDER BY id",
+        let outcome = mint_reuse_or_suppress_review_card_in_tx(
+            &mut tx,
+            ReviewCardMintProposal {
+                site: ReviewCardMintSite::CapturedRouteHandoff,
+                user_id,
+                work_id: Some(work_id),
+                generation: expected_generation,
+                card: &card,
+                origin: ReviewCardMintOrigin::CompatibilityGenericSettlement,
+                validated_explicit_choice: false,
+            },
         )
-        .bind(user_id)
-        .bind(work_id)
-        .bind(ReviewKind::PendingRoute.storage_code())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        for row in pending {
-            let payload: String = row.try_get("payload").map_err(repo_decode)?;
-            let pending_card: SettlementReviewCard =
-                serde_json::from_str(&payload).map_err(repo_json)?;
-            if pending_route_proposal_key(&pending_card).as_ref() == Some(&proposal_key) {
-                return Ok(MintedReviewCard {
-                    id: row.try_get("id").map_err(repo_decode)?,
-                    kind: ReviewKind::PendingRoute,
-                    // The row keeps its mint generation as history; callers
-                    // receive the generation that is actionable now.
-                    generation: expected_generation,
-                });
-            }
-        }
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let inserted = sqlx::query(
-            "INSERT INTO identity_review_cards \
-                (user_id, work_id, kind, generation, status, payload, created_at) \
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .bind(ReviewKind::PendingRoute.storage_code())
-        .bind(expected_generation)
-        .bind(serde_json::to_string(&card).map_err(repo_json)?)
-        .bind(&created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let card_id = inserted.last_insert_rowid();
-        let SettlementReviewCard::PendingRoute { candidate, .. } = &card else {
-            unreachable!("commit_pending_route_review always constructs PendingRoute")
-        };
-        let provider_name = review_notification_provider_name(&candidate.route.provider);
-        let message = format!(
-            "Review needed: link '{work_title}' — a possible {provider_name} match was found"
-        );
-        sqlx::query(
-            "INSERT INTO notifications \
-                (user_id, type, ref_key, message, data, created_at) \
-             VALUES (?1, 'identityReviewNeeded', ?2, ?3, ?4, ?5)",
-        )
-        .bind(user_id)
-        .bind(format!("identity-review-card:{card_id}"))
-        .bind(message)
-        .bind(
-            serde_json::to_string(&serde_json::json!({
-                "cardId": card_id,
-                "workId": work_id,
-                "title": work_title,
-                "author": work_author,
-                "provider": provider_name,
-            }))
-            .map_err(repo_json)?,
-        )
-        .bind(&created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        sqlx::query(
-            "INSERT INTO identity_audit_events \
-                (user_id, work_id, event_kind, actor, payload, created_at) \
-             VALUES (?1, ?2, 'pending-route-proposal', 'identity-road', ?3, ?4)",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .bind(format!("card_id={card_id};origin=search-fallback"))
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
+        .await?;
         tx.commit().await.map_err(repo_db)?;
-        Ok(MintedReviewCard {
-            id: card_id,
-            kind: ReviewKind::PendingRoute,
-            generation: expected_generation,
-        })
+        minted_or_reused_review_card(outcome)
+    }
+
+    async fn commit_pending_route_review_with_review_context(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        expected_generation: i64,
+        candidate: livrarr_domain::identity_layer::ParkedRouteCandidate,
+        origin: IdentityRoadOrigin,
+        validated_explicit_choice: bool,
+    ) -> Result<MintedReviewCard, IdentityRepositoryError> {
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(repo_db)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT identity_generation FROM works WHERE user_id=?1 AND id=?2")
+                .bind(user_id)
+                .bind(work_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(repo_db)?;
+        let current_generation = current.ok_or(IdentityRepositoryError::NotFound)?;
+        if current_generation != expected_generation {
+            return Err(IdentityRepositoryError::StaleGeneration);
+        }
+        let card = SettlementReviewCard::PendingRoute { work_id, candidate };
+        let outcome = mint_reuse_or_suppress_review_card_in_tx(
+            &mut tx,
+            ReviewCardMintProposal {
+                site: ReviewCardMintSite::CapturedRouteHandoff,
+                user_id,
+                work_id: Some(work_id),
+                generation: expected_generation,
+                card: &card,
+                origin: ReviewCardMintOrigin::Road(origin),
+                validated_explicit_choice,
+            },
+        )
+        .await?;
+        tx.commit().await.map_err(repo_db)?;
+        minted_or_reused_review_card(outcome)
     }
 
     async fn load_pending_review(
@@ -2057,25 +2212,25 @@ impl EditionRepository for SqliteDb {
                 .is_some_and(|existing| incoming != existing)
         });
         if format_conflict || language_conflict {
-            sqlx::query(
-                "INSERT INTO identity_review_cards \
-                    (user_id, work_id, kind, generation, status, payload, created_at) \
-                 VALUES (?1, ?2, ?3, 0, 'pending', ?4, ?5)",
+            let work_id = row.try_get::<i64, _>("work_id").map_err(edition_decode)?;
+            let card = SettlementReviewCard::EditionEvidence {
+                edition_id: command.edition_id,
+                evidence_ids: Vec::new(),
+            };
+            mint_reuse_or_suppress_review_card_in_tx(
+                &mut tx,
+                ReviewCardMintProposal {
+                    site: ReviewCardMintSite::ApplyEvidence,
+                    user_id: command.user_id,
+                    work_id: Some(work_id),
+                    generation: 0,
+                    card: &card,
+                    origin: ReviewCardMintOrigin::CallerlessApplyEvidence,
+                    validated_explicit_choice: false,
+                },
             )
-            .bind(command.user_id)
-            .bind(row.try_get::<i64, _>("work_id").map_err(edition_decode)?)
-            .bind(ReviewKind::EditionEvidence.storage_code())
-            .bind(
-                serde_json::to_string(&SettlementReviewCard::EditionEvidence {
-                    edition_id: command.edition_id,
-                    evidence_ids: Vec::new(),
-                })
-                .map_err(edition_json)?,
-            )
-            .bind(chrono::Utc::now().to_rfc3339())
-            .execute(&mut *tx)
             .await
-            .map_err(edition_db)?;
+            .map_err(edition_mint_err)?;
             tx.commit().await.map_err(edition_db)?;
             return Err(EditionRepositoryError::ContradictoryEvidenceParked);
         }
@@ -2193,26 +2348,24 @@ impl EditionRepository for SqliteDb {
                     .is_some_and(|current| incoming != current)
             });
             if format_conflict || language_conflict {
-                sqlx::query(
-                    "INSERT INTO identity_review_cards \
-                        (user_id, work_id, kind, generation, status, payload, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+                let card = SettlementReviewCard::EditionEvidence {
+                    edition_id,
+                    evidence_ids: Vec::new(),
+                };
+                mint_reuse_or_suppress_review_card_in_tx(
+                    &mut tx,
+                    ReviewCardMintProposal {
+                        site: ReviewCardMintSite::ApplyWorkEvidence,
+                        user_id: command.user_id,
+                        work_id: Some(command.work_id),
+                        generation,
+                        card: &card,
+                        origin: ReviewCardMintOrigin::ManualImportApplyWorkEvidence,
+                        validated_explicit_choice: false,
+                    },
                 )
-                .bind(command.user_id)
-                .bind(command.work_id)
-                .bind(ReviewKind::EditionEvidence.storage_code())
-                .bind(generation)
-                .bind(
-                    serde_json::to_string(&SettlementReviewCard::EditionEvidence {
-                        edition_id,
-                        evidence_ids: Vec::new(),
-                    })
-                    .map_err(edition_json)?,
-                )
-                .bind(chrono::Utc::now().to_rfc3339())
-                .execute(&mut *tx)
                 .await
-                .map_err(edition_db)?;
+                .map_err(edition_mint_err)?;
                 tx.commit().await.map_err(edition_db)?;
                 return Err(EditionRepositoryError::ContradictoryEvidenceParked);
             }
@@ -2855,6 +3008,10 @@ fn edition_decode(error: sqlx::Error) -> EditionRepositoryError {
 }
 
 fn edition_json(error: serde_json::Error) -> EditionRepositoryError {
+    EditionRepositoryError::Database(error.to_string())
+}
+
+fn edition_mint_err(error: IdentityRepositoryError) -> EditionRepositoryError {
     EditionRepositoryError::Database(error.to_string())
 }
 
@@ -3885,6 +4042,15 @@ fn review_card_work_id(
     }
 }
 
+fn durable_review_card_work_scope(
+    card: &SettlementReviewCard,
+    fallback_work_id: Option<WorkId>,
+) -> Option<WorkId> {
+    review_card_work_id(card)
+        .filter(|id| *id > 0)
+        .or(fallback_work_id.filter(|id| *id > 0))
+}
+
 /// Stable semantic identity for an unresolved group proposal. Operational
 /// route fields (row/owner ids, provenance, observation time) and title
 /// presentation/provenance are deliberately excluded: retriggered capture of
@@ -3950,6 +4116,145 @@ fn pending_route_proposal_key(card: &SettlementReviewCard) -> Option<String> {
         candidate.route.value.trim(),
     ))
     .ok()
+}
+
+/// Canonical REQ-005 reuse key shared by mint/reuse and duplicate cleanup.
+fn review_card_reuse_key(
+    user_id: UserId,
+    card: &SettlementReviewCard,
+    fallback_work_id: Option<WorkId>,
+) -> Result<Option<String>, IdentityRepositoryError> {
+    match card {
+        SettlementReviewCard::PendingRoute { candidate, .. } => serde_json::to_string(&(
+            user_id,
+            durable_review_card_work_scope(card, fallback_work_id),
+            &candidate.route.provider,
+            &candidate.route.kind,
+            candidate.route.value.trim(),
+        ))
+        .map(Some)
+        .map_err(repo_json),
+        SettlementReviewCard::GroupIdentity { .. } => match group_identity_proposal_key(card)? {
+            Some(inner) => serde_json::to_string(&(user_id, inner))
+                .map(Some)
+                .map_err(repo_json),
+            None => Ok(None),
+        },
+        SettlementReviewCard::EditionEvidence { edition_id, .. } => {
+            serde_json::to_string(&(user_id, edition_id))
+                .map(Some)
+                .map_err(repo_json)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn review_mint_origin_is_inline(origin: &ReviewCardMintOrigin) -> bool {
+    matches!(
+        origin,
+        ReviewCardMintOrigin::Road(IdentityRoadOrigin::WorkUpdateRekey)
+            | ReviewCardMintOrigin::Road(IdentityRoadOrigin::ManualWorkMerge { .. })
+            | ReviewCardMintOrigin::Road(IdentityRoadOrigin::AffirmPendingRoute)
+    )
+}
+
+fn minted_or_reused_review_card(
+    outcome: ReviewCardMintOutcome,
+) -> Result<MintedReviewCard, IdentityRepositoryError> {
+    match outcome {
+        ReviewCardMintOutcome::Minted(card) | ReviewCardMintOutcome::ReusedPending(card) => {
+            Ok(card)
+        }
+        ReviewCardMintOutcome::SuppressedByDismissal => Err(IdentityRepositoryError::Database(
+            "review-card suppression is not available in this unit".to_string(),
+        )),
+    }
+}
+
+async fn cancel_equivalent_duplicate_review_cards(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    proposal: &ReviewCardMintProposal<'_>,
+    survivor_id: i64,
+    cancelled_ids: &[i64],
+    now: &str,
+) -> Result<(), IdentityRepositoryError> {
+    for id in cancelled_ids {
+        sqlx::query(
+            "UPDATE identity_review_cards SET status='cancelled', resolved_at=?1 \
+              WHERE id=?2 AND user_id=?3 AND status='pending'",
+        )
+        .bind(now)
+        .bind(id)
+        .bind(proposal.user_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+    }
+    let cancelled = cancelled_ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    sqlx::query(
+        "INSERT INTO identity_audit_events \
+            (user_id, work_id, event_kind, actor, payload, created_at) \
+         VALUES (?1, ?2, 'review-card-duplicate-cleanup', 'identity-engine', ?3, ?4)",
+    )
+    .bind(proposal.user_id)
+    .bind(proposal.work_id)
+    .bind(format!("survivor={survivor_id};cancelled={cancelled}"))
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    Ok(())
+}
+
+async fn maybe_insert_pending_route_notification(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    proposal: &ReviewCardMintProposal<'_>,
+    card_id: i64,
+    created_at: &str,
+) -> Result<(), IdentityRepositoryError> {
+    let SettlementReviewCard::PendingRoute { candidate, .. } = proposal.card else {
+        return Ok(());
+    };
+    let work_id = durable_review_card_work_scope(proposal.card, proposal.work_id)
+        .ok_or(IdentityRepositoryError::NotFound)?;
+    let work: Option<(String, String)> =
+        sqlx::query_as("SELECT title, author_name FROM works WHERE user_id=?1 AND id=?2")
+            .bind(proposal.user_id)
+            .bind(work_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+    let (work_title, work_author) = work.ok_or(IdentityRepositoryError::NotFound)?;
+    let provider_name = review_notification_provider_name(&candidate.route.provider);
+    let message =
+        format!("Review needed: link '{work_title}' — a possible {provider_name} match was found");
+    sqlx::query(
+        "INSERT INTO notifications \
+            (user_id, type, ref_key, message, data, created_at) \
+         VALUES (?1, 'identityReviewNeeded', ?2, ?3, ?4, ?5)",
+    )
+    .bind(proposal.user_id)
+    .bind(format!("identity-review-card:{card_id}"))
+    .bind(message)
+    .bind(
+        serde_json::to_string(&serde_json::json!({
+            "cardId": card_id,
+            "workId": work_id,
+            "title": work_title,
+            "author": work_author,
+            "provider": provider_name,
+        }))
+        .map_err(repo_json)?,
+    )
+    .bind(created_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    Ok(())
 }
 
 const IDENTITY_DEDUP_RESIDUE_HEAL_GENERATION: i64 = 1;

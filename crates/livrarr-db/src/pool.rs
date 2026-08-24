@@ -1395,32 +1395,34 @@ pub async fn heal_identity_title_policy(
             .iter()
             .any(|proposal| proposal.id == anchor_id && !blocked_keys.contains(&proposal.key));
         let card_generation = anchor.row.identity_generation + i64::from(anchor_will_bump);
-        let payload = serde_json::to_string(
-            &livrarr_domain::identity_layer::SettlementReviewCard::GroupIdentity {
-                work_ids: work_ids.clone(),
-                proposed_identity: None,
-                merge_choices: Vec::new(),
+        let card = livrarr_domain::identity_layer::SettlementReviewCard::GroupIdentity {
+            work_ids: work_ids.clone(),
+            proposed_identity: None,
+            merge_choices: Vec::new(),
+        };
+        let outcome = crate::identity_layer::mint_reuse_or_suppress_review_card_in_tx(
+            &mut tx,
+            crate::identity_layer::ReviewCardMintProposal {
+                site: crate::identity_layer::ReviewCardMintSite::StartupTitleHeal,
+                user_id: anchor.row.user_id,
+                work_id: Some(anchor.row.id),
+                generation: card_generation,
+                card: &card,
+                origin: crate::identity_layer::ReviewCardMintOrigin::StartupTitleHeal,
+                validated_explicit_choice: false,
             },
         )
-        .map_err(|error| format!("serialize title-policy review: {error}"))?;
-        let inserted = sqlx::query(
-            "INSERT INTO identity_review_cards \
-                (user_id, work_id, kind, generation, status, payload, created_at) \
-             SELECT ?1, ?2, ?3, ?4, 'pending', ?5, ?6 \
-              WHERE NOT EXISTS (SELECT 1 FROM identity_review_cards \
-                                 WHERE user_id=?1 AND work_id=?2 AND kind=?3 \
-                                   AND status='pending' AND payload=?5)",
-        )
-        .bind(anchor.row.user_id)
-        .bind(anchor.row.id)
-        .bind(livrarr_domain::identity_layer::ReviewKind::GroupIdentity.storage_code())
-        .bind(card_generation)
-        .bind(payload)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&mut *tx)
         .await
         .map_err(|error| format!("mint title-policy GroupIdentity card: {error}"))?;
-        report.review_cards_minted += inserted.rows_affected() as usize;
+        match outcome {
+            crate::identity_layer::ReviewCardMintOutcome::Minted(_) => {
+                report.review_cards_minted += 1;
+            }
+            crate::identity_layer::ReviewCardMintOutcome::ReusedPending(_) => {}
+            crate::identity_layer::ReviewCardMintOutcome::SuppressedByDismissal => {
+                return Err("review-card suppression is not available in this unit".to_string());
+            }
+        }
     }
 
     for proposal in proposals

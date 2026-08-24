@@ -835,7 +835,6 @@ export interface IdentityConflictDetail {
 
 export interface ResolveIdentityConflictRequest {
   action: ConflictResolutionAction;
-  notes?: string;
 }
 
 // Queue

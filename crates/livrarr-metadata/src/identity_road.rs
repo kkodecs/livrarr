@@ -332,24 +332,28 @@ where
 
         let committed = self
             .identity_repository
-            .commit_settlement(SettlementCommit {
-                user_id: request.user_id,
-                existing_work_id,
-                add_source: creation_add_source(&request.origin),
-                identity_title: commit_title,
-                text_distinction,
-                contributors: vec![WorkContributor {
+            .commit_settlement_with_review_context(
+                SettlementCommit {
                     user_id: request.user_id,
-                    work_id: existing_work_id.unwrap_or_default(),
-                    author_id: primary_author_id,
-                    ordinal: 0,
-                    roles: Vec::new(),
-                }],
-                routes,
-                absorbed_work_ids,
-                expected_generation,
-                review_cards,
-            })
+                    existing_work_id,
+                    add_source: creation_add_source(&request.origin),
+                    identity_title: commit_title,
+                    text_distinction,
+                    contributors: vec![WorkContributor {
+                        user_id: request.user_id,
+                        work_id: existing_work_id.unwrap_or_default(),
+                        author_id: primary_author_id,
+                        ordinal: 0,
+                        roles: Vec::new(),
+                    }],
+                    routes,
+                    absorbed_work_ids,
+                    expected_generation,
+                    review_cards,
+                },
+                request.origin.clone(),
+                request.evidence.user_choice.is_some(),
+            )
             .await
             .map_err(map_repository_error)?;
         if let Some(card) = committed.review_cards.first() {
@@ -644,7 +648,7 @@ where
                 let provider = route.provider.clone();
                 let minted = self
                     .identity_repository
-                    .commit_pending_route_review(
+                    .commit_pending_route_review_with_review_context(
                         user_id,
                         work_id,
                         snapshot.identity_generation,
@@ -652,6 +656,8 @@ where
                             route,
                             proposed_owner: RouteOwner::Work(work_id),
                         },
+                        trigger.clone(),
+                        false,
                     )
                     .await
                     .map_err(map_repository_error)?;

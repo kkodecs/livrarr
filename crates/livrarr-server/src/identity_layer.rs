@@ -791,6 +791,9 @@ pub async fn run_identity_cutover_command(
                 .map_err(|_| IdentityCutoverCommandError::InvalidActionFile)?;
             let action: serde_json::Value = serde_json::from_slice(&bytes)
                 .map_err(|_| IdentityCutoverCommandError::InvalidActionFile)?;
+            if json_contains_notes_key(&action) {
+                return Err(IdentityCutoverCommandError::InvalidActionFile);
+            }
             let resolution =
                 command_from_action(pending.kind, card_id, expected_generation, action)?;
             let road = IdentityRoadServiceImpl {
@@ -827,6 +830,16 @@ fn parse_review_kind(value: &str) -> Result<ReviewKind, IdentityCutoverCommandEr
     ReviewKind::from_storage_code(value).ok_or_else(|| {
         IdentityCutoverCommandError::Database(format!("unknown review kind {value}"))
     })
+}
+
+fn json_contains_notes_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.contains_key("notes") || map.values().any(json_contains_notes_key)
+        }
+        serde_json::Value::Array(items) => items.iter().any(json_contains_notes_key),
+        _ => false,
+    }
 }
 
 fn normalized_action(value: serde_json::Value) -> serde_json::Value {

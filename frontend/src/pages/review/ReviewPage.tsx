@@ -313,7 +313,16 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
           Dismiss
         </button>
       </div>
-      {pendingRoute ? (
+      {card.kind === "EditionEvidence" ? (
+        <div className="mt-2 text-sm text-muted">
+          <p>
+            not yet actionable — EditionEvidence; handled by its post-wave-B continuation feature
+          </p>
+          <p className="mt-1">
+            Dismiss prevents this evidence question from returning
+          </p>
+        </div>
+      ) : pendingRoute ? (
         <div className="mt-3 text-sm">
           <p className="font-medium text-zinc-200">
             Possible {routePresentation?.providerName ?? "catalog"} match

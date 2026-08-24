@@ -1228,6 +1228,8 @@ async fn conflict_resolve_and_dismiss_generation_losses_map_contextually() {
         .await;
         let base = spawn_goodreads(StatusCode::OK).await;
         let app = identity_app(route_state(db.clone(), work_service(db.clone(), base)));
+        // Old-client compatibility pin: `notes: null` remains ignored after U7
+        // removes the request field.
         let body = (action == "resolve").then(|| json!({"action":"keep_existing","notes":null}));
         let request = authenticated_request(
             &db,

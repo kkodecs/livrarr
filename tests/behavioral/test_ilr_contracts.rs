@@ -2408,6 +2408,7 @@ async fn red_repo_edition(contract: EditionRepositoryContract) {
                         .await
                         .expect("count contradictory Edition review");
                         assert_eq!(parked, 1, "contradiction parks one typed review");
+                        // U7: repeated same-(user, edition) keys belong to the new hygiene suite and reuse rather than append.
                     }
                     other => panic!("unexpected edition evidence fixture index {other}"),
                 }
@@ -7654,6 +7655,8 @@ async fn red_direct_add_dedup_review_reuses_existing_work() {
 
 // Bug reproduction: identity-layer-rewrite — retrying the same unresolved
 // group proposal must reuse its pending card rather than minting a duplicate.
+// U7: reuse is a consequence of the shared mint/reuse helper, not a
+// GroupIdentity-local pending scan.
 async fn red_group_identity_pending_card_mint_is_idempotent_on_retrigger() {
     let _breaker = lock_breaker().await;
     let db = create_activated_test_db().await;
@@ -8360,6 +8363,7 @@ async fn title_policy_heal_parks_colliding_cohort() {
         .expect("park title-policy collision");
     assert_eq!(report.healed, 0);
     assert_eq!(report.blocked_cohorts, 1);
+    // U7: review_cards_minted counts the helper's Minted outcome; reuse is zero.
     assert_eq!(report.review_cards_minted, 1);
     let unchanged: String = sqlx::query_scalar("SELECT title FROM works WHERE id=?1")
         .bind(second.id)
@@ -8560,6 +8564,8 @@ async fn article_variant_heal_parks_contradictory_work_routes_with_current_gener
         .await
         .expect("park contradictory article variants");
     assert_eq!(report.article_folds, 0);
+    // U7: startup heal mints through the shared helper at the current generation
+    // and emits no notification.
     assert_eq!(report.review_cards_minted, 1);
     let works: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id=?1")
         .bind(harness.user_id)
@@ -11580,7 +11586,7 @@ async fn red_missing_composition(contract: CompositionContract) {
                     &harness,
                     Method::POST,
                     format!("/api/v1/identity-conflict/{conflict_id}/resolve"),
-                    Some(json!({"action": "replace_anchor", "notes": null})),
+                    Some(json!({"action": "replace_anchor", "notes": null})), // old-client notes pin
                 )
                 .await
             } else {
@@ -14818,6 +14824,7 @@ async fn round13_uncorroborated_search_cards_once_and_burns_to_threshold() {
             card_count, 1,
             "equivalent proposal must reuse its oldest card"
         );
+        // U7: one-card reuse is Minted then ReusedPending from the shared helper.
         let card_id: i64 = sqlx::query_scalar(
             "SELECT id FROM identity_review_cards WHERE user_id=?1 AND work_id=?2 \
              AND kind='PendingRoute' AND status='pending'",
@@ -14850,6 +14857,7 @@ async fn round13_uncorroborated_search_cards_once_and_burns_to_threshold() {
                     .to_string(),
             )],
             "a new card emits one notification and semantic card reuse emits none"
+            // U7: that one identityReviewNeeded is a helper Minted consequence, not a second site-local insert.
         );
         let pending_cards = WorkIdentityRepository::list_pending_reviews(
             &harness.db,
