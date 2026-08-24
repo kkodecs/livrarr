@@ -134,6 +134,9 @@ fn map_identity_road_error(error: IdentityRoadError) -> ApiError {
                 reason: error.to_string(),
             }
         }
+        IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
+            reason: error.to_string(),
+        },
         IdentityRoadError::Database(message) => ApiError::Internal(message),
     }
 }

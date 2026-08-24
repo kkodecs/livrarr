@@ -680,3 +680,7 @@ path = "../../tests/behavioral/test_dup_authors_doors.rs"
 [[test]]
 name = "test_ilr_contracts"
 path = "../../tests/behavioral/test_ilr_contracts.rs"
+
+[[test]]
+name = "test_irf_u1_refusal"
+path = "../../tests/behavioral/test_irf_u1_refusal.rs"

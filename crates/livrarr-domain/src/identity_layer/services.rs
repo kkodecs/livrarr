@@ -35,6 +35,19 @@ use super::title::{IdentityTitleTuple, MachineSubtitleProjection};
 // repository traits).
 // ---------------------------------------------------------------------------
 
+fn continuation_owner(kind: ReviewKind) -> &'static str {
+    match kind {
+        ReviewKind::PendingRoute | ReviewKind::GroupIdentity => "available continuation",
+        ReviewKind::IdentityConflict => "wave B",
+        ReviewKind::EditionEvidence => "its post-wave-B continuation feature",
+        ReviewKind::ImportIdentity => "the Readarr feature",
+        ReviewKind::FieldResolution => "wave B's merge unit",
+        ReviewKind::ContributorOrder
+        | ReviewKind::MigrationRepair
+        | ReviewKind::InvariantRepair => "the features that build their respective producers",
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum IdentityRoadError {
     #[error("invalid door evidence")]
@@ -61,6 +74,12 @@ pub enum IdentityRoadError {
     ReviewRequired,
     #[error("blocked on probe {0:?}")]
     ProbeBlocked(ProbeId),
+    #[error(
+        "continuation unavailable for {}; handled by {}",
+        kind.storage_code(),
+        continuation_owner(*kind)
+    )]
+    ContinuationUnavailable { kind: ReviewKind },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
@@ -528,6 +547,21 @@ pub trait IdentityCutoverService: Send + Sync {
 // ---------------------------------------------------------------------------
 // Free deterministic functions.
 // ---------------------------------------------------------------------------
+
+/// Exhaustive continuation availability. Only `PendingRoute` and
+/// `GroupIdentity` may proceed; every other kind is refused by name.
+pub fn require_continuation(kind: ReviewKind) -> Result<(), IdentityRoadError> {
+    match kind {
+        ReviewKind::PendingRoute | ReviewKind::GroupIdentity => Ok(()),
+        ReviewKind::IdentityConflict
+        | ReviewKind::FieldResolution
+        | ReviewKind::ContributorOrder
+        | ReviewKind::EditionEvidence
+        | ReviewKind::ImportIdentity
+        | ReviewKind::MigrationRepair
+        | ReviewKind::InvariantRepair => Err(IdentityRoadError::ContinuationUnavailable { kind }),
+    }
+}
 
 /// Split provider display text into the immutable identity tuple.
 pub fn title_parts_from_provider(

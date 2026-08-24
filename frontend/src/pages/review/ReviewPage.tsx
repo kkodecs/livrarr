@@ -161,7 +161,10 @@ function ConflictCard({ conflict }: { conflict: IdentityConflictSummary }) {
       queryClient.invalidateQueries({ queryKey: ["identity-conflicts"] });
       queryClient.invalidateQueries({ queryKey: ["works"] });
     },
-    onError: () => toast.error("Could not resolve the conflict"),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Could not resolve the conflict",
+      ),
   });
 
   const dismiss = useMutation({
@@ -170,7 +173,10 @@ function ConflictCard({ conflict }: { conflict: IdentityConflictSummary }) {
       toast.success("Conflict dismissed");
       queryClient.invalidateQueries({ queryKey: ["identity-conflicts"] });
     },
-    onError: () => toast.error("Could not dismiss the conflict"),
+    onError: (error) =>
+      toast.error(
+        error instanceof Error ? error.message : "Could not dismiss the conflict",
+      ),
   });
 
   const isPending = resolve.isPending || dismiss.isPending;

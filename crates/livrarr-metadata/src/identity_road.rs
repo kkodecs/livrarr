@@ -4,13 +4,14 @@
 //! `livrarr-metadata` module (ir-v1-identity-layer-rewrite.yaml:1251-1292).
 
 use livrarr_domain::identity_layer::{
-    evaluate_match, title_parts_from_provider, AuthorInheritanceOutcome, CapturedIdentity,
-    DirectionalMatchVerdicts, EditionId, EditionRepository, EvidenceProvenance, IdentityRoadError,
-    IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome, IdentityRoadRequest,
-    IdentityRoadService, IdentityTitleTuple, LostMatchGuardSet, MainTitleGuard,
-    ProviderIdentityEvidence, ReviewActor, ReviewResolutionCommand, RouteKey, RouteOwner,
-    RouteProvenance, SettlementCommit, SettlementReviewCard, UserIdentityChoice, WorkContributor,
-    WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState, WrongMergeGuardSet,
+    evaluate_match, require_continuation, title_parts_from_provider, AuthorInheritanceOutcome,
+    CapturedIdentity, DirectionalMatchVerdicts, EditionId, EditionRepository, EvidenceProvenance,
+    IdentityRoadError, IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome,
+    IdentityRoadRequest, IdentityRoadService, IdentityTitleTuple, LostMatchGuardSet,
+    MainTitleGuard, ProviderIdentityEvidence, ReviewActor, ReviewResolutionCommand, RouteKey,
+    RouteOwner, RouteProvenance, SettlementCommit, SettlementReviewCard, UserIdentityChoice,
+    WorkContributor, WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState,
+    WrongMergeGuardSet,
 };
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
@@ -708,6 +709,7 @@ where
             .load_pending_review(actor.clone(), command.card_id())
             .await
             .map_err(map_repository_error)?;
+        require_continuation(pending.kind)?;
         if pending.kind != command.kind() {
             return Err(IdentityRoadError::ReviewKindMismatch);
         }

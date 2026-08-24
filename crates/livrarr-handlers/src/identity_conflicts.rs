@@ -8,7 +8,9 @@ use crate::context::{
 };
 use crate::{ApiError, AuthContext};
 use livrarr_domain::identity::*;
-use livrarr_domain::identity_layer::{IdentityRoadService, RouteKey, WorkIdentityRepository as _};
+use livrarr_domain::identity_layer::{
+    require_continuation, IdentityRoadService, ReviewKind, RouteKey, WorkIdentityRepository as _,
+};
 use livrarr_domain::services::IdentityConflictService;
 
 #[derive(Debug, Serialize)]
@@ -125,12 +127,15 @@ pub async fn get_detail<S: HasIdentityConflictService>(
     }))
 }
 
-pub async fn resolve<S: HasIdentityRoadService + HasIdentityLayerRepository>(
+pub async fn resolve<
+    S: HasIdentityRoadService + HasIdentityLayerRepository + HasIdentityConflictService,
+>(
     State(ctx): State<S>,
     Path(id): Path<i64>,
     auth: AuthContext,
     Json(body): Json<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
+    require_conflict_continuation(&ctx, auth.user.id, id).await?;
     let actor = livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
         user_id: auth.user.id,
     };
@@ -195,11 +200,14 @@ pub async fn resolve<S: HasIdentityRoadService + HasIdentityLayerRepository>(
     }))
 }
 
-pub async fn dismiss<S: HasIdentityRoadService + HasIdentityLayerRepository>(
+pub async fn dismiss<
+    S: HasIdentityRoadService + HasIdentityLayerRepository + HasIdentityConflictService,
+>(
     State(ctx): State<S>,
     Path(id): Path<i64>,
     auth: AuthContext,
 ) -> Result<StatusCode, ApiError> {
+    require_conflict_continuation(&ctx, auth.user.id, id).await?;
     let actor = livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
         user_id: auth.user.id,
     };
@@ -241,6 +249,39 @@ pub async fn dismiss<S: HasIdentityRoadService + HasIdentityLayerRepository>(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn require_conflict_continuation<S>(
+    ctx: &S,
+    user_id: i64,
+    conflict_id: i64,
+) -> Result<(), ApiError>
+where
+    S: HasIdentityConflictService + HasIdentityLayerRepository,
+{
+    let actor = livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser { user_id };
+    let typed_pending = match ctx
+        .identity_layer_repository()
+        .load_pending_conflict_review(actor, conflict_id)
+        .await
+    {
+        Ok(_) => true,
+        Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound) => false,
+        Err(error) => return Err(map_repository_error(error)),
+    };
+    let open_legacy = match ctx
+        .identity_conflict_service()
+        .get(conflict_id, user_id)
+        .await
+    {
+        Ok(Some(conflict)) => conflict.status == ConflictStatus::Open,
+        Ok(None) => false,
+        Err(error) => return Err(ApiError::Internal(error.to_string())),
+    };
+    if !typed_pending && !open_legacy {
+        return Err(ApiError::NotFound);
+    }
+    require_continuation(ReviewKind::IdentityConflict).map_err(map_road_error)
+}
+
 fn map_repository_error(
     error: livrarr_domain::identity_layer::IdentityRepositoryError,
 ) -> ApiError {
@@ -265,6 +306,11 @@ fn map_road_error(error: livrarr_domain::identity_layer::IdentityRoadError) -> A
             reason: error.to_string(),
         },
         livrarr_domain::identity_layer::IdentityRoadError::UnauthorizedScope => ApiError::Forbidden,
+        livrarr_domain::identity_layer::IdentityRoadError::ContinuationUnavailable { .. } => {
+            ApiError::Conflict {
+                reason: error.to_string(),
+            }
+        }
         other => ApiError::Internal(other.to_string()),
     }
 }

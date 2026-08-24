@@ -1195,9 +1195,15 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
     );
     cli_db.pool().close().await;
 
+    let available = kinds
+        .iter()
+        .copied()
+        .filter(|kind| ilr::require_continuation(*kind).is_ok())
+        .count();
     let mut http_graphs = Vec::with_capacity(kinds.len());
     for (kind, (work_id, card)) in kinds.iter().zip(&http_fixtures) {
         let command = review_resolution_fixture(*kind, card.id, card.generation);
+        let before = identity_graph_bytes(&harness.db, *work_id).await;
         let response = call_router_json(
             &harness,
             Method::POST,
@@ -1205,12 +1211,36 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
             Some(json!({"command": command})),
         )
         .await;
-        assert!(
-            response.status.is_success(),
-            "HTTP must resolve {kind:?}: {}",
-            response.json
-        );
-        http_graphs.push(identity_graph_bytes(&harness.db, *work_id).await);
+        match ilr::require_continuation(*kind) {
+            Ok(()) => {
+                assert!(
+                    response.status.is_success(),
+                    "HTTP must resolve {kind:?}: {}",
+                    response.json
+                );
+                http_graphs.push(identity_graph_bytes(&harness.db, *work_id).await);
+            }
+            Err(ilr::IdentityRoadError::ContinuationUnavailable { kind: observed }) => {
+                assert_eq!(observed, *kind);
+                assert_eq!(
+                    response.status,
+                    StatusCode::CONFLICT,
+                    "HTTP must refuse {kind:?}: {}",
+                    response.json
+                );
+                assert_eq!(
+                    response.json["message"],
+                    ilr::IdentityRoadError::ContinuationUnavailable { kind: *kind }.to_string()
+                );
+                assert_eq!(
+                    identity_graph_bytes(&harness.db, *work_id).await,
+                    before,
+                    "{kind:?} refusal must precede every write"
+                );
+                http_graphs.push(before);
+            }
+            Err(other) => panic!("unexpected continuation result for {kind:?}: {other}"),
+        }
     }
 
     for ((kind, (work_id, card)), expected_graph) in
@@ -1223,7 +1253,7 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
             serde_json::to_vec(&review_cli_action(&command)).expect("encode CLI action"),
         )
         .expect("write CLI action");
-        let outcome = livrarr_server::identity_layer::run_identity_cutover_command(
+        let result = livrarr_server::identity_layer::run_identity_cutover_command(
             livrarr_server::identity_layer::IdentityCutoverCliCommand::ResolveReview {
                 card_id: card.id,
                 expected_generation: card.generation,
@@ -1232,12 +1262,32 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
             data_dir.path().to_path_buf(),
             CancellationToken::new(),
         )
-        .await
-        .unwrap_or_else(|error| panic!("CLI must resolve {kind:?}: {error}"));
-        assert!(matches!(
-            outcome,
-            livrarr_server::identity_layer::IdentityCutoverCliOutcome::ReviewResolved(_)
-        ));
+        .await;
+        match ilr::require_continuation(*kind) {
+            Ok(()) => {
+                let outcome =
+                    result.unwrap_or_else(|error| panic!("CLI must resolve {kind:?}: {error}"));
+                assert!(matches!(
+                    outcome,
+                    livrarr_server::identity_layer::IdentityCutoverCliOutcome::ReviewResolved(_)
+                ));
+            }
+            Err(ilr::IdentityRoadError::ContinuationUnavailable { kind: observed }) => {
+                assert_eq!(observed, *kind);
+                assert!(
+                    matches!(
+                        result,
+                        Err(
+                            livrarr_server::identity_layer::IdentityCutoverCommandError::ContinuationUnavailable(
+                                refused
+                            )
+                        ) if refused == *kind
+                    ),
+                    "CLI must refuse {kind:?} by name: {result:?}"
+                );
+            }
+            Err(other) => panic!("unexpected continuation result for {kind:?}: {other}"),
+        }
 
         let pool = livrarr_db::pool::create_sqlite_pool(data_dir.path())
             .await
@@ -1257,7 +1307,7 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
     .fetch_all(harness.db.pool())
     .await
     .expect("read HTTP review provenance");
-    assert_eq!(http_actors.len(), kinds.len());
+    assert_eq!(http_actors.len(), available);
     assert!(http_actors.iter().all(|actor| matches!(
         serde_json::from_str::<ReviewActor>(actor),
         Ok(ReviewActor::AuthenticatedUser { user_id }) if user_id == harness.user_id
@@ -1273,7 +1323,7 @@ async fn assert_review_http_cli_parity(kinds: &[ilr::ReviewKind]) {
     .fetch_all(cli_db.pool())
     .await
     .expect("read CLI review provenance");
-    assert_eq!(cli_actors.len(), kinds.len());
+    assert_eq!(cli_actors.len(), available);
     assert!(cli_actors.iter().all(|actor| matches!(
         serde_json::from_str::<ReviewActor>(actor),
         Ok(ReviewActor::CutoverOperator { .. })
@@ -11533,49 +11583,24 @@ async fn red_missing_composition(contract: CompositionContract) {
                 )
                 .await
             };
-            assert!(
-                response.status.is_success(),
+            assert_eq!(
+                response.status,
+                StatusCode::CONFLICT,
                 "legacy adapter: {}",
                 response.json
             );
+            assert_eq!(
+                response.json["message"],
+                ilr::IdentityRoadError::ContinuationUnavailable {
+                    kind: ilr::ReviewKind::IdentityConflict,
+                }
+                .to_string()
+            );
             let calls = harness.state.identity_road.test_recorder().snapshot();
-            assert_eq!(calls.len(), 1);
-            let livrarr_server::identity_layer::IdentityRoadCall::Resolve { command, .. } =
-                &calls[0]
-            else {
-                panic!("legacy conflict adapter must resolve exactly once")
-            };
-            match (contract, command) {
-                (
-                    CompositionContract::ConflictResolveOnce,
-                    ReviewResolutionCommand::IdentityConflict {
-                        card_id: observed,
-                        action:
-                            ilr::IdentityConflictResolution::Accept {
-                                surviving_routes,
-                                target_edition: None,
-                            },
-                        ..
-                    },
-                ) => {
-                    assert_eq!(*observed, card_id);
-                    assert_eq!(surviving_routes.len(), 1);
-                    assert_eq!(surviving_routes[0].value, "OL-CONFLICT-SURVIVOR-W");
-                }
-                (
-                    CompositionContract::ConflictDismissReject,
-                    ReviewResolutionCommand::IdentityConflict {
-                        card_id: observed,
-                        action: ilr::IdentityConflictResolution::Reject { surviving_routes },
-                        ..
-                    },
-                ) => {
-                    assert_eq!(*observed, card_id);
-                    assert_eq!(surviving_routes.len(), 1);
-                    assert_eq!(surviving_routes[0].value, "OL-CONFLICT-SURVIVOR-W");
-                }
-                other => panic!("resolve and dismiss must remain distinguishable: {other:?}"),
-            }
+            assert!(
+                calls.is_empty(),
+                "IdentityConflict refusal must precede resolve_review"
+            );
             let legacy_writes: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM work_identity_conflicts WHERE status='resolved'",
             )

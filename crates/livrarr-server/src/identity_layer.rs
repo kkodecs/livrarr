@@ -390,6 +390,8 @@ pub enum IdentityCutoverCommandError {
     Cancelled,
     #[error("database error: {0}")]
     Database(String),
+    #[error("continuation unavailable for {}", .0.storage_code())]
+    ContinuationUnavailable(ReviewKind),
 }
 
 /// New, shadow `StartupError` — see module header.
@@ -921,6 +923,9 @@ fn map_road_command_error(
         }
         livrarr_domain::identity_layer::IdentityRoadError::Cancelled => {
             IdentityCutoverCommandError::Cancelled
+        }
+        livrarr_domain::identity_layer::IdentityRoadError::ContinuationUnavailable { kind } => {
+            IdentityCutoverCommandError::ContinuationUnavailable(kind)
         }
         other => IdentityCutoverCommandError::Database(other.to_string()),
     }

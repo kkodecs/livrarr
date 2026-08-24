@@ -586,6 +586,9 @@ fn map_identity_road_error(error: livrarr_domain::identity_layer::IdentityRoadEr
         | IdentityRoadError::InvalidResolution => ApiError::BadRequest(error.to_string()),
         IdentityRoadError::ProviderBoundary => ApiError::BadGateway(error.to_string()),
         IdentityRoadError::Cancelled => ApiError::ServiceUnavailable,
+        IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
+            reason: error.to_string(),
+        },
         IdentityRoadError::Database(message) => ApiError::Internal(message),
     }
 }

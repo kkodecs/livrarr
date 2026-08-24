@@ -1097,3 +1097,10 @@ Updated `integrations/goodreads.md` and insight 96. Settled-work author linking 
 - insights.md: added insight 100 — the audit's verdict (sound core, three rings of damage: review surface / frozen scalars still read / the never-run non-empty cutover), the PO-blessed four fix-waves, the method lessons (ledger truncation at `#[cfg(test)]`, blind duplicate discovery as the strongest evidence class), and the IA-001 root cause (the "missing" epubs were never missing — the materialize tag-write road passes library-relative paths to the writer while the TagService road composes absolute ones; AUD-P1-24, wave 2). Records the three experiment-branch merges (IA-E05 `684adbba`, AUD-P1-10 `986f7498`, AUD-P1-9 `269a8269` + `fb301367`) and the seating decision that rode on the audit's evidence.
 - index.md insight count 99→100.
 - Canonical artifacts: `docs/identity-lifecycle-audit-2026-08.md` (report r2 + PO rulings; r2 snapshot in `docs/design-history/`), `build/audit-identity-lifecycle/FINDINGS.md` (master ledger, local).
+
+## 2026-08-23 — identity-review-fixes spec rounds r3/r4 fold
+
+- New page `architecture/identity-review-census.md`: review-card mint sites (7 INSERTs / 6 sites, enumerated from the live tree — the code-index was ~300 lines stale), the eight doors into `resolve_review`, the known-broken GroupIdentity continuation (AUD-P0-2) and the manual-import matcher inputs (OL key + text only). Source: spec v4 ST-007/009/011 + both r3/r4 reviews, every claim PM-verified at source.
+- index.md: Architecture section +1.
+
+- 2026-08-23: identity-review-census.md extended (spec r5/r6 verification): four cancel sites, user_confirmed three writers + observed_at refresh, road-trait surface vs compile wall, import screen has no title editor.

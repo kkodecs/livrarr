@@ -17,6 +17,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [RSS Sync](architecture/rss-sync.md) — automated release discovery, fuzzy matching, gap detection
 - [Usenet Pipeline](architecture/usenet-pipeline.md) — SABnzbd integration, protocol routing
 - [UI Architecture](architecture/ui-architecture.md) — React stack, auth flow, Readarr mimicry
+- [Identity Review Census](architecture/identity-review-census.md) — the 7 INSERT sites for review cards (incl. the boot-time heal), the 8 doors into the one continuation, why GroupIdentity is unsafe until wave B, what manual import really feeds the matcher
 
 ## Domain Entities
 
