@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use livrarr_domain::identity_layer::{
     EditionRepository, IdentityAuthorityReadiness, IdentityCutoverService, IdentityMigrationError,
-    IdentityMigrationReport, IdentityRoadOutcome, ReviewActor, ReviewKind, ReviewResolutionCommand,
-    WorkIdentityRepository,
+    IdentityMigrationReport, IdentityRoadOutcome, ManualImportMinimumCommand, ReviewActor,
+    ReviewKind, ReviewResolutionCommand, WorkIdentityRepository,
 };
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_identity::identity_layer::IdentityEngine;
@@ -33,6 +33,7 @@ pub type LiveIdentityRoad = IdentityRoadServiceImpl<
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdentityRoadCall {
     Settle(livrarr_domain::identity_layer::IdentityRoadRequest),
+    SettleManualImportMinimum(ManualImportMinimumCommand),
     Resolve {
         actor: ReviewActor,
         command: ReviewResolutionCommand,
@@ -117,6 +118,17 @@ where
         self.inner.resolve_review(actor, command).await
     }
 
+    async fn settle_manual_import_minimum(
+        &self,
+        command: ManualImportMinimumCommand,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        self.recorder
+            .record(IdentityRoadCall::SettleManualImportMinimum(command.clone()));
+        let outcome = self.inner.settle_manual_import_minimum(command).await;
+        self.recorder.record_outcome(&outcome);
+        outcome
+    }
+
     async fn apply_captured_route_handoff(
         &self,
         user_id: i64,
@@ -166,6 +178,16 @@ impl livrarr_domain::identity_layer::IdentityRoadService for AppIdentityRoad {
         match self {
             Self::Live(road) => road.resolve_review(actor, command).await,
             Self::Recording(road) => road.resolve_review(actor, command).await,
+        }
+    }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        command: ManualImportMinimumCommand,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        match self {
+            Self::Live(road) => road.settle_manual_import_minimum(command).await,
+            Self::Recording(road) => road.settle_manual_import_minimum(command).await,
         }
     }
 

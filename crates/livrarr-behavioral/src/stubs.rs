@@ -1000,6 +1000,13 @@ impl identity_layer::IdentityRoadService for StubIdentityRoadService {
     ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
         todo!()
     }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        _command: identity_layer::ManualImportMinimumCommand,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        todo!()
+    }
 }
 
 /// Repository-backed road used by handler regression fixtures that exercise
@@ -1086,6 +1093,20 @@ impl identity_layer::IdentityRoadService for SqlitePendingRouteRoad {
         command: identity_layer::ReviewResolutionCommand,
     ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
         use identity_layer::WorkIdentityRepository as _;
+        let pending = self
+            .db
+            .load_pending_review(actor.clone(), command.card_id())
+            .await
+            .map_err(map_pending_route_repo_error)?;
+        identity_layer::require_continuation(pending.kind)?;
+        if pending.kind != command.kind() {
+            return Err(identity_layer::IdentityRoadError::ReviewKindMismatch);
+        }
+        if pending.kind != identity_layer::ReviewKind::PendingRoute
+            && pending.generation != command.expected_generation()
+        {
+            return Err(identity_layer::IdentityRoadError::StaleGeneration);
+        }
         let committed = self
             .db
             .commit_review_continuation(actor, command, tokio_util::sync::CancellationToken::new())
@@ -1102,6 +1123,13 @@ impl identity_layer::IdentityRoadService for SqlitePendingRouteRoad {
             library_items_moved: committed.library_items_moved,
             grabs_moved: committed.grabs_moved,
         })
+    }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        _command: identity_layer::ManualImportMinimumCommand,
+    ) -> Result<identity_layer::IdentityRoadOutcome, identity_layer::IdentityRoadError> {
+        todo!()
     }
 }
 

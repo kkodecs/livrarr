@@ -3,20 +3,25 @@
 //! remains available until the installation-wide authority marker is active.
 
 use livrarr_domain::identity_layer::{
-    CapturedIdentity, CoverPlaceholderState, CoverSlotPresentation, Edition,
-    EditionEvidenceCommand, EditionEvidenceOutcome, EditionFormat, EditionId, EditionRepository,
-    EditionRepositoryError, EditionState, EditionWorkEvidenceCommand,
+    adopt_unambiguous_author, author_name_is_exact, complete_group_member, evaluate_captured_group,
+    exact_text_hint_holds, format_manual_import_defer, title_parts_from_provider, CapturedIdentity,
+    CompleteGroupCandidate, CompleteGroupEvaluation, CoverPlaceholderState, CoverSlotPresentation,
+    Edition, EditionEvidenceCommand, EditionEvidenceOutcome, EditionFormat, EditionId,
+    EditionRepository, EditionRepositoryError, EditionState, EditionWorkEvidenceCommand,
     EmbeddedCoverInspectionOutcome, EmbeddedCoverInspectionRecord, EvidenceProvenance,
-    FileRevision, IdentityAuthorityReadiness, IdentityCutoverService, IdentityEvidenceBundle,
-    IdentityMigrationError, IdentityMigrationReport, IdentityProvider, IdentityRepositoryError,
-    IdentityStatus, MachineSubtitleProjection, MintedReviewCard, PendingReviewCard,
-    ResolveIdentityConflictCommand, ReviewActor, ReviewContinuationOutcome, ReviewKind,
-    ReviewResolutionCommand, RouteKey, RouteKind, RouteOwner, RouteProvenance, SettlementCommit,
-    SettlementCommitOutcome, SettlementReviewCard, SnapshotDatabase, WorkContributor,
-    WorkCoverPresentation, WorkIdentityPresentation, WorkIdentityRepository, WorkRoute,
-    WorkRouteState,
+    FileRevision, IdentityAuthorityReadiness, IdentityCutoverService, IdentityMigrationError,
+    IdentityMigrationReport, IdentityProvider, IdentityRepositoryError, IdentityRoadOutcome,
+    IdentityStatus, MachineSubtitleProjection, ManualImportMinimumCommand, MintedReviewCard,
+    PendingReviewCard, ResolveIdentityConflictCommand, ReviewActor, ReviewContinuationOutcome,
+    ReviewKind, ReviewResolutionCommand, RouteKey, RouteKind, RouteOwner, RouteProvenance,
+    SettlementCommit, SettlementCommitOutcome, SettlementReviewCard, SnapshotDatabase,
+    WorkContributor, WorkCoverPresentation, WorkIdentityPresentation, WorkIdentityRepository,
+    WorkRoute, WorkRouteState,
 };
-use livrarr_domain::{history_events, AuthorId, LibraryItemId, UserId, WorkId};
+use livrarr_domain::{
+    history_events, AuthorId, AuthorLinkTrigger, AuthorNameSource, AuthorRouteKey, LibraryItemId,
+    UserId, WorkId,
+};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
@@ -291,92 +296,515 @@ pub struct WorkProjectionSnapshot {
 // `WorkIdentityRepository`; `EditionRepository`; `IdentityCutoverService`).
 // ---------------------------------------------------------------------------
 
+struct SettlementTxResult {
+    work_id: WorkId,
+    created: bool,
+    audit_id: i64,
+    review_cards: Vec<MintedReviewCard>,
+}
+
+async fn commit_settlement_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    command: &SettlementCommit,
+) -> Result<SettlementTxResult, IdentityRepositoryError> {
+    let primary = command
+        .contributors
+        .iter()
+        .filter(|contributor| contributor.ordinal == 0)
+        .collect::<Vec<_>>();
+    if primary.len() != 1 {
+        return Err(IdentityRepositoryError::AtomicRollback);
+    }
+    let primary_author_id = primary[0].author_id;
+    commit_settlement_failpoint("begin")?;
+    let route_graph_before = match command.existing_work_id {
+        Some(work_id) => Some(
+            read_active_route_graph(tx, command.user_id, work_id)
+                .await
+                .map_err(repo_db)?,
+        ),
+        // A new Work cannot already own provider retry standing.
+        None => None,
+    };
+
+    // An inline pending-route affirmation is a settle+resolve sequence.
+    // Reject an already-owned candidate before the settlement mutates the
+    // Work generation, writes its audit, or mints the continuation card.
+    // Keeping this read inside the settlement transaction also closes the
+    // window between the handler's informative owner preflight and the
+    // first write claim.
+    for card in &command.review_cards {
+        let SettlementReviewCard::PendingRoute { candidate, .. } = card else {
+            continue;
+        };
+        let provider = serde_json::to_string(&candidate.route.provider).map_err(repo_json)?;
+        let kind = serde_json::to_string(&candidate.route.kind).map_err(repo_json)?;
+        let owner: Option<i64> = sqlx::query_scalar(
+            "SELECT resolved_work_id FROM identity_routes \
+                  WHERE user_id=?1 AND provider=?2 AND kind=?3 \
+                    AND provider_scoped_id=?4 AND state='active' LIMIT 1",
+        )
+        .bind(command.user_id)
+        .bind(provider)
+        .bind(kind)
+        .bind(&candidate.route.value)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+        if owner.is_some_and(|owner| Some(owner) != command.existing_work_id) {
+            return Err(IdentityRepositoryError::RouteOwnershipCollision);
+        }
+    }
+    let author_name: String =
+        sqlx::query_scalar("SELECT name FROM authors WHERE user_id = ?1 AND id = ?2")
+            .bind(command.user_id)
+            .bind(primary_author_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(repo_db)?
+            .ok_or(IdentityRepositoryError::NotFound)?;
+
+    let provenance = serde_json::to_string(&command.identity_title.provenance)
+        .map_err(|error| IdentityRepositoryError::Database(error.to_string()))?;
+    let (work_id, created, generation, birth_date) = if let Some(work_id) = command.existing_work_id
+    {
+        let current: Option<i64> = sqlx::query_scalar(
+            "SELECT identity_generation FROM works WHERE user_id = ?1 AND id = ?2",
+        )
+        .bind(command.user_id)
+        .bind(work_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+        let current = current.ok_or(IdentityRepositoryError::NotFound)?;
+        if current != command.expected_generation {
+            return Err(IdentityRepositoryError::StaleGeneration);
+        }
+        let generation = current + 1;
+        let result = sqlx::query(
+            "UPDATE works \
+                    SET title = ?1, subtitle = ?2, author_name = ?3, author_id = ?4, \
+                        normalized_title = ?5, normalized_author = ?6, \
+                        normalized_identity_main = ?5, normalized_identity_subtitle = ?7, \
+                        normalized_identity_volume = ?8, primary_author_id = ?4, \
+                        identity_status_v2 = 'not_connected', identity_generation = ?9, \
+                        identity_title_provenance = ?10, identity_volume = ?11, \
+                        text_distinction = COALESCE(?12, text_distinction) \
+                  WHERE user_id = ?13 AND id = ?14 AND identity_generation = ?15",
+        )
+        .bind(&command.identity_title.main)
+        .bind(&command.identity_title.subtitle)
+        .bind(&author_name)
+        .bind(primary_author_id)
+        .bind(&command.identity_title.normalized_main)
+        .bind(author_name.to_lowercase())
+        .bind(&command.identity_title.normalized_subtitle)
+        .bind(&command.identity_title.normalized_volume)
+        .bind(generation)
+        .bind(&provenance)
+        .bind(&command.identity_title.volume)
+        .bind(&command.text_distinction)
+        .bind(command.user_id)
+        .bind(work_id)
+        .bind(current)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_settlement_sql)?;
+        if result.rows_affected() != 1 {
+            return Err(IdentityRepositoryError::StaleGeneration);
+        }
+        (work_id, false, generation, None)
+    } else {
+        if command.expected_generation != 0 {
+            return Err(IdentityRepositoryError::StaleGeneration);
+        }
+        let added_at = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "INSERT INTO works \
+                    (user_id, title, subtitle, author_name, author_id, normalized_title, \
+                     normalized_author, added_at, normalized_identity_main, \
+                     normalized_identity_subtitle, normalized_identity_volume, \
+                     text_distinction, identity_status_v2, primary_author_id, \
+                     identity_generation, identity_title_provenance, identity_volume) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6, ?9, ?10, \
+                         ?11, 'not_connected', ?5, 1, ?12, ?13)",
+        )
+        .bind(command.user_id)
+        .bind(&command.identity_title.main)
+        .bind(&command.identity_title.subtitle)
+        .bind(&author_name)
+        .bind(primary_author_id)
+        .bind(&command.identity_title.normalized_main)
+        .bind(author_name.to_lowercase())
+        .bind(&added_at)
+        .bind(&command.identity_title.normalized_subtitle)
+        .bind(&command.identity_title.normalized_volume)
+        .bind(command.text_distinction.as_deref().unwrap_or("common"))
+        .bind(&provenance)
+        .bind(&command.identity_title.volume)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_settlement_sql)?;
+        (result.last_insert_rowid(), true, 1, Some(added_at))
+    };
+    commit_settlement_failpoint("work")?;
+
+    // The v2 INSERT above is the Work's moment of truth. Its birth fact
+    // participates in this same transaction so a committed Work can never
+    // exist without its one live `added` event. Payload construction stays
+    // at the typed domain chokepoint used by every other history writer.
+    if created {
+        if let (Some(source), Some(date)) = (command.add_source, birth_date.as_deref()) {
+            let draft = history_events::added(
+                work_id,
+                &command.identity_title.main,
+                Some(&author_name),
+                source,
+            );
+            sqlx::query(
+                "INSERT INTO history (user_id, work_id, event_type, data, date) \
+                     VALUES (?1, ?2, 'added', ?3, ?4)",
+            )
+            .bind(command.user_id)
+            .bind(work_id)
+            .bind(serde_json::to_string(&draft.data).map_err(repo_json)?)
+            .bind(date)
+            .execute(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+        }
+    }
+
+    for loser_work_id in command
+        .absorbed_work_ids
+        .iter()
+        .copied()
+        .filter(|loser| *loser != work_id)
+    {
+        absorb_work_into(tx, command.user_id, work_id, loser_work_id).await?;
+    }
+    merge_contributors(tx, command.user_id, work_id, &command.contributors).await?;
+    commit_settlement_failpoint("contributors")?;
+
+    for route in &command.routes {
+        let mut route = route.clone();
+        materialize_edition_route_owner(tx, command.user_id, work_id, &mut route).await?;
+        insert_route(tx, command.user_id, work_id, &route).await?;
+    }
+    cancel_satisfied_pending_route_cards(tx, command.user_id, work_id, &command.routes).await?;
+    let route_state = sqlx::query(
+        "SELECT COUNT(*) AS route_count, COALESCE(MAX(user_confirmed), 0) AS confirmed \
+               FROM identity_routes \
+              WHERE user_id = ?1 AND resolved_work_id = ?2 AND state = 'active'",
+    )
+    .bind(command.user_id)
+    .bind(work_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    let status = if route_state
+        .try_get::<i64, _>("confirmed")
+        .map_err(repo_decode)?
+        > 0
+    {
+        IdentityStatus::UserConfirmed
+    } else if route_state
+        .try_get::<i64, _>("route_count")
+        .map_err(repo_decode)?
+        > 0
+    {
+        IdentityStatus::Connected
+    } else {
+        IdentityStatus::NotConnected
+    };
+    sqlx::query("UPDATE works SET identity_status_v2 = ?1 WHERE user_id = ?2 AND id = ?3")
+        .bind(encode_identity_status(status))
+        .bind(command.user_id)
+        .bind(work_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+    if let Some(before) = route_graph_before.as_ref() {
+        invalidate_retry_state_if_route_graph_changed(tx, command.user_id, work_id, before)
+            .await
+            .map_err(repo_db)?;
+    }
+    commit_settlement_failpoint("routes")?;
+
+    let search_fallback_kinds: BTreeSet<String> = command
+        .routes
+        .iter()
+        .filter_map(|route| match &route.provenance {
+            RouteProvenance::SearchFallback {
+                corroborating_kind, ..
+            } => Some(format!("{corroborating_kind:?}")),
+            _ => None,
+        })
+        .collect();
+    let has_text_decisive_search = command.routes.iter().any(|route| {
+        matches!(
+            route.provenance,
+            RouteProvenance::TextDecisiveSearchFallback { .. }
+        )
+    });
+    let audit_payload = if search_fallback_kinds.is_empty() && !has_text_decisive_search {
+        format!("generation={generation}")
+    } else if search_fallback_kinds.is_empty() {
+        format!("generation={generation};origin=search-fallback;basis=TEXT-DECISIVE")
+    } else {
+        let mut payload = format!(
+            "generation={generation};origin=search-fallback;corroborating_kind={}",
+            search_fallback_kinds
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        if has_text_decisive_search {
+            payload.push_str(";additional_basis=TEXT-DECISIVE");
+        }
+        payload
+    };
+    let audit = sqlx::query(
+        "INSERT INTO identity_audit_events \
+                (user_id, work_id, event_kind, actor, payload, created_at) \
+             VALUES (?1, ?2, 'settlement', 'identity-engine', ?3, ?4)",
+    )
+    .bind(command.user_id)
+    .bind(work_id)
+    .bind(audit_payload)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    let audit_id = audit.last_insert_rowid();
+    let mut review_cards = Vec::with_capacity(command.review_cards.len());
+    for card in &command.review_cards {
+        let kind = card.kind();
+        if let Some(proposal_key) = group_identity_proposal_key(card)? {
+            let pending = sqlx::query(
+                "SELECT id, payload FROM identity_review_cards \
+                      WHERE user_id=?1 AND kind=?2 AND status='pending' ORDER BY id",
+            )
+            .bind(command.user_id)
+            .bind(ReviewKind::GroupIdentity.storage_code())
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+            let mut reusable_id = None;
+            for row in pending {
+                let card_id: i64 = row.try_get("id").map_err(repo_decode)?;
+                let payload: String = row.try_get("payload").map_err(repo_decode)?;
+                let pending_card: SettlementReviewCard =
+                    serde_json::from_str(&payload).map_err(repo_json)?;
+                if group_identity_proposal_key(&pending_card)?.as_ref() == Some(&proposal_key) {
+                    reusable_id = Some(card_id);
+                    break;
+                }
+            }
+            if let Some(id) = reusable_id {
+                review_cards.push(MintedReviewCard {
+                    id,
+                    kind,
+                    generation,
+                });
+                continue;
+            }
+        }
+        let row = sqlx::query(
+            "INSERT INTO identity_review_cards \
+                    (user_id, work_id, kind, generation, status, payload, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
+        )
+        .bind(command.user_id)
+        .bind(
+            review_card_work_id(card)
+                .filter(|candidate| *candidate > 0)
+                .or(Some(work_id)),
+        )
+        .bind(kind.storage_code())
+        .bind(generation)
+        .bind(serde_json::to_string(card).map_err(repo_json)?)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut **tx)
+        .await
+        .map_err(repo_db)?;
+        review_cards.push(MintedReviewCard {
+            id: row.last_insert_rowid(),
+            kind,
+            generation,
+        });
+    }
+    commit_settlement_failpoint("reviews")?;
+    Ok(SettlementTxResult {
+        work_id,
+        created,
+        audit_id,
+        review_cards,
+    })
+}
+
+fn map_author_db(error: crate::DbError) -> IdentityRepositoryError {
+    IdentityRepositoryError::Database(error.to_string())
+}
+
+async fn captured_identity_on(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+) -> Result<CapturedIdentity, IdentityRepositoryError> {
+    let row = sqlx::query(
+        "SELECT title, subtitle, identity_volume, \
+                CASE WHEN normalized_identity_main IS NULL \
+                          OR trim(normalized_identity_main) = '' \
+                          OR normalized_identity_main = '__UNMIGRATED__' \
+                     THEN normalized_title ELSE normalized_identity_main END \
+                    AS normalized_identity_main, \
+                COALESCE(normalized_identity_subtitle, '') AS normalized_identity_subtitle, \
+                COALESCE(normalized_identity_volume, '') AS normalized_identity_volume, \
+                COALESCE(primary_author_id, author_id, \
+                    (SELECT a.id FROM authors a WHERE a.user_id = works.user_id \
+                     AND lower(a.name) = lower(works.author_name) LIMIT 1)) \
+                    AS primary_author_id, \
+                COALESCE(text_distinction, 'common') AS text_distinction, \
+                identity_status_v2, identity_generation, \
+                identity_title_provenance \
+           FROM works WHERE user_id = ?1 AND id = ?2",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(repo_db)?
+    .ok_or(IdentityRepositoryError::NotFound)?;
+
+    let provenance = row
+        .try_get::<String, _>("identity_title_provenance")
+        .ok()
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .unwrap_or(EvidenceProvenance::Migrated);
+    let primary_author_id = row
+        .try_get::<Option<i64>, _>("primary_author_id")
+        .map_err(repo_decode)?
+        .ok_or(IdentityRepositoryError::NotFound)?;
+    let route_rows = sqlx::query(
+        "SELECT id, user_id, owner_type, work_id, edition_id, resolved_work_id, \
+                provider, kind, provider_scoped_id, state, provenance, \
+                user_confirmed, observed_at \
+           FROM identity_routes \
+          WHERE user_id = ?1 AND resolved_work_id = ?2 AND state = 'active' \
+          ORDER BY id",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(repo_db)?;
+    let mut active_routes = Vec::with_capacity(route_rows.len());
+    for route in route_rows {
+        active_routes.push(decode_route(&route)?);
+    }
+
+    Ok(CapturedIdentity {
+        user_id,
+        own_work_id: work_id,
+        identity_title: livrarr_domain::identity_layer::IdentityTitleTuple {
+            main: row.try_get("title").map_err(repo_decode)?,
+            subtitle: row.try_get("subtitle").map_err(repo_decode)?,
+            volume: row.try_get("identity_volume").map_err(repo_decode)?,
+            normalized_main: row
+                .try_get("normalized_identity_main")
+                .map_err(repo_decode)?,
+            normalized_subtitle: row
+                .try_get("normalized_identity_subtitle")
+                .map_err(repo_decode)?,
+            normalized_volume: row
+                .try_get("normalized_identity_volume")
+                .map_err(repo_decode)?,
+            provenance,
+        },
+        primary_author_id,
+        text_distinction: row.try_get("text_distinction").map_err(repo_decode)?,
+        active_routes,
+        status: decode_identity_status(
+            row.try_get::<String, _>("identity_status_v2")
+                .map_err(repo_decode)?
+                .as_str(),
+        )?,
+        identity_generation: row.try_get("identity_generation").map_err(repo_decode)?,
+    })
+}
+
+async fn work_author_name_on(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+) -> Result<String, IdentityRepositoryError> {
+    sqlx::query_scalar("SELECT author_name FROM works WHERE user_id = ?1 AND id = ?2")
+        .bind(user_id)
+        .bind(work_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(repo_db)?
+        .ok_or(IdentityRepositoryError::NotFound)
+}
+
+async fn apply_existing_author_effects_on(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    author_id: AuthorId,
+    route: Option<&AuthorRouteKey>,
+) -> Result<(), IdentityRepositoryError> {
+    crate::sqlite_author_link::ensure_progress_tx(
+        conn,
+        user_id,
+        author_id,
+        AuthorLinkTrigger::AuthorAdopted,
+    )
+    .await
+    .map_err(map_author_db)?;
+    if let Some(route) = route {
+        crate::sqlite_author_link::attach_route_as_user_tx(conn, user_id, author_id, route.clone())
+            .await
+            .map_err(map_author_db)?;
+    }
+    Ok(())
+}
+
+async fn create_author_for_minimum_on(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    name: &str,
+    route: Option<&AuthorRouteKey>,
+) -> Result<AuthorId, IdentityRepositoryError> {
+    let (author, _created) = crate::sqlite_author_link::create_or_adopt_author_tx(
+        conn,
+        &crate::CreateAuthorGateRequest {
+            user_id,
+            name: name.to_string(),
+            sort_name: None,
+            import_id: None,
+            initial_name_source: AuthorNameSource::User,
+            trigger: AuthorLinkTrigger::AuthorCreated,
+        },
+    )
+    .await
+    .map_err(map_author_db)?;
+    if let Some(route) = route {
+        crate::sqlite_author_link::attach_route_as_user_tx(conn, user_id, author.id, route.clone())
+            .await
+            .map_err(map_author_db)?;
+    }
+    Ok(author.id)
+}
+
 impl WorkIdentityRepository for SqliteDb {
     async fn read_captured_identity(
         &self,
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<CapturedIdentity, IdentityRepositoryError> {
-        let row = sqlx::query(
-            "SELECT title, subtitle, identity_volume, \
-                    CASE WHEN normalized_identity_main IS NULL \
-                              OR trim(normalized_identity_main) = '' \
-                              OR normalized_identity_main = '__UNMIGRATED__' \
-                         THEN normalized_title ELSE normalized_identity_main END \
-                        AS normalized_identity_main, \
-                    COALESCE(normalized_identity_subtitle, '') AS normalized_identity_subtitle, \
-                    COALESCE(normalized_identity_volume, '') AS normalized_identity_volume, \
-                    COALESCE(primary_author_id, author_id, \
-                        (SELECT a.id FROM authors a WHERE a.user_id = works.user_id \
-                         AND lower(a.name) = lower(works.author_name) LIMIT 1)) \
-                        AS primary_author_id, \
-                    COALESCE(text_distinction, 'common') AS text_distinction, \
-                    identity_status_v2, identity_generation, \
-                    identity_title_provenance \
-               FROM works WHERE user_id = ?1 AND id = ?2",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(repo_db)?
-        .ok_or(IdentityRepositoryError::NotFound)?;
-
-        let provenance = row
-            .try_get::<String, _>("identity_title_provenance")
-            .ok()
-            .and_then(|value| serde_json::from_str(&value).ok())
-            .unwrap_or(EvidenceProvenance::Migrated);
-        let primary_author_id = row
-            .try_get::<Option<i64>, _>("primary_author_id")
-            .map_err(repo_decode)?
-            .ok_or(IdentityRepositoryError::NotFound)?;
-        let route_rows = sqlx::query(
-            "SELECT id, user_id, owner_type, work_id, edition_id, resolved_work_id, \
-                    provider, kind, provider_scoped_id, state, provenance, \
-                    user_confirmed, observed_at \
-               FROM identity_routes \
-              WHERE user_id = ?1 AND resolved_work_id = ?2 AND state = 'active' \
-              ORDER BY id",
-        )
-        .bind(user_id)
-        .bind(work_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(repo_db)?;
-        let mut active_routes = Vec::with_capacity(route_rows.len());
-        for route in route_rows {
-            active_routes.push(decode_route(&route)?);
-        }
-
-        Ok(CapturedIdentity {
-            user_id,
-            own_work_id: work_id,
-            identity_title: livrarr_domain::identity_layer::IdentityTitleTuple {
-                main: row.try_get("title").map_err(repo_decode)?,
-                subtitle: row.try_get("subtitle").map_err(repo_decode)?,
-                volume: row.try_get("identity_volume").map_err(repo_decode)?,
-                normalized_main: row
-                    .try_get("normalized_identity_main")
-                    .map_err(repo_decode)?,
-                normalized_subtitle: row
-                    .try_get("normalized_identity_subtitle")
-                    .map_err(repo_decode)?,
-                normalized_volume: row
-                    .try_get("normalized_identity_volume")
-                    .map_err(repo_decode)?,
-                provenance,
-            },
-            primary_author_id,
-            text_distinction: row.try_get("text_distinction").map_err(repo_decode)?,
-            active_routes,
-            status: decode_identity_status(
-                row.try_get::<String, _>("identity_status_v2")
-                    .map_err(repo_decode)?
-                    .as_str(),
-            )?,
-            identity_generation: row.try_get("identity_generation").map_err(repo_decode)?,
-        })
+        let mut conn = self.pool().acquire().await.map_err(repo_db)?;
+        captured_identity_on(&mut conn, user_id, work_id).await
     }
 
     async fn read_identity_presentations(
@@ -518,420 +946,261 @@ impl WorkIdentityRepository for SqliteDb {
         &self,
         command: SettlementCommit,
     ) -> Result<SettlementCommitOutcome, IdentityRepositoryError> {
-        let primary = command
-            .contributors
-            .iter()
-            .filter(|contributor| contributor.ordinal == 0)
-            .collect::<Vec<_>>();
-        if primary.len() != 1 {
-            return Err(IdentityRepositoryError::AtomicRollback);
-        }
-        let primary_author_id = primary[0].author_id;
         let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(repo_db)?;
-        commit_settlement_failpoint("begin")?;
-        let route_graph_before = match command.existing_work_id {
-            Some(work_id) => Some(
-                read_active_route_graph(&mut tx, command.user_id, work_id)
-                    .await
-                    .map_err(repo_db)?,
-            ),
-            // A new Work cannot already own provider retry standing.
-            None => None,
-        };
-
-        // An inline pending-route affirmation is a settle+resolve sequence.
-        // Reject an already-owned candidate before the settlement mutates the
-        // Work generation, writes its audit, or mints the continuation card.
-        // Keeping this read inside the settlement transaction also closes the
-        // window between the handler's informative owner preflight and the
-        // first write claim.
-        for card in &command.review_cards {
-            let SettlementReviewCard::PendingRoute { candidate, .. } = card else {
-                continue;
-            };
-            let provider = serde_json::to_string(&candidate.route.provider).map_err(repo_json)?;
-            let kind = serde_json::to_string(&candidate.route.kind).map_err(repo_json)?;
-            let owner: Option<i64> = sqlx::query_scalar(
-                "SELECT resolved_work_id FROM identity_routes \
-                  WHERE user_id=?1 AND provider=?2 AND kind=?3 \
-                    AND provider_scoped_id=?4 AND state='active' LIMIT 1",
-            )
-            .bind(command.user_id)
-            .bind(provider)
-            .bind(kind)
-            .bind(&candidate.route.value)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(repo_db)?;
-            if owner.is_some_and(|owner| Some(owner) != command.existing_work_id) {
-                return Err(IdentityRepositoryError::RouteOwnershipCollision);
-            }
-        }
-        let author_name: String =
-            sqlx::query_scalar("SELECT name FROM authors WHERE user_id = ?1 AND id = ?2")
-                .bind(command.user_id)
-                .bind(primary_author_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(repo_db)?
-                .ok_or(IdentityRepositoryError::NotFound)?;
-
-        let provenance = serde_json::to_string(&command.identity_title.provenance)
-            .map_err(|error| IdentityRepositoryError::Database(error.to_string()))?;
-        let (work_id, created, generation, birth_date) =
-            if let Some(work_id) = command.existing_work_id {
-                let current: Option<i64> = sqlx::query_scalar(
-                    "SELECT identity_generation FROM works WHERE user_id = ?1 AND id = ?2",
-                )
-                .bind(command.user_id)
-                .bind(work_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(repo_db)?;
-                let current = current.ok_or(IdentityRepositoryError::NotFound)?;
-                if current != command.expected_generation {
-                    return Err(IdentityRepositoryError::StaleGeneration);
-                }
-                let generation = current + 1;
-                let result = sqlx::query(
-                    "UPDATE works \
-                    SET title = ?1, subtitle = ?2, author_name = ?3, author_id = ?4, \
-                        normalized_title = ?5, normalized_author = ?6, \
-                        normalized_identity_main = ?5, normalized_identity_subtitle = ?7, \
-                        normalized_identity_volume = ?8, primary_author_id = ?4, \
-                        identity_status_v2 = 'not_connected', identity_generation = ?9, \
-                        identity_title_provenance = ?10, identity_volume = ?11, \
-                        text_distinction = COALESCE(?12, text_distinction) \
-                  WHERE user_id = ?13 AND id = ?14 AND identity_generation = ?15",
-                )
-                .bind(&command.identity_title.main)
-                .bind(&command.identity_title.subtitle)
-                .bind(&author_name)
-                .bind(primary_author_id)
-                .bind(&command.identity_title.normalized_main)
-                .bind(author_name.to_lowercase())
-                .bind(&command.identity_title.normalized_subtitle)
-                .bind(&command.identity_title.normalized_volume)
-                .bind(generation)
-                .bind(&provenance)
-                .bind(&command.identity_title.volume)
-                .bind(&command.text_distinction)
-                .bind(command.user_id)
-                .bind(work_id)
-                .bind(current)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_settlement_sql)?;
-                if result.rows_affected() != 1 {
-                    return Err(IdentityRepositoryError::StaleGeneration);
-                }
-                (work_id, false, generation, None)
-            } else {
-                if command.expected_generation != 0 {
-                    return Err(IdentityRepositoryError::StaleGeneration);
-                }
-                let added_at = chrono::Utc::now().to_rfc3339();
-                let result = sqlx::query(
-                    "INSERT INTO works \
-                    (user_id, title, subtitle, author_name, author_id, normalized_title, \
-                     normalized_author, added_at, normalized_identity_main, \
-                     normalized_identity_subtitle, normalized_identity_volume, \
-                     text_distinction, identity_status_v2, primary_author_id, \
-                     identity_generation, identity_title_provenance, identity_volume) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6, ?9, ?10, \
-                         ?11, 'not_connected', ?5, 1, ?12, ?13)",
-                )
-                .bind(command.user_id)
-                .bind(&command.identity_title.main)
-                .bind(&command.identity_title.subtitle)
-                .bind(&author_name)
-                .bind(primary_author_id)
-                .bind(&command.identity_title.normalized_main)
-                .bind(author_name.to_lowercase())
-                .bind(&added_at)
-                .bind(&command.identity_title.normalized_subtitle)
-                .bind(&command.identity_title.normalized_volume)
-                .bind(command.text_distinction.as_deref().unwrap_or("common"))
-                .bind(&provenance)
-                .bind(&command.identity_title.volume)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_settlement_sql)?;
-                (result.last_insert_rowid(), true, 1, Some(added_at))
-            };
-        commit_settlement_failpoint("work")?;
-
-        // The v2 INSERT above is the Work's moment of truth. Its birth fact
-        // participates in this same transaction so a committed Work can never
-        // exist without its one live `added` event. Payload construction stays
-        // at the typed domain chokepoint used by every other history writer.
-        if created {
-            if let (Some(source), Some(date)) = (command.add_source, birth_date.as_deref()) {
-                let draft = history_events::added(
-                    work_id,
-                    &command.identity_title.main,
-                    Some(&author_name),
-                    source,
-                );
-                sqlx::query(
-                    "INSERT INTO history (user_id, work_id, event_type, data, date) \
-                     VALUES (?1, ?2, 'added', ?3, ?4)",
-                )
-                .bind(command.user_id)
-                .bind(work_id)
-                .bind(serde_json::to_string(&draft.data).map_err(repo_json)?)
-                .bind(date)
-                .execute(&mut *tx)
-                .await
-                .map_err(repo_db)?;
-            }
-        }
-
-        for loser_work_id in command
-            .absorbed_work_ids
-            .iter()
-            .copied()
-            .filter(|loser| *loser != work_id)
-        {
-            absorb_work_into(&mut tx, command.user_id, work_id, loser_work_id).await?;
-        }
-        merge_contributors(&mut tx, command.user_id, work_id, &command.contributors).await?;
-        commit_settlement_failpoint("contributors")?;
-
-        for route in &command.routes {
-            let mut route = route.clone();
-            materialize_edition_route_owner(&mut tx, command.user_id, work_id, &mut route).await?;
-            insert_route(&mut tx, command.user_id, work_id, &route).await?;
-        }
-        cancel_satisfied_pending_route_cards(&mut tx, command.user_id, work_id, &command.routes)
-            .await?;
-        let route_state = sqlx::query(
-            "SELECT COUNT(*) AS route_count, COALESCE(MAX(user_confirmed), 0) AS confirmed \
-               FROM identity_routes \
-              WHERE user_id = ?1 AND resolved_work_id = ?2 AND state = 'active'",
-        )
-        .bind(command.user_id)
-        .bind(work_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let status = if route_state
-            .try_get::<i64, _>("confirmed")
-            .map_err(repo_decode)?
-            > 0
-        {
-            IdentityStatus::UserConfirmed
-        } else if route_state
-            .try_get::<i64, _>("route_count")
-            .map_err(repo_decode)?
-            > 0
-        {
-            IdentityStatus::Connected
-        } else {
-            IdentityStatus::NotConnected
-        };
-        sqlx::query("UPDATE works SET identity_status_v2 = ?1 WHERE user_id = ?2 AND id = ?3")
-            .bind(encode_identity_status(status))
-            .bind(command.user_id)
-            .bind(work_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(repo_db)?;
-        if let Some(before) = route_graph_before.as_ref() {
-            invalidate_retry_state_if_route_graph_changed(
-                &mut tx,
-                command.user_id,
-                work_id,
-                before,
-            )
-            .await
-            .map_err(repo_db)?;
-        }
-        commit_settlement_failpoint("routes")?;
-
-        let search_fallback_kinds: BTreeSet<String> = command
-            .routes
-            .iter()
-            .filter_map(|route| match &route.provenance {
-                RouteProvenance::SearchFallback {
-                    corroborating_kind, ..
-                } => Some(format!("{corroborating_kind:?}")),
-                _ => None,
-            })
-            .collect();
-        let has_text_decisive_search = command.routes.iter().any(|route| {
-            matches!(
-                route.provenance,
-                RouteProvenance::TextDecisiveSearchFallback { .. }
-            )
-        });
-        let audit_payload = if search_fallback_kinds.is_empty() && !has_text_decisive_search {
-            format!("generation={generation}")
-        } else if search_fallback_kinds.is_empty() {
-            format!("generation={generation};origin=search-fallback;basis=TEXT-DECISIVE")
-        } else {
-            let mut payload = format!(
-                "generation={generation};origin=search-fallback;corroborating_kind={}",
-                search_fallback_kinds
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            if has_text_decisive_search {
-                payload.push_str(";additional_basis=TEXT-DECISIVE");
-            }
-            payload
-        };
-        let audit = sqlx::query(
-            "INSERT INTO identity_audit_events \
-                (user_id, work_id, event_kind, actor, payload, created_at) \
-             VALUES (?1, ?2, 'settlement', 'identity-engine', ?3, ?4)",
-        )
-        .bind(command.user_id)
-        .bind(work_id)
-        .bind(audit_payload)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let audit_id = audit.last_insert_rowid();
-        let mut review_cards = Vec::with_capacity(command.review_cards.len());
-        for card in &command.review_cards {
-            let kind = card.kind();
-            if let Some(proposal_key) = group_identity_proposal_key(card)? {
-                let pending = sqlx::query(
-                    "SELECT id, payload FROM identity_review_cards \
-                      WHERE user_id=?1 AND kind=?2 AND status='pending' ORDER BY id",
-                )
-                .bind(command.user_id)
-                .bind(ReviewKind::GroupIdentity.storage_code())
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(repo_db)?;
-                let mut reusable_id = None;
-                for row in pending {
-                    let card_id: i64 = row.try_get("id").map_err(repo_decode)?;
-                    let payload: String = row.try_get("payload").map_err(repo_decode)?;
-                    let pending_card: SettlementReviewCard =
-                        serde_json::from_str(&payload).map_err(repo_json)?;
-                    if group_identity_proposal_key(&pending_card)?.as_ref() == Some(&proposal_key) {
-                        reusable_id = Some(card_id);
-                        break;
-                    }
-                }
-                if let Some(id) = reusable_id {
-                    review_cards.push(MintedReviewCard {
-                        id,
-                        kind,
-                        generation,
-                    });
-                    continue;
-                }
-            }
-            let row = sqlx::query(
-                "INSERT INTO identity_review_cards \
-                    (user_id, work_id, kind, generation, status, payload, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)",
-            )
-            .bind(command.user_id)
-            .bind(
-                review_card_work_id(card)
-                    .filter(|candidate| *candidate > 0)
-                    .or(Some(work_id)),
-            )
-            .bind(kind.storage_code())
-            .bind(generation)
-            .bind(serde_json::to_string(card).map_err(repo_json)?)
-            .bind(chrono::Utc::now().to_rfc3339())
-            .execute(&mut *tx)
-            .await
-            .map_err(repo_db)?;
-            review_cards.push(MintedReviewCard {
-                id: row.last_insert_rowid(),
-                kind,
-                generation,
-            });
-        }
-        commit_settlement_failpoint("reviews")?;
+        let written = commit_settlement_in_tx(&mut tx, &command).await?;
         tx.commit().await.map_err(repo_db)?;
-
         let identity = self
-            .read_captured_identity(command.user_id, work_id)
+            .read_captured_identity(command.user_id, written.work_id)
             .await?;
         Ok(SettlementCommitOutcome {
             identity,
-            created,
-            audit_id,
-            review_cards,
+            created: written.created,
+            audit_id: written.audit_id,
+            review_cards: written.review_cards,
         })
     }
 
-    async fn commit_unattached_import_review(
+    async fn settle_manual_import_minimum(
         &self,
-        user_id: UserId,
-        evidence: IdentityEvidenceBundle,
-    ) -> Result<MintedReviewCard, IdentityRepositoryError> {
-        let card = SettlementReviewCard::ImportIdentity {
-            work_id: None,
-            evidence,
-        };
-        let kind = card.kind();
-        let kind_code = kind.storage_code();
-        let payload = serde_json::to_string(&card).map_err(repo_json)?;
+        command: ManualImportMinimumCommand,
+    ) -> Result<IdentityRoadOutcome, IdentityRepositoryError> {
+        let mut identity_title = title_parts_from_provider(command.title.clone(), None)
+            .map_err(|_| IdentityRepositoryError::InvalidResolution)?;
+        identity_title.provenance = EvidenceProvenance::User;
+        if command.author.trim().is_empty() {
+            return Err(IdentityRepositoryError::InvalidResolution);
+        }
+
+        #[cfg(any(test, feature = "test-helpers"))]
+        manual_import_minimum_interleaving::observe_before_begin_write(
+            command.user_id,
+            &command.title,
+        )
+        .await;
         let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(repo_db)?;
-        let existing = sqlx::query(
-            "SELECT id, generation FROM identity_review_cards \
-              WHERE user_id = ?1 AND work_id IS NULL AND kind = ?2 \
-                AND status = 'pending' AND payload = ?3 ORDER BY id LIMIT 1",
-        )
-        .bind(user_id)
-        .bind(kind_code)
-        .bind(&payload)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        if let Some(row) = existing {
-            return Ok(MintedReviewCard {
-                id: row.try_get("id").map_err(repo_decode)?,
-                kind,
-                generation: row.try_get("generation").map_err(repo_decode)?,
-            });
+        #[cfg(any(test, feature = "test-helpers"))]
+        manual_import_minimum_interleaving::mark_begin_acquired(command.user_id, &command.title);
+
+        enum MinimumDecision {
+            Attach {
+                identity: Box<CapturedIdentity>,
+            },
+            Create {
+                author_id: Option<AuthorId>,
+            },
+            Defer {
+                members: Vec<livrarr_domain::identity_layer::CompleteGroupMember>,
+            },
         }
-        let created_at = chrono::Utc::now().to_rfc3339();
-        let inserted = sqlx::query(
-            "INSERT INTO identity_review_cards \
-                (user_id, work_id, kind, generation, status, payload, created_at) \
-             VALUES (?1, NULL, ?2, 0, 'pending', ?3, ?4)",
+
+        let mut decision = MinimumDecision::Create { author_id: None };
+        if let Some(hint) = command.request_start_work_hint {
+            let hinted: Option<(String, String)> = sqlx::query_as(
+                "SELECT title, author_name FROM works WHERE user_id = ?1 AND id = ?2",
+            )
+            .bind(command.user_id)
+            .bind(hint)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(repo_db)?;
+            if let Some((stored_title, stored_author)) = hinted {
+                if exact_text_hint_holds(
+                    &stored_title,
+                    &stored_author,
+                    &command.title,
+                    &command.author,
+                ) {
+                    let identity = captured_identity_on(&mut tx, command.user_id, hint).await?;
+                    decision = MinimumDecision::Attach {
+                        identity: Box::new(identity),
+                    };
+                }
+            }
+        }
+
+        if !matches!(decision, MinimumDecision::Attach { .. }) {
+            let stored: Vec<(AuthorId, String)> =
+                sqlx::query_as("SELECT id, name FROM authors WHERE user_id = ?1 ORDER BY id")
+                    .bind(command.user_id)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(repo_db)?;
+            let names = stored
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect::<Vec<_>>();
+            let author_id = stored
+                .iter()
+                .find(|(_, name)| author_name_is_exact(name, &command.author))
+                .map(|(id, _)| *id)
+                .or_else(|| {
+                    adopt_unambiguous_author(&command.author, &names).map(|index| stored[index].0)
+                });
+            if let Some(author_id) = author_id {
+                let ids: Vec<WorkId> = sqlx::query_scalar(
+                    "SELECT id FROM works \
+                      WHERE user_id = ?1 AND normalized_identity_main = ?2 \
+                        AND primary_author_id = ?3 ORDER BY id",
+                )
+                .bind(command.user_id)
+                .bind(&identity_title.normalized_main)
+                .bind(author_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(repo_db)?;
+                let mut members = Vec::with_capacity(ids.len());
+                for work_id in ids {
+                    let identity = captured_identity_on(&mut tx, command.user_id, work_id).await?;
+                    let display_author =
+                        work_author_name_on(&mut tx, command.user_id, work_id).await?;
+                    members.push(complete_group_member(identity, display_author));
+                }
+                let evaluation = evaluate_captured_group(
+                    &CompleteGroupCandidate {
+                        identity_title: identity_title.clone(),
+                        primary_author_id: author_id,
+                        text_distinction: None,
+                    },
+                    members,
+                );
+                decision = match evaluation {
+                    CompleteGroupEvaluation::Create => MinimumDecision::Create {
+                        author_id: Some(author_id),
+                    },
+                    CompleteGroupEvaluation::AutoMerge { mut members } if members.len() == 1 => {
+                        let member = members.remove(0);
+                        MinimumDecision::Attach {
+                            identity: Box::new(member.identity),
+                        }
+                    }
+                    CompleteGroupEvaluation::AutoMerge { members }
+                    | CompleteGroupEvaluation::Review { members } => {
+                        MinimumDecision::Defer { members }
+                    }
+                };
+            } else {
+                decision = MinimumDecision::Create { author_id: None };
+            }
+        }
+
+        #[cfg(any(test, feature = "test-helpers"))]
+        manual_import_minimum_interleaving::pause_after_authoritative_reads(
+            command.user_id,
+            &command.title,
         )
-        .bind(user_id)
-        .bind(kind_code)
-        .bind(&payload)
-        .bind(&created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let card_id = inserted.last_insert_rowid();
-        sqlx::query(
-            "INSERT INTO identity_audit_events \
-                (user_id, work_id, event_kind, actor, payload, created_at) \
-             VALUES (?1, NULL, 'unattached-import-review', 'identity-road', ?2, ?3)",
-        )
-        .bind(user_id)
-        .bind(format!("card_id={card_id}"))
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        tx.commit().await.map_err(repo_db)?;
-        Ok(MintedReviewCard {
-            id: card_id,
-            kind,
-            generation: 0,
-        })
+        .await;
+
+        match decision {
+            MinimumDecision::Defer { members } => {
+                drop(tx);
+                Ok(IdentityRoadOutcome::Deferred {
+                    reason: format_manual_import_defer(&members),
+                })
+            }
+            MinimumDecision::Attach { identity } => {
+                let author_id = identity.primary_author_id;
+                apply_existing_author_effects_on(
+                    &mut tx,
+                    command.user_id,
+                    author_id,
+                    command.author_route.as_ref(),
+                )
+                .await?;
+                let written = commit_settlement_in_tx(
+                    &mut tx,
+                    &SettlementCommit {
+                        user_id: command.user_id,
+                        existing_work_id: Some(identity.own_work_id),
+                        add_source: Some(history_events::WorkAddSource::FileImport),
+                        identity_title: identity.identity_title.clone(),
+                        text_distinction: (identity.text_distinction != "common")
+                            .then(|| identity.text_distinction.clone()),
+                        contributors: vec![WorkContributor {
+                            user_id: command.user_id,
+                            work_id: identity.own_work_id,
+                            author_id,
+                            ordinal: 0,
+                            roles: Vec::new(),
+                        }],
+                        routes: identity.active_routes.clone(),
+                        absorbed_work_ids: Vec::new(),
+                        expected_generation: identity.identity_generation,
+                        review_cards: Vec::new(),
+                    },
+                )
+                .await?;
+                tx.commit().await.map_err(repo_db)?;
+                let settled = self
+                    .read_captured_identity(command.user_id, written.work_id)
+                    .await?;
+                Ok(IdentityRoadOutcome::Settled {
+                    work_id: settled.own_work_id,
+                    created: written.created,
+                    routes: settled.active_routes,
+                    status: settled.status,
+                    library_items_moved: 0,
+                    grabs_moved: 0,
+                })
+            }
+            MinimumDecision::Create { author_id } => {
+                let author_id = if let Some(author_id) = author_id {
+                    apply_existing_author_effects_on(
+                        &mut tx,
+                        command.user_id,
+                        author_id,
+                        command.author_route.as_ref(),
+                    )
+                    .await?;
+                    author_id
+                } else {
+                    create_author_for_minimum_on(
+                        &mut tx,
+                        command.user_id,
+                        command.author.trim(),
+                        command.author_route.as_ref(),
+                    )
+                    .await?
+                };
+                let written = commit_settlement_in_tx(
+                    &mut tx,
+                    &SettlementCommit {
+                        user_id: command.user_id,
+                        existing_work_id: None,
+                        add_source: Some(history_events::WorkAddSource::FileImport),
+                        identity_title,
+                        text_distinction: None,
+                        contributors: vec![WorkContributor {
+                            user_id: command.user_id,
+                            work_id: 0,
+                            author_id,
+                            ordinal: 0,
+                            roles: Vec::new(),
+                        }],
+                        routes: Vec::new(),
+                        absorbed_work_ids: Vec::new(),
+                        expected_generation: 0,
+                        review_cards: Vec::new(),
+                    },
+                )
+                .await?;
+                tx.commit().await.map_err(repo_db)?;
+                let settled = self
+                    .read_captured_identity(command.user_id, written.work_id)
+                    .await?;
+                Ok(IdentityRoadOutcome::Settled {
+                    work_id: settled.own_work_id,
+                    created: written.created,
+                    routes: settled.active_routes,
+                    status: settled.status,
+                    library_items_moved: 0,
+                    grabs_moved: 0,
+                })
+            }
+        }
     }
 
     async fn commit_pending_route_review(
@@ -5738,3 +6007,190 @@ impl SqliteDb {
         Ok(row.last_insert_rowid())
     }
 }
+
+#[cfg(any(test, feature = "test-helpers"))]
+mod manual_import_minimum_interleaving {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tokio::sync::Notify;
+
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    struct InterleaveKey {
+        user_id: UserId,
+        title: String,
+    }
+
+    struct InterleaveSlot {
+        before_begin: Notify,
+        before_begin_seen: AtomicBool,
+        begin_acquired: AtomicBool,
+        after_reads: Notify,
+        after_reads_seen: AtomicBool,
+        release_after_reads: Notify,
+        released_after_reads: AtomicBool,
+    }
+
+    impl InterleaveSlot {
+        fn new() -> Self {
+            Self {
+                before_begin: Notify::new(),
+                before_begin_seen: AtomicBool::new(false),
+                begin_acquired: AtomicBool::new(false),
+                after_reads: Notify::new(),
+                after_reads_seen: AtomicBool::new(false),
+                release_after_reads: Notify::new(),
+                released_after_reads: AtomicBool::new(false),
+            }
+        }
+    }
+
+    fn registry() -> &'static Mutex<HashMap<InterleaveKey, Arc<InterleaveSlot>>> {
+        static REGISTRY: OnceLock<Mutex<HashMap<InterleaveKey, Arc<InterleaveSlot>>>> =
+            OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn slot(user_id: UserId, title: &str) -> Option<Arc<InterleaveSlot>> {
+        registry()
+            .lock()
+            .expect("manual-import interleaving registry")
+            .get(&InterleaveKey {
+                user_id,
+                title: title.to_string(),
+            })
+            .cloned()
+    }
+
+    pub struct ManualImportMinimumInterleavingGuard {
+        user_id: UserId,
+        titles: Vec<String>,
+    }
+
+    impl ManualImportMinimumInterleavingGuard {
+        pub async fn wait_before_begin(&self, title: &str) {
+            let Some(slot) = slot(self.user_id, title) else {
+                return;
+            };
+            loop {
+                if slot.before_begin_seen.load(Ordering::SeqCst) {
+                    return;
+                }
+                let notified = slot.before_begin.notified();
+                if slot.before_begin_seen.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        pub fn begin_acquired(&self, title: &str) -> bool {
+            slot(self.user_id, title)
+                .map(|slot| slot.begin_acquired.load(Ordering::SeqCst))
+                .unwrap_or(false)
+        }
+
+        pub async fn wait_after_authoritative_reads(&self, title: &str) {
+            let Some(slot) = slot(self.user_id, title) else {
+                return;
+            };
+            loop {
+                if slot.after_reads_seen.load(Ordering::SeqCst) {
+                    return;
+                }
+                let notified = slot.after_reads.notified();
+                if slot.after_reads_seen.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        pub fn release_after_authoritative_reads(&self, title: &str) {
+            if let Some(slot) = slot(self.user_id, title) {
+                slot.released_after_reads.store(true, Ordering::SeqCst);
+                slot.release_after_reads.notify_waiters();
+            }
+        }
+    }
+
+    impl Drop for ManualImportMinimumInterleavingGuard {
+        fn drop(&mut self) {
+            let mut registry = registry()
+                .lock()
+                .expect("manual-import interleaving registry");
+            for title in &self.titles {
+                if let Some(slot) = registry.remove(&InterleaveKey {
+                    user_id: self.user_id,
+                    title: title.clone(),
+                }) {
+                    slot.released_after_reads.store(true, Ordering::SeqCst);
+                    slot.release_after_reads.notify_waiters();
+                    slot.before_begin_seen.store(true, Ordering::SeqCst);
+                    slot.before_begin.notify_waiters();
+                    slot.after_reads_seen.store(true, Ordering::SeqCst);
+                    slot.after_reads.notify_waiters();
+                }
+            }
+        }
+    }
+
+    pub fn install_manual_import_minimum_interleaving_for_tests(
+        user_id: UserId,
+        titles: Vec<String>,
+    ) -> ManualImportMinimumInterleavingGuard {
+        {
+            let mut registry = registry()
+                .lock()
+                .expect("manual-import interleaving registry");
+            for title in &titles {
+                registry.insert(
+                    InterleaveKey {
+                        user_id,
+                        title: title.clone(),
+                    },
+                    Arc::new(InterleaveSlot::new()),
+                );
+            }
+        }
+        ManualImportMinimumInterleavingGuard { user_id, titles }
+    }
+
+    #[allow(dead_code)]
+    pub async fn observe_before_begin_write(user_id: UserId, title: &str) {
+        if let Some(slot) = slot(user_id, title) {
+            slot.before_begin_seen.store(true, Ordering::SeqCst);
+            slot.before_begin.notify_waiters();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_begin_acquired(user_id: UserId, title: &str) {
+        if let Some(slot) = slot(user_id, title) {
+            slot.begin_acquired.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub async fn pause_after_authoritative_reads(user_id: UserId, title: &str) {
+        let Some(slot) = slot(user_id, title) else {
+            return;
+        };
+        slot.after_reads_seen.store(true, Ordering::SeqCst);
+        slot.after_reads.notify_waiters();
+        loop {
+            if slot.released_after_reads.load(Ordering::SeqCst) {
+                return;
+            }
+            let notified = slot.release_after_reads.notified();
+            if slot.released_after_reads.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub use manual_import_minimum_interleaving::install_manual_import_minimum_interleaving_for_tests;

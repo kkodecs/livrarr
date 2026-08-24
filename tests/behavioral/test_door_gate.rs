@@ -1638,6 +1638,16 @@ impl livrarr_domain::identity_layer::IdentityRoadService for InertIdentityRoad {
             _ => Err(livrarr_domain::identity_layer::IdentityRoadError::InvalidResolution),
         }
     }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        _command: livrarr_domain::identity_layer::ManualImportMinimumCommand,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        todo!("not exercised by door-gate")
+    }
 }
 
 fn inert_captured(
@@ -1740,17 +1750,6 @@ impl livrarr_domain::identity_layer::WorkIdentityRepository for RecordingIdentit
             audit_id: 1,
             review_cards,
         })
-    }
-
-    async fn commit_unattached_import_review(
-        &self,
-        _user_id: UserId,
-        _evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle,
-    ) -> Result<
-        livrarr_domain::identity_layer::MintedReviewCard,
-        livrarr_domain::identity_layer::IdentityRepositoryError,
-    > {
-        Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
     }
 
     async fn load_pending_review(

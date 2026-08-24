@@ -684,3 +684,7 @@ path = "../../tests/behavioral/test_ilr_contracts.rs"
 [[test]]
 name = "test_irf_u1_refusal"
 path = "../../tests/behavioral/test_irf_u1_refusal.rs"
+
+[[test]]
+name = "test_irf_u2_import_defer"
+path = "../../tests/behavioral/test_irf_u2_import_defer.rs"

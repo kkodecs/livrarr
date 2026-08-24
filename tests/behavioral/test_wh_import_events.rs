@@ -442,6 +442,16 @@ impl livrarr_domain::identity_layer::IdentityRoadService for ManualImportRoad {
     > {
         unreachable!("manual-import history fixtures never resolve reviews")
     }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        _command: livrarr_domain::identity_layer::ManualImportMinimumCommand,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        unreachable!("manual-import history fixtures never use the minimum coordinator")
+    }
 }
 
 /// Scan-progress state is a scan-endpoint concern; the confirm/adopt roads

@@ -257,7 +257,7 @@ async fn current_generation_tx(
 /// deciding from, so its claim is voided exactly as migration 078 voids it when
 /// work evidence changes. The stale worker then loses its claim rather than
 /// writing a route the user's action already answered.
-async fn ensure_progress_tx(
+pub(crate) async fn ensure_progress_tx(
     conn: &mut SqliteConnection,
     user_id: UserId,
     author_id: AuthorId,
@@ -538,7 +538,7 @@ async fn find_route_for_tuple_tx(
 /// `attach_route_as_user` and `pick_candidate_as_user`, which is what makes
 /// "only an explicit user selection clears a tombstone" mechanical rather than
 /// a convention every future caller has to remember.
-async fn attach_route_as_user_tx(
+pub(crate) async fn attach_route_as_user_tx(
     conn: &mut SqliteConnection,
     user_id: UserId,
     author_id: AuthorId,

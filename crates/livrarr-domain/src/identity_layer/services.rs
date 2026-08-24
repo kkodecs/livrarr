@@ -13,7 +13,7 @@ use super::contributor::WorkContributor;
 use super::cover::{CoverPlaceholderState, CoverSlotPresentation, WorkCoverPresentation};
 use super::door::{
     IdentityEvidenceBundle, IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome,
-    IdentityRoadRequest, ProviderIdentityEvidence,
+    IdentityRoadRequest, OwnedFileEvidence, ProviderIdentityEvidence,
 };
 use super::edition::{Edition, EditionFormat};
 use super::matching::{
@@ -320,6 +320,18 @@ pub struct SnapshotDatabase {
     pub path: std::path::PathBuf,
 }
 
+/// Internal (non-wire) command for a minimum-only ManualImport settlement.
+/// Carries no path and no provider-wire fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualImportMinimumCommand {
+    pub user_id: crate::UserId,
+    pub title: String,
+    pub author: String,
+    pub owned_file: OwnedFileEvidence,
+    pub author_route: Option<crate::AuthorRouteKey>,
+    pub request_start_work_hint: Option<crate::WorkId>,
+}
+
 /// Fresh provider identities produced by one metadata pass against a coherent
 /// identity generation. Persisted routes are never copied into this value:
 /// the road receives only observations that were absent from the snapshot the
@@ -350,6 +362,11 @@ pub trait IdentityRoadService: Send + Sync {
         &self,
         actor: ReviewActor,
         command: ReviewResolutionCommand,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError>;
+
+    async fn settle_manual_import_minimum(
+        &self,
+        command: ManualImportMinimumCommand,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError>;
 
     /// The single machine-observation handoff authority. Concrete production
@@ -441,13 +458,19 @@ pub trait WorkIdentityRepository: Send + Sync {
         command: SettlementCommit,
     ) -> Result<SettlementCommitOutcome, IdentityRepositoryError>;
 
-    /// Idempotently park a ManualImport candidate that has enough local
-    /// metadata to review but cannot yet claim a Work identity.
-    async fn commit_unattached_import_review(
+    /// One `BEGIN IMMEDIATE` transaction owning hint revalidation, Author
+    /// resolution, complete-group reads, the one decision, and commit/rollback.
+    fn settle_manual_import_minimum(
         &self,
-        user_id: crate::UserId,
-        evidence: IdentityEvidenceBundle,
-    ) -> Result<MintedReviewCard, IdentityRepositoryError>;
+        _command: ManualImportMinimumCommand,
+    ) -> impl std::future::Future<Output = Result<IdentityRoadOutcome, IdentityRepositoryError>> + Send
+    {
+        async move {
+            Err(IdentityRepositoryError::Database(
+                "manual-import minimum settlement is not implemented".to_string(),
+            ))
+        }
+    }
 
     /// Generation-checked, identity-neutral origination for a machine search
     /// proposal. Equivalent pending routes reuse the oldest durable card.

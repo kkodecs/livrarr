@@ -65,8 +65,13 @@ continuation; until then a bounded fix must defer such cases, not park them.
 only the OL-key arm and the text tier (exact main title + author agreement) can fire. The
 work list is loaded ONCE per request, so item N cannot dedup-attach to a work item 1
 created — it reaches the road and AutoMerges onto it (text-certain pair). A one-sided
-subtitle tail is grey: never absorbed by the dedup tier, parked by the road's group
-reconciliation (see above).
+subtitle tail is grey at the dedup tier ONLY (never absorbed there — `identity_absorb_match`
+compares the raw incoming string against `Work.title`); at the road's group reconciliation it
+is text-CERTAIN, because `candidate_core` splits the incoming title into its identity tuple
+and `evaluate_match` compares tuple mains only (`crates/livrarr-domain/src/identity_layer/services.rs:639-640`
+at `c71af24a`) — so a lone sibling is ATTACHED and a sibling inside a 2+ cohort is ABSORBED
+(observed live 2026-08-24; spec identity-review-fixes v11 ST-011). The earlier claim on this
+page that the road "parks" it was wrong (corrected 2026-08-24).
 
 ## Cancellation is four sites; only one is the user (verified 2026-08-23)
 

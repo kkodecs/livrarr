@@ -4,14 +4,15 @@
 //! `livrarr-metadata` module (ir-v1-identity-layer-rewrite.yaml:1251-1292).
 
 use livrarr_domain::identity_layer::{
-    evaluate_match, require_continuation, title_parts_from_provider, AuthorInheritanceOutcome,
-    CapturedIdentity, DirectionalMatchVerdicts, EditionId, EditionRepository, EvidenceProvenance,
-    IdentityRoadError, IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome,
-    IdentityRoadRequest, IdentityRoadService, IdentityTitleTuple, LostMatchGuardSet,
-    MainTitleGuard, ProviderIdentityEvidence, ReviewActor, ReviewResolutionCommand, RouteKey,
-    RouteOwner, RouteProvenance, SettlementCommit, SettlementReviewCard, UserIdentityChoice,
-    WorkContributor, WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState,
-    WrongMergeGuardSet,
+    complete_group_member, evaluate_captured_group, evaluate_match, format_manual_import_defer,
+    require_continuation, title_parts_from_provider, AuthorInheritanceOutcome, CapturedIdentity,
+    CompleteGroupCandidate, CompleteGroupEvaluation, DirectionalMatchVerdicts, EditionId,
+    EditionRepository, EvidenceProvenance, IdentityRoadError, IdentityRoadInteraction,
+    IdentityRoadOrigin, IdentityRoadOutcome, IdentityRoadRequest, IdentityRoadService,
+    IdentityTitleTuple, LostMatchGuardSet, ManualImportMinimumCommand, ProviderIdentityEvidence,
+    ReviewActor, ReviewResolutionCommand, RouteKey, RouteOwner, RouteProvenance, SettlementCommit,
+    SettlementReviewCard, UserIdentityChoice, WorkContributor, WorkIdentityEvidence,
+    WorkIdentityRepository, WorkRoute, WorkRouteState, WrongMergeGuardSet,
 };
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
@@ -64,6 +65,7 @@ pub struct CompleteGroupReconciliation {
     pub pairwise_outcomes: Vec<PairwiseIdentityOutcome>,
     pub action: CompleteGroupReconciliationAction,
     pub review_card: Option<SettlementReviewCard>,
+    pub evaluation: CompleteGroupEvaluation,
 }
 
 /// Generic/enum dispatch only (FP-029) — never `Box<dyn Service>`.
@@ -92,29 +94,6 @@ where
         request: IdentityRoadRequest,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         validate_road_request(&request)?;
-        if matches!(
-            request.origin,
-            IdentityRoadOrigin::CreationDoor(
-                livrarr_domain::identity_layer::DoorKind::ManualImport
-            )
-        ) && request.existing_work_id.is_none()
-            && request.evidence.provider_identity.is_empty()
-            && request.evidence.minimum.is_some()
-        {
-            let provenance = request_provenance(&request);
-            let card = self
-                .identity_repository
-                .commit_unattached_import_review(request.user_id, request.evidence)
-                .await
-                .map_err(map_repository_error)?;
-            return Ok(IdentityRoadOutcome::ReviewPending {
-                review_id: card.id,
-                kind: card.kind,
-                unattached: true,
-                expected_generation: card.generation,
-                provenance,
-            });
-        }
         let mut existing_work_id = selected_existing_work(&request)?;
         let mut existing = match existing_work_id {
             Some(work_id) => Some(
@@ -249,6 +228,9 @@ where
                         text_distinction: text_distinction.clone(),
                     })
                     .await?;
+                if let Some(reason) = manual_import_creation_defer(&request, &reconciliation) {
+                    return Ok(IdentityRoadOutcome::Deferred { reason });
+                }
                 match reconciliation.action {
                     CompleteGroupReconciliationAction::AutoMerge => {
                         if existing_work_id.is_none() {
@@ -452,17 +434,33 @@ where
                 });
             }
         }
-        let cohort_has_audited_distinction = identities
+        let display_author = self
+            .identity_repository
+            .read_primary_author_names(candidate.user_id, candidate.primary_author_id)
+            .await
+            .map_err(map_repository_error)?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let members = identities
             .iter()
-            .any(|identity| identity.text_distinction != "common");
-        let action = if candidate.text_distinction.is_some() || pairwise_outcomes.is_empty() {
-            CompleteGroupReconciliationAction::CommitDifferent
-        } else if cohort_has_audited_distinction {
-            CompleteGroupReconciliationAction::Review
-        } else if pairwise_outcomes.iter().all(|outcome| outcome.same_text) {
-            CompleteGroupReconciliationAction::AutoMerge
-        } else {
-            CompleteGroupReconciliationAction::Review
+            .cloned()
+            .map(|identity| complete_group_member(identity, display_author.clone()))
+            .collect::<Vec<_>>();
+        let evaluation = evaluate_captured_group(
+            &CompleteGroupCandidate {
+                identity_title: candidate.identity_title.clone(),
+                primary_author_id: candidate.primary_author_id,
+                text_distinction: candidate.text_distinction.clone(),
+            },
+            members,
+        );
+        let action = match &evaluation {
+            CompleteGroupEvaluation::Create => CompleteGroupReconciliationAction::CommitDifferent,
+            CompleteGroupEvaluation::AutoMerge { .. } => {
+                CompleteGroupReconciliationAction::AutoMerge
+            }
+            CompleteGroupEvaluation::Review { .. } => CompleteGroupReconciliationAction::Review,
         };
         let review_card = (action == CompleteGroupReconciliationAction::Review).then(|| {
             SettlementReviewCard::GroupIdentity {
@@ -477,6 +475,7 @@ where
             pairwise_outcomes,
             action,
             review_card,
+            evaluation,
         })
     }
 
@@ -682,6 +681,16 @@ where
         })
         .await
         .map(Some)
+    }
+
+    pub async fn settle_manual_import_minimum(
+        &self,
+        command: ManualImportMinimumCommand,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        self.identity_repository
+            .settle_manual_import_minimum(command)
+            .await
+            .map_err(map_repository_error)
     }
 
     /// Validates card kind, scope, allowed action, and expected generation,
@@ -1061,21 +1070,11 @@ fn merge_routes(routes: &mut Vec<WorkRoute>, incoming: Vec<WorkRoute>) {
 }
 
 fn strict_lost_guards() -> LostMatchGuardSet {
-    LostMatchGuardSet {
-        one_sided_subtitle_recovery: true,
-        shared_edition_id_confirmation: true,
-        translation_same_text_signals: Default::default(),
-    }
+    livrarr_domain::identity_layer::strict_lost_guards()
 }
 
 fn strict_wrong_merge_guards() -> WrongMergeGuardSet {
-    WrongMergeGuardSet {
-        main_title_guard: MainTitleGuard(true),
-        volume_conflict_guard: true,
-        author_disagreement_guard: true,
-        work_key_contradiction_guard: true,
-        audited_different_text_guard: true,
-    }
+    livrarr_domain::identity_layer::strict_wrong_merge_guards()
 }
 
 fn evidence_from_captured(identity: &CapturedIdentity) -> WorkIdentityEvidence {
@@ -1087,16 +1086,30 @@ fn evidence_from_captured(identity: &CapturedIdentity) -> WorkIdentityEvidence {
 }
 
 fn authority_certain(verdicts: &DirectionalMatchVerdicts) -> bool {
-    matches!(
-        verdicts.title,
-        livrarr_domain::identity_matching::TitleVerdict::Same
-    ) && matches!(
-        verdicts.author,
-        livrarr_domain::identity_matching::AuthorVerdict::Agree
-    ) && !matches!(
-        verdicts.id,
-        livrarr_domain::identity_matching::IdVerdict::WorkKeyContradiction
-    )
+    livrarr_domain::identity_layer::authority_certain(verdicts)
+}
+
+fn manual_import_creation_defer(
+    request: &IdentityRoadRequest,
+    reconciliation: &CompleteGroupReconciliation,
+) -> Option<livrarr_domain::identity_layer::DeferReason> {
+    if !matches!(
+        request.origin,
+        IdentityRoadOrigin::CreationDoor(livrarr_domain::identity_layer::DoorKind::ManualImport)
+    ) {
+        return None;
+    }
+    if !request.evidence.provider_identity.is_empty() {
+        return None;
+    }
+    request.evidence.minimum.as_ref()?;
+    match &reconciliation.evaluation {
+        CompleteGroupEvaluation::Review { members } => Some(format_manual_import_defer(members)),
+        CompleteGroupEvaluation::AutoMerge { members } if members.len() >= 2 => {
+            Some(format_manual_import_defer(members))
+        }
+        _ => None,
+    }
 }
 
 fn settled_outcome(
@@ -1171,6 +1184,13 @@ where
         command: ReviewResolutionCommand,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         IdentityRoadServiceImpl::resolve_review(self, actor, command).await
+    }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        command: ManualImportMinimumCommand,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        IdentityRoadServiceImpl::settle_manual_import_minimum(self, command).await
     }
 
     async fn apply_captured_route_handoff(

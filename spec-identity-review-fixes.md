@@ -2,11 +2,40 @@
 feature: "identity-review-fixes"
 stage: spec
 status: draft
-version: 9
+version: 11
 req_ids: [REQ-001, REQ-003, REQ-005, REQ-007]
 ---
 
 # Spec: identity-review-fixes (audit fix-wave 1a — the review surface, bounded half)
+
+v10 (2026-08-24, PO ruling) corrects a wrong system truth carried since v3:
+at the road's complete-group evaluator a one-sided subtitle is text-CERTAIN
+— by construction: the incoming title is split into its identity tuple and
+`evaluate_match` compares tuple mains only, so `Book` vs `Book: Tail` enters
+as `Book` vs `Book` (`crates/livrarr-domain/src/identity_layer/services.rs:639-640`,
+`crates/livrarr-metadata/src/identity_road.rs:790-792`, both at `c71af24a`) —
+so the road attaches a lone subtitle sibling and absorbs one inside a cohort;
+it never parks it. v9's REQ-003 rule 5, AC-003 cases 3-7 and ST-011 assumed a grey
+park (my 2026-08-23 case table said "any grey pair → today parks"; false).
+PO 2026-08-24: a minimum-only import whose title differs from exactly one
+existing book only by a subtitle ATTACHES to it (the app's standing rule);
+defer stays for audited distinctions, other non-certain pairs, and 2+
+text-certain members. Found at the U2 red gate: grok's Step-2 stop plus the
+PM trace of `tests/behavioral/test_irf_u2_import_defer.rs` c3, where
+today's road absorbed `Book: Tail` into `Book` on a manual import of `Book`.
+The same main-only comparison hides two-sided subtitle disagreements
+(latent, wave 4). v9 snapshotted beside the earlier revisions.
+
+v11 after round 10 (`review-spec-xai-r10.md`, FAIL p1=1 p2=2 p3=1 — every
+earlier round stays closed): XAI-R10-001 — v10 named the wrong lever (the
+`one_sided_subtitle_recovery` arm, `services.rs:666-676`, never fires for
+split tuples; main-only comparison is the whole mechanism) and cited
+working-tree lines; both corrected here against `c71af24a`. XAI-R10-002 —
+the handler's exact-text hint is main-only against `works.title` and takes
+the request-start snapshot's first hit by id, so AC-003(3) now pins the seed
+order. XAI-R10-003 — the census page's "parked by the road" clause is
+retracted (ST-011 and the page itself). XAI-R10-004 — § 4 wording. v10
+snapshotted.
 
 v9 after round 8 (`review-spec-xai-r8.md`, FAIL p1=1 — both r7 findings
 RESOLVED; the one finding was a leftover of the r7 fold itself: rules 4–5 of
@@ -85,7 +114,8 @@ red reproduction test (bugfix carve-out) and runs every gate independently.
   `EditionEvidence` continuation.
 - **A human-watching door flags instead of parking when the card would
   corrupt.** Until wave B fixes `GroupIdentity` and its absorption
-  archive, minimum-only manual import defers the grey and multi-member cases:
+  archive, minimum-only manual import defers the non-certain and multi-member
+  cases (a subtitle-only difference is not one of them — PO 2026-08-24):
   the screen names the existing book(s), gives an operable recovery, creates
   no review card, and leaves no state except the ordinary failure-history
   event (Q-008).
@@ -126,7 +156,7 @@ indexer, or download client is changed):
 | ST-008 | `crates/livrarr-domain/src/identity_layer/services.rs:38-64`, `crates/livrarr-server/src/identity_layer.rs:375-393,909-927`, `crates/livrarr-server/src/main.rs:115-130`, `crates/livrarr-handlers/src/identity_layer.rs:116-139` | Neither error enum has a “continuation unavailable” case. Unnamed road errors collapse to CLI `Database`; CLI errors print on stderr and exit 2. HTTP already distinguishes 409 review/probe from 400 mismatch. | Reusing an existing error variant; giving the CLI an HTTP status; allowing the new road error to collapse to Database. | high |
 | ST-009 | Every external `resolve_review` ingress, enumerated from the symbol's live references: typed route + legacy alias (`crates/livrarr-handlers/src/identity_layer.rs:60-114`), conflict resolve/dismiss (`crates/livrarr-handlers/src/identity_conflicts.rs:128-242`), inline update/merge/affirm (`crates/livrarr-handlers/src/work.rs:762-899,1066-1178,1604-1781`, calls at `crates/livrarr-handlers/src/work.rs:860,1125,1749`), and cutover CLI (`crates/livrarr-server/src/identity_layer.rs:766-872`). The other symbol references are recorder/enum pass-throughs, not doors (`crates/livrarr-server/src/identity_layer.rs:90-174`). Legacy list/detail read `work_identity_conflicts` (`crates/livrarr-handlers/src/identity_conflicts.rs:64-126`); actions load typed cards (`crates/livrarr-db/src/identity_layer.rs:1173-1218`). | Seven HTTP doors plus CLI reach one continuation. The conflict page lists a store its actions do not load; all listed rows 404 today. The three inline doors submit only `GroupIdentity`/`PendingRoute` cards minted in the same request. | Treating conflict or inline handlers as separate continuations; leaving the conflict mapper wildcard; calling a fixture-only 409 the real-page fix. | high |
 | ST-010 | `crates/livrarr-metadata/src/identity_road.rs:830-943,777-827`, `crates/livrarr-domain/src/identity_layer/services.rs:532-539`, `crates/livrarr-handlers/src/manual_import.rs:1175-1235` | Road validation requires HumanWatching + choice + owned file for manual creation; candidate title parsing rejects an empty parsed main, including nonblank punctuation/marker-only input. The current door writes the Author first. | “Nonblank” as the title rule; relying on road validation after Author writes. | high |
-| ST-011 | `crates/livrarr-handlers/src/manual_import.rs:1154-1173`, `crates/livrarr-matching/src/work_dedup.rs:48-55,80-144`, `crates/livrarr-metadata/src/identity_road.rs:243-305,389-479,1087-1098`, `crates/livrarr-db/src/identity_layer.rs:2550` | For a minimum-only item, handler dedup gets only title+author against the request-start Work snapshot. Exact text may attach; one-sided subtitle is grey. The live road group read can create, attach one text-certain member, absorb 2+, or park Review. The unique identity-v2 index makes the 2+ text-certain common tuple unreachable in an activated production DB. | Describing ISBN/ASIN/GR/HC as live dedup inputs; duplicating the road's authority rule in the handler. | high |
+| ST-011 | `crates/livrarr-handlers/src/manual_import.rs:1154-1173`, `crates/livrarr-matching/src/work_dedup.rs:18-31,48-55,80-144`, `crates/livrarr-db/src/sqlite_work.rs:323-324`, `crates/livrarr-metadata/src/identity_road.rs:243-305,389-479,790-792,1063-1068,1089-1100`, `crates/livrarr-domain/src/identity_layer/services.rs:565-612,629-676`, `crates/livrarr-db/src/identity_layer.rs:2550` (all at `c71af24a`) | For a minimum-only item, handler dedup gets only title+author against the request-start Work snapshot: `identity_absorb_match` compares the raw incoming title against `Work.title` (the stored MAIN only) and the snapshot is read in id order, so an incoming `Book` is exact against every `Book`/`Book: <x>` sibling and the FIRST by id becomes the hint, while an incoming `Book: Tail` is grey against a stored `Book` (the raw string carries the tail) and is never absorbed there. At the road's complete-group evaluator a one-sided subtitle is text-CERTAIN by construction: `candidate_core` splits the incoming title into its identity tuple (`identity_road.rs:790-792`), captured members carry split tuples, and `evaluate_match` parses only `title.main` (`services.rs:639-640`) — `Book` vs `Book: Tail` enters as `Book` vs `Book` and is `Same` before any guard runs; the `one_sided_subtitle_recovery` arm (`services.rs:666-676`, on via `strict_lost_guards()` `identity_road.rs:1063-1068`) never fires for split tuples, so turning it off changes nothing here. `authority_certain` (`identity_road.rs:1089-1100`) then holds for every pair → `AutoMerge` (`:455-463`) → absorption (`:253-275`); a lone subtitle sibling is attached and a subtitle sibling inside a 2+ cohort is absorbed (observed live 2026-08-24). The same invisibility hides two-sided subtitle disagreements (latent, wave 4). The live road group read can create, attach one text-certain member, absorb 2+, or park Review. The unique identity-v2 index (subtitle in the key) makes two IDENTICAL tuples unreachable, but a text-certain 2+ cohort IS reachable in production through subtitle siblings. The census page's clause "parked by the road's group reconciliation" (`wiki/architecture/identity-review-census.md:67-69`) is retracted by this revision. | Describing ISBN/ASIN/GR/HC as live dedup inputs; duplicating the road's authority rule in the handler; calling a one-sided subtitle grey at the road; naming the recovery guard as the lever; a door-specific notion of "same text". | high |
 | ST-012 | `crates/livrarr-db/src/identity_layer.rs:1315-1363,1438-1451,1522-1579`, `frontend/src/pages/review/ReviewPage.tsx:216-352` | `GroupIdentity::DifferentFromAll` overwrites the card's established Work with the proposal; `AttachOrMerge` absorbs without an archive. The UI exposes those two actions. | Calling the continuation correct; routing/alerting a new flow onto it; fixing AUD-P0-2/3 in wave A. | high |
 | ST-013 | All four `status='cancelled'` writers: user dismiss (`crates/livrarr-db/src/identity_layer.rs:1116-1170`), satisfied pending route (`crates/livrarr-db/src/identity_layer.rs:2732-2750`), dedup-residue heal (`crates/livrarr-db/src/identity_layer.rs:4948-4975`), sweep heal (`crates/livrarr-db/src/pool.rs:1729-1745`). Card FK/cascade: `crates/livrarr-db/migrations/082_identity_layer_foundation.sql:183-194`. | Only user dismiss has a `review-dismissal` whose actor parses as `ReviewActor`. Machine cancellations must not create tombstones. Nothing reopens a card. Deleting the card's own Work cascades it; deleting a non-anchor cohort member can leave a multi-work GroupIdentity card. | Treating every cancelled row as user intent; adopting a machine cancel; a “re-open card” action. | high |
 | ST-014 | `frontend/src/api/client.ts:33-75`, `frontend/src/pages/review/ReviewPage.tsx:153-174` | The client preserves the server message; `ConflictCard` discards it for fixed Resolve/Dismiss toasts. | Backend-only conflict refusal; a new error-body shape. | high |
@@ -271,21 +301,26 @@ claims remain wave B.
 
   1. A still-valid exact-text hint attaches and the file imports; the
      evaluator is not consulted. A stored exact-title twin therefore always
-     attaches even when a grey sibling (e.g. the same main title with a
+     attaches even when a subtitle sibling (the same main title with a
      subtitle) also exists in the library — the recovery § 3 promises
-     depends on this rule.
+     depends on this rule. The hint is the request-start snapshot's first
+     exact-main hit by id (ST-011).
   2. With no valid hint, an empty group or candidate text distinction creates
      the zero-route Work and imports.
   3. With no valid hint, a live group of EXACTLY ONE member whose pair with
-     the candidate is text-certain attaches and imports, including item 2 of
-     the same new book in one batch.
+     the candidate is text-certain at the shared evaluator attaches and
+     imports — including item 2 of the same new book in one batch, and a
+     subtitle-only variant of one existing book (PO 2026-08-24: the
+     evaluator compares split tuple mains only, so a one-sided subtitle is
+     text-certain; ST-011).
   4. With no valid hint, two or more text-certain members defer (no
      absorption).
   5. With no valid hint, an audited distinction in the group or any
-     non-certain pair, including a one-sided subtitle tail, defers (no
-     GroupIdentity card). A distinguished work reached by an exact-text hint
-     attaches under rule 1 — the flag gates the evaluator's Review, never
-     the hint (recovery § 3 promises depends on this too).
+     non-certain pair (a different main title, a volume conflict) defers (no
+     GroupIdentity card). A one-sided subtitle is NOT a non-certain pair. A
+     distinguished work reached by an exact-text hint attaches under rule 1 —
+     the flag gates the evaluator's Review, never the hint (recovery § 3
+     promises depends on this too).
 
   A Deferred/Rejected/invalid item has `status=Failed` and leaves no
   Author create/update/adoption, name variant, link task, Author route, Work,
@@ -296,7 +331,9 @@ claims remain wave B.
 
   **Exact defer copy.** Group members are ordered by stored display title
   casefold, stored author casefold, then Work id (id is only a tie-breaker and
-  is not displayed). For one member the per-item `error` is exactly:
+  is not displayed). A member's `<title>` is its stored main title followed by
+  `: <subtitle>` when the Work stores a subtitle (so `"Book: Other"` renders as
+  stored, and orders after `"Book"`). For one member the per-item `error` is exactly:
 
   `Not imported: you already have "<title>" by <author>. Choose Edit title and author for this row. To add this file to that book, enter exactly "<title>" and "<author>", then retry. To add it as a different book, enter a different main title (a different subtitle alone is not enough).`
 
@@ -460,7 +497,7 @@ No mockup is required; these are additions to existing rows/cards.
   (versioned full-loser archive), REQ-006 (one conflict authority, legacy→typed
   mapping, all-door audited Reject, producer conflict flags), and REQ-008
   (per-work GenerationClaims + versioned CLI). It also owns an explicit
-  manual-import existing-Work wire choice, replacement of U2's temporary grey/
+  manual-import existing-Work wire choice, replacement of U2's temporary non-certain/
   multi-member defer, and GroupIdentity notifications after its continuation
   is safe.
 - No frozen-scalar rewiring (fix-wave 2), cutover staging change (wave 3),
@@ -491,7 +528,7 @@ No mockup is required; these are additions to existing rows/cards.
 | Q-005 | Whole-batch 4xx or per-item invalid minimum | resolved | Existing batch 200 and per-item failure; authoritative title/file preflight before U2's write transaction. |
 | Q-006 | Refuse IdentityConflict now or keep no-op resolution | resolved | Refuse on every real legacy/typed conflict action after scope/existence but before action-specific validation; show the server reason. |
 | Q-007 | Notify every card or actionable cards only | resolved | Only a newly minted, still-pending safe kind; PendingRoute alone in wave A. |
-| Q-008 | Manual grey/absorption after unattached-card removal | resolved | **PO 2026-08-23: DEFER.** Exact singular/plural message; no card/state, including all Author-side effects; only ordinary failure history. U2's transaction makes this atomic. |
+| Q-008 | Manual grey/absorption after unattached-card removal | resolved | **PO 2026-08-23: DEFER.** Exact singular/plural message; no card/state, including all Author-side effects; only ordinary failure history. U2's transaction makes this atomic. **Amended 2026-08-24 (PO):** a subtitle-only variant of exactly one existing book ATTACHES (the road's standing rule — v9 wrongly called it grey); defer covers audited distinctions, other non-certain pairs, and 2+ text-certain members. |
 | Q-009 | Adopt pre-upgrade dismissals and how to identify later revokes | resolved | Adopt user dismissals for all three keyed kinds. Only a later parsed user PendingRoute Affirm is historically unambiguous. Ignore mutable route timestamps; conservatively adopt the irrecoverable pre-upgrade certified-edit ordering. Future edit/Affirm revokes are transactional. |
 | Q-010 | Non-`notes` CLI unknowns | resolved | Preserve each value-shape result exactly; objects cannot replace string AuthorRefs. |
 | Q-011 | Which proposals does a tombstone suppress | resolved | Equivalent machine intent only. A genuine REQ-018 choice and inline origins bypass; ListImport is classified from validated choice, not origin/interaction/click. |
@@ -543,36 +580,51 @@ No mockup is required; these are additions to existing rows/cards.
      commit regardless of position.
   3. Exact-text request-start dedup attaches; two files of one new book in one
      batch create one Work then the second live-group attaches; no card.
-     Hint-first with a grey sibling: the library holds `Book` and
-     `Book: Tail` by the same author (legal under `idx_works_identity_v2` —
-     subtitle is in the key); a minimum-only import titled exactly `Book`
-     attaches to `Book`, imports, writes no card, and emits NEITHER defer
-     sentence.
-  4. One-member grey subtitle case Deferred: `error` exactly equals REQ-003
-     singular text (no wrapper), no Author exact-hit update/re-arm and, in a
-     second case, no unambiguous-match adoption; existing Work row
-     byte-identical. Audited distinction, split by hint: a distinguished
-     `Book` (`text_distinction != "common"`) plus a minimum-only import
-     titled exactly `Book` is an exact-text hint and ATTACHES with the same
+     Hint-first with a subtitle sibling: seed the unsuffixed `Book` FIRST,
+     then `Book: Tail`, by the same author (legal under
+     `idx_works_identity_v2` — subtitle is in the key; the handler's
+     exact-text hint is main-only and takes the snapshot's first hit by id,
+     ST-011); a minimum-only import titled exactly `Book` attaches to `Book`,
+     imports, writes no card, emits NEITHER defer sentence, and leaves
+     `Book: Tail`'s row byte-identical (today's road absorbs that sibling on
+     this import — the hint-first rule is what prevents it).
+  4. One-member subtitle-sibling case ATTACHES (PO 2026-08-24): the library
+     holds `Book`; a minimum-only import titled `Book: Tail` gets no dedup
+     hint (grey at that tier), the evaluator finds exactly one text-certain
+     member, and the file attaches to `Book` and imports with no card and no
+     second Work — once with an exact-name Author (its supplied Author route
+     attached as part of the successful settlement) and once with an
+     unambiguous-match Author (adopted; no new Author row). Audited
+     distinction, split by hint: a distinguished `Book`
+     (`text_distinction != "common"`) plus a minimum-only import titled
+     exactly `Book` is an exact-text hint and ATTACHES with the same
      non-defer assertions as case 3 (recovery depends on the stored pair
      attaching); the evaluator's distinction-Review branch is covered with
      NO hint — the same distinguished `Book` plus an import titled
-     `Book: Tail` (same main, no exact match) → Deferred with the singular
-     sentence and the same no-write assertions.
-  5. Two-member text-certain group is a constructed-state test because
-     `idx_works_identity_v2` forbids it in activated production. Drive
-     the real coordinator over that fixture; exact error equals the plural
-     grammar with stable ordering and both books, with no absorption/state.
+     `Book: Tail` → Deferred with the singular sentence (no wrapper) and no
+     state delta at all: no Author exact-hit update/re-arm and, in a second
+     case, no unambiguous-match adoption; existing Work row byte-identical.
+  5. Two-member text-certain group, reachable in production: seed `Book` and
+     `Book: Other` by one Author (legal — subtitle is in the identity key);
+     a minimum-only import titled `Book: Tail` gets no hint (both stored
+     pairs are grey at the dedup tier) and the evaluator finds two
+     text-certain members. Drive the real batch door: exact error equals the
+     plural grammar with stable ordering and both books rendered as stored
+     (`"Book"`, `"Book: Other"`), with no absorption/state.
   6. Deterministic interleaving: request A acquires U2's BEGIN IMMEDIATE and
      pauses after authoritative Author/group reads for `Book`; start
-     request B for `Book: Tail` and prove it waits at begin. Release A
-     to create/commit; B then reads the committed group and defers before its
-     first write. B leaves only its failure-history event. Reverse scheduling
-     in a second test and assert whichever request defers has no residue. No
-     test-only lock replaces the production transaction.
-  7. Call ordinary `settle` directly as a compatibility/backstop
-     fixture with an existing Author and grey, then 2+ reconciliation: each is
-     Deferred before `commit_settlement`, no card/absorption/audit.
+     request B for `Book: Tail` and prove it waits at begin. Release A to
+     create/commit; B then reads the committed group, finds one text-certain
+     member, and ATTACHES to A's Work before writing anything else: exactly
+     one Work, two LibraryItems, no card, no second Work. Reverse scheduling
+     in a second test and assert the same single-Work outcome. No test-only
+     lock replaces the production transaction.
+  7. Call ordinary `settle` directly as a compatibility/backstop fixture
+     with an existing Author: an audited-distinction Review (a distinguished
+     `Book` plus `Book: Tail`) and, separately, the legal two-member cohort
+     of case 5: each is Deferred before `commit_settlement`, no
+     card/absorption/audit (today's road absorbs the cohort's other member —
+     the backstop is what prevents it).
   8. Starting from the visible singular failure in production
      `ManualImportPage`, click Edit title and author, enter the stored
      pair, save, retry through the production client: the same file attaches,

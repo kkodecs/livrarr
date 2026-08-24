@@ -1104,3 +1104,5 @@ Updated `integrations/goodreads.md` and insight 96. Settled-work author linking 
 - index.md: Architecture section +1.
 
 - 2026-08-23: identity-review-census.md extended (spec r5/r6 verification): four cancel sites, user_confirmed three writers + observed_at refresh, road-trait surface vs compile wall, import screen has no title editor.
+
+- 2026-08-24: identity-review-census.md § "Manual import: what the door actually feeds the matcher" CORRECTED — the road does not park a one-sided subtitle sibling; it is text-certain there (split tuple, mains-only `evaluate_match`), so a lone sibling attaches and one inside a 2+ cohort is absorbed (observed live; spec identity-review-fixes v11 ST-011, review r10 XAI-R10-003).

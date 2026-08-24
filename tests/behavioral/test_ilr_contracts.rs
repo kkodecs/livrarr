@@ -310,6 +310,13 @@ where
             .push(RecordedRoadCall::Resolve(command.clone()));
         self.inner.resolve_review(actor, command).await
     }
+
+    async fn settle_manual_import_minimum(
+        &self,
+        command: ilr::ManualImportMinimumCommand,
+    ) -> Result<ilr::IdentityRoadOutcome, ilr::IdentityRoadError> {
+        self.inner.settle_manual_import_minimum(command).await
+    }
 }
 
 enum EngineContract {
@@ -603,15 +610,6 @@ async fn red_road_generation_contract(contract: RoadGenerationContract) {
                 .push(command.expected_generation);
             self.commit_barrier.wait().await;
             WorkIdentityRepository::commit_settlement(&self.inner, command).await
-        }
-
-        async fn commit_unattached_import_review(
-            &self,
-            user_id: i64,
-            evidence: ilr::IdentityEvidenceBundle,
-        ) -> Result<ilr::MintedReviewCard, ilr::IdentityRepositoryError> {
-            WorkIdentityRepository::commit_unattached_import_review(&self.inner, user_id, evidence)
-                .await
         }
 
         async fn load_pending_review(
@@ -11432,20 +11430,29 @@ async fn red_missing_composition(contract: CompositionContract) {
                         "asin": null
                     }]})
                 };
-                for _ in 0..2 {
-                    let parked = call_router_json(
-                        &harness,
-                        Method::POST,
-                        "/api/v1/manualimport/import".to_string(),
-                        Some(body()),
-                    )
-                    .await;
-                    assert!(parked.status.is_success(), "manual import result envelope");
-                    assert_eq!(parked.json["results"][0]["status"], "failed");
-                    assert!(parked.json["results"][0]["error"]
-                        .as_str()
-                        .is_some_and(|error| error.contains("unattached review card")));
-                }
+                let first = call_router_json(
+                    &harness,
+                    Method::POST,
+                    "/api/v1/manualimport/import".to_string(),
+                    Some(body()),
+                )
+                .await;
+                assert!(first.status.is_success(), "manual import result envelope");
+                assert_eq!(first.json["results"][0]["status"], "imported");
+                assert_eq!(first.json["results"][0]["error"], Value::Null);
+                assert!(first.json["results"][0]["workId"].as_i64().is_some());
+                let second = call_router_json(
+                    &harness,
+                    Method::POST,
+                    "/api/v1/manualimport/import".to_string(),
+                    Some(body()),
+                )
+                .await;
+                assert!(second.status.is_success(), "manual import result envelope");
+                assert_eq!(
+                    second.json["results"][0]["status"], "skipped",
+                    "the same source path is not imported twice"
+                );
                 let works_after: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id = ?1")
                         .bind(harness.user_id)
@@ -11459,23 +11466,25 @@ async fn red_missing_composition(contract: CompositionContract) {
                         .await
                         .expect("count items after providerless import");
                 assert_eq!(
-                    works_after, works_before,
-                    "unattached review creates no Work"
+                    works_after,
+                    works_before + 1,
+                    "minimum-only create yields one Work"
                 );
                 assert_eq!(
-                    items_after, items_before,
-                    "unattached review attaches no file"
+                    items_after,
+                    items_before + 1,
+                    "minimum-only import attaches one file"
                 );
                 let cards: i64 = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM identity_review_cards \
-                      WHERE user_id = ?1 AND work_id IS NULL AND kind = ?2 AND status = 'pending'",
+                      WHERE user_id = ?1 AND kind = ?2 AND status = 'pending'",
                 )
                 .bind(harness.user_id)
                 .bind(ilr::ReviewKind::ImportIdentity.storage_code())
                 .fetch_one(harness.db.pool())
                 .await
-                .expect("count idempotent unattached import cards");
-                assert_eq!(cards, 1, "repeated outage/minimum evidence parks one card");
+                .expect("count ImportIdentity cards after minimum-only import");
+                assert_eq!(cards, 0, "minimum-only import never parks ImportIdentity");
             }
         }
         CompositionContract::ListRealRows | CompositionContract::ListRejectOwnedFile => {

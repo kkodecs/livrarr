@@ -1019,26 +1019,45 @@ async fn import_single_item<S: ManualImportHandlerContext>(
         }
     };
 
-    let work_id = match find_or_create_work(
-        state,
-        user_id,
-        item,
-        existing_works,
-        author_ol_cache,
-        default_language,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            warn!("manual import: work creation failed for {}: {e}", item.path);
-            return ImportResult {
-                path: item.path.clone(),
-                status: ImportStatus::Failed,
-                work_id: None,
-                error: Some(format!("work creation failed: {e}")),
-                media_type: Some(media_type),
-            };
+    let work_id = if is_minimum_only_item(item) {
+        match settle_minimum_only_item(state, user_id, item, existing_works).await {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(
+                    "manual import: minimum-only item failed for {}: {error}",
+                    item.path
+                );
+                return ImportResult {
+                    path: item.path.clone(),
+                    status: ImportStatus::Failed,
+                    work_id: None,
+                    error: Some(error),
+                    media_type: Some(media_type),
+                };
+            }
+        }
+    } else {
+        match find_or_create_work(
+            state,
+            user_id,
+            item,
+            existing_works,
+            author_ol_cache,
+            default_language,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                warn!("manual import: work creation failed for {}: {e}", item.path);
+                return ImportResult {
+                    path: item.path.clone(),
+                    status: ImportStatus::Failed,
+                    work_id: None,
+                    error: Some(format!("work creation failed: {e}")),
+                    media_type: Some(media_type),
+                };
+            }
         }
     };
 
@@ -1147,6 +1166,75 @@ async fn import_single_item<S: ManualImportHandlerContext>(
                 error: Some(e),
                 media_type: Some(media_type),
             }
+        }
+    }
+}
+
+fn is_minimum_only_item(item: &ImportItem) -> bool {
+    item.ol_key.trim().is_empty()
+        && item
+            .gr_key
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        && item
+            .hc_key
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        && item.isbn.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && item.asin.as_deref().map(str::trim).unwrap_or("").is_empty()
+}
+
+async fn settle_minimum_only_item<S: HasIdentityRoadService>(
+    state: &S,
+    user_id: i64,
+    item: &ImportItem,
+    existing_works: &[livrarr_domain::Work],
+) -> Result<i64, String> {
+    if livrarr_domain::identity_layer::title_parts_from_provider(item.title.clone(), None).is_err()
+    {
+        return Err("title does not parse to a non-empty identity main".to_string());
+    }
+    if item.author.trim().is_empty() {
+        return Err("author must not be blank".to_string());
+    }
+    let owned_file = owned_file_evidence(&item.path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let request_start_work_hint =
+        find_existing_work(existing_works, "", &item.title, &item.author).map(|work| work.id);
+    let author_route = item
+        .author_ol_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|raw| {
+            livrarr_domain::AuthorRouteKey::parse(livrarr_domain::AuthorProvider::OpenLibrary, raw)
+                .ok()
+        });
+    let outcome = state
+        .identity_road_service()
+        .settle_manual_import_minimum(livrarr_domain::identity_layer::ManualImportMinimumCommand {
+            user_id,
+            title: item.title.clone(),
+            author: item.author.clone(),
+            owned_file,
+            author_route,
+            request_start_work_hint,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    match outcome {
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Settled { work_id, .. } => Ok(work_id),
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Deferred { reason } => Err(reason.0),
+        livrarr_domain::identity_layer::IdentityRoadOutcome::Rejected { reason } => {
+            Err(reason.to_string())
+        }
+        livrarr_domain::identity_layer::IdentityRoadOutcome::ReviewPending { .. } => {
+            Err("manual import minimum settlement returned a review card".to_string())
         }
     }
 }

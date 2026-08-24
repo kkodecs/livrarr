@@ -16,6 +16,10 @@ type FileState = ScannedFile & {
   deleteExisting: boolean;
   importResult?: ManualImportResult;
   correctedMatch?: OlMatch;
+  manualOverride?: { title: string; author: string };
+  editing?: boolean;
+  editTitle?: string;
+  editAuthor?: string;
 };
 
 export default function ManualImportPage() {
@@ -222,32 +226,98 @@ export default function ManualImportPage() {
     const selected = files.filter((f) => f.selected && hasMatch(f));
     const groups: ManualImportItem[][] = [];
     for (const f of selected) {
-      const m = f.correctedMatch || f.match;
-      const title = m?.title ?? f.parsed?.title ?? f.filename;
-      const author = m?.author ?? f.parsed?.author ?? "";
-      const olKey = m?.olKey ?? "";
-      const language = m?.language ?? f.parsed?.language ?? undefined;
       const paths = f.groupedPaths ?? [f.path];
-      const group: ManualImportItem[] = paths.map((p) => ({
-        path: p,
-        olKey,
-        title,
-        author,
-        deleteExisting: f.deleteExisting,
-        language,
-        // #97: carry the picked match's anchors + cover so the work lands
-        // Confirmed (and gets its cover) instead of falling back to ISBN-only.
-        candidateId: m?.candidateId ?? undefined,
-        hcKey: m?.hcKey ?? undefined,
-        grKey: m?.grKey ?? undefined,
-        asin: m?.asin ?? undefined,
-        coverUrl: m?.coverUrl ?? undefined,
-        isbn: m?.isbn13 ?? undefined,
-        year: m?.year ?? undefined,
-      }));
+      const group: ManualImportItem[] = f.manualOverride
+        ? paths.map((p) => ({
+            path: p,
+            olKey: "",
+            title: f.manualOverride!.title,
+            author: f.manualOverride!.author,
+            deleteExisting: f.deleteExisting,
+          }))
+        : (() => {
+            const m = f.correctedMatch || f.match;
+            const title = m?.title ?? f.parsed?.title ?? f.filename;
+            const author = m?.author ?? f.parsed?.author ?? "";
+            const olKey = m?.olKey ?? "";
+            const language = m?.language ?? f.parsed?.language ?? undefined;
+            return paths.map((p) => ({
+              path: p,
+              olKey,
+              title,
+              author,
+              deleteExisting: f.deleteExisting,
+              language,
+              // #97: carry the picked match's anchors + cover so the work lands
+              // Confirmed (and gets its cover) instead of falling back to ISBN-only.
+              candidateId: m?.candidateId ?? undefined,
+              hcKey: m?.hcKey ?? undefined,
+              grKey: m?.grKey ?? undefined,
+              asin: m?.asin ?? undefined,
+              coverUrl: m?.coverUrl ?? undefined,
+              isbn: m?.isbn13 ?? undefined,
+              year: m?.year ?? undefined,
+            }));
+          })();
       groups.push(group);
     }
     runSequentialImport(groups);
+  };
+
+  const effectiveTitle = (f: FileState) =>
+    f.manualOverride?.title ?? f.correctedMatch?.title ?? f.match?.title ?? f.parsed?.title ?? "";
+  const effectiveAuthor = (f: FileState) =>
+    f.manualOverride?.author ??
+    f.correctedMatch?.author ??
+    f.match?.author ??
+    f.parsed?.author ??
+    "";
+
+  const openTitleAuthorEditor = (idx: number) => {
+    setFiles((prev) =>
+      prev.map((f, i) =>
+        i === idx
+          ? {
+              ...f,
+              editing: true,
+              editTitle: effectiveTitle(f),
+              editAuthor: effectiveAuthor(f),
+            }
+          : f,
+      ),
+    );
+  };
+
+  const cancelTitleAuthorEditor = (idx: number) => {
+    setFiles((prev) =>
+      prev.map((f, i) =>
+        i === idx ? { ...f, editing: false, editTitle: undefined, editAuthor: undefined } : f,
+      ),
+    );
+  };
+
+  const saveTitleAuthorEditor = (idx: number) => {
+    setFiles((prev) =>
+      prev.map((f, i) => {
+        if (i !== idx) return f;
+        const title = (f.editTitle ?? "").trim();
+        const author = (f.editAuthor ?? "").trim();
+        if (!title || !author) {
+          return f;
+        }
+        return {
+          ...f,
+          editing: false,
+          editTitle: undefined,
+          editAuthor: undefined,
+          manualOverride: { title, author },
+          match: null,
+          correctedMatch: undefined,
+          existingWorkId: null,
+          importResult: undefined,
+        };
+      }),
+    );
   };
 
   const handleInlineSearch = (idx: number) => {
@@ -311,9 +381,15 @@ export default function ManualImportPage() {
   };
 
   const hasMatch = (f: FileState) =>
-    !!(f.correctedMatch || f.match || (f.parsed?.title && f.parsed?.author));
+    !!(
+      f.manualOverride ||
+      f.correctedMatch ||
+      f.match ||
+      (f.parsed?.title && f.parsed?.author)
+    );
 
-  const effectiveMatch = (f: FileState) => f.correctedMatch || f.match;
+  const effectiveMatch = (f: FileState) =>
+    f.manualOverride ? null : f.correctedMatch || f.match;
 
   const selectedCount = files.filter((f) => f.selected).length;
   const selectableCount = files.filter((f) => hasMatch(f) && !isImported(f)).length;
@@ -525,7 +601,11 @@ export default function ManualImportPage() {
 
                         {/* Match */}
                         <td className="px-3 py-2">
-                          {match ? (
+                          {f.manualOverride ? (
+                            <div className="text-xs text-zinc-200">
+                              {f.manualOverride.title} — {f.manualOverride.author}
+                            </div>
+                          ) : match ? (
                             <div>
                               <button
                                 onClick={() => handleInlineSearch(idx)}
@@ -601,6 +681,75 @@ export default function ManualImportPage() {
                             >
                               Search...
                             </button>
+                          )}
+
+                          {!imported && (
+                            <div className="mt-2">
+                              {f.editing ? (
+                                <div className="space-y-2 rounded border border-border bg-zinc-900 p-2">
+                                  <label className="block text-xs text-muted">
+                                    Title
+                                    <input
+                                      type="text"
+                                      aria-label="Title"
+                                      value={f.editTitle ?? ""}
+                                      onChange={(e) =>
+                                        setFiles((prev) =>
+                                          prev.map((row, rowIdx) =>
+                                            rowIdx === idx
+                                              ? { ...row, editTitle: e.target.value }
+                                              : row,
+                                          ),
+                                        )
+                                      }
+                                      className="mt-1 w-full rounded border border-border bg-zinc-800 px-2 py-1 text-xs text-zinc-200"
+                                    />
+                                  </label>
+                                  <label className="block text-xs text-muted">
+                                    Author
+                                    <input
+                                      type="text"
+                                      aria-label="Author"
+                                      value={f.editAuthor ?? ""}
+                                      onChange={(e) =>
+                                        setFiles((prev) =>
+                                          prev.map((row, rowIdx) =>
+                                            rowIdx === idx
+                                              ? { ...row, editAuthor: e.target.value }
+                                              : row,
+                                          ),
+                                        )
+                                      }
+                                      className="mt-1 w-full rounded border border-border bg-zinc-800 px-2 py-1 text-xs text-zinc-200"
+                                    />
+                                  </label>
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => cancelTitleAuthorEditor(idx)}
+                                      className="text-xs text-muted hover:text-zinc-200"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => saveTitleAuthorEditor(idx)}
+                                      className="text-xs text-blue-400 hover:underline"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => openTitleAuthorEditor(idx)}
+                                  className="text-xs text-blue-400 hover:underline"
+                                >
+                                  Edit title and author
+                                </button>
+                              )}
+                            </div>
                           )}
 
                           {/* Inline search dropdown */}

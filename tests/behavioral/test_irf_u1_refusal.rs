@@ -623,28 +623,35 @@ async fn mint_refused_card(db: &SqliteDb, user_id: i64, kind: ilr::ReviewKind) -
             pending_card(db, user_id, kind).await
         }
         ilr::ReviewKind::ImportIdentity => {
-            // Production mint on today's tree: U2 later removes this sole
-            // unattached ManualImport writer, but U1 must refuse its rows now.
-            let minted = WorkIdentityRepository::commit_unattached_import_review(
+            // After U2, ImportIdentity has no production producer and this
+            // card exists only to preserve U1's continuation-refusal coverage.
+            let (_, author_id) = seed_work(db, user_id, "import-identity").await;
+            let evidence = ilr::IdentityEvidenceBundle {
+                user_choice: None,
+                owned_files: vec![],
+                provider_identity: vec![],
+                minimum: Some(ilr::MinimumWorkEvidence {
+                    title: "U1 parked import".to_string(),
+                    authors: vec![],
+                }),
+            };
+            let card = ilr::SettlementReviewCard::ImportIdentity {
+                work_id: None,
+                evidence,
+            };
+            let n = CASE_ID.fetch_add(1, Ordering::Relaxed);
+            let committed = WorkIdentityRepository::commit_settlement(
                 db,
-                user_id,
-                ilr::IdentityEvidenceBundle {
-                    user_choice: None,
-                    owned_files: vec![],
-                    provider_identity: vec![],
-                    minimum: Some(ilr::MinimumWorkEvidence {
-                        title: "U1 parked import".to_string(),
-                        authors: vec![],
-                    }),
-                },
+                settlement_commit(user_id, author_id, &format!("U1 import identity {n}"), card),
             )
             .await
-            .expect("production ImportIdentity writer");
+            .expect("commit serialized compatibility ImportIdentity card");
+            let minted = committed.review_cards[0];
             MintedRefusal {
                 kind,
                 card_id: minted.id,
                 generation: minted.generation,
-                work_id: None,
+                work_id: Some(committed.identity.own_work_id),
             }
         }
         ilr::ReviewKind::IdentityConflict
@@ -932,6 +939,38 @@ async fn assert_direct_road_refusal(kind: ilr::ReviewKind) {
     assert_eq!(
         user_state_snapshot(&harness.db, harness.user_id).await,
         before
+    );
+}
+
+#[tokio::test]
+async fn sqlite_pending_route_road_refuses_import_identity_without_delta() {
+    let harness = build_route_harness().await;
+    let card = mint_refused_card(
+        &harness.db,
+        harness.user_id,
+        ilr::ReviewKind::ImportIdentity,
+    )
+    .await;
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
+    let road = livrarr_behavioral::stubs::SqlitePendingRouteRoad::new(harness.db.clone());
+    let result = IdentityRoadService::resolve_review(
+        &road,
+        ReviewActor::AuthenticatedUser {
+            user_id: harness.user_id,
+        },
+        refusal_command(&card),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(ilr::IdentityRoadError::ContinuationUnavailable {
+            kind: ilr::ReviewKind::ImportIdentity
+        })
+    ));
+    assert_eq!(
+        user_state_snapshot(&harness.db, harness.user_id).await,
+        before,
+        "refused-kind regression through SqlitePendingRouteRoad writes nothing"
     );
 }
 
