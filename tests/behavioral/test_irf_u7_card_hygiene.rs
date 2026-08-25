@@ -1559,7 +1559,9 @@ async fn seed_title_heal_collision(db: &SqliteDb, user_id: i64) -> (i64, i64, i6
     (author.id, first.id, second.id)
 }
 
-// RED-UNTIL-U7: today startup title heal only checks for an equivalent PENDING payload (and therefore re-mints a GroupIdentity card the user cancelled); mint/reuse never traverses the shared authority.
+// U7 reuse baseline: a still-pending startup-heal GroupIdentity card is reused
+// on the next boot, and a changed-cohort key mints. U5 owns Dismiss/replay
+// suppression (`startup_heal_suppresses_on_second_boot_but_changed_cohort_key_mints`).
 #[tokio::test]
 async fn second_boot_reuses_startup_heal_card_and_changed_cohort_members_mint() {
     let _serial = U7_TRACE_LOCK.lock().await;
@@ -1842,6 +1844,13 @@ async fn pre_u7_equivalent_duplicates_collapse_oldest_wins_without_review_actor(
     .await
     .expect("count ReviewActor dismissals");
     assert_eq!(dismissals, 0);
+    let ledger: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM identity_review_dismissals WHERE user_id=?1")
+            .bind(user_id)
+            .fetch_one(db.pool())
+            .await
+            .expect("machine duplicate cleanup writes no dismissal ledger");
+    assert_eq!(ledger, 0);
     assert!(notification_rows(&db, user_id).await.is_empty());
 
     let trace = take_mint_trace();

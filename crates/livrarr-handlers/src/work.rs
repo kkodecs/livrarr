@@ -969,9 +969,9 @@ fn map_identity_repository_error(
         IdentityRepositoryError::UnauthorizedScope => ApiError::Forbidden,
         IdentityRepositoryError::InvalidResolution => ApiError::BadRequest(error.to_string()),
         IdentityRepositoryError::Cancelled => ApiError::ServiceUnavailable,
-        IdentityRepositoryError::AtomicRollback | IdentityRepositoryError::Database(_) => {
-            ApiError::Internal(error.to_string())
-        }
+        IdentityRepositoryError::AtomicRollback
+        | IdentityRepositoryError::Database(_)
+        | IdentityRepositoryError::StandingDismissal => ApiError::Internal(error.to_string()),
     }
 }
 
@@ -1356,8 +1356,13 @@ pub async fn retry_all_incomplete<
         let _bulk_guard = bulk_guard;
         match s.work_service().retry_all_incomplete(user_id).await {
             Ok(mut summary) => {
-                for (work_id, handoff) in std::mem::take(&mut summary.route_handoffs) {
-                    if let Err(error) = s
+                for (work_id, handoff, prior_status) in std::mem::take(&mut summary.route_handoffs)
+                {
+                    // OAI-U5-201: decide this Work's final status only after
+                    // its ConvergenceVisit handoff resolves (spec-v11 AC-005
+                    // line 664) — never from the pre-handoff refresh
+                    // snapshot.
+                    match s
                         .identity_road_service()
                         .apply_captured_route_handoff(
                             user_id,
@@ -1367,7 +1372,42 @@ pub async fn retry_all_incomplete<
                         )
                         .await
                     {
-                        tracing::warn!(work_id, "retry route handoff failed: {error}");
+                        Ok(Some(
+                            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                                work_id: settled_work_id,
+                                ..
+                            },
+                        )) if settled_work_id == work_id => {
+                            // Settled for this same Work: retain the
+                            // successful Enriched/Thin status `refresh`
+                            // already persisted.
+                            summary.recovered += 1;
+                        }
+                        other => {
+                            // None, Deferred, ReviewPending, a wrong-Work
+                            // settlement, or an error: this Work stays
+                            // incomplete. Restore its recorded status
+                            // through the one narrow WorkService persistence
+                            // operation, after the handoff has resolved.
+                            if let Err(error) = &other {
+                                tracing::warn!(work_id, "retry route handoff failed: {error}");
+                            }
+                            if let Err(e) = s
+                                .work_service()
+                                .restore_incomplete_enrichment_status(
+                                    user_id,
+                                    work_id,
+                                    prior_status,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    work_id,
+                                    "retry-incomplete status restore failed: {e}"
+                                );
+                            }
+                            summary.still_incomplete += 1;
+                        }
                     }
                 }
                 if let Err(e) = s

@@ -158,6 +158,8 @@ fn map_identity_repository_error(error: IdentityRepositoryError) -> ApiError {
         | IdentityRepositoryError::InvalidResolution => ApiError::BadRequest(error.to_string()),
         IdentityRepositoryError::Cancelled => ApiError::ServiceUnavailable,
         IdentityRepositoryError::Database(message) => ApiError::Internal(message),
-        IdentityRepositoryError::AtomicRollback => ApiError::Internal(error.to_string()),
+        IdentityRepositoryError::AtomicRollback | IdentityRepositoryError::StandingDismissal => {
+            ApiError::Internal(error.to_string())
+        }
     }
 }

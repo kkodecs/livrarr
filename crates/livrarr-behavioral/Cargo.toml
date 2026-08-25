@@ -692,3 +692,7 @@ path = "../../tests/behavioral/test_irf_u2_import_defer.rs"
 [[test]]
 name = "test_irf_u7_card_hygiene"
 path = "../../tests/behavioral/test_irf_u7_card_hygiene.rs"
+
+[[test]]
+name = "test_irf_u5_durable_dismissal"
+path = "../../tests/behavioral/test_irf_u5_durable_dismissal.rs"

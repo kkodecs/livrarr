@@ -122,9 +122,16 @@ pub struct RetrySummary {
     pub recovered: usize,
     /// Works still incomplete after the pass (left for a later retry).
     pub still_incomplete: usize,
-    /// Non-serialized machine handoffs consumed by the Retry-All handler.
+    /// Non-serialized machine handoffs consumed by the Retry-All handler,
+    /// paired with each Work's prior incomplete `enrichment_status` so the
+    /// handler can restore it if the handoff does not settle for that same
+    /// Work (OAI-U5-201 / spec-v11 AC-005 line 664).
     #[serde(skip)]
-    pub route_handoffs: Vec<(WorkId, crate::identity_layer::CapturedRouteHandoff)>,
+    pub route_handoffs: Vec<(
+        WorkId,
+        crate::identity_layer::CapturedRouteHandoff,
+        EnrichmentStatus,
+    )>,
 }
 
 // Dead: bulk refresh is implemented at the handler layer
@@ -469,6 +476,22 @@ pub trait WorkService: Send + Sync {
     /// Replaces the removed `enrichment_retry_tick`.
     async fn retry_all_incomplete(&self, user_id: UserId)
         -> Result<RetrySummary, WorkServiceError>;
+    /// Retry-All-only persistence op (OAI-U5-201 / spec-v11 AC-005 line 664):
+    /// after the Retry-All handler awaits a Work's ConvergenceVisit handoff
+    /// and finds it did not settle for that same Work, this restores the
+    /// Work's recorded incomplete `enrichment_status`. Never called by
+    /// `refresh`, `EnrichmentPass`, or `ManualRefresh`, which keep the
+    /// successful status regardless of the handoff outcome. Legacy/test
+    /// services may keep the no-op default.
+    fn restore_incomplete_enrichment_status(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        status: EnrichmentStatus,
+    ) -> impl std::future::Future<Output = Result<(), WorkServiceError>> + Send {
+        let _ = (user_id, work_id, status);
+        async move { Ok(()) }
+    }
     // Dead: bulk refresh is implemented at the handler layer
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
     // Restore here only if the spawn pattern is ever moved into services.

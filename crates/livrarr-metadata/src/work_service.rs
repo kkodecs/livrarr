@@ -1999,6 +1999,28 @@ where
         crate::convergence_service::retry_all_incomplete(self, user_id).await
     }
 
+    /// OAI-U5-201: the one write the Retry-All producer owns.
+    /// `update_work_enrichment`'s COALESCE update leaves every other field
+    /// untouched; only `enrichment_status` (and `enriched_at`) changes.
+    async fn restore_incomplete_enrichment_status(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        status: EnrichmentStatus,
+    ) -> Result<(), WorkServiceError> {
+        self.db
+            .update_work_enrichment(
+                user_id,
+                work_id,
+                UpdateWorkEnrichmentDbRequest {
+                    enrichment_status: status,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
     // Dead: bulk refresh is implemented at the handler layer
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g
     // (handler-level spawning for long-running background work). This stub
@@ -3896,6 +3918,13 @@ where
                 },
             )
         });
+        // A pending route handoff does not, by itself, make this pass's
+        // result incomplete: the handoff's own outcome (settled, or a true
+        // all-suppressed no-op) is what determines whether the identity is
+        // resolved, and that is not known yet here. Reverting the
+        // just-computed successful status pre-emptively — before the
+        // handoff is even attempted — used to leave a genuinely successful
+        // enrichment stuck at its old Failed/Unenriched status.
         UnifiedEnrichmentOutcome {
             enrichment_status: final_status,
             identity_not_found,

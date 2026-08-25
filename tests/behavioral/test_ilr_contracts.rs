@@ -9404,6 +9404,25 @@ async fn review_card_dismissal_is_scoped_audited_and_generation_neutral() {
     .await
     .expect("dismissal audit");
     assert_eq!(audit_count, 1);
+    let ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_review_dismissals \
+          WHERE user_id=?1 AND revoked_at IS NULL AND key_version=1",
+    )
+    .bind(harness.user_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("keyed Dismiss writes an active v1 ledger row");
+    assert_eq!(ledger, 1);
+    let audit_payload: String = sqlx::query_scalar(
+        "SELECT payload FROM identity_audit_events \
+          WHERE user_id=?1 AND work_id=?2 AND event_kind='review-dismissal' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(harness.user_id)
+    .bind(work_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read keyed dismissal audit payload");
+    assert!(audit_payload.contains(&card_id.to_string()));
 }
 
 // Bug reproduction: identity-layer-rewrite — a pending GroupIdentity proposal
@@ -9600,6 +9619,16 @@ async fn red_group_identity_stale_card() {
             .await
             .expect("dismiss invalid proposal");
     assert_eq!(invalid_status, "cancelled");
+    let ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_review_dismissals \
+          WHERE user_id=?1 AND source_card_id=?2 AND revoked_at IS NULL",
+    )
+    .bind(harness.user_id)
+    .bind(invalid_card_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("keyed stale-card Dismiss writes a ledger row");
+    assert_eq!(ledger, 1);
 }
 
 async fn affirm_collision_is_structured_and_writes_nothing() {
@@ -15546,6 +15575,26 @@ async fn round15_pending_route_satisfaction_noop_and_foreign_owner_lifecycle() {
     )
     .await;
     assert_eq!(dismissed.status, StatusCode::NO_CONTENT);
+    let ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_review_dismissals \
+          WHERE user_id=?1 AND source_card_id=?2 AND revoked_at IS NULL",
+    )
+    .bind(harness.user_id)
+    .bind(foreign_card.id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("keyed foreign-owner Dismiss writes a ledger row");
+    assert_eq!(ledger, 1);
+    let machine_ledger: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM identity_review_dismissals d \
+          JOIN identity_audit_events a ON a.payload LIKE '%card_id=' || d.source_card_id || ';%' \
+         WHERE d.user_id=?1 AND a.actor='identity-engine'",
+    )
+    .bind(harness.user_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("machine satisfied-route cancellation remains ledger-free");
+    assert_eq!(machine_ledger, 0);
 }
 
 // Bug reproduction: identity-layer-rewrite round 15 / AC-025(a).

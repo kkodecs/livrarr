@@ -15,6 +15,7 @@
 pub mod conflict;
 pub mod contributor;
 pub mod cover;
+pub mod dismissal;
 pub mod door;
 pub mod edition;
 pub mod matching;
@@ -30,6 +31,7 @@ pub mod title;
 pub use conflict::*;
 pub use contributor::*;
 pub use cover::*;
+pub use dismissal::*;
 pub use door::*;
 pub use edition::*;
 pub use matching::*;

@@ -494,7 +494,14 @@ where
         // Low: unattended retry-all-incomplete sweep (B4 table).
         if let Ok(refresh) = svc.refresh(user_id, work.id, RefreshSurface::Bulk).await {
             if let Some(handoff) = refresh.route_handoff {
-                route_handoffs.push((work.id, handoff));
+                // OAI-U5-201: this Work's fate is undetermined until the
+                // registered Retry-All caller resolves the ConvergenceVisit
+                // handoff. Carry its prior incomplete status so the caller
+                // can restore it if the handoff does not settle for this
+                // same Work; do not declare recovery from this pre-handoff
+                // snapshot (spec-v11 AC-005 line 664).
+                route_handoffs.push((work.id, handoff, work.enrichment_status));
+                continue;
             }
             if let Ok(after) = svc.db.get_work(user_id, work.id).await {
                 let still_incomplete = matches!(
@@ -509,10 +516,17 @@ where
         }
     }
 
+    // A refresh() error or a post-refresh get_work() error leaves a work
+    // counted in neither `recovered` nor `route_handoffs`, so it still lands
+    // in `still_incomplete` below via subtraction — unchanged from before
+    // OAI-U5-201. Handoff-bearing works are excluded from `recovered` here
+    // and from this subtraction (via route_handoffs.len()); the registered
+    // Retry-All caller finalizes their recovered/still_incomplete split only
+    // after each handoff resolves (spec-v11 AC-005 line 664).
     Ok(RetrySummary {
         total,
         recovered,
-        still_incomplete: total - recovered,
+        still_incomplete: total - recovered - route_handoffs.len(),
         route_handoffs,
     })
 }

@@ -2335,6 +2335,15 @@ async fn apply_identity_edit_in_tx(
         .await?;
     }
 
+    crate::identity_layer::revoke_identity_review_dismissals(
+        tx,
+        user_id,
+        work_id,
+        "certified identity edit",
+    )
+    .await
+    .map_err(|error| EditTxFailure::Sqlx(sqlx::Error::Protocol(error.to_string())))?;
+
     Ok(())
 }
 

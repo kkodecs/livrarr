@@ -108,6 +108,8 @@ pub enum IdentityRepositoryError {
     ReviewProposalInvalidated(String),
     #[error("cancelled")]
     Cancelled,
+    #[error("standing dismissal")]
+    StandingDismissal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]

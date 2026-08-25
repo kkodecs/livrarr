@@ -1063,33 +1063,6 @@ where
                 },
             );
 
-            if let Some(existing) = matched {
-                match self
-                    .db
-                    .link_work_to_series(
-                        user_id,
-                        LinkWorkToSeriesRequest {
-                            work_id: existing.id,
-                            series_id,
-                            series_work_count: series.work_count,
-                            series_name: series_name.clone(),
-                            series_position: book.position,
-                            monitor_ebook,
-                            monitor_audiobook,
-                        },
-                    )
-                    .await
-                {
-                    Ok(_) => linked += 1,
-                    Err(e) => tracing::warn!(
-                        work_id = existing.id,
-                        series_id = series_id,
-                        "series worker: failed to link existing work to series: {e}"
-                    ),
-                }
-                continue;
-            }
-
             let provider_route = (!book.gr_key.trim().is_empty()).then(|| {
                 livrarr_domain::identity_layer::ProviderIdentityEvidence {
                     provider: livrarr_domain::identity_layer::IdentityProvider::Goodreads,
@@ -1118,6 +1091,83 @@ where
                     authors: vec![author.id],
                 }
             });
+
+            if let Some(existing) = matched {
+                // `find_matching_work` absorbed on `existing`'s OWN
+                // confirmed provider key (never on text alone) exactly when
+                // that key already equals this book's key — the same
+                // equality its work-key tier used. Bind only that case: the
+                // road can settle directly against the Work we already know
+                // owns this identity. A text-tier match stays unbound below
+                // so the road's own full reconciliation — and any standing
+                // dismissal on the proposal it raises — still applies,
+                // exactly like the no-match branch further down.
+                let confirmed_provider_key_match = !book.gr_key.trim().is_empty()
+                    && existing.gr_key.as_deref() == Some(book.gr_key.as_str());
+                let road_request = livrarr_domain::identity_layer::IdentityRoadRequest {
+                    user_id: author.user_id,
+                    origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+                        livrarr_domain::identity_layer::DoorKind::SeriesMonitor,
+                    ),
+                    evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                        user_choice: None,
+                        owned_files: Vec::new(),
+                        provider_identity: provider_route.clone().into_iter().collect(),
+                        minimum: minimum.clone(),
+                    },
+                    interaction:
+                        livrarr_domain::identity_layer::IdentityRoadInteraction::MachineAlone,
+                    existing_work_id: confirmed_provider_key_match.then_some(existing.id),
+                };
+                match self.identity_road.settle(road_request).await {
+                    None => {}
+                    Some(Ok(livrarr_domain::identity_layer::IdentityRoadOutcome::Settled {
+                        work_id,
+                        ..
+                    })) if work_id == existing.id => {}
+                    Some(Ok(other)) => {
+                        tracing::warn!(
+                            title = %book.title,
+                            outcome = ?other,
+                            "series identity road did not settle work"
+                        );
+                        continue;
+                    }
+                    Some(Err(error)) => {
+                        tracing::warn!(
+                            title = %book.title,
+                            %error,
+                            "series identity road failed"
+                        );
+                        continue;
+                    }
+                }
+                match self
+                    .db
+                    .link_work_to_series(
+                        user_id,
+                        LinkWorkToSeriesRequest {
+                            work_id: existing.id,
+                            series_id,
+                            series_work_count: series.work_count,
+                            series_name: series_name.clone(),
+                            series_position: book.position,
+                            monitor_ebook,
+                            monitor_audiobook,
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => linked += 1,
+                    Err(e) => tracing::warn!(
+                        work_id = existing.id,
+                        series_id = series_id,
+                        "series worker: failed to link existing work to series: {e}"
+                    ),
+                }
+                continue;
+            }
+
             let road_request = livrarr_domain::identity_layer::IdentityRoadRequest {
                 user_id: author.user_id,
                 origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(

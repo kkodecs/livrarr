@@ -316,8 +316,7 @@ where
             user_id,
             origin: ilr::IdentityRoadOrigin::CreationDoor(ilr::DoorKind::ListImport),
             evidence: ilr::IdentityEvidenceBundle {
-                user_choice: anchorless
-                    .then(|| ilr::UserIdentityChoice::ExplicitCreate(minimum.clone())),
+                user_choice: None,
                 owned_files: Vec::new(),
                 provider_identity,
                 minimum: anchorless.then_some(minimum),

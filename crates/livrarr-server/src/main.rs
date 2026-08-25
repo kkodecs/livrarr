@@ -801,6 +801,15 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
         }
     }
 
+    match livrarr_db::pool::adopt_identity_review_dismissals(&pool).await {
+        Ok(()) => info!("identity review-dismissal adoption complete"),
+        Err(error) => {
+            error!("identity review-dismissal adoption failed: {error}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    }
+
     // Runtime data policy heal: migrations 082-084 remain immutable. Exact
     // Extracted provider parentheticals are repaired transactionally after F2
     // activation; collision cohorts become ordinary GroupIdentity reviews.

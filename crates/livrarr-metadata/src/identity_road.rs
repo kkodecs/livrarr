@@ -6,13 +6,13 @@
 use livrarr_domain::identity_layer::{
     complete_group_member, evaluate_captured_group, evaluate_match, format_manual_import_defer,
     require_continuation, title_parts_from_provider, AuthorInheritanceOutcome, CapturedIdentity,
-    CompleteGroupCandidate, CompleteGroupEvaluation, DirectionalMatchVerdicts, EditionId,
-    EditionRepository, EvidenceProvenance, IdentityRoadError, IdentityRoadInteraction,
-    IdentityRoadOrigin, IdentityRoadOutcome, IdentityRoadRequest, IdentityRoadService,
-    IdentityTitleTuple, LostMatchGuardSet, ManualImportMinimumCommand, ProviderIdentityEvidence,
-    ReviewActor, ReviewResolutionCommand, RouteKey, RouteOwner, RouteProvenance, SettlementCommit,
-    SettlementReviewCard, UserIdentityChoice, WorkContributor, WorkIdentityEvidence,
-    WorkIdentityRepository, WorkRoute, WorkRouteState, WrongMergeGuardSet,
+    CompleteGroupCandidate, CompleteGroupEvaluation, DeferReason, DirectionalMatchVerdicts,
+    EditionId, EditionRepository, EvidenceProvenance, IdentityRepositoryError, IdentityRoadError,
+    IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome, IdentityRoadRequest,
+    IdentityRoadService, IdentityTitleTuple, LostMatchGuardSet, ManualImportMinimumCommand,
+    ProviderIdentityEvidence, ReviewActor, ReviewResolutionCommand, RouteKey, RouteOwner,
+    RouteProvenance, SettlementCommit, SettlementReviewCard, UserIdentityChoice, WorkContributor,
+    WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState, WrongMergeGuardSet,
 };
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
@@ -330,7 +330,7 @@ where
             }
         }
 
-        let committed = self
+        let committed = match self
             .identity_repository
             .commit_settlement_with_review_context(
                 SettlementCommit {
@@ -355,7 +355,15 @@ where
                 request.evidence.user_choice.is_some(),
             )
             .await
-            .map_err(map_repository_error)?;
+        {
+            Ok(committed) => committed,
+            Err(IdentityRepositoryError::StandingDismissal) => {
+                return Ok(IdentityRoadOutcome::Deferred {
+                    reason: DeferReason("standing dismissal".to_string()),
+                });
+            }
+            Err(error) => return Err(map_repository_error(error)),
+        };
         if let Some(card) = committed.review_cards.first() {
             return Ok(IdentityRoadOutcome::ReviewPending {
                 review_id: card.id,
@@ -646,7 +654,7 @@ where
             let mut first = None;
             for route in proposals {
                 let provider = route.provider.clone();
-                let minted = self
+                match self
                     .identity_repository
                     .commit_pending_route_review_with_review_context(
                         user_id,
@@ -660,8 +668,13 @@ where
                         false,
                     )
                     .await
-                    .map_err(map_repository_error)?;
-                first.get_or_insert((minted, provider));
+                {
+                    Ok(minted) => {
+                        first.get_or_insert((minted, provider));
+                    }
+                    Err(IdentityRepositoryError::StandingDismissal) => {}
+                    Err(error) => return Err(map_repository_error(error)),
+                }
             }
             return Ok(
                 first.map(|(card, provider)| IdentityRoadOutcome::ReviewPending {
@@ -673,20 +686,71 @@ where
                 }),
             );
         }
-        self.settle(IdentityRoadRequest {
-            user_id,
-            origin: trigger,
-            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
-                user_choice: None,
-                owned_files: Vec::new(),
-                provider_identity: handoff.provider_identity,
-                minimum: None,
-            },
-            interaction: IdentityRoadInteraction::MachineAlone,
-            existing_work_id: Some(work_id),
-        })
-        .await
-        .map(Some)
+        let proposals = handoff.route_proposals.clone();
+        let provider_identity = handoff.provider_identity.clone();
+        match self
+            .settle(IdentityRoadRequest {
+                user_id,
+                origin: trigger.clone(),
+                evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                    user_choice: None,
+                    owned_files: Vec::new(),
+                    provider_identity: provider_identity.clone(),
+                    minimum: None,
+                },
+                interaction: IdentityRoadInteraction::MachineAlone,
+                existing_work_id: Some(work_id),
+            })
+            .await
+        {
+            Ok(IdentityRoadOutcome::Deferred { reason }) if reason.0 == "standing dismissal" => {
+                let mut routes = proposals;
+                for evidence in provider_identity {
+                    routes.push(evidence.route);
+                }
+                // Track the first minted/reused sibling exactly as the
+                // proposal-only branch above does: a changed-key route that
+                // survives suppression must still report its ReviewPending
+                // card. `None` is reserved for every candidate suppressed
+                // (or none proposed at all).
+                let mut first = None;
+                for route in routes {
+                    let provider = route.provider.clone();
+                    match self
+                        .identity_repository
+                        .commit_pending_route_review_with_review_context(
+                            user_id,
+                            work_id,
+                            snapshot.identity_generation,
+                            livrarr_domain::identity_layer::ParkedRouteCandidate {
+                                route,
+                                proposed_owner: RouteOwner::Work(work_id),
+                            },
+                            trigger.clone(),
+                            false,
+                        )
+                        .await
+                    {
+                        Ok(minted) => {
+                            first.get_or_insert((minted, provider));
+                        }
+                        Err(IdentityRepositoryError::StandingDismissal) => {}
+                        Err(error) => return Err(map_repository_error(error)),
+                    }
+                }
+                Ok(
+                    first.map(|(card, provider)| IdentityRoadOutcome::ReviewPending {
+                        review_id: card.id,
+                        kind: card.kind,
+                        unattached: false,
+                        expected_generation: card.generation,
+                        provenance: EvidenceProvenance::Provider(provider),
+                    }),
+                )
+            }
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn settle_manual_import_minimum(
@@ -892,6 +956,22 @@ fn validate_road_request(request: &IdentityRoadRequest) -> Result<(), IdentityRo
                         && (has_file || (has_provider && !has_minimum))
                 }
             }
+        }
+        // SeriesMonitor's confirmed-provider-key existing-match: the same
+        // machine evidence shape as the no-match branch above, but
+        // explicitly bound to the Work the caller already confirmed owns
+        // this exact provider key, so `settle` reconciles against that one
+        // Work instead of running its own general (title/author) search
+        // unbound. A text-tier (not provider-key-confirmed) match stays
+        // unbound, above, so its own standing dismissal still applies.
+        IdentityRoadOrigin::CreationDoor(
+            livrarr_domain::identity_layer::DoorKind::SeriesMonitor,
+        ) if request.existing_work_id.is_some() => {
+            request.interaction == IdentityRoadInteraction::MachineAlone
+                && !has_choice
+                && !has_file
+                && has_provider
+                && !has_minimum
         }
         IdentityRoadOrigin::EnrichmentPass
         | IdentityRoadOrigin::ManualRefresh

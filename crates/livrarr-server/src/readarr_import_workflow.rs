@@ -217,6 +217,10 @@ impl LiveReadarrImportWorkflow {
         let author_map = HashMap::from([(author.id, &author)]);
         let editions_by_book = HashMap::new();
         let book_files_by_book = HashMap::new();
+        // The progress record is shared across every book a test drives
+        // through this helper; only errors appended while processing THIS
+        // book may be attributed to it, never an earlier book's leftovers.
+        let errors_before = runner.progress().lock().await.errors.len();
         runner
             .process_works(
                 &[&book],
@@ -226,11 +230,18 @@ impl LiveReadarrImportWorkflow {
                 "",
             )
             .await?;
-        runner
-            .work_map_rd
-            .get(&book.id)
-            .copied()
-            .ok_or_else(|| "Readarr process_works item did not produce a Work".to_string())
+        if let Some(work_id) = runner.work_map_rd.get(&book.id).copied() {
+            Ok(work_id)
+        } else {
+            let errors = runner.progress().lock().await.errors.clone();
+            Err(errors
+                .into_iter()
+                .skip(errors_before)
+                .find(|error| {
+                    error.contains("did not settle") || error.contains("standing dismissal")
+                })
+                .unwrap_or_else(|| "Readarr process_works item did not produce a Work".to_string()))
+        }
     }
 
     /// Establish and protocol-verify a Readarr client from a raw,

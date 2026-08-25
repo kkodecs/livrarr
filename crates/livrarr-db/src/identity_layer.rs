@@ -13,10 +13,10 @@ use livrarr_domain::identity_layer::{
     IdentityMigrationReport, IdentityProvider, IdentityRepositoryError, IdentityRoadOrigin,
     IdentityRoadOutcome, IdentityStatus, MachineSubtitleProjection, ManualImportMinimumCommand,
     MintedReviewCard, PendingReviewCard, ResolveIdentityConflictCommand, ReviewActor,
-    ReviewContinuationOutcome, ReviewKind, ReviewResolutionCommand, RouteKey, RouteKind,
-    RouteOwner, RouteProvenance, SettlementCommit, SettlementCommitOutcome, SettlementReviewCard,
-    SnapshotDatabase, WorkContributor, WorkCoverPresentation, WorkIdentityPresentation,
-    WorkIdentityRepository, WorkRoute, WorkRouteState,
+    ReviewContinuationOutcome, ReviewDismissalKeyV1, ReviewKind, ReviewResolutionCommand, RouteKey,
+    RouteKind, RouteOwner, RouteProvenance, SettlementCommit, SettlementCommitOutcome,
+    SettlementReviewCard, SnapshotDatabase, WorkContributor, WorkCoverPresentation,
+    WorkIdentityPresentation, WorkIdentityRepository, WorkRoute, WorkRouteState,
 };
 use livrarr_domain::{
     history_events, AuthorId, AuthorLinkTrigger, AuthorNameSource, AuthorRouteKey, LibraryItemId,
@@ -350,6 +350,11 @@ pub(crate) struct ReviewCardMintProposal<'a> {
     pub card: &'a SettlementReviewCard,
     pub origin: ReviewCardMintOrigin,
     pub validated_explicit_choice: bool,
+    /// A suppression disposition already decided by a prior ledger read for
+    /// this same proposal (see `commit_settlement_in_tx`'s preflight).
+    /// `None` means "decide normally"; `Some` is trusted as-is so the
+    /// ledger is read at most once per proposal.
+    pub preflight_disposition: Option<bool>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -388,14 +393,49 @@ fn record_review_card_mint_observation(
         });
 }
 
+/// The one authority for whether `proposal` is presently suppressed by a
+/// standing dismissal. Performs at most one ledger read. Shared by
+/// `commit_settlement_in_tx`'s preflight (consulted before any settlement
+/// mutation) and by `mint_reuse_or_suppress_review_card_in_tx` itself when
+/// no preflight disposition was already supplied.
+async fn review_card_suppression_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    proposal: &ReviewCardMintProposal<'_>,
+) -> Result<bool, IdentityRepositoryError> {
+    let dismissal_key =
+        ReviewDismissalKeyV1::from_card(proposal.user_id, proposal.card, proposal.work_id);
+    if let Some(key) = dismissal_key.as_ref() {
+        let bypass =
+            proposal.validated_explicit_choice || review_mint_origin_is_inline(&proposal.origin);
+        if !bypass && active_review_dismissal_exists(tx, key).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) async fn mint_reuse_or_suppress_review_card_in_tx(
     tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
     proposal: ReviewCardMintProposal<'_>,
 ) -> Result<ReviewCardMintOutcome, IdentityRepositoryError> {
-    let _ = proposal.validated_explicit_choice;
     let kind = proposal.card.kind();
     let created_at = chrono::Utc::now().to_rfc3339();
-    let reuse_key = review_card_reuse_key(proposal.user_id, proposal.card, proposal.work_id)?;
+    let dismissal_key =
+        ReviewDismissalKeyV1::from_card(proposal.user_id, proposal.card, proposal.work_id);
+    let suppressed = match proposal.preflight_disposition {
+        Some(disposition) => disposition,
+        None => review_card_suppression_in_tx(tx, &proposal).await?,
+    };
+    if suppressed {
+        let outcome = ReviewCardMintOutcome::SuppressedByDismissal;
+        #[cfg(any(test, feature = "test-helpers"))]
+        record_review_card_mint_observation(&proposal, &outcome);
+        return Ok(outcome);
+    }
+    let reuse_key = match dismissal_key.as_ref() {
+        Some(key) => Some(key.canonical_json().map_err(repo_json)?),
+        None => None,
+    };
     let mut reusable_id = None;
     if let Some(reuse_key) = reuse_key {
         let pending = sqlx::query(
@@ -416,7 +456,7 @@ pub(crate) async fn mint_reuse_or_suppress_review_card_in_tx(
             let payload: String = row.try_get("payload").map_err(repo_decode)?;
             let pending_card: SettlementReviewCard =
                 serde_json::from_str(&payload).map_err(repo_json)?;
-            if review_card_reuse_key(proposal.user_id, &pending_card, stored_work_id)?.as_ref()
+            if review_dismissal_canonical(proposal.user_id, &pending_card, stored_work_id)?.as_ref()
                 == Some(&reuse_key)
             {
                 matches.push(card_id);
@@ -524,6 +564,101 @@ async fn commit_settlement_in_tx(
         // A new Work cannot already own provider retry standing.
         None => None,
     };
+
+    // One authority decides review-card suppression: `card_dispositions`
+    // captures each proposal's ledger read here, before any settlement
+    // mutation, and is reused — never re-read — by the materialization
+    // loop below. A route that never became an actual card proposal
+    // carries no dismissal key here and is therefore never vetoed on its
+    // account; only genuine suppressed proposals are skipped, so unrelated
+    // evidence in this same settlement still commits. If every proposed
+    // card is suppressed, defer before the Work mutates at all.
+    let mut card_dispositions: Vec<bool> = Vec::with_capacity(command.review_cards.len());
+    for card in &command.review_cards {
+        let preflight = ReviewCardMintProposal {
+            site: ReviewCardMintSite::GenericSettlement,
+            user_id: command.user_id,
+            work_id: command.existing_work_id,
+            generation: command.expected_generation,
+            card,
+            origin: origin.clone(),
+            validated_explicit_choice,
+            preflight_disposition: None,
+        };
+        card_dispositions.push(review_card_suppression_in_tx(tx, &preflight).await?);
+    }
+    if !command.review_cards.is_empty() && card_dispositions.iter().all(|suppressed| *suppressed) {
+        for card in &command.review_cards {
+            let proposal = ReviewCardMintProposal {
+                site: ReviewCardMintSite::GenericSettlement,
+                user_id: command.user_id,
+                work_id: command.existing_work_id,
+                generation: command.expected_generation,
+                card,
+                origin: origin.clone(),
+                validated_explicit_choice,
+                preflight_disposition: Some(true),
+            };
+            mint_reuse_or_suppress_review_card_in_tx(tx, proposal).await?;
+        }
+        return Err(IdentityRepositoryError::StandingDismissal);
+    }
+
+    // Machine-proposed routes that are not already active are themselves
+    // suppressible: classify each one through the same one authority used
+    // for review cards above (never a second, separate ledger decision)
+    // before this settlement's first mutation. An explicit user choice, an
+    // inline continuation, a brand-new Work, or a route that is already
+    // active is exempt — none of those is a machine guess a standing
+    // dismissal should block. Any other genuinely new route found
+    // suppressed defers this whole settlement attempt; the road's
+    // captured-handoff fallback then gives every sibling route in the same
+    // batch its own independent, per-route chance, so unrelated evidence
+    // still survives at that level even though this one attempt does not.
+    if !validated_explicit_choice && !review_mint_origin_is_inline(&origin) {
+        if let Some(work_id) = command.existing_work_id {
+            for route in &command.routes {
+                let provider_json = serde_json::to_string(&route.provider).map_err(repo_json)?;
+                let kind_json = serde_json::to_string(&route.kind).map_err(repo_json)?;
+                let already_active = route_graph_before.as_ref().is_some_and(|graph| {
+                    graph
+                        .iter()
+                        .any(|(_, _, _, graph_provider, graph_kind, value)| {
+                            graph_provider == &provider_json
+                                && graph_kind == &kind_json
+                                && value.trim() == route.provider_scoped_id.trim()
+                        })
+                });
+                if already_active {
+                    continue;
+                }
+                let candidate_card = SettlementReviewCard::PendingRoute {
+                    work_id,
+                    candidate: livrarr_domain::identity_layer::ParkedRouteCandidate {
+                        route: RouteKey {
+                            provider: route.provider.clone(),
+                            kind: route.kind.clone(),
+                            value: route.provider_scoped_id.clone(),
+                        },
+                        proposed_owner: RouteOwner::Work(work_id),
+                    },
+                };
+                let route_preflight = ReviewCardMintProposal {
+                    site: ReviewCardMintSite::GenericSettlement,
+                    user_id: command.user_id,
+                    work_id: Some(work_id),
+                    generation: command.expected_generation,
+                    card: &candidate_card,
+                    origin: origin.clone(),
+                    validated_explicit_choice,
+                    preflight_disposition: None,
+                };
+                if review_card_suppression_in_tx(tx, &route_preflight).await? {
+                    return Err(IdentityRepositoryError::StandingDismissal);
+                }
+            }
+        }
+    }
 
     // An inline pending-route affirmation is a settle+resolve sequence.
     // Reject an already-owned candidate before the settlement mutates the
@@ -776,7 +911,11 @@ async fn commit_settlement_in_tx(
     .map_err(repo_db)?;
     let audit_id = audit.last_insert_rowid();
     let mut review_cards = Vec::with_capacity(command.review_cards.len());
-    for card in &command.review_cards {
+    for (card, suppressed) in command
+        .review_cards
+        .iter()
+        .zip(card_dispositions.iter().copied())
+    {
         let outcome = mint_reuse_or_suppress_review_card_in_tx(
             tx,
             ReviewCardMintProposal {
@@ -787,11 +926,23 @@ async fn commit_settlement_in_tx(
                 card,
                 origin: origin.clone(),
                 validated_explicit_choice,
+                preflight_disposition: Some(suppressed),
             },
         )
         .await?;
-        review_cards.push(minted_or_reused_review_card(outcome)?);
+        match outcome {
+            ReviewCardMintOutcome::Minted(minted)
+            | ReviewCardMintOutcome::ReusedPending(minted) => {
+                review_cards.push(minted);
+            }
+            ReviewCardMintOutcome::SuppressedByDismissal => {}
+        }
     }
+    // AffirmPendingRoute revocation happens only inside
+    // `commit_review_continuation`'s own transaction, after a validated
+    // Affirm has actually applied and resolved its card (no-op included).
+    // Revoking here — before that continuation ever runs — could leave a
+    // tombstone revoked even when the Affirm itself later fails.
     commit_settlement_failpoint("reviews")?;
     Ok(SettlementTxResult {
         work_id,
@@ -1426,6 +1577,7 @@ impl WorkIdentityRepository for SqliteDb {
                 card: &card,
                 origin: ReviewCardMintOrigin::CompatibilityGenericSettlement,
                 validated_explicit_choice: false,
+                preflight_disposition: None,
             },
         )
         .await?;
@@ -1467,6 +1619,7 @@ impl WorkIdentityRepository for SqliteDb {
                 card: &card,
                 origin: ReviewCardMintOrigin::Road(origin),
                 validated_explicit_choice,
+                preflight_disposition: None,
             },
         )
         .await?;
@@ -1561,19 +1714,58 @@ impl WorkIdentityRepository for SqliteDb {
         let pending = decode_pending_review(&row)?;
         authorize_review_actor(&actor, pending.user_id)?;
         let now = chrono::Utc::now().to_rfc3339();
-        let updated = sqlx::query(
-            "UPDATE identity_review_cards SET status='cancelled', resolved_at=?1 \
-              WHERE id=?2 AND user_id=?3 AND status='pending'",
-        )
-        .bind(&now)
-        .bind(card_id)
-        .bind(pending.user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        if updated.rows_affected() != 1 {
-            return Err(IdentityRepositoryError::NotFound);
+        let key =
+            ReviewDismissalKeyV1::from_card(pending.user_id, &pending.payload, pending.work_id);
+        let mut cancelled_ids = vec![card_id];
+        if let Some(key) = key.as_ref() {
+            let canonical = key.canonical_json().map_err(repo_json)?;
+            let pending_rows = sqlx::query(
+                "SELECT id, work_id, payload FROM identity_review_cards \
+                  WHERE user_id=?1 AND kind=?2 AND status='pending' AND id!=?3 ORDER BY id",
+            )
+            .bind(pending.user_id)
+            .bind(pending.kind.storage_code())
+            .bind(card_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(repo_db)?;
+            for row in pending_rows {
+                let other_id: i64 = row.try_get("id").map_err(repo_decode)?;
+                let stored_work_id: Option<WorkId> = row
+                    .try_get::<Option<i64>, _>("work_id")
+                    .map_err(repo_decode)?;
+                let payload: String = row.try_get("payload").map_err(repo_decode)?;
+                let other_card: SettlementReviewCard =
+                    serde_json::from_str(&payload).map_err(repo_json)?;
+                if let Some(other_key) =
+                    ReviewDismissalKeyV1::from_card(pending.user_id, &other_card, stored_work_id)
+                {
+                    if other_key.canonical_json().map_err(repo_json)? == canonical {
+                        cancelled_ids.push(other_id);
+                    }
+                }
+            }
         }
+        for id in &cancelled_ids {
+            let updated = sqlx::query(
+                "UPDATE identity_review_cards SET status='cancelled', resolved_at=?1 \
+                  WHERE id=?2 AND user_id=?3 AND status='pending'",
+            )
+            .bind(&now)
+            .bind(id)
+            .bind(pending.user_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(repo_db)?;
+            if *id == card_id && updated.rows_affected() != 1 {
+                return Err(IdentityRepositoryError::NotFound);
+            }
+        }
+        let equivalent_ids = cancelled_ids
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
         sqlx::query(
             "INSERT INTO identity_audit_events \
                 (user_id, work_id, event_kind, actor, payload, created_at) \
@@ -1583,13 +1775,17 @@ impl WorkIdentityRepository for SqliteDb {
         .bind(pending.work_id)
         .bind(serde_json::to_string(&actor).map_err(repo_json)?)
         .bind(format!(
-            "card_id={card_id};kind={}",
+            "card_id={card_id};kind={};equivalent_ids={equivalent_ids}",
             pending.kind.storage_code()
         ))
         .bind(&now)
         .execute(&mut *tx)
         .await
         .map_err(repo_db)?;
+        if let Some(key) = key.as_ref() {
+            upsert_identity_review_dismissal(&mut tx, key, card_id, &now).await?;
+        }
+        // identity_review_dismissals / identity_review_dismissal_works
         tx.commit().await.map_err(repo_db)?;
         Ok(())
     }
@@ -2001,6 +2197,17 @@ impl WorkIdentityRepository for SqliteDb {
         if resolved.rows_affected() != 1 {
             return Err(IdentityRepositoryError::NotFound);
         }
+        if pending.kind == ReviewKind::PendingRoute {
+            if let Some(work_id) = pending.work_id {
+                revoke_identity_review_dismissals(
+                    &mut tx,
+                    pending.user_id,
+                    work_id,
+                    "pending-route affirm",
+                )
+                .await?;
+            }
+        }
         if cancel.is_cancelled() {
             return Err(IdentityRepositoryError::Cancelled);
         }
@@ -2217,7 +2424,7 @@ impl EditionRepository for SqliteDb {
                 edition_id: command.edition_id,
                 evidence_ids: Vec::new(),
             };
-            mint_reuse_or_suppress_review_card_in_tx(
+            let mint_outcome = mint_reuse_or_suppress_review_card_in_tx(
                 &mut tx,
                 ReviewCardMintProposal {
                     site: ReviewCardMintSite::ApplyEvidence,
@@ -2227,10 +2434,17 @@ impl EditionRepository for SqliteDb {
                     card: &card,
                     origin: ReviewCardMintOrigin::CallerlessApplyEvidence,
                     validated_explicit_choice: false,
+                    preflight_disposition: None,
                 },
             )
             .await
             .map_err(edition_mint_err)?;
+            if matches!(mint_outcome, ReviewCardMintOutcome::SuppressedByDismissal) {
+                let edition =
+                    hydrate_existing_edition_in_tx(&mut tx, command.user_id, command.edition_id)
+                        .await?;
+                return Ok(EditionEvidenceOutcome { edition });
+            }
             tx.commit().await.map_err(edition_db)?;
             return Err(EditionRepositoryError::ContradictoryEvidenceParked);
         }
@@ -2352,7 +2566,7 @@ impl EditionRepository for SqliteDb {
                     edition_id,
                     evidence_ids: Vec::new(),
                 };
-                mint_reuse_or_suppress_review_card_in_tx(
+                let mint_outcome = mint_reuse_or_suppress_review_card_in_tx(
                     &mut tx,
                     ReviewCardMintProposal {
                         site: ReviewCardMintSite::ApplyWorkEvidence,
@@ -2362,10 +2576,17 @@ impl EditionRepository for SqliteDb {
                         card: &card,
                         origin: ReviewCardMintOrigin::ManualImportApplyWorkEvidence,
                         validated_explicit_choice: false,
+                        preflight_disposition: None,
                     },
                 )
                 .await
                 .map_err(edition_mint_err)?;
+                if matches!(mint_outcome, ReviewCardMintOutcome::SuppressedByDismissal) {
+                    let edition =
+                        hydrate_existing_edition_in_tx(&mut tx, command.user_id, edition_id)
+                            .await?;
+                    return Ok(EditionEvidenceOutcome { edition });
+                }
                 tx.commit().await.map_err(edition_db)?;
                 return Err(EditionRepositoryError::ContradictoryEvidenceParked);
             }
@@ -3015,6 +3236,88 @@ fn edition_mint_err(error: IdentityRepositoryError) -> EditionRepositoryError {
     EditionRepositoryError::Database(error.to_string())
 }
 
+/// The complete existing Edition aggregate a normal read produces: every
+/// durable field persisted on the `editions` row plus its real active
+/// routes. Used whenever an Edition-evidence write is suppressed by a
+/// standing dismissal, so the caller sees the same shape a normal read
+/// would — never a sparse synthetic value — while writing nothing.
+async fn hydrate_existing_edition_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    user_id: UserId,
+    edition_id: EditionId,
+) -> Result<Edition, EditionRepositoryError> {
+    let row = sqlx::query(
+        "SELECT work_id, format, language, subtitle, subtitle_provenance, \
+                source_provider, provider_edition_id, state \
+           FROM editions WHERE user_id = ?1 AND id = ?2",
+    )
+    .bind(user_id)
+    .bind(edition_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(edition_db)?
+    .ok_or_else(|| EditionRepositoryError::Database("edition not found".to_string()))?;
+    let work_id = row.try_get("work_id").map_err(edition_decode)?;
+    let format: EditionFormat = decode_json_column(&row, "format")
+        .map_err(|error| EditionRepositoryError::Database(error.to_string()))?;
+    let language: Option<String> = row.try_get("language").map_err(edition_decode)?;
+    let subtitle_value: Option<String> = row.try_get("subtitle").map_err(edition_decode)?;
+    let subtitle_provenance: Option<String> =
+        row.try_get("subtitle_provenance").map_err(edition_decode)?;
+    let subtitle = subtitle_value.map(|value| livrarr_domain::identity_layer::SourcedValue {
+        value,
+        provenance: subtitle_provenance
+            .and_then(|encoded| serde_json::from_str(&encoded).ok())
+            .unwrap_or(EvidenceProvenance::Migrated),
+        observed_at: chrono::Utc::now(),
+    });
+    let source_provider = row
+        .try_get::<Option<String>, _>("source_provider")
+        .map_err(edition_decode)?
+        .and_then(|encoded| serde_json::from_str(&encoded).ok());
+    let state = match row
+        .try_get::<String, _>("state")
+        .map_err(edition_decode)?
+        .as_str()
+    {
+        "active" => EditionState::Active,
+        "archived" => EditionState::Archived,
+        other => {
+            return Err(EditionRepositoryError::Database(format!(
+                "invalid edition state {other}"
+            )))
+        }
+    };
+    let route_rows = sqlx::query(
+        "SELECT id, user_id, owner_type, work_id, edition_id, resolved_work_id, provider, kind, \
+                provider_scoped_id, state, provenance, user_confirmed, observed_at \
+           FROM identity_routes WHERE user_id = ?1 AND edition_id = ?2 ORDER BY id",
+    )
+    .bind(user_id)
+    .bind(edition_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(edition_db)?;
+    let routes = route_rows
+        .iter()
+        .map(decode_route)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| EditionRepositoryError::Database(error.to_string()))?;
+    Ok(Edition {
+        id: edition_id,
+        user_id,
+        work_id,
+        format,
+        language,
+        subtitle,
+        routes,
+        covers: vec![],
+        source_provider,
+        provider_edition_id: row.try_get("provider_edition_id").map_err(edition_decode)?,
+        state,
+    })
+}
+
 fn migration_db(error: sqlx::Error) -> IdentityMigrationError {
     IdentityMigrationError::Database(error.to_string())
 }
@@ -3146,11 +3449,18 @@ async fn cancel_satisfied_pending_route_cards(
         let card_id: i64 = row.try_get("id").map_err(repo_decode)?;
         let payload: String = row.try_get("payload").map_err(repo_decode)?;
         let card: SettlementReviewCard = serde_json::from_str(&payload).map_err(repo_json)?;
-        let Some(key) = pending_route_proposal_key(&card) else {
+        let Some(ReviewDismissalKeyV1::PendingRoute {
+            provider,
+            kind,
+            value,
+            ..
+        }) = ReviewDismissalKeyV1::from_card(user_id, &card, Some(work_id))
+        else {
             return Err(IdentityRepositoryError::Database(
                 "PendingRoute row has a non-PendingRoute payload".to_string(),
             ));
         };
+        let key = serde_json::to_string(&(&provider, &kind, value.as_str())).map_err(repo_json)?;
         if !active_keys.contains(&key) {
             continue;
         }
@@ -4051,102 +4361,106 @@ fn durable_review_card_work_scope(
         .or(fallback_work_id.filter(|id| *id > 0))
 }
 
-/// Stable semantic identity for an unresolved group proposal. Operational
-/// route fields (row/owner ids, provenance, observation time) and title
-/// presentation/provenance are deliberately excluded: retriggered capture of
-/// the same evidence must reuse the existing pending decision.
+/// Stable semantic identity for an unresolved group proposal. Delegates to
+/// the one version-1 canonical dismissal key.
 fn group_identity_proposal_key(
+    user_id: UserId,
     card: &SettlementReviewCard,
 ) -> Result<Option<String>, IdentityRepositoryError> {
-    let SettlementReviewCard::GroupIdentity {
-        work_ids,
-        proposed_identity,
-        merge_choices,
-    } = card
-    else {
-        return Ok(None);
-    };
-
-    let mut work_ids = work_ids.clone();
-    work_ids.sort_unstable();
-    work_ids.dedup();
-    let proposed = proposed_identity
-        .as_ref()
-        .map(|identity| {
-            let routes: Result<BTreeSet<String>, IdentityRepositoryError> = identity
-                .routes
-                .iter()
-                .map(|route| {
-                    serde_json::to_string(&(
-                        &route.provider,
-                        &route.kind,
-                        &route.provider_scoped_id,
-                    ))
-                    .map_err(repo_json)
-                })
-                .collect();
-            Ok((
-                identity.title.normalized_main.clone(),
-                identity.title.normalized_subtitle.clone(),
-                identity.title.normalized_volume.clone(),
-                identity.primary_author_id,
-                routes?,
-            ))
-        })
-        .transpose()?;
-    let choices: Result<BTreeSet<String>, IdentityRepositoryError> = merge_choices
-        .iter()
-        .map(|choice| serde_json::to_string(choice).map_err(repo_json))
-        .collect();
-    serde_json::to_string(&(work_ids, proposed, choices?))
-        .map(Some)
-        .map_err(repo_json)
+    match ReviewDismissalKeyV1::from_card(user_id, card, None) {
+        Some(key) if key.kind() == ReviewKind::GroupIdentity => {
+            key.canonical_json().map(Some).map_err(repo_json)
+        }
+        _ => Ok(None),
+    }
 }
 
-/// Stable semantic identity for a pending route proposal. Row ids and the
-/// operational owner representation are excluded; user/work scope is already
-/// fixed by the card row query.
-fn pending_route_proposal_key(card: &SettlementReviewCard) -> Option<String> {
-    let SettlementReviewCard::PendingRoute { candidate, .. } = card else {
-        return None;
-    };
-    serde_json::to_string(&(
-        &candidate.route.provider,
-        &candidate.route.kind,
-        candidate.route.value.trim(),
-    ))
-    .ok()
-}
-
-/// Canonical REQ-005 reuse key shared by mint/reuse and duplicate cleanup.
-fn review_card_reuse_key(
+fn review_dismissal_canonical(
     user_id: UserId,
     card: &SettlementReviewCard,
     fallback_work_id: Option<WorkId>,
 ) -> Result<Option<String>, IdentityRepositoryError> {
-    match card {
-        SettlementReviewCard::PendingRoute { candidate, .. } => serde_json::to_string(&(
-            user_id,
-            durable_review_card_work_scope(card, fallback_work_id),
-            &candidate.route.provider,
-            &candidate.route.kind,
-            candidate.route.value.trim(),
-        ))
-        .map(Some)
-        .map_err(repo_json),
-        SettlementReviewCard::GroupIdentity { .. } => match group_identity_proposal_key(card)? {
-            Some(inner) => serde_json::to_string(&(user_id, inner))
-                .map(Some)
-                .map_err(repo_json),
-            None => Ok(None),
-        },
-        SettlementReviewCard::EditionEvidence { edition_id, .. } => {
-            serde_json::to_string(&(user_id, edition_id))
-                .map(Some)
-                .map_err(repo_json)
-        }
-        _ => Ok(None),
+    match ReviewDismissalKeyV1::from_card(user_id, card, fallback_work_id) {
+        Some(key) => key.canonical_json().map(Some).map_err(repo_json),
+        None => Ok(None),
     }
+}
+
+fn review_dismissal_user_id(key: &ReviewDismissalKeyV1) -> UserId {
+    match key {
+        ReviewDismissalKeyV1::GroupIdentity { user_id, .. }
+        | ReviewDismissalKeyV1::PendingRoute { user_id, .. }
+        | ReviewDismissalKeyV1::EditionEvidence { user_id, .. } => *user_id,
+    }
+}
+
+async fn active_review_dismissal_exists(
+    tx: &mut SqliteConnection,
+    key: &ReviewDismissalKeyV1,
+) -> Result<bool, IdentityRepositoryError> {
+    let canonical = key.canonical_json().map_err(repo_json)?;
+    sqlx::query_scalar(
+        "SELECT EXISTS(\
+            SELECT 1 FROM identity_review_dismissals \
+             WHERE user_id=?1 AND kind=?2 AND key_version=?3 \
+               AND canonical_key=?4 AND revoked_at IS NULL)",
+    )
+    .bind(review_dismissal_user_id(key))
+    .bind(key.kind().storage_code())
+    .bind(key.key_version())
+    .bind(canonical)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(repo_db)
+}
+
+async fn upsert_identity_review_dismissal(
+    tx: &mut SqliteConnection,
+    key: &ReviewDismissalKeyV1,
+    source_card_id: i64,
+    dismissed_at: &str,
+) -> Result<i64, IdentityRepositoryError> {
+    let canonical = key.canonical_json().map_err(repo_json)?;
+    let user_id = review_dismissal_user_id(key);
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO identity_review_dismissals \
+            (user_id, kind, key_version, canonical_key, dismissed_at, \
+             source_card_id, revoked_at, revoke_reason) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL) \
+         ON CONFLICT(user_id, kind, key_version, canonical_key) DO UPDATE SET \
+            dismissed_at=excluded.dismissed_at, \
+            source_card_id=excluded.source_card_id, \
+            revoked_at=NULL, \
+            revoke_reason=NULL \
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(key.kind().storage_code())
+    .bind(key.key_version())
+    .bind(canonical)
+    .bind(dismissed_at)
+    .bind(source_card_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(repo_db)?;
+    sqlx::query("DELETE FROM identity_review_dismissal_works WHERE dismissal_id=?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(repo_db)?;
+    for work_id in key.work_ids() {
+        sqlx::query(
+            "INSERT INTO identity_review_dismissal_works \
+                (dismissal_id, user_id, work_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(work_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(repo_db)?;
+    }
+    Ok(id)
 }
 
 fn review_mint_origin_is_inline(origin: &ReviewCardMintOrigin) -> bool {
@@ -4158,6 +4472,38 @@ fn review_mint_origin_is_inline(origin: &ReviewCardMintOrigin) -> bool {
     )
 }
 
+pub(crate) async fn revoke_identity_review_dismissals(
+    tx: &mut SqliteConnection,
+    user_id: UserId,
+    work_id: WorkId,
+    reason: &str,
+) -> Result<(), IdentityRepositoryError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(IdentityRepositoryError::Database(
+            "revoke_reason must be non-empty".to_string(),
+        ));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "UPDATE identity_review_dismissals \
+            SET revoked_at=?1, revoke_reason=?2 \
+          WHERE user_id=?3 AND revoked_at IS NULL \
+            AND kind IN ('GroupIdentity', 'PendingRoute') \
+            AND id IN (\
+                SELECT dismissal_id FROM identity_review_dismissal_works \
+                 WHERE user_id=?3 AND work_id=?4)",
+    )
+    .bind(&now)
+    .bind(reason)
+    .bind(user_id)
+    .bind(work_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(repo_db)?;
+    Ok(())
+}
+
 fn minted_or_reused_review_card(
     outcome: ReviewCardMintOutcome,
 ) -> Result<MintedReviewCard, IdentityRepositoryError> {
@@ -4165,9 +4511,9 @@ fn minted_or_reused_review_card(
         ReviewCardMintOutcome::Minted(card) | ReviewCardMintOutcome::ReusedPending(card) => {
             Ok(card)
         }
-        ReviewCardMintOutcome::SuppressedByDismissal => Err(IdentityRepositoryError::Database(
-            "review-card suppression is not available in this unit".to_string(),
-        )),
+        ReviewCardMintOutcome::SuppressedByDismissal => {
+            Err(IdentityRepositoryError::StandingDismissal)
+        }
     }
 }
 
@@ -5327,7 +5673,7 @@ pub async fn heal_identity_dedup_residue(
     for (card_id, user_id, work_id, payload) in remaining {
         let card: SettlementReviewCard = serde_json::from_str(&payload)
             .map_err(|error| format!("decode remaining GroupIdentity card {card_id}: {error}"))?;
-        let Some(key) = group_identity_proposal_key(&card)
+        let Some(key) = group_identity_proposal_key(user_id, &card)
             .map_err(|error| format!("key GroupIdentity card {card_id}: {error:?}"))?
         else {
             continue;
@@ -6203,6 +6549,7 @@ pub enum IdentityDbFailpoint {
     TransferBeforeCommit = 6,
     ReadinessIndex = 7,
     ActivationIndex = 8,
+    DismissalAdoptionBeforeCommit = 9,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -6287,6 +6634,14 @@ fn activation_index_failpoint() -> Result<(), IdentityMigrationError> {
         return Err(IdentityMigrationError::Database(
             "activation index failpoint".to_string(),
         ));
+    }
+    Ok(())
+}
+
+pub(crate) fn dismissal_adoption_before_commit_failpoint() -> Result<(), String> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    if consume_failpoint(IdentityDbFailpoint::DismissalAdoptionBeforeCommit) {
+        return Err("dismissal adoption failpoint".to_string());
     }
     Ok(())
 }

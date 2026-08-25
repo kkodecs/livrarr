@@ -248,7 +248,7 @@ pub struct RdRootFolder {
     pub total_space: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdAuthor {
     pub id: i64,
@@ -263,7 +263,7 @@ pub struct RdAuthor {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdBook {
     pub id: i64,
@@ -309,7 +309,7 @@ pub fn select_edition(editions: &[RdEdition]) -> Option<&RdEdition> {
         .or_else(|| editions.first())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdEdition {
     pub id: i64,
@@ -354,14 +354,14 @@ pub struct RdQualityInner {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdRatings {
     pub votes: Option<i32>,
     pub value: Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdImage {
     pub url: Option<String>,

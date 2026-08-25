@@ -1089,6 +1089,304 @@ pub struct IdentityTitlePolicyHealReport {
 /// collides, the whole cohort is left untouched and enters the existing
 /// GroupIdentity review mechanics; the generation marker intentionally remains
 /// behind so a later startup retries after review resolution.
+/// Marker-gated one-time adoption of historical user dismissals into the
+/// durable ledger. Failure is fatal at startup and leaves the marker unset.
+pub async fn adopt_identity_review_dismissals(pool: &SqlitePool) -> Result<(), String> {
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM _livrarr_meta WHERE key = 'identity_review_dismissal_adoption_v1'",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| format!("read identity_review_dismissal_adoption_v1: {error}"))?;
+    if marker.is_some() {
+        return Ok(());
+    }
+
+    let mut tx = crate::pool::begin_write(pool)
+        .await
+        .map_err(|error| format!("begin identity dismissal adoption: {error}"))?;
+
+    type CardRow = (i64, i64, Option<i64>, String, String, Option<String>);
+    let cards: Vec<CardRow> = sqlx::query_as(
+        "SELECT id, user_id, work_id, kind, payload, resolved_at \
+           FROM identity_review_cards \
+          WHERE status='cancelled' \
+            AND kind IN ('GroupIdentity','PendingRoute','EditionEvidence') \
+          ORDER BY id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select cancelled review cards for adoption: {error}"))?;
+
+    type AuditRow = IdentityReviewAuditRow;
+    let audits: Vec<AuditRow> = sqlx::query_as(
+        "SELECT user_id, work_id, event_kind, actor, payload, created_at \
+           FROM identity_audit_events \
+          WHERE event_kind IN ('review-dismissal','review-resolution') \
+          ORDER BY id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("select identity review audits for adoption: {error}"))?;
+
+    struct AdoptionCandidate {
+        card_id: i64,
+        user_id: i64,
+        dismissed_at: String,
+        key: livrarr_domain::identity_layer::ReviewDismissalKeyV1,
+        canonical: String,
+    }
+
+    let mut candidates: Vec<AdoptionCandidate> = Vec::new();
+    for (card_id, user_id, work_id, kind, payload, resolved_at) in cards {
+        let dismiss_audits = audits
+            .iter()
+            .filter(|(audit_user, _, event_kind, _, audit_payload, _)| {
+                *audit_user == user_id
+                    && event_kind == "review-dismissal"
+                    && audit_payload_names_card(audit_payload, card_id)
+            })
+            .collect::<Vec<_>>();
+        if dismiss_audits.is_empty() {
+            continue;
+        }
+        let parsed_actors = dismiss_audits
+            .iter()
+            .filter_map(|(_, _, _, actor, _, created_at)| {
+                serde_json::from_str::<livrarr_domain::identity_layer::ReviewActor>(actor)
+                    .ok()
+                    .map(|_| created_at.as_str())
+            })
+            .collect::<Vec<_>>();
+        if parsed_actors.is_empty() {
+            tracing::warn!(card_id, "identity dismissal adoption skipped");
+            continue;
+        }
+        let card: livrarr_domain::identity_layer::SettlementReviewCard =
+            match serde_json::from_str(&payload) {
+                Ok(card) => card,
+                Err(_) => {
+                    tracing::warn!(card_id, "identity dismissal adoption skipped");
+                    continue;
+                }
+            };
+        let Some(key) = livrarr_domain::identity_layer::ReviewDismissalKeyV1::from_card(
+            user_id, &card, work_id,
+        ) else {
+            tracing::warn!(card_id, "identity dismissal adoption skipped");
+            continue;
+        };
+        if key.kind().storage_code() != kind {
+            tracing::warn!(card_id, "identity dismissal adoption skipped");
+            continue;
+        }
+        let members_exist = review_dismissal_members_exist(&mut tx, user_id, &key)
+            .await
+            .map_err(|error| format!("existence check for adopted card {card_id}: {error}"))?;
+        if !members_exist {
+            continue;
+        }
+        let canonical = match key.canonical_json() {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                tracing::warn!(card_id, "identity dismissal adoption skipped");
+                continue;
+            }
+        };
+        let dismissed_at = resolved_at
+            .or_else(|| parsed_actors.last().map(|value| (*value).to_string()))
+            .unwrap_or_default();
+        candidates.push(AdoptionCandidate {
+            card_id,
+            user_id,
+            dismissed_at,
+            key,
+            canonical,
+        });
+    }
+
+    let mut latest: BTreeMap<(i64, String, String), AdoptionCandidate> = BTreeMap::new();
+    for candidate in candidates {
+        let map_key = (
+            candidate.user_id,
+            candidate.key.kind().storage_code().to_string(),
+            candidate.canonical.clone(),
+        );
+        match latest.get(&map_key) {
+            Some(existing)
+                if adoption_order(&existing.dismissed_at, existing.card_id)
+                    >= adoption_order(&candidate.dismissed_at, candidate.card_id) => {}
+            _ => {
+                latest.insert(map_key, candidate);
+            }
+        }
+    }
+
+    for candidate in latest.into_values() {
+        if later_pending_route_affirm_blocks(
+            &audits,
+            candidate.user_id,
+            &candidate.dismissed_at,
+            &candidate.key,
+        ) {
+            continue;
+        }
+        upsert_adopted_dismissal(
+            &mut tx,
+            &candidate.key,
+            candidate.card_id,
+            &candidate.dismissed_at,
+        )
+        .await
+        .map_err(|error| format!("insert adopted dismissal {}: {error}", candidate.card_id))?;
+    }
+
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         VALUES ('identity_review_dismissal_adoption_v1', '1') \
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("stamp identity_review_dismissal_adoption_v1: {error}"))?;
+
+    crate::identity_layer::dismissal_adoption_before_commit_failpoint()?;
+    tx.commit()
+        .await
+        .map_err(|error| format!("commit identity dismissal adoption: {error}"))?;
+    Ok(())
+}
+
+fn audit_payload_names_card(payload: &str, card_id: i64) -> bool {
+    let needle = format!("card_id={card_id};");
+    payload.contains(&needle) || payload == format!("card_id={card_id}")
+}
+
+fn adoption_order(resolved_at: &str, card_id: i64) -> (String, i64) {
+    (resolved_at.to_string(), card_id)
+}
+
+type IdentityReviewAuditRow = (i64, Option<i64>, String, String, String, String);
+
+fn later_pending_route_affirm_blocks(
+    audits: &[IdentityReviewAuditRow],
+    user_id: i64,
+    dismissed_at: &str,
+    key: &livrarr_domain::identity_layer::ReviewDismissalKeyV1,
+) -> bool {
+    let work_ids = key.work_ids();
+    audits.iter().any(
+        |(audit_user, work_id, event_kind, actor, payload, created_at)| {
+            if *audit_user != user_id || event_kind != "review-resolution" {
+                return false;
+            }
+            if created_at.as_str() <= dismissed_at {
+                return false;
+            }
+            if serde_json::from_str::<livrarr_domain::identity_layer::ReviewActor>(actor).is_err() {
+                return false;
+            }
+            let Ok(command) = serde_json::from_str::<
+                livrarr_domain::identity_layer::ReviewResolutionCommand,
+            >(payload) else {
+                return false;
+            };
+            matches!(
+                command,
+                livrarr_domain::identity_layer::ReviewResolutionCommand::PendingRoute { .. }
+            ) && work_id.is_some_and(|id| work_ids.contains(&id))
+        },
+    )
+}
+
+async fn review_dismissal_members_exist(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    user_id: i64,
+    key: &livrarr_domain::identity_layer::ReviewDismissalKeyV1,
+) -> Result<bool, sqlx::Error> {
+    match key {
+        livrarr_domain::identity_layer::ReviewDismissalKeyV1::EditionEvidence {
+            edition_id,
+            ..
+        } => {
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM editions WHERE user_id=?1 AND id=?2)")
+                .bind(user_id)
+                .bind(*edition_id)
+                .fetch_one(&mut **tx)
+                .await
+        }
+        _ => {
+            for work_id in key.work_ids() {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM works WHERE user_id=?1 AND id=?2)",
+                )
+                .bind(user_id)
+                .bind(work_id)
+                .fetch_one(&mut **tx)
+                .await?;
+                if !exists {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+async fn upsert_adopted_dismissal(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    key: &livrarr_domain::identity_layer::ReviewDismissalKeyV1,
+    source_card_id: i64,
+    dismissed_at: &str,
+) -> Result<(), sqlx::Error> {
+    let canonical = key
+        .canonical_json()
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let user_id = match key {
+        livrarr_domain::identity_layer::ReviewDismissalKeyV1::GroupIdentity { user_id, .. }
+        | livrarr_domain::identity_layer::ReviewDismissalKeyV1::PendingRoute { user_id, .. }
+        | livrarr_domain::identity_layer::ReviewDismissalKeyV1::EditionEvidence {
+            user_id, ..
+        } => *user_id,
+    };
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO identity_review_dismissals \
+            (user_id, kind, key_version, canonical_key, dismissed_at, \
+             source_card_id, revoked_at, revoke_reason) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL) \
+         ON CONFLICT(user_id, kind, key_version, canonical_key) DO UPDATE SET \
+            dismissed_at=excluded.dismissed_at, \
+            source_card_id=excluded.source_card_id, \
+            revoked_at=NULL, \
+            revoke_reason=NULL \
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(key.kind().storage_code())
+    .bind(key.key_version())
+    .bind(canonical)
+    .bind(dismissed_at)
+    .bind(source_card_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM identity_review_dismissal_works WHERE dismissal_id=?1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    for work_id in key.work_ids() {
+        sqlx::query(
+            "INSERT INTO identity_review_dismissal_works \
+                (dismissal_id, user_id, work_id) VALUES (?1, ?2, ?3)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(work_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn heal_identity_title_policy(
     pool: &SqlitePool,
 ) -> Result<IdentityTitlePolicyHealReport, String> {
@@ -1410,6 +1708,7 @@ pub async fn heal_identity_title_policy(
                 card: &card,
                 origin: crate::identity_layer::ReviewCardMintOrigin::StartupTitleHeal,
                 validated_explicit_choice: false,
+                preflight_disposition: None,
             },
         )
         .await
@@ -1419,9 +1718,7 @@ pub async fn heal_identity_title_policy(
                 report.review_cards_minted += 1;
             }
             crate::identity_layer::ReviewCardMintOutcome::ReusedPending(_) => {}
-            crate::identity_layer::ReviewCardMintOutcome::SuppressedByDismissal => {
-                return Err("review-card suppression is not available in this unit".to_string());
-            }
+            crate::identity_layer::ReviewCardMintOutcome::SuppressedByDismissal => {}
         }
     }
 
