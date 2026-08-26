@@ -58,5 +58,5 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Quick Reference
 
-- [Insights](insights.md) — 100 active learnings for every session
+- [Insights](insights.md) — 101 active learnings for every session
 - [Log](log.md) — wiki change log

@@ -1106,3 +1106,15 @@ Updated `integrations/goodreads.md` and insight 96. Settled-work author linking 
 - 2026-08-23: identity-review-census.md extended (spec r5/r6 verification): four cancel sites, user_confirmed three writers + observed_at refresh, road-trait surface vs compile wall, import screen has no title editor.
 
 - 2026-08-24: identity-review-census.md § "Manual import: what the door actually feeds the matcher" CORRECTED — the road does not park a one-sided subtitle sibling; it is text-certain there (split tuple, mains-only `evaluate_match`), so a lone sibling attaches and one inside a 2+ cohort is absorbed (observed live; spec identity-review-fixes v11 ST-011, review r10 XAI-R10-003).
+
+## 2026-08-26 — identity-review-fixes (fix-wave 1a) close-out fold
+
+- `architecture/identity-review-census.md` **re-enumerated at `cd506d15`** and largely rewritten; the `8353c0bc` enumeration is superseded because all four commits (U1 `c71af24a`, U2 `44895d7b`, U7 `43c2554b`, U5 `cd506d15`) changed exactly those files. Method: python tree walk of `crates/` per the page's own instruction, not the index.
+  - **Mint sites 7-at-6 → 2.** `mint_reuse_or_suppress_review_card_in_tx` (`identity_layer.rs:417`) is the one runtime authority; its seven callers are tabulated. `stage_legacy_identity_rows:6322` is cutover-only, excluded by design. `commit_unattached_import_review` verified deleted (0 hits) — nothing mints `ImportIdentity`.
+  - New sections: the U1 refusal gate and its three handler doors + CLI mapping; the U5 dismissal ledger (canonical `ReviewDismissalKeyV1`, the per-producer suppression matrix, the two revocation doors verified at `sqlite_work_identity.rs:2338` and `identity_layer.rs:2202`, the marker-gated adoption pass); the U2 atomic minimum-only coordinator.
+  - Corrections to previously-true claims: cancel sites four → **five** (U7 added `cancel_equivalent_duplicate_review_cards`); **"the import screen has no title editor" is now FALSE** (U2 added it; the override omits every match-derived key).
+  - New section "Settlement and continuation each claim a generation — by design", recording that a committed generation claim surviving a failed continuation is correct and pinned, not an atomicity hole. Added because a 2026-08-25 contest judgment mis-framed it and the PM relayed it as a possible live bug; both withdrawn on probe. Marked "do not fix".
+  - Unchanged and re-affirmed: the GroupIdentity continuation stays known-broken until wave B; the manual-import matcher inputs; `user_confirmed` three writers + `observed_at` refresh; the road-trait surface vs the compile wall.
+- `insights.md`: added insight **101** — the whole wave in one entry (one mint authority, refuse-by-name, one canonical dismissal key + suppression matrix + two revocations + adoption, `cancelled` still never means the user decided, manual import never parks, what stays broken until wave B, and the by-design two-step generation claim).
+- `index.md`: insight count 100 → 101.
+- Canonical artifacts: `docs/spec-identity-review-fixes.md` v11; `build/reviews/identity-review-fixes/` (per-unit reviews, the contest judgment and `CORRECTION-JUDGE-CONTEST-U5R1.md`).

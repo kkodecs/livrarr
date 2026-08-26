@@ -1,12 +1,19 @@
 ---
 feature: "identity-review-fixes"
-stage: spec
-status: draft
-version: 11
+stage: done
+status: delivered
+version: 12
 req_ids: [REQ-001, REQ-003, REQ-005, REQ-007]
 ---
 
 # Spec: identity-review-fixes (audit fix-wave 1a — the review surface, bounded half)
+
+v12 (2026-08-26) is the AS-BUILT reconciliation: no requirement changed, no
+acceptance criterion reworded. It ticks the four AC boxes against shipped code,
+adds §7 recording what was Delivered vs Deferred and the two review
+adjudications, and flips the frontmatter to delivered. v11 is snapshotted at
+`build/reviews/identity-review-fixes/spec-identity-review-fixes-v11.md`
+(this feature's convention; v1-v10 sit beside it).
 
 v10 (2026-08-24, PO ruling) corrects a wrong system truth carried since v3:
 at the road's complete-group evaluator a one-sided subtitle is text-CERTAIN
@@ -540,7 +547,7 @@ No mockup is required; these are additions to existing rows/cards.
 
 ## 6. Acceptance Criteria
 
-- [ ] **AC-001 (REQ-001) — every ingress and every conflict action.**
+- [x] **AC-001 (REQ-001) — every ingress and every conflict action.**
   Through the real router/auth, each refused kind on a pending typed card
   returns 409 naming the kind through the typed card route and legacy alias;
   card remains
@@ -565,7 +572,7 @@ No mockup is required; these are additions to existing rows/cards.
   Both GroupIdentity actions are pinned as known wave-B defects, not certified
   correct; PendingRoute is pinned unchanged.
 
-- [ ] **AC-003 (REQ-003) — production door, transaction, UI, and boundary.**
+- [x] **AC-003 (REQ-003) — production door, transaction, UI, and boundary.**
   All cases use admin auth, real router, real SQLite, real U2 coordinator,
   real import workflow, and before/after snapshots of Authors, variants,
   link tasks, Author routes, Works, cards, identity audits, generations,
@@ -636,7 +643,7 @@ No mockup is required; these are additions to existing rows/cards.
      byte-identical after U2. The unattached-import repository operation and
      its sole road arm no longer exist.
 
-- [ ] **AC-005 (REQ-005) — keys, intent, every origin, revocation, upgrade.**
+- [x] **AC-005 (REQ-005) — keys, intent, every origin, revocation, upgrade.**
   For GroupIdentity, PendingRoute, and EditionEvidence, mint through the real
   production write path (using the stated callerless `apply_evidence`
   compatibility fixture), Dismiss through the real typed route, and assert
@@ -705,7 +712,7 @@ No mockup is required; these are additions to existing rows/cards.
   row is rewritten/deleted, skips are logged, second start adds nothing, and
   failpoint rollback leaves marker unset for successful retry.
 
-- [ ] **AC-007 (REQ-007) — one helper, notifications, UI, codec.**
+- [x] **AC-007 (REQ-007) — one helper, notifications, UI, codec.**
   Instrument the one helper and drive every runtime site: generic
   PendingRoute/GroupIdentity settlement; captured-route PendingRoute;
   `apply_evidence` and `apply_work_evidence`
@@ -732,3 +739,93 @@ No mockup is required; these are additions to existing rows/cards.
   `ContinuationUnavailable`; `notes` at either location is
   `InvalidActionFile`; object-valued order element/primary and a
   second top-level key remain invalid. Every invalid case writes nothing.
+
+---
+
+## 7. As-built reconciliation (v12, 2026-08-26)
+
+Written at close-out. No requirement or acceptance criterion was changed here —
+this section only records what shipped, what did not, and the two adjudications
+the review rounds produced.
+
+### 7a. Delivered
+
+All four requirements shipped. Commits, each with its own gate run:
+
+| REQ | Unit | Commit | Suite at commit |
+|---|---|---|---|
+| REQ-001 | U1 — refuse unbuilt continuations by name | `c71af24a` | `test_irf_u1_refusal` 45/45 + `ConflictCard.refusal.test.tsx` |
+| REQ-003 | U2 — manual import never parks; atomic minimum-only coordinator | `44895d7b` | `test_irf_u2_import_defer` 19/19 |
+| REQ-007 | U7 — one transactional mint/reuse authority | `43c2554b` | `test_irf_u7_card_hygiene` 14/14 |
+| REQ-005 | U5 — durable dismissal ledger; suppression, revocation, adoption | `cd506d15` | `test_irf_u5_durable_dismissal` 36/36 |
+
+Workspace gates at the final commit (PM-run, own exit codes): `cargo fmt` 0
+diffs; `cargo clippy --workspace --all-targets` 0 warnings; workspace tests 0
+failures; `tsc` clean; vitest 183/183.
+
+Every AC-001 / AC-003 / AC-005 / AC-007 box is ticked against shipped code. The
+as-built enumeration lives in
+[`wiki/architecture/identity-review-census.md`](wiki/architecture/identity-review-census.md)
+(re-walked at `cd506d15`) and insight 101 — those, not this spec, are the page a
+future session should read first.
+
+### 7b. Deferred — carried out of this wave unchanged
+
+Everything in §4 Non-Requirements held; nothing was quietly pulled in or dropped.
+The load-bearing carries:
+
+- **Wave B (design-first, unopened):** v2 REQ-002 (GroupIdentity +
+  FieldResolution/parent-child continuation), REQ-004 (versioned full-loser
+  archive), REQ-006 (one conflict authority + legacy→typed mapping), REQ-008
+  (per-work GenerationClaims + versioned CLI). Also wave B's: the explicit
+  manual-import existing-Work wire choice, the replacement for U2's temporary
+  non-certain/multi-member defer, and GroupIdentity notifications once its
+  continuation is safe.
+- **The two GroupIdentity buttons still act on the wrong work** (AUD-P0-2/3).
+  U1 deliberately lets GroupIdentity *proceed* rather than refuse, because
+  refusing it would break working doors. `identity_route_archives` still has no
+  writer. Any new flow routed into a GroupIdentity card must **defer**, never park.
+- **EditionEvidence** has pending reuse, durable Dismiss, safe machine
+  suppression, refusal copy and no notification — but **no revocation** and no
+  continuation. Its own feature owns both.
+- Fix-wave 2 (frozen scalars still read by import dedup / cover tiers / retag
+  ISBN / author-monitor dedup; the dead tag-write road), wave 3 (cutover
+  hardening for pre-F2 installs), wave 4 (handoffs/ledgers/matching, the parked
+  entry-A finding, and the latent two-sided subtitle disagreement that the
+  mains-only comparison hides).
+- No exact reconstruction of a pre-upgrade certified-edit timestamp (ST-019);
+  REQ-005's deterministic adoption policy is the complete migration contract.
+
+### 7c. The two review adjudications
+
+Both arose in U5's review rounds, and both were settled by returning to the
+spec's own rows rather than to a reviewer's later prose.
+
+1. **AC-005's ConvergenceVisit row outranked the reviewer's own r1 wording.**
+   The r1 finding restated the intended behaviour in a form that contradicted
+   the acceptance criterion it was auditing. The AC's row is the contract; the
+   review comment is a reading of it. Resolved in favour of the row.
+2. **Registered-Affirm atomicity is continuation-scoped, not whole-request.**
+   The affirm's effects — generation claim, route install, card resolution and
+   dismissal revocation — are atomic *within the continuation transaction*. They
+   are not atomic across the settlement that minted the card, and were never
+   specified to be: an update is one settle plus one continuation and **each
+   claims a generation** (`tests/behavioral/test_irf_u1_refusal.rs:1851-1870`;
+   end state `generation + 2`). A committed settlement claim therefore survives a
+   failed continuation *by design*, pinned at
+   `tests/behavioral/test_irf_u5_durable_dismissal.rs:4870-4876`.
+
+   **Post-close note (2026-08-26):** a head-to-head contest judgment
+   re-characterised this as an atomicity hole and the PM relayed it to the PO as
+   a possible live bug on main. Both were wrong and were withdrawn after a direct
+   probe — the test passes on main and pins the surviving claim as intended.
+   Record: `build/reviews/identity-review-fixes/CORRECTION-JUDGE-CONTEST-U5R1.md`
+   § Correction 2. Do not re-open this without re-running that test first.
+
+### 7d. Standing caution for the next wave
+
+The census page's own instruction is the rule that keeps paying: **enumerate by
+walking the tree, never by searching an index.** Two review rounds failed on a
+sampled census, and the code-index was ~300 lines stale in `identity_layer.rs`
+on the day the first one was written. Re-enumerate after any change to these
+files.
