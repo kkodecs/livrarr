@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use livrarr_behavioral::stubs::{create_test_user, StubHttpFetcher};
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{
-    CreateLibraryItemDbRequest, CreateWorkDbRequest, HistoryDb, LibraryItemDb, RootFolderDb,
-    TagStatus, WorkDb, WorkDbCreate,
-};
+use livrarr_db::{CreateLibraryItemDbRequest, HistoryDb, LibraryItemDb, RootFolderDb, TagStatus};
 use livrarr_domain::identity::{
     CandidateId, CapturedIdentity, IdentityMethod, IdentityState, WorkCandidate,
 };
@@ -19,8 +16,8 @@ use livrarr_domain::services::{
     SourceProviderData, WorkService,
 };
 use livrarr_domain::{
-    normalize_for_matching, EnrichmentStatus, EventType, Freshness, HistoryFilter, IdentityStatus,
-    MediaType, MetadataProvider, OutcomeClass, RequestPriority, UserId, Work, WorkId,
+    EnrichmentStatus, EventType, Freshness, HistoryFilter, IdentityStatus, MediaType,
+    MetadataProvider, OutcomeClass, RequestPriority, UserId, Work, WorkId,
 };
 use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::NormalizedWorkDetail;
@@ -249,29 +246,32 @@ fn confirmed_candidate(title: &str, author: &str, ol_key: &str) -> WorkCandidate
 }
 
 async fn seed_confirmed_work(db: &SqliteDb, user_id: UserId, suffix: &str) -> Work {
-    let (work, created) = db
-        .create_work(CreateWorkDbRequest {
-            user_id,
-            title: format!("Metadata Fixture {suffix}"),
-            author_name: "Metadata Author".to_string(),
-            normalized_title: normalize_for_matching(&format!("Metadata Fixture {suffix}")),
-            normalized_author: normalize_for_matching("Metadata Author"),
-            language: Some("en".to_string()),
-            ol_key: Some(format!("/works/WH-META-{suffix}")),
-            monitor_ebook: true,
-            monitor_audiobook: true,
-            ..CreateWorkDbRequest::default()
-        })
-        .await
-        .expect("seed work");
-    assert!(created);
+    let ol_key = format!("/works/WH-META-{suffix}");
+    let work = livrarr_db::test_helpers::settle_work_fixture(
+        db,
+        user_id,
+        &format!("Metadata Fixture {suffix}"),
+        "Metadata Author",
+        Some("en"),
+        &[(
+            livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+            livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+            &ol_key,
+        )],
+    )
+    .await;
     // Fixture-satisfiability: create_work alone does not confirm identity, and
     // the refresh road blocks enrichment for non-Confirmed works — without this
     // the "completed pass" fixtures could never produce their event even after
     // the writer lands (n2 precedent: set the status explicitly).
-    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-        .await
-        .expect("confirm seeded identity");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("confirm seeded identity");
     work
 }
 
@@ -366,37 +366,6 @@ async fn wh_refresh_failure_writes_one_enrichment_failed() {
     assert!(
         rows[0].data.get("reason").is_some(),
         "enrichmentFailed payload should summarize the failure"
-    );
-}
-
-#[tokio::test]
-async fn wh_identity_parked_refresh_writes_zero_metadata_events() {
-    let db = common::create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let (work, created) = db
-        .create_work(CreateWorkDbRequest {
-            user_id,
-            title: "Parked Metadata Fixture".to_string(),
-            author_name: "Metadata Author".to_string(),
-            normalized_title: normalize_for_matching("Parked Metadata Fixture"),
-            normalized_author: normalize_for_matching("Metadata Author"),
-            language: Some("en".to_string()),
-            monitor_ebook: true,
-            monitor_audiobook: true,
-            ..CreateWorkDbRequest::default()
-        })
-        .await
-        .expect("seed parked work");
-    assert!(created);
-
-    let svc = scripted_service(db.clone(), ScriptedWorkflow::completed(true));
-    svc.refresh(user_id, work.id, RefreshSurface::Interactive)
-        .await
-        .expect("parked refresh should return successfully");
-
-    assert!(
-        metadata_rows(&db, user_id, work.id).await.is_empty(),
-        "identity-pending work must not enrich and must not record metadata history"
     );
 }
 

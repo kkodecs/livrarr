@@ -12,11 +12,11 @@ use livrarr_domain::identity_layer::{
     FileRevision, IdentityAuthorityReadiness, IdentityCutoverService, IdentityMigrationError,
     IdentityMigrationReport, IdentityProvider, IdentityRepositoryError, IdentityRoadOrigin,
     IdentityRoadOutcome, IdentityStatus, MachineSubtitleProjection, ManualImportMinimumCommand,
-    MintedReviewCard, PendingReviewCard, ResolveIdentityConflictCommand, ReviewActor,
-    ReviewContinuationOutcome, ReviewDismissalKeyV1, ReviewKind, ReviewResolutionCommand, RouteKey,
-    RouteKind, RouteOwner, RouteProvenance, SettlementCommit, SettlementCommitOutcome,
-    SettlementReviewCard, SnapshotDatabase, WorkContributor, WorkCoverPresentation,
-    WorkIdentityPresentation, WorkIdentityRepository, WorkRoute, WorkRouteState,
+    MintedReviewCard, PendingReviewCard, ReviewActor, ReviewContinuationOutcome,
+    ReviewDismissalKeyV1, ReviewKind, ReviewResolutionCommand, RouteKey, RouteKind, RouteOwner,
+    RouteProvenance, SettlementCommit, SettlementCommitOutcome, SettlementReviewCard,
+    SnapshotDatabase, WorkContributor, WorkCoverPresentation, WorkIdentityPresentation,
+    WorkIdentityRepository, WorkRoute, WorkRouteState,
 };
 use livrarr_domain::{
     history_events, AuthorId, AuthorLinkTrigger, AuthorNameSource, AuthorRouteKey, LibraryItemId,
@@ -2229,161 +2229,6 @@ impl WorkIdentityRepository for SqliteDb {
             grabs_moved: moved.grabs,
         })
     }
-
-    async fn resolve_conflict_atomically(
-        &self,
-        command: ResolveIdentityConflictCommand,
-    ) -> Result<CapturedIdentity, IdentityRepositoryError> {
-        let mut tx = crate::pool::begin_write(self.pool())
-            .await
-            .map_err(repo_db)?;
-        let row = sqlx::query(
-            "SELECT current_work_id, expected_generation, status, candidate_kind, \
-                    proposed_owner_type, proposed_owner_id \
-               FROM identity_conflicts_v2 WHERE user_id = ?1 AND id = ?2",
-        )
-        .bind(command.user_id)
-        .bind(command.conflict_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(repo_db)?
-        .ok_or(IdentityRepositoryError::NotFound)?;
-        let work_id: i64 = row.try_get("current_work_id").map_err(repo_decode)?;
-        let recorded_generation: i64 = row.try_get("expected_generation").map_err(repo_decode)?;
-        let status: String = row.try_get("status").map_err(repo_decode)?;
-        if status != "pending" || recorded_generation != command.expected_generation {
-            return Err(IdentityRepositoryError::StaleGeneration);
-        }
-        let work_generation: Option<i64> = sqlx::query_scalar(
-            "SELECT identity_generation FROM works WHERE user_id = ?1 AND id = ?2",
-        )
-        .bind(command.user_id)
-        .bind(work_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        if work_generation != Some(command.expected_generation) {
-            return Err(IdentityRepositoryError::StaleGeneration);
-        }
-        let candidate_kind: livrarr_domain::identity_layer::RouteKind = serde_json::from_str(
-            &row.try_get::<String, _>("candidate_kind")
-                .map_err(repo_decode)?,
-        )
-        .map_err(repo_json)?;
-        let edition_scoped = matches!(
-            candidate_kind,
-            livrarr_domain::identity_layer::RouteKind::Isbn13Edition
-                | livrarr_domain::identity_layer::RouteKind::AsinEdition
-                | livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition
-                | livrarr_domain::identity_layer::RouteKind::Undeclared {
-                    scope: livrarr_domain::identity_layer::RouteScope::Edition,
-                    ..
-                }
-        );
-        if edition_scoped {
-            let proposed_owner_type: String =
-                row.try_get("proposed_owner_type").map_err(repo_decode)?;
-            let proposed_owner_id: i64 = row.try_get("proposed_owner_id").map_err(repo_decode)?;
-            let (target_work_id, target_edition) = match &command.resolution {
-                livrarr_domain::identity_layer::IdentityConflictResolution::Reject { .. } => {
-                    (work_id, None)
-                }
-                livrarr_domain::identity_layer::IdentityConflictResolution::Accept {
-                    target_edition,
-                    ..
-                } => {
-                    let proposed_work_id = if proposed_owner_type == "edition" {
-                        sqlx::query_scalar(
-                            "SELECT work_id FROM editions WHERE user_id = ?1 AND id = ?2 AND state = 'active'",
-                        )
-                        .bind(command.user_id)
-                        .bind(proposed_owner_id)
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .map_err(repo_db)?
-                        .ok_or(IdentityRepositoryError::NotFound)?
-                    } else {
-                        proposed_owner_id
-                    };
-                    (proposed_work_id, *target_edition)
-                }
-                livrarr_domain::identity_layer::IdentityConflictResolution::DifferentWork {
-                    winning_work_id,
-                    target_edition,
-                    ..
-                } => (*winning_work_id, *target_edition),
-            };
-            match target_edition {
-                Some(edition_id) => {
-                    let belongs: Option<i64> = sqlx::query_scalar(
-                        "SELECT id FROM editions WHERE user_id = ?1 AND id = ?2 \
-                           AND work_id = ?3 AND state = 'active'",
-                    )
-                    .bind(command.user_id)
-                    .bind(edition_id)
-                    .bind(target_work_id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(repo_db)?;
-                    if belongs.is_none() {
-                        return Err(IdentityRepositoryError::StillAmbiguous);
-                    }
-                }
-                None => {
-                    let eligible: i64 = sqlx::query_scalar(
-                        "SELECT COUNT(*) FROM editions WHERE user_id = ?1 AND work_id = ?2 AND state = 'active'",
-                    )
-                    .bind(command.user_id)
-                    .bind(target_work_id)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(repo_db)?;
-                    if eligible != 1 {
-                        return Err(IdentityRepositoryError::StillAmbiguous);
-                    }
-                }
-            }
-        }
-        let audit = sqlx::query(
-            "INSERT INTO identity_audit_events \
-                (user_id, work_id, event_kind, actor, payload, created_at) \
-             VALUES (?1, ?2, 'conflict-resolution', 'authenticated-user', ?3, ?4)",
-        )
-        .bind(command.user_id)
-        .bind(work_id)
-        .bind(serde_json::to_string(&command.resolution).map_err(repo_json)?)
-        .bind(chrono::Utc::now().to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        sqlx::query(
-            "UPDATE identity_conflicts_v2 \
-                SET status = 'resolved', resolution = ?1, audit_id = ?2 \
-              WHERE user_id = ?3 AND id = ?4 AND status = 'pending'",
-        )
-        .bind(serde_json::to_string(&command.resolution).map_err(repo_json)?)
-        .bind(audit.last_insert_rowid())
-        .bind(command.user_id)
-        .bind(command.conflict_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        let updated = sqlx::query(
-            "UPDATE works SET identity_generation = identity_generation + 1 \
-              WHERE user_id = ?1 AND id = ?2 AND identity_generation = ?3",
-        )
-        .bind(command.user_id)
-        .bind(work_id)
-        .bind(command.expected_generation)
-        .execute(&mut *tx)
-        .await
-        .map_err(repo_db)?;
-        if updated.rows_affected() != 1 {
-            return Err(IdentityRepositoryError::StaleGeneration);
-        }
-        tx.commit().await.map_err(repo_db)?;
-        self.read_captured_identity(command.user_id, work_id).await
-    }
 }
 
 impl EditionRepository for SqliteDb {
@@ -3157,10 +3002,6 @@ impl SqliteDb {
         if legacy_review_count != 0 || (legacy_work_count != 0 && ready_run_id.is_none()) {
             return Ok(IdentityAuthorityReadiness::CutoverRequired);
         }
-        sqlx::query("DROP INDEX IF EXISTS idx_works_identity")
-            .execute(&mut *tx)
-            .await
-            .map_err(migration_db)?;
         sqlx::query("DROP INDEX IF EXISTS idx_works_user_normalized")
             .execute(&mut *tx)
             .await

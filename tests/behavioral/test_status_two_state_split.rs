@@ -6,16 +6,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use assert_matches::assert_matches;
 use livrarr_behavioral::stubs::StubHttpFetcher;
 use livrarr_db::{create_test_db, CreateUserDbRequest, ProviderRetryStateDb, UserDb, WorkDb};
 use livrarr_domain::identity::{
-    CapturedIdentity, ConflictSource, IdentityConflictKind, IdentityMethod, IdentityState,
-    IncomingConflictPayload, NewIdentityConflict, PendingReason, WorkCandidate, WorkSeedFields,
+    CapturedIdentity, IdentityMethod, IdentityState, IncomingConflictPayload, PendingReason,
+    WorkCandidate, WorkSeedFields,
 };
 use livrarr_domain::services::{
     EnrichmentMode as WorkflowMode, EnrichmentResult as WorkflowResult, EnrichmentWorkflow,
-    EnrichmentWorkflowError, SourceProviderData, WorkIdentityRepository, WorkService,
+    EnrichmentWorkflowError, SourceProviderData, WorkService,
 };
 use livrarr_domain::{
     EnrichmentStatus, IdentityStatus, MetadataProvider, OutcomeClass, UserId, UserRole, Work,
@@ -407,52 +406,9 @@ async fn test_group_a_success_with_no_text_and_no_cover_is_thin_not_failed() {
 // GROUP B — Pending identity holds enrichment (REQ-015).
 // =============================================================================
 
-#[tokio::test]
-async fn test_group_b_pending_identity_does_not_invoke_enrichment_workflow() {
-    // REQ-ID: REQ-015 | Contract: WorkService::add | Behavior: Pending identity holds enrichment fan-out (AC-011)
-    let (db, user_id) = setup_user().await;
-    let spy = SpyEnrichmentWorkflow::returning(EnrichmentStatus::Enriched);
-    let svc = WorkServiceImpl::new(db, spy.clone(), StubHttpFetcher::new(), test_data_dir());
-
-    let result = svc
-        .add(
-            user_id,
-            pending_candidate("Fuzzy Pending Book", "Unknown Author"),
-        )
-        .await
-        .expect("pending add should succeed");
-
-    assert_eq!(spy.call_count(), 0);
-    assert_matches!(result.work.enrichment_status, EnrichmentStatus::Unenriched);
-}
-
 // =============================================================================
 // GROUP C — de-facto identity enriches (REQ-016).
 // =============================================================================
-
-#[tokio::test]
-async fn test_group_c_isbn_bridge_without_work_anchor_is_provisional_identity() {
-    // REQ-ID: REQ-016 | Contract: WorkService::add | Behavior: ISBN bridge without work anchor creates Provisional identity (AC-012)
-    let (db, user_id) = setup_user().await;
-    let spy = SpyEnrichmentWorkflow::returning(EnrichmentStatus::Enriched);
-    let svc = WorkServiceImpl::new(db, spy, StubHttpFetcher::new(), test_data_dir());
-
-    let result = svc
-        .add(
-            user_id,
-            confirmed_candidate(
-                "ISBN Only Book",
-                "Bridge Author",
-                None,
-                Some("9780765326355"),
-                None,
-            ),
-        )
-        .await
-        .expect("isbn bridge add should succeed");
-
-    assert_eq!(result.work.identity_status, IdentityStatus::Provisional);
-}
 
 #[tokio::test]
 async fn test_group_c_provisional_identity_still_invokes_enrichment_workflow() {
@@ -483,33 +439,6 @@ async fn test_group_c_provisional_identity_still_invokes_enrichment_workflow() {
 // =============================================================================
 
 #[tokio::test]
-async fn test_group_d_confirmed_identity_with_no_text_is_simultaneously_confirmed_and_thin() {
-    // REQ-ID: REQ-014 | Contract: WorkService::add | Behavior: Confirmed identity and Thin enrichment coexist independently (AC-010)
-    let (db, user_id) = setup_user().await;
-    let workflow = real_textless_workflow(db.clone(), user_id);
-    let svc = WorkServiceImpl::new(db, workflow, StubHttpFetcher::new(), test_data_dir());
-
-    let result = svc
-        .add(
-            user_id,
-            confirmed_candidate(
-                "Anchored Textless Book",
-                "Sparse Author",
-                Some("OL123W"),
-                None,
-                None,
-            ),
-        )
-        .await
-        .expect("anchored add should succeed");
-
-    assert_eq!(
-        (result.work.identity_status, result.work.enrichment_status),
-        (IdentityStatus::Confirmed, EnrichmentStatus::Thin)
-    );
-}
-
-#[tokio::test]
 async fn test_group_d_open_identity_conflict_derives_conflict_identity_status() {
     // REQ-ID: REQ-014/D-013 | Contract: identity_status derivation | Behavior: an open work_identity_conflicts row derives IdentityStatus::Conflict
     let (db, user_id) = setup_user().await;
@@ -530,27 +459,40 @@ async fn test_group_d_open_identity_conflict_derives_conflict_identity_status() 
         .await
         .expect("confirmed add should succeed");
 
-    db.raise_identity_conflict(NewIdentityConflict {
-        user_id,
-        existing_work_id: result.work.id,
-        kind: IdentityConflictKind::IncomingDifferentOlKey,
-        incoming: IncomingConflictPayload {
-            ol_key: Some("OL999W".to_string()),
-            gr_key: None,
-            hc_key: None,
-            isbn_13: None,
-            asin: None,
-            title: "Conflicted Identity Book".to_string(),
-            author_name: "Anchor Author".to_string(),
-            year: None,
-            cover_url: None,
-            top_candidates: Vec::new(),
-        },
-        raised_by: ConflictSource::ManualAdd,
-        raised_source_path: None,
+    // Legacy conflicts have no production writer any more — seed the surviving
+    // table directly and reflect the badge, mirroring the kept runtime mint.
+    let incoming_json = serde_json::to_string(&IncomingConflictPayload {
+        ol_key: Some("OL999W".to_string()),
+        gr_key: None,
+        hc_key: None,
+        isbn_13: None,
+        asin: None,
+        title: "Conflicted Identity Book".to_string(),
+        author_name: "Anchor Author".to_string(),
+        year: None,
+        cover_url: None,
+        top_candidates: Vec::new(),
     })
+    .expect("payload json");
+    sqlx::query(
+        "INSERT INTO work_identity_conflicts \
+         (user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, \
+          raised_source_path, status) \
+         VALUES (?1, ?2, 'incoming_different_ol_key', ?3, ?4, 'manual_add', NULL, 'open')",
+    )
+    .bind(user_id)
+    .bind(result.work.id)
+    .bind(&incoming_json)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(db.pool())
     .await
     .expect("open identity conflict should be inserted");
+    sqlx::query("UPDATE works SET identity_status = 'conflict' WHERE id = ?1 AND user_id = ?2")
+        .bind(result.work.id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await
+        .expect("reflect legacy conflict badge");
 
     let reloaded = db
         .get_work(user_id, result.work.id)

@@ -263,13 +263,18 @@ async fn create_merged_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId)
     db.get_work(user_id, work.id).await.unwrap()
 }
 
-async fn create_conflict_work<DB: WorkDb + WorkDbCreate>(db: &DB, user_id: UserId) -> Work {
+async fn create_conflict_work(db: &livrarr_db::sqlite::SqliteDb, user_id: UserId) -> Work {
     let work = create_new_work(db, user_id).await;
     // list_conflict_works now selects on identity_status (conflict/not_found), not the
     // dropped EnrichmentStatus::Conflict.
-    db.set_identity_status(user_id, work.id, livrarr_domain::IdentityStatus::Conflict)
-        .await
-        .unwrap();
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        livrarr_domain::IdentityStatus::Conflict,
+    )
+    .await
+    .unwrap();
     db.get_work(user_id, work.id).await.unwrap()
 }
 
@@ -293,11 +298,7 @@ async fn seed_retry_rows<DB: ProviderRetryStateDb>(db: &DB, user_id: UserId, wor
     .unwrap();
 }
 
-async fn setup_sqlite() -> (
-    impl WorkDb + WorkDbCreate + UserDb + ProviderRetryStateDb + ProvenanceDb + ExternalIdDb,
-    UserId,
-    UserId,
-) {
+async fn setup_sqlite() -> (livrarr_db::sqlite::SqliteDb, UserId, UserId) {
     let db = create_test_db().await;
     let (u1, u2) = seed_users(&db).await;
     (db, u1, u2)
@@ -640,7 +641,7 @@ macro_rules! work_db_merge_tests {
             let (db, u1, _) = $setup().await;
 
             let nf = create_new_work(&db, u1).await;
-            db.set_identity_status(u1, nf.id, livrarr_domain::IdentityStatus::NotFound)
+            livrarr_db::test_helpers::set_identity_status_fixture(&db, u1, nf.id, livrarr_domain::IdentityStatus::NotFound)
                 .await
                 .unwrap();
             db.reset_for_manual_refresh(u1, nf.id).await.unwrap();
@@ -652,7 +653,7 @@ macro_rules! work_db_merge_tests {
             );
 
             let cf = create_new_work(&db, u1).await;
-            db.set_identity_status(u1, cf.id, livrarr_domain::IdentityStatus::Conflict)
+            livrarr_db::test_helpers::set_identity_status_fixture(&db, u1, cf.id, livrarr_domain::IdentityStatus::Conflict)
                 .await
                 .unwrap();
             db.reset_for_manual_refresh(u1, cf.id).await.unwrap();

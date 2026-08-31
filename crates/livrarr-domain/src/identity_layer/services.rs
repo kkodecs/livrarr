@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use super::conflict::{IdentityConflictResolution, ParkedRouteCandidate};
+use super::conflict::ParkedRouteCandidate;
 use super::contributor::WorkContributor;
 use super::cover::{CoverPlaceholderState, CoverSlotPresentation, WorkCoverPresentation};
 use super::door::{
@@ -276,16 +276,6 @@ pub struct ReviewContinuationOutcome {
     pub identity: Option<CapturedIdentity>,
     pub library_items_moved: usize,
     pub grabs_moved: usize,
-}
-
-/// Mirrors `ReviewResolutionCommand`'s `card_id` + `expected_generation` +
-/// action shape, reusing the already-specified `IdentityConflictResolution`.
-#[derive(Debug, Clone)]
-pub struct ResolveIdentityConflictCommand {
-    pub user_id: crate::UserId,
-    pub conflict_id: i64,
-    pub expected_generation: i64,
-    pub resolution: IdentityConflictResolution,
 }
 
 /// Direct format/language evidence for one user-scoped Edition.
@@ -566,11 +556,6 @@ pub trait WorkIdentityRepository: Send + Sync {
         command: ReviewResolutionCommand,
         cancel: CancellationToken,
     ) -> Result<ReviewContinuationOutcome, IdentityRepositoryError>;
-
-    async fn resolve_conflict_atomically(
-        &self,
-        command: ResolveIdentityConflictCommand,
-    ) -> Result<CapturedIdentity, IdentityRepositoryError>;
 }
 
 #[trait_variant::make(Send)]

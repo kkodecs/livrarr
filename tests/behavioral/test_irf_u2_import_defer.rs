@@ -216,11 +216,8 @@ async fn build_route_harness_from(db: SqliteDb, tmp: tempfile::TempDir) -> Route
         livrarr_metadata::english_identity_resolver::ResolverConfig::default(),
     );
     let db_arc = Arc::new(db.clone());
-    let queue = Arc::new(
-        livrarr_metadata::DefaultProviderQueueBuilder::new()
-            .with_identity_route_dispatch()
-            .build(db_arc.clone()),
-    );
+    let queue =
+        Arc::new(livrarr_metadata::DefaultProviderQueueBuilder::new().build(db_arc.clone()));
     let enrichment_service = Arc::new(livrarr_metadata::EnrichmentServiceImpl::new(
         db_arc,
         queue.clone(),
@@ -372,11 +369,6 @@ async fn build_route_harness_from(db: SqliteDb, tmp: tempfile::TempDir) -> Route
                 ),
             )
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(

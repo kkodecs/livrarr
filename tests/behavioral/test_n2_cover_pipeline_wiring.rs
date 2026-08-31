@@ -123,9 +123,14 @@ async fn v1_refresh_reaches_the_cover_write_gate_and_lands_a_provenanced_file() 
     // refresh()'s identity gate would block before ever reaching
     // run_unified_enrichment — irrelevant to what this test proves, so settle
     // it the same way a resolved identity would.
-    db.set_identity_status(user_id, work.id, livrarr_domain::IdentityStatus::Confirmed)
-        .await
-        .unwrap();
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work.id,
+        livrarr_domain::IdentityStatus::Confirmed,
+    )
+    .await
+    .unwrap();
 
     // Seed an incumbent BELOW the floor (a real rescue scenario end to end),
     // stamped with the exact "add" placeholder S3 diagnoses.

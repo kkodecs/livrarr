@@ -543,23 +543,6 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
             "/listimport/{import_id}",
             delete(livrarr_handlers::list_import::undo::<AppState>),
         )
-        // Identity conflicts
-        .route(
-            "/identity-conflict",
-            get(livrarr_handlers::identity_conflicts::list_open::<AppState>),
-        )
-        .route(
-            "/identity-conflict/{id}",
-            get(livrarr_handlers::identity_conflicts::get_detail::<AppState>),
-        )
-        .route(
-            "/identity-conflict/{id}/resolve",
-            post(livrarr_handlers::identity_conflicts::resolve::<AppState>),
-        )
-        .route(
-            "/identity-conflict/{id}/dismiss",
-            post(livrarr_handlers::identity_conflicts::dismiss::<AppState>),
-        )
         // Identity review (AC-013 grey-park surface)
         .route(
             "/identity-review",
@@ -1040,11 +1023,6 @@ mod tests {
                     identity_road_arc.clone(),
                 ))
             },
-            identity_conflict_service: Arc::new(
-                crate::services::identity_conflict_service::LiveIdentityConflictService::new(
-                    db.clone(),
-                ),
-            ),
             identity_resolver: identity_resolver_arc,
             enrichment_workflow: Arc::new(
                 m::enrichment_workflow_service::EnrichmentWorkflowImpl::new(

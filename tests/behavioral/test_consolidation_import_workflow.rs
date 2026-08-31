@@ -1602,15 +1602,6 @@ impl WorkService for StubWorkService {
     ) -> Result<MergePreview, WorkServiceError> {
         unreachable!("not used by scan")
     }
-    async fn merge_works(
-        &self,
-        _: UserId,
-        _: WorkId,
-        _: WorkId,
-        _: Vec<MergeFieldChoiceEntry>,
-    ) -> Result<MergeWorksResult, WorkServiceError> {
-        unreachable!("not used by scan")
-    }
 }
 
 #[derive(Clone)]

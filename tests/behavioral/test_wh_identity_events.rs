@@ -13,10 +13,9 @@ use livrarr_db::{
 };
 use livrarr_domain::identity::{
     AnchorConfidence, AnchorSetter, AnchorType, Candidate, CandidateId, CapturedIdentity,
-    ConflictResolutionAction, ConflictSource, IdentityConflictKind, IncomingConflictPayload,
-    NewIdentityConflict, ResolutionScore,
+    ResolutionScore,
 };
-use livrarr_domain::services::{IdentityConflictService, WorkIdentityRepository};
+use livrarr_domain::services::WorkIdentityRepository;
 use livrarr_domain::{
     normalize_for_matching, AuthType, EventType, HistoryFilter, IdentityStatus, MetadataProvider,
     UserId, Work, WorkId,
@@ -27,7 +26,6 @@ use livrarr_handlers::context::{
 use livrarr_handlers::AuthContext;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_server::history_service::HistoryServiceImpl;
-use livrarr_server::services::identity_conflict_service::LiveIdentityConflictService;
 
 type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
 type TestHistoryService = HistoryServiceImpl<SqliteDb>;
@@ -142,7 +140,7 @@ async fn seed_work(
         .await
         .expect("seed confirmed OL anchor");
     }
-    db.set_identity_status(user_id, work.id, identity_status)
+    livrarr_db::test_helpers::set_identity_status_fixture(db, user_id, work.id, identity_status)
         .await
         .expect("seed identity status");
     db.get_work(user_id, work.id).await.expect("read work")
@@ -202,53 +200,6 @@ fn candidate(id: &str, title: &str, ol_key: &str) -> Candidate {
     }
 }
 
-fn incoming(title: &str, ol_key: &str) -> IncomingConflictPayload {
-    IncomingConflictPayload {
-        ol_key: Some(ol_key.to_string()),
-        gr_key: None,
-        hc_key: None,
-        isbn_13: None,
-        asin: None,
-        title: title.to_string(),
-        author_name: "Work History Author".to_string(),
-        year: Some(2026),
-        cover_url: None,
-        top_candidates: vec![],
-    }
-}
-
-async fn raise_conflict(
-    db: &SqliteDb,
-    user_id: UserId,
-    action_name: &str,
-) -> (LiveIdentityConflictService, WorkId, i64) {
-    let old_key = format!("OL-CONFLICT-OLD-{action_name}W");
-    let work = seed_work(
-        db,
-        user_id,
-        &format!("Conflict {action_name}"),
-        IdentityStatus::Confirmed,
-        Some(&old_key),
-    )
-    .await;
-    let service = LiveIdentityConflictService::new(db.clone());
-    let id = service
-        .raise(NewIdentityConflict {
-            user_id,
-            existing_work_id: work.id,
-            kind: IdentityConflictKind::IncomingDifferentOlKey,
-            incoming: incoming(
-                &format!("Conflict {action_name}"),
-                &format!("OL-CONFLICT-NEW-{action_name}W"),
-            ),
-            raised_by: ConflictSource::ManualAdd,
-            raised_source_path: None,
-        })
-        .await
-        .expect("raise identity conflict");
-    (service, work.id, id)
-}
-
 async fn identity_events(db: &SqliteDb, user_id: UserId) -> Vec<livrarr_domain::HistoryEvent> {
     db.list_history(user_id, identity_filter())
         .await
@@ -279,64 +230,6 @@ fn assert_only_action(events: &[livrarr_domain::HistoryEvent], action: &str, wor
 }
 
 #[tokio::test]
-async fn wh_conflict_resolution_each_action_records_one_identity_resolved() {
-    let cases = [
-        (
-            ConflictResolutionAction::KeepExisting,
-            "keep-existing",
-            "keep",
-        ),
-        (
-            ConflictResolutionAction::AcceptSeparate,
-            "accept-separate",
-            "separate",
-        ),
-        (
-            ConflictResolutionAction::ReplaceAnchor,
-            "replace-anchor",
-            "replace",
-        ),
-        (ConflictResolutionAction::Merge, "merge", "merge"),
-    ];
-
-    for (action, action_label, suffix) in cases {
-        let db = create_test_db().await;
-        let user_id = create_test_user(&db).await;
-        let (service, work_id, conflict_id) = raise_conflict(&db, user_id, suffix).await;
-
-        service
-            .resolve(conflict_id, user_id, action, Some("user chose".to_string()))
-            .await
-            .expect("resolve conflict");
-
-        let events = identity_events(&db, user_id).await;
-        assert_only_action(&events, action_label, work_id);
-    }
-}
-
-#[tokio::test]
-async fn wh_conflict_resolution_rejected_resolution_records_zero_identity_events() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let (service, _work_id, _conflict_id) = raise_conflict(&db, user_id, "rejected").await;
-
-    let err = service
-        .resolve(
-            9_999_999,
-            user_id,
-            ConflictResolutionAction::KeepExisting,
-            None,
-        )
-        .await
-        .expect_err("unknown conflict id is rejected");
-    assert!(matches!(
-        err,
-        livrarr_domain::services::ConflictError::NotFound
-    ));
-    assert!(identity_events(&db, user_id).await.is_empty());
-}
-
-#[tokio::test]
 async fn wh_review_candidate_apply_records_once_second_apply_409_and_dismiss_records_none() {
     let db = create_test_db().await;
     let user_id = create_test_user(&db).await;
@@ -353,7 +246,7 @@ async fn wh_review_candidate_apply_records_once_second_apply_409_and_dismiss_rec
         "Review Identity Door",
         "OL-REVIEW-1W",
     )];
-    db.record_review_candidates(work.id, &candidates)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &candidates)
         .await
         .expect("record review candidates");
     let state = test_state(db.clone());
@@ -406,17 +299,17 @@ async fn wh_review_candidate_apply_records_once_second_apply_409_and_dismiss_rec
         None,
     )
     .await;
-    dismiss_db
-        .record_review_candidates(
-            dismiss_work.id,
-            &[candidate(
-                "review-dismiss-1",
-                "Review Dismiss Identity Door",
-                "OL-REVIEW-DISMISS-1W",
-            )],
-        )
-        .await
-        .expect("record dismiss candidates");
+    livrarr_db::test_helpers::record_review_candidates_fixture(
+        &dismiss_db,
+        dismiss_work.id,
+        &[candidate(
+            "review-dismiss-1",
+            "Review Dismiss Identity Door",
+            "OL-REVIEW-DISMISS-1W",
+        )],
+    )
+    .await
+    .expect("record dismiss candidates");
     let dismiss_status = livrarr_handlers::identity_review::dismiss(
         State(test_state(dismiss_db.clone())),
         auth_context(&dismiss_db, dismiss_user).await,
@@ -443,9 +336,14 @@ async fn wh_affirm_pending_anchor_records_once_and_settled_slot_records_zero() {
         None,
     )
     .await;
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B0AFFIRMWH")
-        .await
-        .expect("record pending ASIN");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work.id,
+        AnchorType::new(AnchorType::ASIN),
+        "B0AFFIRMWH",
+    )
+    .await
+    .expect("record pending ASIN");
 
     let status = livrarr_handlers::work::affirm_pending_anchor(
         State(test_state(db.clone())),
@@ -470,14 +368,14 @@ async fn wh_affirm_pending_anchor_records_once_and_settled_slot_records_zero() {
         Some("OL-SETTLED-1W"),
     )
     .await;
-    settled_db
-        .record_pending_anchor(
-            settled_work.id,
-            AnchorType::new(AnchorType::OL_WORK),
-            "OL-SETTLED-OTHERW",
-        )
-        .await
-        .expect("record competing settled-slot guess");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &settled_db,
+        settled_work.id,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL-SETTLED-OTHERW",
+    )
+    .await
+    .expect("record competing settled-slot guess");
     let err = livrarr_handlers::work::affirm_pending_anchor(
         State(test_state(settled_db.clone())),
         auth_context(&settled_db, settled_user).await,

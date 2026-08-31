@@ -101,10 +101,6 @@ import type {
   AnchorDTO,
   PendingAnchorDTO,
   IdentityReviewPark,
-  IdentityConflictSummary,
-  IdentityConflictDetail,
-  ResolveIdentityConflictRequest,
-  ConflictResolutionAction,
 } from "@/types/api";
 
 // Setup
@@ -390,22 +386,6 @@ export const resolveIdentityReviewCard = (cardId: number, command: unknown) =>
   });
 export const dismissIdentityReviewCard = (cardId: number) =>
   apiFetch<void>(`/identity-review-card/${cardId}/dismiss`, { method: "POST" });
-
-// Identity conflicts (AC-021 work-key contradictions)
-export const listIdentityConflicts = () =>
-  apiFetch<IdentityConflictSummary[]>("/identity-conflict");
-export const getIdentityConflict = (id: number) =>
-  apiFetch<IdentityConflictDetail>(`/identity-conflict/${id}`);
-export const resolveIdentityConflict = (
-  id: number,
-  req: ResolveIdentityConflictRequest,
-) =>
-  apiFetch<{ status: string; action: ConflictResolutionAction }>(
-    `/identity-conflict/${id}/resolve`,
-    { method: "POST", body: JSON.stringify(req) },
-  );
-export const dismissIdentityConflict = (id: number) =>
-  apiFetch<void>(`/identity-conflict/${id}/dismiss`, { method: "POST" });
 
 // Queue
 export const getQueue = (page = 1) =>

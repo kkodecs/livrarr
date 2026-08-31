@@ -466,11 +466,6 @@ async fn main() {
                 identity_road_arc.clone(),
             ))
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                svc_db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
@@ -1084,7 +1079,7 @@ fn build_enrichment_pipeline(
         max_attempts: 5,
     };
 
-    let mut builder = m::DefaultProviderQueueBuilder::new().with_identity_route_dispatch();
+    let mut builder = m::DefaultProviderQueueBuilder::new();
 
     // Audnexus — always available. URL is captured at startup; if you
     // want a custom audnexus_url to take effect live too, that's a

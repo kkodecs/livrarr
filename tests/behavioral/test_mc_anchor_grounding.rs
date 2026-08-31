@@ -2,7 +2,6 @@
 
 use livrarr_behavioral::stubs::create_test_user;
 use livrarr_db::test_helpers::create_test_db;
-use livrarr_db::{CreateWorkDbRequest, WorkDbCreate};
 use livrarr_domain::services::{
     CallOperation, CallOutcomeClass, ProviderCallRecord, ProviderCallSink,
 };
@@ -63,22 +62,30 @@ async fn create_work(
     isbn_13: Option<&str>,
     gr_key: Option<&str>,
 ) -> Work {
-    let (work, _) = db
-        .create_work(CreateWorkDbRequest {
-            user_id,
-            title: "Anchor Grounding Work".to_string(),
-            author_name: "Grounded Author".to_string(),
-            normalized_title: "anchor grounding work".to_string(),
-            normalized_author: "grounded author".to_string(),
-            isbn_13: isbn_13.map(str::to_string),
-            gr_key: gr_key.map(str::to_string),
-            language: Some("en".to_string()),
-            monitor_ebook: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    work
+    let mut routes = Vec::new();
+    if let Some(isbn) = isbn_13 {
+        routes.push((
+            livrarr_domain::identity_layer::IdentityProvider::IsbnRegistry,
+            livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+            isbn,
+        ));
+    }
+    if let Some(key) = gr_key {
+        routes.push((
+            livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+            livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+            key,
+        ));
+    }
+    livrarr_db::test_helpers::settle_work_fixture(
+        db,
+        user_id,
+        "Anchor Grounding Work",
+        "Grounded Author",
+        Some("en"),
+        &routes,
+    )
+    .await
 }
 
 #[tokio::test]

@@ -108,7 +108,7 @@ impl SqliteDb {
 /// monotonic author fields, loser delete) on the caller's own
 /// connection/transaction. Shared between the live merge endpoint and the
 /// startup author-identity repair so both paths apply the identical policy
-/// (the same factoring as `merge_user_identity_state` in pool.rs).
+/// (the author-side sibling of the retired work-merge policy).
 pub(crate) async fn merge_authors_tx(
     conn: &mut sqlx::SqliteConnection,
     user_id: UserId,

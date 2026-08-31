@@ -30,15 +30,11 @@ use livrarr_db::{
     AuthorDb, AuthorLinkDb, CreateAuthorDbRequest, CreateAuthorGateRequest, CreateUserDbRequest,
     CreateWorkDbRequest, RootFolderDb, UserDb, WorkDbCreate,
 };
-use livrarr_domain::identity::{
-    AnchorType, ConflictResolutionAction, ConflictSource, IdentityConflictKind,
-    IncomingConflictPayload, NewIdentityConflict,
-};
+use livrarr_domain::identity::AnchorType;
 use livrarr_domain::identity_layer::{self as ilr};
 use livrarr_domain::identity_layer::{
     EditionRepository, IdentityRoadService, WorkIdentityRepository,
 };
-use livrarr_domain::services::{IdentityConflictService, WorkIdentityRepository as _};
 use livrarr_domain::{AuthorLinkTrigger, AuthorNameSource, MediaType, UserRole};
 use livrarr_server::auth_crypto::{AuthCryptoService, RealAuthCrypto};
 use livrarr_server::state::AppState;
@@ -189,11 +185,8 @@ async fn build_route_harness() -> RouteHarness {
         livrarr_metadata::english_identity_resolver::ResolverConfig::default(),
     );
     let db_arc = Arc::new(db.clone());
-    let queue = Arc::new(
-        livrarr_metadata::DefaultProviderQueueBuilder::new()
-            .with_identity_route_dispatch()
-            .build(db_arc.clone()),
-    );
+    let queue =
+        Arc::new(livrarr_metadata::DefaultProviderQueueBuilder::new().build(db_arc.clone()));
     let enrichment_service = Arc::new(livrarr_metadata::EnrichmentServiceImpl::new(
         db_arc,
         queue.clone(),
@@ -345,11 +338,6 @@ async fn build_route_harness() -> RouteHarness {
                 ),
             )
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
@@ -1887,15 +1875,14 @@ async fn registered_inline_doors_mint_then_resolve_and_emit_zero_notifications()
     .await;
     let affirm = seed_work(&harness.db, harness.user_id, author_id, "inline affirm").await;
     let affirm_value = format!("U7-GR-{}", CASE_ID.fetch_add(1, Ordering::Relaxed));
-    harness
-        .db
-        .record_pending_anchor(
-            affirm.own_work_id,
-            AnchorType::new(AnchorType::GR_WORK),
-            &affirm_value,
-        )
-        .await
-        .expect("seed pending anchor through production writer");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &harness.db,
+        affirm.own_work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        &affirm_value,
+    )
+    .await
+    .expect("seed pending anchor through production writer");
     clear_mint_trace();
 
     let updated = call_router_json(
@@ -1990,108 +1977,6 @@ async fn registered_inline_doors_mint_then_resolve_and_emit_zero_notifications()
     assert_no_provider_http(&harness);
 }
 
-fn incoming_conflict(label: &str) -> IncomingConflictPayload {
-    IncomingConflictPayload {
-        ol_key: Some(format!("OL-{label}-NEW-W")),
-        gr_key: None,
-        hc_key: None,
-        isbn_13: None,
-        asin: None,
-        title: format!("Incoming {label}"),
-        author_name: "U7 Conflict Author".to_string(),
-        year: Some(2026),
-        cover_url: None,
-        top_candidates: vec![],
-    }
-}
-
-async fn conflict_notes_snapshot(db: &SqliteDb, user_id: i64, conflict_id: i64) -> String {
-    sqlx::query_scalar(
-        "SELECT json_object( \
-            'conflict', (SELECT json_object('status',status,'resolved_at',resolved_at, \
-                'action',resolution_action,'notes',resolution_notes) \
-              FROM work_identity_conflicts WHERE user_id=?1 AND id=?2), \
-            'cards', (SELECT COALESCE(json_group_array(json_object('id',id,'status',status, \
-                'payload',payload)), '[]') FROM (SELECT * FROM identity_review_cards \
-                WHERE user_id=?1 ORDER BY id)), \
-            'audits', (SELECT COALESCE(json_group_array(json_object('id',id,'kind',event_kind, \
-                'actor',actor,'payload',payload)), '[]') FROM (SELECT * FROM identity_audit_events \
-                WHERE user_id=?1 ORDER BY id)))",
-    )
-    .bind(user_id)
-    .bind(conflict_id)
-    .fetch_one(db.pool())
-    .await
-    .expect("snapshot HTTP notes persistence surfaces")
-}
-
-// PIN: old HTTP notes are already deserialized as an unused optional field and U1's conflict refusal leaves every stored row unchanged; U7 must preserve that compatibility after removing the field.
-#[tokio::test]
-async fn old_http_client_notes_are_ignored_and_persist_nowhere() {
-    let harness = build_route_harness().await;
-    let author_id = seed_author(&harness.db, harness.user_id, "http notes").await;
-    let work = seed_work(&harness.db, harness.user_id, author_id, "http notes").await;
-    let conflict_id = harness
-        .state
-        .identity_conflict_service
-        .raise(NewIdentityConflict {
-            user_id: harness.user_id,
-            existing_work_id: work.own_work_id,
-            kind: IdentityConflictKind::IncomingDifferentOlKey,
-            incoming: incoming_conflict("U7-NOTES"),
-            raised_by: ConflictSource::ManualAdd,
-            raised_source_path: None,
-        })
-        .await
-        .expect("seed legacy conflict through production writer");
-    let before = conflict_notes_snapshot(&harness.db, harness.user_id, conflict_id).await;
-    let changes_before: i64 = sqlx::query_scalar("SELECT total_changes()")
-        .fetch_one(harness.db.pool())
-        .await
-        .expect("read HTTP notes total_changes baseline");
-    let sentinel = "U7-NOTES-MUST-NOT-PERSIST-6e9d7";
-    let response = call_router_json(
-        &harness,
-        Method::POST,
-        format!("/api/v1/identity-conflict/{conflict_id}/resolve"),
-        Some(json!({
-            "action": ConflictResolutionAction::KeepExisting,
-            "notes": sentinel,
-        })),
-    )
-    .await;
-    assert_eq!(
-        response.status,
-        StatusCode::CONFLICT,
-        "an ignored old field must reach U1's kind guard, not fail JSON extraction: {}",
-        response.json,
-    );
-    assert!(response.json["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("IdentityConflict")));
-    let changes_after: i64 = sqlx::query_scalar("SELECT total_changes()")
-        .fetch_one(harness.db.pool())
-        .await
-        .expect("read HTTP notes total_changes after refusal");
-    assert_eq!(
-        changes_after, changes_before,
-        "old-client notes must reach the refusal guard before any database write",
-    );
-    let after = conflict_notes_snapshot(&harness.db, harness.user_id, conflict_id).await;
-    assert_eq!(after, before, "ignored HTTP notes write no row or audit");
-    assert!(!after.contains(sentinel));
-    let stored_notes: Option<String> = sqlx::query_scalar(
-        "SELECT resolution_notes FROM work_identity_conflicts WHERE user_id=?1 AND id=?2",
-    )
-    .bind(harness.user_id)
-    .bind(conflict_id)
-    .fetch_one(harness.db.pool())
-    .await
-    .expect("read legacy conflict notes column");
-    assert!(stored_notes.is_none());
-    assert_no_provider_http(&harness);
-}
-
 fn braced_item<'a>(source: &'a str, marker: &str) -> &'a str {
     let start = source
         .find(marker)
@@ -2111,33 +1996,6 @@ fn braced_item<'a>(source: &'a str, marker: &str) -> &'a str {
         }
     }
     panic!("unterminated {marker}")
-}
-
-// RED-UNTIL-U7: today both ResolveRequest and ResolveIdentityConflictRequest still declare notes even though the HTTP handler never uses it.
-#[test]
-fn current_rust_and_typescript_conflict_request_types_omit_notes() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let rust =
-        std::fs::read_to_string(root.join("crates/livrarr-handlers/src/identity_conflicts.rs"))
-            .expect("read production Rust conflict request");
-    let rust_request = braced_item(&rust, "pub struct ResolveRequest");
-    assert!(rust_request.contains("pub action: ConflictResolutionAction"));
-    assert!(
-        !rust_request.contains("notes"),
-        "current Rust request type must rely on default unknown-field behavior: {rust_request}",
-    );
-
-    let typescript = std::fs::read_to_string(root.join("frontend/src/types/api.ts"))
-        .expect("read production TypeScript API types");
-    let ts_request = braced_item(
-        &typescript,
-        "export interface ResolveIdentityConflictRequest",
-    );
-    assert!(ts_request.contains("action: ConflictResolutionAction"));
-    assert!(
-        !ts_request.contains("notes"),
-        "current TypeScript request type must omit the retired field: {ts_request}",
-    );
 }
 
 // RED-UNTIL-U7: today runtime sites 1, 2, 4, and 5 each retain an INSERT/local guard; there is no single repository-side authority for the instrumentation above to observe.

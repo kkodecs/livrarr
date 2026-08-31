@@ -2,7 +2,7 @@ use chrono::Utc;
 use livrarr_behavioral::stubs::create_test_user;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
-    CreateHistoryEventDbRequest, CreateWorkDbRequest, HistoryDb, UserDb, WorkDb, WorkDbCreate,
+    CreateHistoryEventDbRequest, CreateWorkDbRequest, HistoryDb, UserDb, WorkDbCreate,
 };
 use livrarr_domain::{
     normalize_for_matching, EventType, HistoryFilter, IdentityStatus, UserId, Work, WorkId,
@@ -37,9 +37,14 @@ async fn seed_work(db: &livrarr_db::sqlite::SqliteDb, user_id: UserId, title: &s
         .await
         .expect("seed work");
     assert!(created, "fixture work must be newly created");
-    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-        .await
-        .expect("seed identity status");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("seed identity status");
     work
 }
 

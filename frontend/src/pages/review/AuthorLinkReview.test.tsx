@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { act } from "react";
 import ReviewPage from "./ReviewPage";
 import AuthorDetailPage from "@/pages/author-detail/AuthorDetailPage";
 import {
@@ -89,8 +88,7 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     stub((call) => {
       if (
         call.path === "/identity-review" ||
-        call.path === "/identity-review-card" ||
-        call.path === "/identity-conflict"
+        call.path === "/identity-review-card"
       ) {
         return { status: 500, body: { status: 500, error: "internal", message: "boom" } };
       }
@@ -176,8 +174,7 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     stub((call) => {
       if (
         call.path === "/identity-review" ||
-        call.path === "/identity-review-card" ||
-        call.path === "/identity-conflict"
+        call.path === "/identity-review-card"
       ) {
         return { status: 200, body: [] };
       }
@@ -228,7 +225,6 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
           ],
         };
       }
-      if (call.path === "/identity-conflict") return { status: 200, body: [] };
       if (call.path === "/identity-review-card") return { status: 200, body: [] };
       if (call.path === "/author-link-review") {
         return {
@@ -255,69 +251,10 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     }
   });
 
-  // Bug reproduction: identity-layer-rewrite round 18 — conflict cards
-  // exposed a bare internal Work id while the title query loaded or failed.
-  it("uses neutral conflict labels while the existing book loads or fails", async () => {
-    let finishWork!: (reply: StubReply) => void;
-    const workReply = new Promise<StubReply>((resolve) => {
-      finishWork = resolve;
-    });
-    stub(async (call) => {
-      if (call.path === "/identity-review") return { status: 200, body: [] };
-      if (call.path === "/identity-review-card") return { status: 200, body: [] };
-      if (call.path === "/identity-conflict") {
-        return {
-          status: 200,
-          body: [
-            {
-              id: 18,
-              existingWorkId: 73,
-              kind: "incoming_different_ol_key",
-              incomingTitle: "A Candidate Book",
-              incomingAuthor: "Candidate Author",
-              incomingOlKey: "OL18W",
-              raisedAt: "2026-08-18T00:00:00Z",
-              raisedBy: "convergence",
-              status: "open",
-            },
-          ],
-        };
-      }
-      if (call.path === "/author-link-review") return { status: 200, body: [] };
-      if (call.path === "/work/73") return workReply;
-      throw new Error(`unexpected call ${call.method} ${call.path}`);
-    });
-
-    const client = newTestClient();
-    const review = mountWith(client, <ReviewPage />);
-    try {
-      await vi.waitFor(
-        () => expect(review.container.textContent).toContain("A Candidate Book"),
-        { timeout: 5000 },
-      );
-      expect(review.container.textContent).toContain("Loading…");
-      expect(review.container.textContent).not.toContain("Work #73");
-
-      await act(async () => {
-        finishWork({
-          status: 500,
-          body: { status: 500, error: "internal", message: "book unavailable" },
-        });
-      });
-      await vi.waitFor(
-        () => expect(review.container.textContent).toContain("this book"),
-        { timeout: 5000 },
-      );
-      expect(review.container.textContent).not.toContain("Work #73");
-    } finally {
-      review.cleanup();
-    }
-  });
-
   it("finishes a merge from the typed GroupIdentity card", async () => {
     let resolved = false;
     const { calls } = stub((call) => {
-      if (call.path === "/identity-review" || call.path === "/identity-conflict") {
+      if (call.path === "/identity-review") {
         return { status: 200, body: [] };
       }
       if (call.path === "/identity-review-card") {
@@ -409,8 +346,7 @@ describe("pickAuthorLinkCandidate — picking a candidate from review", () => {
     const { calls } = stub((call) => {
       if (
         call.path === "/identity-review" ||
-        call.path === "/identity-review-card" ||
-        call.path === "/identity-conflict"
+        call.path === "/identity-review-card"
       ) {
         return { status: 200, body: [] };
       }

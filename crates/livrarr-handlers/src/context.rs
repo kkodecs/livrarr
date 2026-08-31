@@ -2,8 +2,8 @@ use livrarr_domain::services::{
     AppConfigService, AuthorLinkService, AuthorMonitorWorkflow, AuthorService, AuthorViewService,
     BookmarkService, ChapterService, CoverService, DiscoveryService,
     DownloadClientCredentialService, DownloadClientSettingsService, EmailService,
-    EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityConflictService,
-    IdentityResolver, ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
+    EnrichmentWorkflow, FileService, GrabService, HistoryService, IdentityResolver,
+    ImportIoService, ImportService, ImportWorkflow, IndexerCredentialService,
     IndexerSettingsService, ListService, ManualImportService, MatchingService, NotificationService,
     ProviderStatsService, QueueService, ReadarrImportWorkflow, ReleaseService,
     RemotePathMappingService, RootFolderService, RssSyncWorkflow, SeriesQueryService,
@@ -142,11 +142,6 @@ pub trait HasReleaseService: Clone + Send + Sync + 'static {
 pub trait HasListService: Clone + Send + Sync + 'static {
     type ListSvc: ListService + Send + Sync + 'static;
     fn list_service(&self) -> &Self::ListSvc;
-}
-
-pub trait HasIdentityConflictService: Clone + Send + Sync + 'static {
-    type IdentityConflictSvc: IdentityConflictService + Send + Sync + 'static;
-    fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc;
 }
 
 pub trait HasIdentityResolver: Clone + Send + Sync + 'static {
@@ -361,7 +356,6 @@ pub trait AppContext:
     + HasGrabService
     + HasReleaseService
     + HasListService
-    + HasIdentityConflictService
     + HasIdentityResolver
     + HasAppConfigService
     + HasDownloadClientSettingsService
@@ -416,7 +410,6 @@ impl<T> AppContext for T where
         + HasGrabService
         + HasReleaseService
         + HasListService
-        + HasIdentityConflictService
         + HasIdentityResolver
         + HasAppConfigService
         + HasDownloadClientSettingsService

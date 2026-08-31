@@ -99,16 +99,6 @@ impl WorkService for StubWorkService {
         todo!("stub: not exercised by author-monitor tests")
     }
 
-    async fn merge_works(
-        &self,
-        _user_id: UserId,
-        _survivor_id: WorkId,
-        _loser_id: WorkId,
-        _choices: Vec<livrarr_domain::services::MergeFieldChoiceEntry>,
-    ) -> Result<livrarr_domain::services::MergeWorksResult, WorkServiceError> {
-        todo!("stub: not exercised by author-monitor tests")
-    }
-
     async fn resolve_identity(
         &self,
         _user_id: UserId,

@@ -68,14 +68,11 @@ use livrarr_external_data::transport_cache::TransportCache;
 use livrarr_external_data::{
     NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
-use livrarr_handlers::context::{
-    HasHistoryService, HasIdentityConflictService, HasWorkIdentityRepository, HasWorkService,
-};
+use livrarr_handlers::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
 use livrarr_handlers::AuthContext;
 use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_server::history_service::HistoryServiceImpl;
-use livrarr_server::services::identity_conflict_service::LiveIdentityConflictService;
 use tower::ServiceExt;
 
 /// The book the work was wrongly settled on before the user intervened.
@@ -97,7 +94,6 @@ struct RouteState {
     work_service: Arc<TestWorkService>,
     identity_repo: SqliteDb,
     history_service: Arc<TestHistoryService>,
-    conflict_service: Arc<LiveIdentityConflictService>,
 }
 
 impl HasWorkService for RouteState {
@@ -121,14 +117,6 @@ impl HasHistoryService for RouteState {
 
     fn history_service(&self) -> &Self::HistorySvc {
         &self.history_service
-    }
-}
-
-impl HasIdentityConflictService for RouteState {
-    type IdentityConflictSvc = LiveIdentityConflictService;
-
-    fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc {
-        &self.conflict_service
     }
 }
 
@@ -273,7 +261,6 @@ async fn refresh_settle_must_not_restore_an_anchor_the_user_cleared_mid_flight()
         work_service: service.clone(),
         identity_repo: db.clone(),
         history_service: Arc::new(HistoryServiceImpl::new(db.clone())),
-        conflict_service: Arc::new(LiveIdentityConflictService::new(db.clone())),
     });
 
     // 1. Start the background road. It takes its coherent read of the work, then

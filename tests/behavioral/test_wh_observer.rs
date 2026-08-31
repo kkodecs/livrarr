@@ -81,9 +81,14 @@ async fn seed_work(db: &SqliteDb, user_id: UserId, title: &str) -> Work {
         .await
         .expect("seed work");
     assert!(created, "fixture work must be newly created");
-    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-        .await
-        .expect("seed identity status");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("seed identity status");
     db.get_work(user_id, work.id).await.expect("read work")
 }
 

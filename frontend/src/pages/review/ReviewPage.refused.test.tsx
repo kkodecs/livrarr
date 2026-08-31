@@ -43,9 +43,6 @@ function installReviewPageApi() {
     if (call.method === "GET" && call.path === "/identity-review-card") {
       return { status: 200, body: [editionEvidenceCard()] };
     }
-    if (call.method === "GET" && call.path === "/identity-conflict") {
-      return { status: 200, body: [] };
-    }
     if (call.method === "GET" && call.path === "/author-link-review") {
       return { status: 200, body: [] };
     }

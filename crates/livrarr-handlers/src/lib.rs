@@ -12,7 +12,6 @@ pub mod cross_format;
 pub mod download_client;
 pub mod filesystem;
 pub mod history;
-pub mod identity_conflicts;
 pub mod identity_layer;
 pub mod identity_review;
 pub mod indexer;

@@ -7,5 +7,4 @@
 //! No service traits — concrete structs only.
 
 pub mod author_linking_service;
-pub mod identity_conflict_service;
 pub mod settings_service;

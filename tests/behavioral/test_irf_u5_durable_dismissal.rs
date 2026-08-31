@@ -248,8 +248,7 @@ async fn build_route_harness_with_providers(
     ));
 
     let db_arc = Arc::new(db.clone());
-    let mut queue_builder =
-        livrarr_metadata::DefaultProviderQueueBuilder::new().with_identity_route_dispatch();
+    let mut queue_builder = livrarr_metadata::DefaultProviderQueueBuilder::new();
     let open_library_stub = open_library_detail.map(|detail| {
         livrarr_external_data::StubProviderClient::new(
             livrarr_domain::MetadataProvider::OpenLibrary,
@@ -405,11 +404,6 @@ async fn build_route_harness_with_providers(
                 http_fetcher.clone(),
                 livrarr_metadata::list_service::NoOpBibliographyTrigger,
                 identity_road.clone(),
-            ),
-        ),
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
             ),
         ),
         identity_resolver: identity_resolver_arc.clone(),
@@ -4258,15 +4252,14 @@ async fn registered_update_merge_and_affirm_bypass_exact_tombstones_byte_identic
     );
 
     let affirm_value = "9555203";
-    harness
-        .db
-        .record_pending_anchor(
-            affirm.own_work_id,
-            AnchorType::new(AnchorType::GR_WORK),
-            affirm_value,
-        )
-        .await
-        .expect("seed pending affirm anchor through production writer");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &harness.db,
+        affirm.own_work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        affirm_value,
+    )
+    .await
+    .expect("seed pending affirm anchor through production writer");
     let affirm_route = ilr::RouteKey {
         provider: ilr::IdentityProvider::Goodreads,
         kind: ilr::RouteKind::GoodreadsBookEdition,
@@ -4845,15 +4838,14 @@ async fn registered_affirm_revokes_all_member_keys_in_its_continuation_transacti
         route.clone(),
     )
     .await;
-    harness
-        .db
-        .record_pending_anchor(
-            work.own_work_id,
-            AnchorType::new(AnchorType::GR_WORK),
-            route_value,
-        )
-        .await
-        .expect("seed registered affirm input");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &harness.db,
+        work.own_work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        route_value,
+    )
+    .await
+    .expect("seed registered affirm input");
     let before_failure = captured(&harness.db, harness.user_id, work.own_work_id).await;
 
     install_revoke_abort(&harness.db, "affirm").await;

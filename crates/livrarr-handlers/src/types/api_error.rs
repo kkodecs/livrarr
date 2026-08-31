@@ -227,16 +227,6 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
             WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
             WorkServiceError::Cover(msg) => ApiError::Internal(msg),
             WorkServiceError::Db(db_err) => ApiError::Db(db_err),
-            WorkServiceError::MergeChoiceRequired(fields) => ApiError::Conflict {
-                reason: format!(
-                    "merge requires an explicit choice for: {}",
-                    fields
-                        .iter()
-                        .map(|f| format!("{f:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            },
         }
     }
 }
@@ -426,33 +416,6 @@ impl From<livrarr_domain::identity_edit::IdentityEditError> for ApiError {
             }
             IdentityEditError::Unavailable => ApiError::ServiceUnavailable,
             IdentityEditError::Db(msg) => ApiError::Internal(msg),
-        }
-    }
-}
-
-impl From<livrarr_domain::services::ConflictError> for ApiError {
-    fn from(e: livrarr_domain::services::ConflictError) -> Self {
-        use livrarr_domain::services::ConflictError;
-        match e {
-            ConflictError::NotFound => ApiError::NotFound,
-            ConflictError::AlreadyResolved => ApiError::Conflict {
-                reason: e.to_string(),
-            },
-            // A lost first-statement generation claim: the conflict was open
-            // at the door read, but a different identity mutation won.
-            ConflictError::StaleIdentity => ApiError::ConflictDetailed {
-                message: "identity changed; reload identity conflicts".into(),
-                details: ErrorDetails::code("identity_conflict_stale"),
-            },
-            ConflictError::InvalidPrimaryAnchor => ApiError::BadRequest(e.to_string()),
-            ConflictError::Db(msg) => {
-                tracing::error!("conflict db error: {msg}");
-                ApiError::Internal("Something went wrong".to_string())
-            }
-            e => {
-                tracing::error!("conflict error: {e}");
-                ApiError::Internal("Something went wrong".to_string())
-            }
         }
     }
 }

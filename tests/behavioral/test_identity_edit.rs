@@ -46,23 +46,20 @@ use livrarr_domain::identity::{
 };
 use livrarr_domain::identity_edit::{classify_identifier_input, ClassifyError, IdentityEditError};
 use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
-use livrarr_domain::services::{IdentityConflictService, WorkIdentityRepository, WorkService};
+use livrarr_domain::services::{WorkIdentityRepository, WorkService};
 use livrarr_domain::{
     ApplyMergeOutcome, AuthType, EnrichmentStatus, EventType, HistoryFilter, IdentityStatus,
     MetadataProvider, User, UserId, UserRole, WorkId,
 };
 use livrarr_enrichment::{DefaultProviderQueueBuilder, ProviderQueueConfig};
 use livrarr_external_data::{GoodreadsClient, ProviderClient};
-use livrarr_handlers::context::{
-    HasHistoryService, HasIdentityConflictService, HasWorkIdentityRepository, HasWorkService,
-};
+use livrarr_handlers::context::{HasHistoryService, HasWorkIdentityRepository, HasWorkService};
 use livrarr_handlers::AuthContext;
 use livrarr_http::{fetcher::HttpFetcherImpl, HttpClient};
 use livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl;
 use livrarr_metadata::work_service::WorkServiceImpl;
 use livrarr_metadata::{DefaultMergeEngine, EnrichmentServiceImpl, PriorityModel};
 use livrarr_server::history_service::HistoryServiceImpl;
-use livrarr_server::services::identity_conflict_service::LiveIdentityConflictService;
 use serde_json::{json, Value};
 use sqlx::Row;
 use tower::ServiceExt;
@@ -73,7 +70,6 @@ struct RouteState<W> {
     work_service: Arc<W>,
     identity_repo: SqliteDb,
     history_service: Arc<TestHistoryService>,
-    conflict_service: Arc<LiveIdentityConflictService>,
 }
 
 impl<W> Clone for RouteState<W> {
@@ -82,7 +78,6 @@ impl<W> Clone for RouteState<W> {
             work_service: self.work_service.clone(),
             identity_repo: self.identity_repo.clone(),
             history_service: self.history_service.clone(),
-            conflict_service: self.conflict_service.clone(),
         }
     }
 }
@@ -120,20 +115,9 @@ where
     }
 }
 
-impl<W> HasIdentityConflictService for RouteState<W>
-where
-    W: WorkService + Send + Sync + 'static,
-{
-    type IdentityConflictSvc = LiveIdentityConflictService;
-
-    fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc {
-        &self.conflict_service
-    }
-}
-
 fn identity_app<S>(state: S) -> Router
 where
-    S: HasWorkService + HasWorkIdentityRepository + HasHistoryService + HasIdentityConflictService,
+    S: HasWorkService + HasWorkIdentityRepository + HasHistoryService,
 {
     Router::new()
         .route(
@@ -156,14 +140,6 @@ where
         .route(
             "/identity-review/{work_id}/dismiss",
             post(livrarr_handlers::identity_review::dismiss::<S>),
-        )
-        .route(
-            "/identity-conflict/{id}/resolve",
-            post(livrarr_handlers::identity_conflicts::resolve::<S>),
-        )
-        .route(
-            "/identity-conflict/{id}/dismiss",
-            post(livrarr_handlers::identity_conflicts::dismiss::<S>),
         )
         .with_state(state)
 }
@@ -243,7 +219,6 @@ where
         work_service: Arc::new(work_service),
         identity_repo: db.clone(),
         history_service: Arc::new(HistoryServiceImpl::new(db.clone())),
-        conflict_service: Arc::new(LiveIdentityConflictService::new(db)),
     }
 }
 
@@ -748,15 +723,29 @@ async fn overwrite_and_sibling_drop_clean_columns_pending_rows_and_dead_ends() {
     )
     .await
     .expect("seed protected bridge");
-    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::OL_WORK), "OL333W")
-        .await
-        .expect("seed sibling pending");
-    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), "44444")
-        .await
-        .expect("seed edited-slot pending");
-    db.bump_anchor_attempt(work_id, AnchorType::new(AnchorType::OL_WORK))
-        .await
-        .expect("seed sibling dead end");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL333W",
+    )
+    .await
+    .expect("seed sibling pending");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        "44444",
+    )
+    .await
+    .expect("seed edited-slot pending");
+    livrarr_db::test_helpers::bump_anchor_attempt_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::OL_WORK),
+    )
+    .await
+    .expect("seed sibling dead end");
 
     let base = spawn_goodreads(StatusCode::OK).await;
     let app = identity_app(route_state(db.clone(), work_service(db.clone(), base)));
@@ -809,12 +798,13 @@ async fn overwrite_and_sibling_drop_clean_columns_pending_rows_and_dead_ends() {
     .await
     .expect("pending count");
     assert_eq!(pending, 0);
-    assert!(db
-        .list_anchor_dead_ends(work_id)
-        .await
-        .expect("dead ends")
-        .iter()
-        .all(|d| d.anchor_type.as_str() != AnchorType::OL_WORK));
+    assert!(
+        livrarr_db::test_helpers::list_anchor_dead_ends_fixture(&db, work_id)
+            .await
+            .expect("dead ends")
+            .iter()
+            .all(|d| d.anchor_type.as_str() != AnchorType::OL_WORK)
+    );
 }
 
 /// REQ-IDs: AC-9
@@ -937,9 +927,14 @@ async fn repository_edit_cas_and_mid_transaction_failure_are_fully_atomic() {
     .await
     .expect("seed GR");
     let stale_generation = generation(&db, work_id).await;
-    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::ASIN), "B0ABC12345")
-        .await
-        .expect("competing writer");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::ASIN),
+        "B0ABC12345",
+    )
+    .await
+    .expect("competing writer");
     let after_competitor = generation(&db, work_id).await;
 
     let stale = db
@@ -1108,9 +1103,14 @@ async fn pending_affirm_generation_loss_maps_to_pending_anchor_stale() {
     let db = common::create_test_db().await;
     let user_id = create_test_user(&db).await;
     let work_id = create_work(&db, user_id, "Stale Pending Affirm").await;
-    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), "12345")
-        .await
-        .expect("seed pending GR");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        "12345",
+    )
+    .await
+    .expect("seed pending GR");
     let base = spawn_goodreads(StatusCode::OK).await;
     let app = identity_app(route_state(db.clone(), work_service(db.clone(), base)));
     let request = authenticated_request(
@@ -1150,10 +1150,16 @@ async fn review_apply_and_dismiss_generation_losses_map_contextually() {
         let db = common::create_test_db().await;
         let user_id = create_test_user(&db).await;
         let work_id = create_work(&db, user_id, &format!("Stale Review {action}")).await;
-        db.set_identity_status(user_id, work_id, IdentityStatus::NeedsReview)
-            .await
-            .expect("park work");
-        db.record_review_candidates(
+        livrarr_db::test_helpers::set_identity_status_fixture(
+            &db,
+            user_id,
+            work_id,
+            IdentityStatus::NeedsReview,
+        )
+        .await
+        .expect("park work");
+        livrarr_db::test_helpers::record_review_candidates_fixture(
+            &db,
             work_id,
             &[review_candidate(
                 "review-stale",
@@ -1321,9 +1327,14 @@ async fn true_no_op_consumes_the_preview_but_writes_nothing() {
     )
     .await
     .expect("seed user anchor");
-    db.set_identity_status(user_id, work_id, IdentityStatus::Confirmed)
-        .await
-        .expect("seed correct badge");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work_id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("seed correct badge");
     let base = spawn_goodreads(StatusCode::OK).await;
     let app = identity_app(route_state(db.clone(), work_service(db.clone(), base)));
     let (_, _, body) = preview(&app, &db, user_id, work_id, "12345", Some("gr_work")).await;
@@ -1408,12 +1419,21 @@ async fn clear_uses_union_truth_and_removes_all_slot_residue() {
     let db = common::create_test_db().await;
     let user_id = create_test_user(&db).await;
     let pending_only = create_work(&db, user_id, "Pending-only Clear").await;
-    db.record_pending_anchor(pending_only, AnchorType::new(AnchorType::GR_WORK), "12345")
-        .await
-        .expect("seed pending-only slot");
-    db.bump_anchor_attempt(pending_only, AnchorType::new(AnchorType::GR_WORK))
-        .await
-        .expect("seed dead end");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        pending_only,
+        AnchorType::new(AnchorType::GR_WORK),
+        "12345",
+    )
+    .await
+    .expect("seed pending-only slot");
+    livrarr_db::test_helpers::bump_anchor_attempt_fixture(
+        &db,
+        pending_only,
+        AnchorType::new(AnchorType::GR_WORK),
+    )
+    .await
+    .expect("seed dead end");
     let hc_work = create_work(&db, user_id, "HC Clear").await;
     db.confirm_anchor(
         hc_work,
@@ -1445,11 +1465,12 @@ async fn clear_uses_union_truth_and_removes_all_slot_residue() {
     .await
     .expect("pending residue");
     assert_eq!(residue, 0);
-    assert!(db
-        .list_anchor_dead_ends(pending_only)
-        .await
-        .expect("dead ends")
-        .is_empty());
+    assert!(
+        livrarr_db::test_helpers::list_anchor_dead_ends_fixture(&db, pending_only)
+            .await
+            .expect("dead ends")
+            .is_empty()
+    );
 
     let (empty, _, _) = call(
         &app,

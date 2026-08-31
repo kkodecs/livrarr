@@ -42,7 +42,6 @@ mod sqlite_field_dissents;
 mod sqlite_grab;
 mod sqlite_history;
 mod sqlite_identity_conflict;
-pub use sqlite_identity_conflict::ConflictApplyError;
 mod sqlite_import;
 mod sqlite_import_intent;
 mod sqlite_indexer;
@@ -72,10 +71,6 @@ pub use sqlite_work_identity::backfill_work_identity_ledger;
 mod cross_user_isolation_tests;
 #[cfg(test)]
 mod playback_enhancement_tests;
-#[cfg(test)]
-mod sqlite_affirm_anchor_tests;
-#[cfg(test)]
-mod sqlite_identity_conflict_tests;
 
 // ---------------------------------------------------------------------------
 // Test Helpers
@@ -273,6 +268,281 @@ pub mod test_helpers {
             path,
             _tempdir: tempdir,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy identity-state fixtures.
+    //
+    // The runtime writers for these rows are retired; live behaviour only
+    // READS them (frozen scalar badge, pending-anchor affirm door, grey-park
+    // candidates, dead-end table). Tests seed that state here, mirroring the
+    // retired writers' row shapes exactly, through the crate-private
+    // serializers so there is still one authority per encoding.
+    // ------------------------------------------------------------------
+
+    /// Seed the frozen legacy identity badge (and advance the identity
+    /// generation, as every identity mutation must).
+    pub async fn set_identity_status_fixture(
+        db: &SqliteDb,
+        user_id: i64,
+        work_id: i64,
+        status: livrarr_domain::IdentityStatus,
+    ) -> Result<(), sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE works SET identity_status = ?, \
+             identity_generation = identity_generation + 1 \
+             WHERE id = ? AND user_id = ?",
+        )
+        .bind(crate::sqlite_identity_conflict::identity_status_str(status))
+        .bind(work_id)
+        .bind(user_id)
+        .execute(db.pool())
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        Ok(())
+    }
+
+    /// Seed a fuzzy pending anchor guess in the ledger (no works.* sync).
+    pub async fn record_pending_anchor_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+        anchor_type: livrarr_domain::identity::AnchorType,
+        value: &str,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut tx = crate::pool::begin_write(db.pool()).await?;
+        crate::sqlite_work_identity::bump_identity_generation(&mut tx, work_id).await?;
+        sqlx::query(
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, ?2, ?3, 'pending', 'auto_search', ?4, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
+                 confidence = 'pending',
+                 setter = 'auto_search',
+                 set_at = ?4
+             WHERE work_identity_anchors.confidence != 'confirmed'",
+        )
+        .bind(work_id)
+        .bind(anchor_type.as_str())
+        .bind(value)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+
+    /// Seed the retired add-path "pending, no candidates" shape: an
+    /// empty-valued pending `ol_work` row plus the frozen Pending badge.
+    pub async fn set_identity_pending_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+        _reason: livrarr_domain::identity::PendingReason,
+        setter: livrarr_domain::identity::AnchorSetter,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let setter_str = serde_json::to_value(setter)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "auto_search".to_string());
+        let mut tx = crate::pool::begin_write(db.pool()).await?;
+        crate::sqlite_work_identity::bump_identity_generation(&mut tx, work_id).await?;
+        sqlx::query(
+            "INSERT INTO work_identity_anchors (work_id, anchor_type, anchor_value, confidence, setter, set_at, user_id)
+             VALUES (?1, 'ol_work', '', 'pending', ?2, ?3, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type, anchor_value) DO UPDATE SET
+                 confidence = 'pending',
+                 setter = ?2,
+                 set_at = ?3",
+        )
+        .bind(work_id)
+        .bind(&setter_str)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE works SET ol_key = NULL, identity_status = 'pending' WHERE id = ?1")
+            .bind(work_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await
+    }
+
+    /// Seed a grey-park candidate set for a work.
+    pub async fn record_review_candidates_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+        candidates: &[livrarr_domain::identity::Candidate],
+    ) -> Result<(), sqlx::Error> {
+        let json =
+            serde_json::to_string(candidates).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO work_identity_review_candidates (work_id, user_id, candidates_json, recorded_at)
+             VALUES (?1, (SELECT user_id FROM works WHERE id = ?1), ?2, ?3)
+             ON CONFLICT (work_id) DO UPDATE SET
+                 candidates_json = ?2,
+                 recorded_at = ?3",
+        )
+        .bind(work_id)
+        .bind(&json)
+        .bind(&now)
+        .execute(db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Seed one dead-end attempt for a missing anchor type.
+    pub async fn bump_anchor_attempt_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+        anchor_type: livrarr_domain::identity::AnchorType,
+    ) -> Result<(), sqlx::Error> {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO work_anchor_dead_ends (work_id, anchor_type, attempt_count, last_attempt_at, user_id)
+             VALUES (?1, ?2, 1, ?3, (SELECT user_id FROM works WHERE id = ?1))
+             ON CONFLICT (work_id, anchor_type) DO UPDATE SET
+                 attempt_count = attempt_count + 1,
+                 last_attempt_at = ?3",
+        )
+        .bind(work_id)
+        .bind(anchor_type.as_str())
+        .bind(&now)
+        .execute(db.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Read the dead-end table for a work (observation only).
+    pub async fn list_anchor_dead_ends_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+    ) -> Result<Vec<livrarr_domain::identity::AnchorDeadEnd>, sqlx::Error> {
+        let rows: Vec<(String, i64, String)> = sqlx::query_as(
+            "SELECT anchor_type, attempt_count, last_attempt_at
+             FROM work_anchor_dead_ends WHERE work_id = ?1",
+        )
+        .bind(work_id)
+        .fetch_all(db.pool())
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(anchor_type, attempt_count, last_attempt_at)| {
+                livrarr_domain::identity::AnchorDeadEnd {
+                    work_id,
+                    anchor_type: livrarr_domain::identity::AnchorType::new(anchor_type),
+                    attempt_count: attempt_count as u32,
+                    last_attempt_at: chrono::DateTime::parse_from_rfc3339(&last_attempt_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                }
+            })
+            .collect())
+    }
+
+    /// Read a work's identity generation (observation only).
+    pub async fn identity_generation_fixture(
+        db: &SqliteDb,
+        work_id: i64,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT identity_generation FROM works WHERE id = ?1")
+            .bind(work_id)
+            .fetch_one(db.pool())
+            .await
+    }
+
+    /// Seed a work the way live composition produces it: through the identity
+    /// road's settlement commit, with an F2 captured identity whose active
+    /// routes carry the given provider keys. Enrichment dispatch reads those
+    /// routes; legacy scalar columns are never consulted.
+    pub async fn settle_work_fixture(
+        db: &SqliteDb,
+        user_id: i64,
+        title: &str,
+        author_name: &str,
+        language: Option<&str>,
+        routes: &[(
+            livrarr_domain::identity_layer::IdentityProvider,
+            livrarr_domain::identity_layer::RouteKind,
+            &str,
+        )],
+    ) -> livrarr_domain::Work {
+        use livrarr_domain::identity_layer::{
+            EvidenceProvenance, IdentityTitleTuple, RouteOwner, RouteProvenance, SettlementCommit,
+            WorkContributor, WorkIdentityRepository, WorkRoute, WorkRouteState,
+        };
+        let (author, _) = crate::AuthorDb::create_author(
+            db,
+            crate::CreateAuthorDbRequest {
+                user_id,
+                name: author_name.to_string(),
+                sort_name: None,
+                ol_key: None,
+                gr_key: None,
+                hc_key: None,
+                import_id: None,
+            },
+        )
+        .await
+        .expect("settle fixture: create author");
+        let settled = WorkIdentityRepository::commit_settlement(
+            db,
+            SettlementCommit {
+                user_id,
+                existing_work_id: None,
+                add_source: None,
+                identity_title: IdentityTitleTuple {
+                    main: title.to_string(),
+                    subtitle: None,
+                    volume: None,
+                    normalized_main: livrarr_domain::normalize_for_matching(title),
+                    normalized_subtitle: String::new(),
+                    normalized_volume: String::new(),
+                    provenance: EvidenceProvenance::User,
+                },
+                text_distinction: None,
+                contributors: vec![WorkContributor {
+                    user_id,
+                    work_id: 0,
+                    author_id: author.id,
+                    ordinal: 0,
+                    roles: Vec::new(),
+                }],
+                routes: routes
+                    .iter()
+                    .map(|(provider, kind, value)| WorkRoute {
+                        id: 0,
+                        user_id,
+                        owner: RouteOwner::Work(0),
+                        resolved_work_id: 0,
+                        provider: provider.clone(),
+                        kind: kind.clone(),
+                        provider_scoped_id: (*value).to_string(),
+                        state: WorkRouteState::Active,
+                        provenance: RouteProvenance::UserChoice,
+                        user_confirmed: true,
+                        observed_at: chrono::Utc::now(),
+                    })
+                    .collect(),
+                absorbed_work_ids: Vec::new(),
+                expected_generation: 0,
+                review_cards: Vec::new(),
+            },
+        )
+        .await
+        .expect("settle fixture: commit settlement");
+        let work_id = settled.identity.own_work_id;
+        if let Some(language) = language {
+            sqlx::query("UPDATE works SET language = ?1 WHERE id = ?2")
+                .bind(language)
+                .bind(work_id)
+                .execute(db.pool())
+                .await
+                .expect("settle fixture: language");
+        }
+        crate::WorkDb::get_work(db, user_id, work_id)
+            .await
+            .expect("settle fixture: read settled work")
     }
 }
 

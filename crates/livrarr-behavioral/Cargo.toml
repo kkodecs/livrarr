@@ -213,14 +213,6 @@ name = "test_ewl_text_norm"
 path = "../../tests/behavioral/test_ewl_text_norm.rs"
 
 [[test]]
-name = "test_ewl_work_identity"
-path = "../../tests/behavioral/test_ewl_work_identity.rs"
-
-[[test]]
-name = "test_ewl_conflict_service"
-path = "../../tests/behavioral/test_ewl_conflict_service.rs"
-
-[[test]]
 name = "test_ewl_resolver"
 path = "../../tests/behavioral/test_ewl_resolver.rs"
 
@@ -333,14 +325,6 @@ name = "test_wcc_seed_identity"
 path = "../../tests/behavioral/test_wcc_seed_identity.rs"
 
 [[test]]
-name = "test_wcc_anchors"
-path = "../../tests/behavioral/test_wcc_anchors.rs"
-
-[[test]]
-name = "test_wcc_conflict_migration"
-path = "../../tests/behavioral/test_wcc_conflict_migration.rs"
-
-[[test]]
 name = "test_wcc_resolver"
 path = "../../tests/behavioral/test_wcc_resolver.rs"
 
@@ -351,10 +335,6 @@ path = "../../tests/behavioral/test_wcc_transport_cache.rs"
 [[test]]
 name = "test_wcc_merge_reuse"
 path = "../../tests/behavioral/test_wcc_merge_reuse.rs"
-
-[[test]]
-name = "test_wcc_async_resolver"
-path = "../../tests/behavioral/test_wcc_async_resolver.rs"
 
 [[test]]
 name = "test_wcc_add"
@@ -449,10 +429,6 @@ name = "test_mc_refresh_orchestration"
 path = "../../tests/behavioral/test_mc_refresh_orchestration.rs"
 
 [[test]]
-name = "test_se_refresh_gate"
-path = "../../tests/behavioral/test_se_refresh_gate.rs"
-
-[[test]]
 name = "test_mc_add_doors"
 path = "../../tests/behavioral/test_mc_add_doors.rs"
 
@@ -471,10 +447,6 @@ path = "../../tests/behavioral/test_mc_matching_variants.rs"
 [[test]]
 name = "test_series_roster"
 path = "../../tests/behavioral/test_series_roster.rs"
-
-[[test]]
-name = "test_unified_identity_path"
-path = "../../tests/behavioral/test_unified_identity_path.rs"
 
 [[test]]
 name = "test_id_completeness"
@@ -539,16 +511,8 @@ name = "test_verify_a1"
 path = "../../tests/behavioral/test_verify_a1.rs"
 
 [[test]]
-name = "test_verify_d1"
-path = "../../tests/behavioral/test_verify_d1.rs"
-
-[[test]]
 name = "test_verify_d2"
 path = "../../tests/behavioral/test_verify_d2.rs"
-
-[[test]]
-name = "test_verify_e2"
-path = "../../tests/behavioral/test_verify_e2.rs"
 
 [[test]]
 name = "test_manifest_guard"
@@ -599,10 +563,6 @@ path = "../../tests/behavioral/test_wh_tags.rs"
 [[test]]
 name = "test_wh_deletion"
 path = "../../tests/behavioral/test_wh_deletion.rs"
-
-[[test]]
-name = "test_wh_merge"
-path = "../../tests/behavioral/test_wh_merge.rs"
 
 [[test]]
 name = "test_wh_identity_events"

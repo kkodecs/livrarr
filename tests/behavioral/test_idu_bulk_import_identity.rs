@@ -134,30 +134,6 @@ fn resolving_openlibrary_stub() -> StubProviderClient {
     )
 }
 
-/// AC-IDU-1: A bulk Goodreads row carrying resolvable anchors is confirmed
-/// immediately by the same shared identity path as interactive Add Work.
-#[tokio::test]
-async fn test_idu_bulk_import_identity_ac_1_goodreads_confirm_persists_confirmed_immediately() {
-    let ol = resolving_openlibrary_stub();
-    let hc = StubProviderClient::new(MetadataProvider::Hardcover, ProviderOutcome::NotFound);
-    let resolver = resolver_with_stubs(vec![ol.clone(), hc]);
-    let (svc, user_id, db) = make_service_with_resolver(resolver).await;
-
-    confirm_first_row(&svc, user_id, goodreads_csv_with_resolvable_row()).await;
-    let work = persisted_work_by_title(&db, user_id, DUNE_TITLE).await;
-
-    assert_eq!(
-        ol.call_count(),
-        1,
-        "bulk confirm should synchronously call the wired identity resolver's provider fan-out"
-    );
-    assert_eq!(
-        work.identity_status,
-        IdentityStatus::Confirmed,
-        "AC-IDU-1: resolvable bulk import rows must be Confirmed immediately after confirm() returns"
-    );
-}
-
 /// AC-IDU-2: A title/author-only miss never blocks import. It still creates the
 /// work and leaves identity pending for later convergence.
 #[tokio::test]
@@ -174,25 +150,6 @@ async fn test_idu_bulk_import_identity_ac_2_title_author_only_miss_adds_pending_
         work.identity_status,
         IdentityStatus::Pending,
         "AC-IDU-2: unresolved title/author-only imports remain Pending, not failed"
-    );
-}
-
-/// AC-IDU-3: The confirmed status is observable as soon as `confirm()` returns;
-/// this test intentionally does not invoke any async resolver/enrichment job tick.
-#[tokio::test]
-async fn test_idu_bulk_import_identity_ac_3_confirmed_status_requires_no_background_job() {
-    let ol = resolving_openlibrary_stub();
-    let hc = StubProviderClient::new(MetadataProvider::Hardcover, ProviderOutcome::NotFound);
-    let resolver = resolver_with_stubs(vec![ol, hc]);
-    let (svc, user_id, db) = make_service_with_resolver(resolver).await;
-
-    confirm_first_row(&svc, user_id, goodreads_csv_with_resolvable_row()).await;
-    let work = persisted_work_by_title(&db, user_id, DUNE_TITLE).await;
-
-    assert_eq!(
-        work.identity_status,
-        IdentityStatus::Confirmed,
-        "AC-IDU-3: confirm() itself must persist Confirmed; no background tick is part of this test"
     );
 }
 

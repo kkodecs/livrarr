@@ -1,8 +1,4 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -18,58 +14,23 @@ use livrarr_db::{
     WorkDb, WorkDbCreate,
 };
 use livrarr_domain::identity::{
-    AnchorConfidence, AnchorProvenance, AnchorSetter, AnchorType, Candidate, CandidateId,
-    CapturedIdentity, ConflictSource, IdentityMethod, IdentityMode, MatchBasis, Resolution,
+    AnchorConfidence, AnchorSetter, AnchorType, Candidate, CandidateId, CapturedIdentity,
     ResolutionScore,
 };
-use livrarr_domain::services::{
-    ConvergeOutcome, RefreshSurface, WorkIdentityError, WorkIdentityRepository, WorkService,
-};
+use livrarr_domain::services::WorkIdentityRepository;
 use livrarr_domain::{
     normalize_for_matching, AuthType, EnrichmentStatus, IdentityStatus, MetadataProvider, UserId,
     Work,
-};
-use livrarr_external_data::transport_cache::TransportCache;
-use livrarr_external_data::{
-    NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
 };
 use livrarr_handlers::context::{
     HasHistoryService, HasIdentityRoadService, HasWorkIdentityRepository, HasWorkService,
 };
 use livrarr_handlers::work::{affirm_pending_anchor, list_pending_anchors};
 use livrarr_handlers::AuthContext;
-use livrarr_metadata::async_resolver::settle_identity;
-use livrarr_metadata::english_identity_resolver::EnglishIdentityResolver;
-use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
+use livrarr_metadata::english_identity_resolver::LiveEnglishIdentityResolver;
 use livrarr_metadata::work_service::WorkServiceImpl;
 
 type TestWorkService = WorkServiceImpl<SqliteDb, StubEnrichmentWorkflow, StubHttpFetcher>;
-
-struct ScriptedResolver {
-    calls: AtomicUsize,
-    result: Mutex<Resolution>,
-}
-
-impl ScriptedResolver {
-    fn new(result: Resolution) -> Self {
-        Self {
-            calls: AtomicUsize::new(0),
-            result: Mutex::new(result),
-        }
-    }
-}
-
-impl EnglishIdentityResolver for ScriptedResolver {
-    async fn resolve(
-        &self,
-        _user_id: UserId,
-        _seed: &livrarr_domain::identity::WorkSeed,
-        _tier: livrarr_domain::identity::LatencyTier,
-    ) -> Result<Resolution, WorkIdentityError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.result.lock().expect("scripted result").clone())
-    }
-}
 
 #[derive(Clone)]
 struct TestState {
@@ -129,21 +90,6 @@ fn service(
     match resolver {
         Some(resolver) => svc.with_resolver(Arc::new(resolver)),
         None => svc,
-    }
-}
-
-fn resolver_with_stubs(stubs: Vec<StubProviderClient>) -> LiveEnglishIdentityResolver {
-    let clients = stubs
-        .into_iter()
-        .map(|s| (s.provider, ProviderClient::Stub(s)))
-        .collect::<HashMap<_, _>>();
-    LiveEnglishIdentityResolver {
-        clients,
-        cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
-        config: ResolverConfig {
-            gb_key_present: false,
-            ..ResolverConfig::default()
-        },
     }
 }
 
@@ -219,7 +165,7 @@ async fn seed_work(
         .expect("seed enrichment status");
     }
 
-    db.set_identity_status(user_id, work.id, identity_status)
+    livrarr_db::test_helpers::set_identity_status_fixture(db, user_id, work.id, identity_status)
         .await
         .expect("seed identity status");
 
@@ -235,49 +181,6 @@ struct SeedAnchors {
     hc_key: Option<&'static str>,
     isbn_13: Option<&'static str>,
     asin: Option<&'static str>,
-}
-
-fn captured(
-    ol_key: Option<&str>,
-    gr_key: Option<&str>,
-    hc_key: Option<&str>,
-    isbn_13: Option<&str>,
-    asin: Option<&str>,
-    title: &str,
-) -> CapturedIdentity {
-    CapturedIdentity {
-        ol_key: ol_key.map(str::to_string),
-        gr_key: gr_key.map(str::to_string),
-        hc_key: hc_key.map(str::to_string),
-        isbn_13: isbn_13.map(str::to_string),
-        asin: asin.map(str::to_string),
-        title: title.to_string(),
-        author_name: "Id Completeness Author".to_string(),
-        language: Some("en".to_string()),
-    }
-}
-
-fn hard_provenance(identity: &CapturedIdentity) -> AnchorProvenance {
-    AnchorProvenance {
-        ol_key: identity.ol_key.as_ref().map(|_| MatchBasis::Hard),
-        gr_key: identity.gr_key.as_ref().map(|_| MatchBasis::Hard),
-        hc_key: identity.hc_key.as_ref().map(|_| MatchBasis::Hard),
-        isbn_13: identity.isbn_13.as_ref().map(|_| MatchBasis::Hard),
-        asin: identity.asin.as_ref().map(|_| MatchBasis::Hard),
-    }
-}
-
-fn resolved_with_provenance(
-    identity: CapturedIdentity,
-    provenance: Option<AnchorProvenance>,
-) -> Resolution {
-    let provenance = provenance.unwrap_or_else(|| hard_provenance(&identity));
-    Resolution::Resolved {
-        identity,
-        method: IdentityMethod::IsbnDirect,
-        candidate_id: CandidateId("id-completeness-candidate".to_string()),
-        provenance,
-    }
 }
 
 async fn confirm_anchor(db: &SqliteDb, work_id: i64, anchor_type: &str, value: &str) {
@@ -312,122 +215,6 @@ fn test_state(db: SqliteDb) -> TestState {
         identity_road: SqlitePendingRouteRoad::new(db.clone()),
         identity_repo: db,
     }
-}
-
-#[tokio::test]
-async fn test_id_completeness_pending_anchor_firewall_blank_and_monotonic() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let work = seed_work(
-        &db,
-        user_id,
-        "Pending Anchor Firewall",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Enriched,
-        SeedAnchors::default(),
-    )
-    .await;
-
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B000PEND12")
-        .await
-        .expect("record pending ASIN");
-    let after = db.get_work(user_id, work.id).await.expect("read work");
-    let anchors = db.list_anchors(work.id).await.expect("list anchors");
-
-    assert_eq!(after.asin, None, "pending ASIN must not sync works.asin");
-    let pending = anchors
-        .iter()
-        .find(|a| a.anchor_type.as_str() == AnchorType::ASIN && a.anchor_value == "B000PEND12")
-        .expect("pending ASIN ledger row");
-    assert_eq!(pending.confidence, AnchorConfidence::Pending);
-    assert_eq!(pending.setter, AnchorSetter::AutoSearch);
-
-    let err = db
-        .record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "   ")
-        .await
-        .expect_err("blank pending anchor is rejected");
-    assert!(matches!(err, WorkIdentityError::InvalidAnchorValue));
-
-    confirm_anchor(&db, work.id, AnchorType::ASIN, "B000CONF12").await;
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B000CONF12")
-        .await
-        .expect("re-offering confirmed anchor as fuzzy guess");
-    let anchors = db.list_anchors(work.id).await.expect("list anchors again");
-    let confirmed = anchors
-        .iter()
-        .find(|a| a.anchor_type.as_str() == AnchorType::ASIN && a.anchor_value == "B000CONF12")
-        .expect("confirmed same-value ASIN");
-    assert_eq!(confirmed.confidence, AnchorConfidence::Confirmed);
-}
-
-#[tokio::test]
-async fn test_id_completeness_dead_end_counters_are_durable_and_clearable() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let work = seed_work(
-        &db,
-        user_id,
-        "Dead End Counters",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Enriched,
-        SeedAnchors::default(),
-    )
-    .await;
-
-    for _ in 0..3 {
-        db.bump_anchor_attempt(work.id, AnchorType::new(AnchorType::GR_WORK))
-            .await
-            .expect("bump gr_key dead-end");
-    }
-    db.bump_anchor_attempt(work.id, AnchorType::new(AnchorType::ASIN))
-        .await
-        .expect("bump ASIN dead-end");
-
-    let dead_ends = db
-        .list_anchor_dead_ends(work.id)
-        .await
-        .expect("list dead-ends");
-    let gr = dead_ends
-        .iter()
-        .find(|d| d.anchor_type.as_str() == AnchorType::GR_WORK)
-        .expect("gr_key dead-end");
-    assert_eq!(gr.attempt_count, 3);
-
-    db.reset_for_manual_refresh(user_id, work.id)
-        .await
-        .expect("manual refresh reset");
-    let dead_ends = db
-        .list_anchor_dead_ends(work.id)
-        .await
-        .expect("dead-ends survive refresh reset");
-    assert_eq!(
-        dead_ends
-            .iter()
-            .find(|d| d.anchor_type.as_str() == AnchorType::GR_WORK)
-            .expect("gr_key dead-end after refresh")
-            .attempt_count,
-        3
-    );
-
-    db.clear_anchor_dead_end(work.id, AnchorType::new(AnchorType::GR_WORK))
-        .await
-        .expect("clear only gr_key");
-    let dead_ends = db.list_anchor_dead_ends(work.id).await.expect("list");
-    assert!(!dead_ends
-        .iter()
-        .any(|d| d.anchor_type.as_str() == AnchorType::GR_WORK));
-    assert!(dead_ends
-        .iter()
-        .any(|d| d.anchor_type.as_str() == AnchorType::ASIN));
-
-    db.clear_anchor_dead_ends(work.id)
-        .await
-        .expect("clear all dead-ends");
-    assert!(db
-        .list_anchor_dead_ends(work.id)
-        .await
-        .expect("list after clear all")
-        .is_empty());
 }
 
 #[tokio::test]
@@ -498,7 +285,8 @@ async fn test_id_completeness_selector_branches_guards_and_next_clock() {
         },
     )
     .await;
-    db.record_pending_anchor(
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
         missing_pending_guess.id,
         AnchorType::new(AnchorType::GR_WORK),
         "100003",
@@ -521,7 +309,8 @@ async fn test_id_completeness_selector_branches_guards_and_next_clock() {
     )
     .await;
     for _ in 0..3 {
-        db.bump_anchor_attempt(
+        livrarr_db::test_helpers::bump_anchor_attempt_fixture(
+            &db,
             missing_at_threshold.id,
             AnchorType::new(AnchorType::GR_WORK),
         )
@@ -583,255 +372,6 @@ async fn test_id_completeness_selector_branches_guards_and_next_clock() {
     );
 }
 
-#[tokio::test]
-async fn test_id_completeness_converge_work_terminal_settle_enrich_clear_and_no_refresh_reset() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let pending_no_chase = seed_work(
-        &db,
-        user_id,
-        "Converge Pending No Chase",
-        IdentityStatus::Pending,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors::default(),
-    )
-    .await;
-    let pending_chaseable = seed_work(
-        &db,
-        user_id,
-        "Converge Pending Chaseable",
-        IdentityStatus::Pending,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors {
-            isbn_13: Some("9780000000101"),
-            ..Default::default()
-        },
-    )
-    .await;
-    let full_enrichment_retry = seed_work(
-        &db,
-        user_id,
-        "Converge Full Enrichment Retry",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Failed,
-        SeedAnchors {
-            ol_key: Some("OL100102W"),
-            gr_key: Some("100102"),
-            hc_key: Some("100102"),
-            isbn_13: Some("9780000000102"),
-            asin: Some("B0CONVFULL"),
-        },
-    )
-    .await;
-    let harvested = seed_work(
-        &db,
-        user_id,
-        "Converge Clears Dead End",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Enriched,
-        SeedAnchors {
-            isbn_13: Some("9780000000103"),
-            ..Default::default()
-        },
-    )
-    .await;
-    db.bump_anchor_attempt(harvested.id, AnchorType::new(AnchorType::GR_WORK))
-        .await
-        .expect("pre-bump gr_key");
-
-    let workflow = StubEnrichmentWorkflow::succeeding();
-    let ol = StubProviderClient::new(
-        MetadataProvider::OpenLibrary,
-        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
-            title: Some("Converge Clears Dead End".to_string()),
-            author_name: Some("Id Completeness Author".to_string()),
-            gr_key: Some("100103".to_string()),
-            isbn_13: Some("9780000000103".to_string()),
-            language: Some("en".to_string()),
-            ..NormalizedWorkDetail::default()
-        })),
-    );
-    let svc = service(
-        db.clone(),
-        workflow.clone(),
-        Some(resolver_with_stubs(vec![ol.clone()])),
-    );
-
-    let outcome = svc
-        .converge_work(user_id, pending_no_chase.id, 3)
-        .await
-        .expect("converge pending with no chaseable anchor");
-    assert_eq!(outcome, ConvergeOutcome::Terminal);
-    assert_eq!(
-        db.get_work(user_id, pending_no_chase.id)
-            .await
-            .expect("read terminalized work")
-            .identity_status,
-        IdentityStatus::NeedsReview
-    );
-
-    let _ = svc
-        .converge_work(user_id, pending_chaseable.id, 3)
-        .await
-        .expect("converge pending with chaseable anchor");
-    assert!(
-        ol.call_count() >= 1,
-        "pending chaseable work settles identity"
-    );
-
-    let before_identity_calls = ol.call_count();
-    let _ = svc
-        .converge_work(user_id, full_enrichment_retry.id, 3)
-        .await
-        .expect("converge fully anchored enrichment retry");
-    assert_eq!(
-        ol.call_count(),
-        before_identity_calls,
-        "fully anchored enrichment retry does not fan out identity"
-    );
-    assert!(
-        workflow.work_ids().contains(&full_enrichment_retry.id),
-        "enrichment still runs for a fully anchored incomplete work"
-    );
-
-    let _ = svc
-        .converge_work(user_id, harvested.id, 3)
-        .await
-        .expect("converge harvested anchor");
-    let harvested_after = db
-        .get_work(user_id, harvested.id)
-        .await
-        .expect("read harvested");
-    assert_eq!(harvested_after.gr_key.as_deref(), Some("100103"));
-    assert!(db
-        .list_anchor_dead_ends(harvested.id)
-        .await
-        .expect("dead-end list after harvest")
-        .iter()
-        .all(|d| d.anchor_type.as_str() != AnchorType::GR_WORK));
-    assert_eq!(
-        workflow.reset_call_count(),
-        0,
-        "converge_work must never call reset_for_manual_refresh"
-    );
-}
-
-/// Directive (Phase 5 REQ-008/AC-012): a work parked as `NeedsReview` — the
-/// resolver could not confidently pick a candidate, so identity is grey — must
-/// never have provider data written onto it by a background pass. Seeds a work
-/// already at `NeedsReview` (the state a `Resolution::NeedsConfirmation`
-/// verdict leaves it in) and drives it through the same background convergence
-/// path a scheduled tick uses, with no resolver wired: the Step-0 dead-end exit
-/// only applies to a `Pending` prior, so this exercises the Step-2 enrichment
-/// gate (`identity_permits`) directly.
-#[tokio::test]
-async fn test_id_completeness_needs_review_work_never_dispatches_enrichment_ac012() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let parked = seed_work(
-        &db,
-        user_id,
-        "AC-012 Parked Grey Candidate",
-        IdentityStatus::NeedsReview,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors::default(),
-    )
-    .await;
-
-    let workflow = StubEnrichmentWorkflow::succeeding();
-    let svc = service(db.clone(), workflow.clone(), None);
-
-    let outcome = svc
-        .converge_work(user_id, parked.id, 3)
-        .await
-        .expect("converge a needs-review work");
-
-    assert_eq!(
-        outcome,
-        ConvergeOutcome::Terminal,
-        "a NeedsReview identity is terminal regardless of enrichment/chaseable state"
-    );
-    assert_eq!(
-        workflow.call_count(),
-        0,
-        "AC-012: background convergence must never dispatch enrichment for a grey/needs-review work"
-    );
-    assert!(
-        !workflow.work_ids().contains(&parked.id),
-        "AC-012: the parked work's id must never reach the enrichment workflow"
-    );
-
-    let after = db
-        .get_work(user_id, parked.id)
-        .await
-        .expect("read parked work");
-    assert_eq!(
-        after.identity_status,
-        IdentityStatus::NeedsReview,
-        "a NeedsReview badge is not silently changed by convergence"
-    );
-    assert_eq!(
-        after.enrichment_status,
-        EnrichmentStatus::Unenriched,
-        "AC-012: no provider data merged onto a grey-identity work"
-    );
-    assert_eq!(
-        after.cover_url, None,
-        "AC-012: no cover written from an uncertain candidate"
-    );
-    assert_eq!(
-        after.description, None,
-        "AC-012: no description written from an uncertain candidate"
-    );
-}
-
-/// `refresh()` lacked the `identity_permits` gate the convergence path (the
-/// test above) and the add door both apply — a parked work would still
-/// enrich on a manual or bulk refresh. Same fixture shape as the test above,
-/// driven through `refresh()` instead of `converge_work`, proving the gate
-/// now makes the two paths consistent.
-#[tokio::test]
-async fn test_id_completeness_needs_review_work_never_enriches_on_refresh() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let parked = seed_work(
-        &db,
-        user_id,
-        "Parked Refresh Guard",
-        IdentityStatus::NeedsReview,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors::default(),
-    )
-    .await;
-
-    let workflow = StubEnrichmentWorkflow::succeeding();
-    let svc = service(db.clone(), workflow.clone(), None);
-
-    svc.refresh(user_id, parked.id, RefreshSurface::Interactive)
-        .await
-        .expect("refresh a needs-review work");
-
-    assert_eq!(
-        workflow.call_count(),
-        0,
-        "refresh must never dispatch enrichment for a grey/needs-review work"
-    );
-    assert!(
-        !workflow.work_ids().contains(&parked.id),
-        "the parked work's id must never reach the enrichment workflow via refresh"
-    );
-
-    let after = db
-        .get_work(user_id, parked.id)
-        .await
-        .expect("read parked work");
-    assert_eq!(
-        after.identity_status,
-        IdentityStatus::NeedsReview,
-        "a NeedsReview badge is not silently changed by refresh"
-    );
-}
-
 /// The ranked candidates behind a `NeedsReview` park are now persisted
 /// (queryable per work) instead of discarded, and carry their real computed
 /// scores rather than a placeholder.
@@ -878,7 +418,7 @@ async fn test_id_completeness_review_candidates_persist_and_round_trip() {
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &candidates)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &candidates)
         .await
         .expect("record candidates");
 
@@ -919,7 +459,7 @@ async fn test_id_completeness_review_candidates_persist_and_round_trip() {
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &candidates_v2)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &candidates_v2)
         .await
         .expect("record replacement candidates");
     let replaced = db
@@ -983,7 +523,7 @@ async fn test_id_completeness_identity_review_list_shows_parked_work_with_real_s
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(parked.id, &candidates)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, parked.id, &candidates)
         .await
         .expect("record park candidates");
 
@@ -1049,7 +589,7 @@ async fn test_id_completeness_identity_review_resolve_applies_candidate_and_unpa
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &candidates)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &candidates)
         .await
         .expect("record resolve candidates");
 
@@ -1148,7 +688,7 @@ async fn test_id_completeness_identity_review_dismiss_leaves_work_standalone_pen
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &candidates)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &candidates)
         .await
         .expect("record dismiss candidates");
 
@@ -1229,7 +769,7 @@ async fn test_id_completeness_identity_review_dismiss_rejects_settled_work() {
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &stale)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &stale)
         .await
         .expect("record stale candidates");
 
@@ -1303,7 +843,7 @@ async fn test_id_completeness_identity_review_resolve_rejects_settled_work_with_
         },
         existing_work_id: None,
     }];
-    db.record_review_candidates(work.id, &stale)
+    livrarr_db::test_helpers::record_review_candidates_fixture(&db, work.id, &stale)
         .await
         .expect("record stale candidates");
 
@@ -1358,9 +898,14 @@ async fn test_id_completeness_pending_anchor_handlers_affirm_list_and_cross_user
         SeedAnchors::default(),
     )
     .await;
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B0AFFIRM12")
-        .await
-        .expect("record pending ASIN");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work.id,
+        AnchorType::new(AnchorType::ASIN),
+        "B0AFFIRM12",
+    )
+    .await
+    .expect("record pending ASIN");
 
     let state = test_state(db.clone());
     let JsonLike(list) = JsonLike(
@@ -1414,9 +959,14 @@ async fn test_id_completeness_pending_anchor_handlers_affirm_list_and_cross_user
         AnchorConfidence::Confirmed
     );
 
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::GR_WORK), "100204")
-        .await
-        .expect("record second pending anchor");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work.id,
+        AnchorType::new(AnchorType::GR_WORK),
+        "100204",
+    )
+    .await
+    .expect("record second pending anchor");
     let cross_affirm = affirm_pending_anchor(
         State(state),
         auth_context(&db, user_b).await,
@@ -1458,12 +1008,22 @@ async fn test_id_completeness_settled_slot_guesses_are_hidden_and_unaffirmable()
     confirm_anchor(&db, work.id, AnchorType::OL_WORK, "OL1W").await;
 
     // A competing guess for the settled slot + a guess for a genuinely open slot.
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::OL_WORK), "OL999W")
-        .await
-        .expect("record competing OL guess");
-    db.record_pending_anchor(work.id, AnchorType::new(AnchorType::ASIN), "B0SETTLED1")
-        .await
-        .expect("record open-slot ASIN guess");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work.id,
+        AnchorType::new(AnchorType::OL_WORK),
+        "OL999W",
+    )
+    .await
+    .expect("record competing OL guess");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work.id,
+        AnchorType::new(AnchorType::ASIN),
+        "B0SETTLED1",
+    )
+    .await
+    .expect("record open-slot ASIN guess");
 
     let state = test_state(db.clone());
 
@@ -1520,177 +1080,4 @@ async fn test_id_completeness_pending_anchor_list_empty_returns_empty_array() {
     .expect("list pending anchors")
     .0;
     assert!(pending.is_empty());
-}
-
-#[tokio::test]
-async fn test_id_completeness_refresh_gate_confirmed_rechases_only_when_missing_obtainable_id() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let full = seed_work(
-        &db,
-        user_id,
-        "Refresh Fully Anchored",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Enriched,
-        SeedAnchors {
-            ol_key: Some("OL100201W"),
-            gr_key: Some("100201"),
-            hc_key: Some("100201"),
-            isbn_13: Some("9780000000201"),
-            asin: Some("B0REFRESH1"),
-        },
-    )
-    .await;
-    let missing = seed_work(
-        &db,
-        user_id,
-        "Refresh Missing Obtainable",
-        IdentityStatus::Confirmed,
-        EnrichmentStatus::Enriched,
-        SeedAnchors {
-            ol_key: Some("OL100202W"),
-            isbn_13: Some("9780000000202"),
-            ..Default::default()
-        },
-    )
-    .await;
-    let ol = StubProviderClient::new(
-        MetadataProvider::OpenLibrary,
-        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
-            title: Some("Refresh Missing Obtainable".to_string()),
-            author_name: Some("Id Completeness Author".to_string()),
-            ol_key: Some("OL100202W".to_string()),
-            gr_key: Some("100202".to_string()),
-            isbn_13: Some("9780000000202".to_string()),
-            language: Some("en".to_string()),
-            ..NormalizedWorkDetail::default()
-        })),
-    );
-    let svc = service(
-        db.clone(),
-        StubEnrichmentWorkflow::succeeding(),
-        Some(resolver_with_stubs(vec![ol.clone()])),
-    );
-
-    svc.refresh(user_id, full.id, RefreshSurface::Interactive)
-        .await
-        .expect("refresh full work");
-    assert_eq!(
-        ol.call_count(),
-        0,
-        "fully anchored Confirmed refresh skips identity fan-out"
-    );
-
-    svc.refresh(user_id, missing.id, RefreshSurface::Interactive)
-        .await
-        .expect("refresh missing-id work");
-    assert!(
-        ol.call_count() >= 1,
-        "Confirmed work missing an obtainable id re-chases identity"
-    );
-}
-
-#[tokio::test]
-async fn test_id_completeness_hard_attach_confirms_flm_syncs_on_title_author_match() {
-    let db = create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let hard = seed_work(
-        &db,
-        user_id,
-        "Hard Shared ISBN",
-        IdentityStatus::Pending,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors {
-            isbn_13: Some("9780000000309"),
-            ..Default::default()
-        },
-    )
-    .await;
-    let fuzzy = seed_work(
-        &db,
-        user_id,
-        "Fuzzy ASIN Only",
-        IdentityStatus::Pending,
-        EnrichmentStatus::Unenriched,
-        SeedAnchors::default(),
-    )
-    .await;
-
-    let hard_identity = captured(
-        None,
-        Some("100301"),
-        None,
-        Some("9780000000309"),
-        None,
-        "Hard Shared ISBN",
-    );
-    let hard_resolver = ScriptedResolver::new(resolved_with_provenance(
-        hard_identity,
-        Some(AnchorProvenance {
-            gr_key: Some(MatchBasis::Hard),
-            isbn_13: Some(MatchBasis::Hard),
-            ..AnchorProvenance::default()
-        }),
-    ));
-    let hard_report = settle_identity(
-        &hard_resolver,
-        &db,
-        user_id,
-        &hard,
-        IdentityMode::Background,
-        ConflictSource::Convergence,
-    )
-    .await
-    .expect("settle hard bridge");
-    let hard_after = db.get_work(user_id, hard.id).await.expect("read hard");
-    assert_eq!(hard_after.gr_key.as_deref(), Some("100301"));
-    assert_eq!(hard_after.identity_status, IdentityStatus::Confirmed);
-    assert!(hard_report
-        .anchors_merged
-        .iter()
-        .any(|kind| kind == AnchorType::GR_WORK));
-
-    let fuzzy_identity = captured(
-        None,
-        None,
-        None,
-        None,
-        Some("B000FUZZY1"),
-        "Fuzzy ASIN Only",
-    );
-    let fuzzy_resolver = ScriptedResolver::new(resolved_with_provenance(
-        fuzzy_identity,
-        Some(AnchorProvenance {
-            asin: Some(MatchBasis::Fuzzy),
-            ..AnchorProvenance::default()
-        }),
-    ));
-    let _ = settle_identity(
-        &fuzzy_resolver,
-        &db,
-        user_id,
-        &fuzzy,
-        IdentityMode::Background,
-        ConflictSource::Convergence,
-    )
-    .await
-    .expect("settle fuzzy-only guess");
-    let fuzzy_after = db.get_work(user_id, fuzzy.id).await.expect("read fuzzy");
-    let fuzzy_anchors = db.list_anchors(fuzzy.id).await.expect("list fuzzy anchors");
-    // FLM: title + author match → ASIN is synced to works.asin and badge raises.
-    assert_eq!(
-        fuzzy_after.asin.as_deref(),
-        Some("B000FUZZY1"),
-        "FLM pass: ASIN synced to works.asin"
-    );
-    assert_eq!(
-        fuzzy_after.identity_status,
-        IdentityStatus::Provisional,
-        "FLM pass: ASIN bridge raises badge to Provisional"
-    );
-    assert!(fuzzy_anchors.iter().any(|a| {
-        a.anchor_type.as_str() == AnchorType::ASIN
-            && a.anchor_value == "B000FUZZY1"
-            && a.confidence == AnchorConfidence::Confirmed
-    }));
 }

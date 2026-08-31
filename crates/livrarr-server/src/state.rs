@@ -91,7 +91,6 @@ pub fn build_live_work_service(
     );
     livrarr_metadata::work_service::WorkServiceImpl::new(db, workflow, http_fetcher, data_dir)
         .with_resolver(identity_resolver)
-        .with_identity_routes_authoritative()
 }
 
 pub type LiveDiscoveryService = livrarr_metadata::discovery_service::DiscoveryServiceImpl<
@@ -232,8 +231,6 @@ pub struct AppState {
     pub cross_format_service: Arc<LiveCrossFormatService>,
     pub import_workflow: Arc<LiveImportWorkflow>,
     pub list_service: Arc<LiveListService>,
-    pub identity_conflict_service:
-        Arc<crate::services::identity_conflict_service::LiveIdentityConflictService>,
     pub identity_resolver: Arc<LiveIdentityResolver>,
     pub rss_sync_workflow: Arc<LiveRssSyncWorkflow>,
     pub author_monitor_workflow: Arc<LiveAuthorMonitorWorkflow>,
@@ -467,9 +464,9 @@ use livrarr_handlers::context::{
     HasDataDir, HasDiscoveryService, HasDownloadClientCredentialService,
     HasDownloadClientSettingsService, HasEmailService, HasEnrichmentWorkflow, HasFileService,
     HasGrabService, HasHistoryService, HasHmacKey, HasHttpClient, HasHttpFetcher,
-    HasIdentityConflictService, HasIdentityResolver, HasImportIoService, HasImportService,
-    HasImportWorkflow, HasIndexerCredentialService, HasIndexerSettingsService, HasListService,
-    HasLiveConfig, HasLogSurface, HasManualImportScan, HasManualImportService, HasMatchingService,
+    HasIdentityResolver, HasImportIoService, HasImportService, HasImportWorkflow,
+    HasIndexerCredentialService, HasIndexerSettingsService, HasListService, HasLiveConfig,
+    HasLogSurface, HasManualImportScan, HasManualImportService, HasMatchingService,
     HasNotificationService, HasPreaddCoverService, HasProviderStats, HasQueueService,
     HasReadarrImportWorkflow, HasReleaseService, HasRemotePathMappingService, HasRootFolderService,
     HasRssSync, HasRssSyncWorkflow, HasSeriesQueryService, HasSeriesService, HasStartupTime,
@@ -574,14 +571,6 @@ impl HasListService for AppState {
     type ListSvc = LiveListService;
     fn list_service(&self) -> &Self::ListSvc {
         &self.list_service
-    }
-}
-
-impl HasIdentityConflictService for AppState {
-    type IdentityConflictSvc =
-        crate::services::identity_conflict_service::LiveIdentityConflictService;
-    fn identity_conflict_service(&self) -> &Self::IdentityConflictSvc {
-        &self.identity_conflict_service
     }
 }
 

@@ -1118,3 +1118,33 @@ Updated `integrations/goodreads.md` and insight 96. Settled-work author linking 
 - `insights.md`: added insight **101** — the whole wave in one entry (one mint authority, refuse-by-name, one canonical dismissal key + suppression matrix + two revocations + adoption, `cancelled` still never means the user decided, manual import never parks, what stays broken until wave B, and the by-design two-step generation claim).
 - `index.md`: insight count 100 → 101.
 - Canonical artifacts: `docs/spec-identity-review-fixes.md` v11; `build/reviews/identity-review-fixes/` (per-unit reviews, the contest judgment and `CORRECTION-JUDGE-CONTEST-U5R1.md`).
+
+- 2026-08-27: identity-review-census.md — corrected the road-trait paragraph (four methods incl. `settle_manual_import_minimum`; `authority_certain` is pub) — found stale by the r5 spec reviewers of identity-conflict-authority.
+
+## 2026-08-31 — insights.md restructured into index + full-text pages
+
+Per PM instruction: `insights.md` had grown to 139,757 bytes / 101 numbered items (some 2-3KB each) — the mandatory first read of every session, costing ~5% of context before any work starts. Restructured to a compact index with the full text relocated, losing zero information.
+
+- **`insights.md`**: 139,757 → 29,358 bytes. Now an index only — one line per insight (`N. **Title.** one-sentence gist → link`), grouped under the same five original section headers (Architecture, Coding Patterns, Metadata, Data & State, Process), in the original numeric order (incl. letter variants 9b-9i).
+- **New `wiki/insights/` directory, 10 theme pages** (sum 175,621 bytes; every insight's full original text moved verbatim, byte-identical, including every "CORRECTED"/amendment note):
+  - `architecture.md` (9 items, 7.0KB) — crate layout, entity model, system structure
+  - `coding-patterns.md` (17 items, 9.7KB) — Rust trait/service patterns, compile wall
+  - `metadata.md` (10 items, 15.2KB) — metadata source policy, enrichment merge/status
+  - `data-and-state.md` (7 items, 3.0KB) — DB, migrations, app state
+  - `process.md` (13 items, 10.8KB) — build-process and operational lessons
+  - `identity.md` (23 items, 49.3KB) — identity matching authority, anchors, generation protocol
+  - `history-and-review.md` (8 items, 17.9KB) — work-history log, identity-review cards, F2 cutover ceremony
+  - `covers.md` (2 items, 4.2KB) — cover ranking and write-gate rules
+  - `providers-and-transport.md` (15 items, 23.4KB) — outbound queue, rate limits/breakers, provider quirks
+  - `tests-and-fixtures.md` (5 items, 5.8KB) — test-suite mechanics and fixture gotchas
+- **`index.md`**: added a "## Insights (full text)" section listing the 10 pages; the Quick Reference line for Insights now says it's an index with full text under `insights/`.
+- Page assignment is thematic (by content), independent of which of the five original headers an item's index line sits under — e.g. insight 48 (canonical architecture model) indexes under "Process" (matching the original file) but its full text lives on `architecture.md`.
+- Item numbering is unchanged and untouched — no renumbering, no merges, no reordering within an insight. One pre-existing oddity carried forward as-is: items appear in the source file as …49, 51, 52, **50**, 53… — insight 50 sits out of numeric order (after 52) in the original file; this is not a duplicate number, just an out-of-order position, and it's preserved exactly.
+- Verified by script: every one of the 109 items (101 numbers + 8 letter variants) has its whitespace-normalized full body present verbatim in exactly one `insights/*.md` page, every number appears exactly once in the index, and every index link resolves to an existing file + heading. 109/109 OK, 0 FAIL.
+- **New rule for adding an insight going forward:** every new insight gets TWO edits, in the same change — (1) a one-line index entry appended under the correct header in `insights.md`, and (2) a full `### N. **Title**` section appended to the matching theme page under `insights/` (or a new theme page if none fits). Never add only the index line or only the full-text section.
+
+## 2026-08-31 — deletion pass (identity-conflict-authority, buckets A–E)
+
+- `architecture/identity-review-census.md`: amended for the deletion pass — legacy conflict endpoints/page/service gone, six doors not eight, legacy repository trait 33→14 methods, line anchors re-read against the post-deletion tree.
+- `insights/identity.md` §13, §15, §54, §57, §72, §80; `insights/metadata.md` §55; `insights/history-and-review.md` §101: dated amendment/retirement notes — they named `settle_identity`, `converge_outcome`, `chaseable_anchor_types`, the dead-end chase, the legacy status writers and the conflict doors, all deleted. `insights.md` index lines marked accordingly.
+- `index.md`: census one-liner updated.

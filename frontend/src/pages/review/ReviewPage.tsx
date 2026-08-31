@@ -2,17 +2,13 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, ExternalLink, Sparkles } from "lucide-react";
+import { ExternalLink, Sparkles } from "lucide-react";
 import {
   listIdentityReview,
   listIdentityReviewCards,
   resolveIdentityReviewCard,
   dismissIdentityReviewCard,
-  listIdentityConflicts,
-  resolveIdentityConflict,
-  dismissIdentityConflict,
   listAuthorLinkReview,
-  getWork,
 } from "@/api";
 import { AuthorLinkReviewCard } from "./AuthorLinkReviewCard";
 import { PageContent } from "@/components/Page/PageContent";
@@ -24,8 +20,6 @@ import { HelpTip } from "@/components/HelpTip";
 import type {
   IdentityReviewPark,
   IdentityReviewCandidate,
-  IdentityConflictSummary,
-  ConflictResolutionAction,
   IdentityReviewCard,
 } from "@/types/api";
 
@@ -45,46 +39,6 @@ const PROVIDER_LABELS: Record<string, string> = {
 function sourceLabel(sources: string[]): string {
   if (sources.length === 0) return "Unknown source";
   return sources.map((s) => PROVIDER_LABELS[s] ?? s).join(", ");
-}
-
-const CONFLICT_ACTIONS: {
-  action: ConflictResolutionAction;
-  label: string;
-  help: string;
-}[] = [
-  {
-    action: "keep_existing",
-    label: "Keep Existing",
-    help: "Keep the identifier this book already has. The new one is ignored.",
-  },
-  {
-    action: "accept_separate",
-    label: "Treat as Separate",
-    help: "These are different books. This book's identifier is not changed.",
-  },
-  {
-    action: "replace_anchor",
-    label: "Use New Match",
-    help: "Replace this book's identifier with the new one that was found.",
-  },
-  {
-    action: "merge",
-    label: "Combine Both",
-    help: "Adopt the new identifiers alongside what this book already has.",
-  },
-];
-
-function ExistingWorkLabel({ workId }: { workId: number }) {
-  const { data, isPending, isError } = useQuery({
-    queryKey: ["work", String(workId)],
-    queryFn: () => getWork(workId),
-  });
-  const label = isPending ? "Loading…" : isError ? "this book" : data?.title || "this book";
-  return (
-    <Link to={`/work/${workId}`} className="font-medium text-zinc-100 hover:underline">
-      {label}
-    </Link>
-  );
 }
 
 function CandidateRow({
@@ -146,75 +100,6 @@ function ParkedWorkCard({ park }: { park: IdentityReviewPark }) {
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-function ConflictCard({ conflict }: { conflict: IdentityConflictSummary }) {
-  const queryClient = useQueryClient();
-
-  const resolve = useMutation({
-    mutationFn: (action: ConflictResolutionAction) =>
-      resolveIdentityConflict(conflict.id, { action }),
-    onSuccess: () => {
-      toast.success("Conflict resolved");
-      queryClient.invalidateQueries({ queryKey: ["identity-conflicts"] });
-      queryClient.invalidateQueries({ queryKey: ["works"] });
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Could not resolve the conflict",
-      ),
-  });
-
-  const dismiss = useMutation({
-    mutationFn: () => dismissIdentityConflict(conflict.id),
-    onSuccess: () => {
-      toast.success("Conflict dismissed");
-      queryClient.invalidateQueries({ queryKey: ["identity-conflicts"] });
-    },
-    onError: (error) =>
-      toast.error(
-        error instanceof Error ? error.message : "Could not dismiss the conflict",
-      ),
-  });
-
-  const isPending = resolve.isPending || dismiss.isPending;
-
-  return (
-    <div className="rounded-lg border border-red-900/40 bg-zinc-900/60 px-4 py-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <AlertTriangle size={15} className="shrink-0 text-red-400" />
-          <ExistingWorkLabel workId={conflict.existingWorkId} />
-          <HelpTip text="Two different sources disagree about what this book's identifier should be. Choose how to resolve it." />
-        </div>
-        <button
-          onClick={() => dismiss.mutate()}
-          disabled={isPending}
-          className="text-xs text-muted hover:text-red-400 disabled:opacity-50"
-        >
-          Dismiss
-        </button>
-      </div>
-      <p className="mt-1 text-sm text-muted">
-        New match found: <span className="text-zinc-200">{conflict.incomingTitle}</span>{" "}
-        by {conflict.incomingAuthor}
-      </p>
-      <div className="mt-2 flex flex-wrap gap-3">
-        {CONFLICT_ACTIONS.map(({ action, label, help }) => (
-          <span key={action} className="inline-flex items-center gap-1">
-            <button
-              onClick={() => resolve.mutate(action)}
-              disabled={isPending}
-              className="rounded bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
-            >
-              {label}
-            </button>
-            <HelpTip text={help} />
-          </span>
-        ))}
-      </div>
     </div>
   );
 }
@@ -420,40 +305,23 @@ function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) 
     queryFn: listIdentityReviewCards,
   });
 
-  const {
-    data: conflicts,
-    isLoading: conflictsLoading,
-    error: conflictsError,
-    refetch: refetchConflicts,
-  } = useQuery({
-    queryKey: ["identity-conflicts"],
-    queryFn: listIdentityConflicts,
-  });
-
   const parkList = parks ?? [];
-  const conflictList = conflicts ?? [];
   const typedCardList = typedCards ?? [];
-  const settled = !parksLoading && !conflictsLoading && !typedCardsLoading;
-  const failed = parksError != null || conflictsError != null || typedCardsError != null;
+  const settled = !parksLoading && !typedCardsLoading;
+  const failed = parksError != null || typedCardsError != null;
 
   useEffect(() => {
     onEmpty(
       settled &&
         !failed &&
         parkList.length === 0 &&
-        conflictList.length === 0 &&
         typedCardList.length === 0,
     );
-  }, [onEmpty, settled, failed, parkList.length, conflictList.length, typedCardList.length]);
+  }, [onEmpty, settled, failed, parkList.length, typedCardList.length]);
 
-  if (parksLoading || conflictsLoading || typedCardsLoading) return <PageLoading />;
+  if (parksLoading || typedCardsLoading) return <PageLoading />;
   if (parksError) {
     return <ErrorState error={parksError} onRetry={() => refetchParks()} />;
-  }
-  if (conflictsError) {
-    return (
-      <ErrorState error={conflictsError} onRetry={() => refetchConflicts()} />
-    );
   }
   if (typedCardsError) {
     return <ErrorState error={typedCardsError} onRetry={() => refetchTypedCards()} />;
@@ -481,18 +349,6 @@ function BookReviewSections({ onEmpty }: { onEmpty: (empty: boolean) => void }) 
           <div className="flex flex-col gap-3">
             {parkList.map((p) => (
               <ParkedWorkCard key={p.workId} park={p} />
-            ))}
-          </div>
-        </section>
-      )}
-      {conflictList.length > 0 && (
-        <section>
-          <h2 className="mb-2 text-sm font-semibold text-zinc-100">
-            Conflicting Matches ({conflictList.length})
-          </h2>
-          <div className="flex flex-col gap-3">
-            {conflictList.map((c) => (
-              <ConflictCard key={c.id} conflict={c} />
             ))}
           </div>
         </section>

@@ -291,21 +291,8 @@ impl WorkDb for HookedWorkDb {
         self.inner.set_cover_manual(user_id, id, manual).await
     }
 
-    async fn set_identity_status(
-        &self,
-        user_id: UserId,
-        id: WorkId,
-        status: livrarr_domain::IdentityStatus,
-    ) -> Result<(), DbError> {
-        self.inner.set_identity_status(user_id, id, status).await
-    }
-
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError> {
         self.inner.delete_work(user_id, id).await
-    }
-
-    async fn merge_works(&self, req: livrarr_db::MergeWorksDbRequest) -> Result<Work, DbError> {
-        self.inner.merge_works(req).await
     }
 
     async fn set_work_series_id(
@@ -995,9 +982,14 @@ async fn t_e_cover_only_change_through_real_enrichment_retags_with_the_accepted_
 
     let db = create_test_db().await;
     let (user_id, work) = seed_user_and_work(&db).await;
-    db.set_identity_status(user_id, work.id, livrarr_domain::IdentityStatus::Confirmed)
-        .await
-        .unwrap();
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work.id,
+        livrarr_domain::IdentityStatus::Confirmed,
+    )
+    .await
+    .unwrap();
 
     let data_dir = tempfile::tempdir().unwrap();
     let books_dir = data_dir.path().join("books");

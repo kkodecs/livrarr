@@ -1,13 +1,12 @@
 mod common;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use livrarr_behavioral::stubs::{create_test_user, StubEnrichmentWorkflow, StubHttpFetcher};
 use livrarr_db::sqlite::SqliteDb;
-use livrarr_db::{CreateWorkDbRequest, UpdateWorkEnrichmentDbRequest, WorkDb, WorkDbCreate};
+use livrarr_db::{CreateWorkDbRequest, WorkDb, WorkDbCreate};
 use livrarr_domain::identity::{
     CandidateId, CapturedIdentity, ConflictSource, IdentityMethod, IdentityMode, IdentityState,
     PendingReason, RawHarvest,
@@ -18,14 +17,9 @@ use livrarr_domain::services::{
     WorkService,
 };
 use livrarr_domain::{
-    normalize_for_matching, EnrichmentStatus, IdentityStatus, MetadataProvider, OutcomeClass,
-    RequestPriority, UserId, Work, WorkId,
+    normalize_for_matching, EnrichmentStatus, MetadataProvider, OutcomeClass, RequestPriority,
+    UserId, Work, WorkId,
 };
-use livrarr_external_data::transport_cache::TransportCache;
-use livrarr_external_data::{
-    NormalizedWorkDetail, ProviderClient, ProviderOutcome, StubProviderClient,
-};
-use livrarr_metadata::english_identity_resolver::{LiveEnglishIdentityResolver, ResolverConfig};
 use livrarr_metadata::work_service::WorkServiceImpl;
 use tokio::sync::Notify;
 
@@ -73,35 +67,6 @@ fn captured_identity(
         title: title.to_string(),
         author_name: author.to_string(),
         language: Some("en".to_string()),
-    }
-}
-
-fn stub_isbn_resolver() -> LiveEnglishIdentityResolver {
-    let ol = StubProviderClient::new(MetadataProvider::OpenLibrary, ProviderOutcome::NotFound);
-    let hc = StubProviderClient::new(
-        MetadataProvider::Hardcover,
-        ProviderOutcome::Success(Box::new(NormalizedWorkDetail {
-            hc_key: Some("hc_dune".to_string()),
-            isbn_13: Some("9780441013593".to_string()),
-            title: Some("Dune".to_string()),
-            author_name: Some("Frank Herbert".to_string()),
-            language: Some("en".to_string()),
-            ..NormalizedWorkDetail::default()
-        })),
-    );
-    let clients = [
-        (MetadataProvider::OpenLibrary, ProviderClient::Stub(ol)),
-        (MetadataProvider::Hardcover, ProviderClient::Stub(hc)),
-    ]
-    .into_iter()
-    .collect::<HashMap<_, _>>();
-    LiveEnglishIdentityResolver {
-        clients,
-        cache: Arc::new(TransportCache::new(Duration::from_secs(30))),
-        config: ResolverConfig {
-            gb_key_present: false,
-            ..ResolverConfig::default()
-        },
     }
 }
 
@@ -262,14 +227,6 @@ impl GatedWorkflow {
         }
     }
 
-    fn failing() -> Self {
-        Self {
-            entered: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-            fail: true,
-        }
-    }
-
     fn entered(&self) -> Arc<Notify> {
         Arc::clone(&self.entered)
     }
@@ -301,90 +258,6 @@ impl EnrichmentWorkflow for GatedWorkflow {
         Ok(EnrichmentResult {
             enrichment_status: EnrichmentStatus::Enriched,
             enrichment_source: Some("gated-test".to_string()),
-            work: Work {
-                id: work_id,
-                user_id,
-                enrichment_status: EnrichmentStatus::Enriched,
-                ..Work::default()
-            },
-            merge_deferred: false,
-            provider_outcomes: HashMap::<MetadataProvider, OutcomeClass>::new(),
-            cover_resolution: None,
-            audiobook_cover_resolution: None,
-            identity_not_found: false,
-            changed: false,
-            attempted: true,
-            captured_provider_identity: Vec::new(),
-            captured_route_proposals: Vec::new(),
-            provider_chase_attempted: false,
-            search_leg_fired: false,
-            ledger_accounting: livrarr_domain::services::LedgerPassAccounting::Idle,
-        })
-    }
-
-    async fn reset_for_manual_refresh(
-        &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-    ) -> Result<(), EnrichmentWorkflowError> {
-        Ok(())
-    }
-
-    async fn inject_source_data(
-        &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-        _data: livrarr_domain::services::SourceProviderData,
-    ) {
-    }
-}
-
-#[derive(Clone)]
-struct RecordingPersistingWorkflow {
-    db: SqliteDb,
-    call_count: Arc<AtomicUsize>,
-}
-
-impl RecordingPersistingWorkflow {
-    fn succeeding(db: SqliteDb) -> Self {
-        Self {
-            db,
-            call_count: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
-    }
-}
-
-impl EnrichmentWorkflow for RecordingPersistingWorkflow {
-    async fn enrich_work(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        _mode: EnrichmentMode,
-        _candidate_id: Option<CandidateId>,
-        _priority: RequestPriority,
-        _freshness: livrarr_domain::Freshness,
-    ) -> Result<EnrichmentResult, EnrichmentWorkflowError> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
-        self.db
-            .update_work_enrichment(
-                user_id,
-                work_id,
-                UpdateWorkEnrichmentDbRequest {
-                    enrichment_status: EnrichmentStatus::Enriched,
-                    enrichment_source: Some("recording-test".to_string()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| EnrichmentWorkflowError::Queue(format!("persist enriched: {e}")))?;
-
-        Ok(EnrichmentResult {
-            enrichment_status: EnrichmentStatus::Enriched,
-            enrichment_source: Some("recording-test".to_string()),
             work: Work {
                 id: work_id,
                 user_id,
@@ -649,56 +522,6 @@ async fn complete_add_tracks_enriching_until_background_work_finishes() {
     );
 }
 
-/// AC: complete_add chases bridge-only seed anchors before the enrichment gate.
-#[tokio::test]
-async fn complete_add_chases_bridge_only_identity_before_enrichment_gate() {
-    let db = common::create_test_db().await;
-    let user_id = create_test_user(&db).await;
-    let workflow = RecordingPersistingWorkflow::succeeding(db.clone());
-    let svc = service(db.clone(), workflow.clone()).with_resolver(Arc::new(stub_isbn_resolver()));
-    let created = svc
-        .add_fast(
-            user_id,
-            bridge_only_candidate("Dune", "Frank Herbert", "9780441013593"),
-        )
-        .await
-        .expect("add_fast should create a bridge-only work");
-    assert!(created.created);
-    assert_eq!(
-        created.work.identity_status,
-        IdentityStatus::Pending,
-        "bridge-only pending seed anchors should start held before complete_add"
-    );
-
-    let work_id = created.work.id;
-    svc.complete_add(
-        user_id,
-        work_id,
-        None,
-        None,
-        IdentityMode::Background,
-        ConflictSource::ManualAdd,
-    )
-    .await;
-
-    let persisted = db.get_work(user_id, work_id).await.expect("read work");
-    assert_eq!(
-        persisted.identity_status,
-        IdentityStatus::Confirmed,
-        "complete_add should run the same identity chase as refresh for pending works with anchors"
-    );
-    assert_eq!(persisted.hc_key.as_deref(), Some("hc_dune"));
-    assert!(
-        workflow.call_count() >= 1,
-        "enrichment workflow should run once the identity chase settles the gate"
-    );
-    assert_eq!(persisted.enrichment_status, EnrichmentStatus::Enriched);
-    assert!(
-        !svc.is_enriching(user_id, work_id),
-        "complete_add should clear the enriching signal after completion"
-    );
-}
-
 /// AC: manual refresh is visible through the same enriching signal as complete_add.
 #[tokio::test]
 async fn refresh_tracks_enriching_until_manual_enrichment_finishes() {
@@ -773,67 +596,6 @@ async fn complete_add_absorbs_failure_and_marks_work_failed() {
     let persisted = db.get_work(user_id, work_id).await.expect("read work");
     assert!(!svc.is_enriching(user_id, work_id));
     assert_eq!(persisted.enrichment_status, EnrichmentStatus::Failed);
-}
-
-/// AC-010: parked identity states gate add completion before enrichment starts.
-#[tokio::test]
-async fn complete_add_preserves_parked_identity_without_enrichment() {
-    for (title, status, ol_key) in [
-        (
-            "Parked Conflict Book",
-            IdentityStatus::Conflict,
-            "/works/OL710W",
-        ),
-        (
-            "Parked Needs Review Book",
-            IdentityStatus::NeedsReview,
-            "/works/OL711W",
-        ),
-    ] {
-        let db = common::create_test_db().await;
-        let user_id = create_test_user(&db).await;
-        let workflow = GatedWorkflow::failing();
-        let entered_notify = workflow.entered();
-        let entered = entered_notify.notified();
-        let svc = Arc::new(service(db.clone(), workflow.clone()));
-        let created = svc
-            .add_fast(
-                user_id,
-                confirmed_candidate(title, "Progress Author", ol_key),
-            )
-            .await
-            .expect("add_fast should create work");
-        let work_id = created.work.id;
-        db.set_identity_status(user_id, work_id, status)
-            .await
-            .expect("park identity status");
-
-        let task_svc = Arc::clone(&svc);
-        let handle = tokio::spawn(async move {
-            task_svc
-                .complete_add(
-                    user_id,
-                    work_id,
-                    None,
-                    None,
-                    IdentityMode::Background,
-                    ConflictSource::ManualAdd,
-                )
-                .await;
-        });
-
-        let entered = tokio::time::timeout(Duration::from_millis(50), entered).await;
-        workflow.release();
-        handle.await.expect("complete_add task should not panic");
-
-        assert!(
-            entered.is_err(),
-            "parked identity must gate complete_add before enrichment starts"
-        );
-        let after = db.get_work(user_id, work_id).await.expect("read work");
-        assert!(!svc.is_enriching(user_id, work_id));
-        assert_eq!(after.identity_status, status);
-    }
 }
 
 /// AC-013/REQ-008: the progress signal is process-local and resets on restart.
@@ -975,7 +737,7 @@ impl livrarr_domain::services::EnrichmentWorkflow for RecordingDelayedWorkflow {
 
 #[tokio::test]
 async fn concurrent_retry_serializes_behind_active_refresh() {
-    use livrarr_db::{WorkDb, WorkDbCreate};
+    use livrarr_db::WorkDbCreate;
     use livrarr_domain::services::WorkService;
 
     let db = livrarr_db::sqlite::SqliteDb::new_test().await;
@@ -995,9 +757,14 @@ async fn concurrent_retry_serializes_behind_active_refresh() {
         .unwrap();
     assert!(created, "AC-012: one seeded work must be created");
 
-    db.set_identity_status(user_id, work.id, livrarr_domain::IdentityStatus::Confirmed)
-        .await
-        .unwrap();
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work.id,
+        livrarr_domain::IdentityStatus::Confirmed,
+    )
+    .await
+    .unwrap();
 
     let workflow = RecordingDelayedWorkflow::new(std::time::Duration::from_millis(80));
     let service = livrarr_metadata::work_service::WorkServiceImpl::new(

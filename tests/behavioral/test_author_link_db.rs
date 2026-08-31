@@ -8,12 +8,12 @@ use std::str::FromStr;
 
 use chrono::{Duration, Utc};
 use livrarr_behavioral::stubs::create_test_user;
-use livrarr_db::pool::{backfill_author_identity, backfill_normalized_identity};
+use livrarr_db::pool::backfill_author_identity;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
     AuthorDb, AuthorLinkClaim, AuthorLinkDb, AuthorNameVariantDb, CreateAuthorDbRequest,
-    CreateWorkDbRequest, GuardedRouteWrite, RenameAuthorDbRequest, WorkDb, WorkDbCreate,
+    CreateWorkDbRequest, GuardedRouteWrite, RenameAuthorDbRequest, WorkDbCreate,
 };
 use livrarr_domain::identity_layer::{
     title_parts_from_provider, IdentityProvider, RouteKind, RouteOwner, RouteProvenance,
@@ -191,9 +191,6 @@ async fn migration_077_db() -> SqliteDb {
         .run(&pool)
         .await
         .expect("apply real migrations through 077");
-    backfill_normalized_identity(&pool)
-        .await
-        .expect("run production work-identity startup repair");
     backfill_author_identity(&pool)
         .await
         .expect("run production migration-077 startup repair");
@@ -436,9 +433,14 @@ async fn ac006_ac012_migration_078_live_claim_race_returns_exact_claim_lost_ever
     let (db, user_id, author_id, work_id) = migration_graph().await;
     let stale_claim = migration_claim(user_id, author_id);
 
-    db.set_identity_status(user_id, work_id, IdentityStatus::Confirmed)
-        .await
-        .expect("production work evidence writer");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work_id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("production work evidence writer");
     assert_trigger_woke_once(&db, author_id).await;
 
     assert_claim_lost(db.load_road_input(stale_claim.clone()).await);

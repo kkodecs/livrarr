@@ -23,16 +23,12 @@ use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{
     AuthorDb, CreateAuthorDbRequest, CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate,
 };
-use livrarr_domain::identity::{
-    AnchorType, ConflictResolutionAction, ConflictSource, IdentityConflictKind,
-    IncomingConflictPayload, NewIdentityConflict,
-};
+use livrarr_domain::identity::{AnchorType, ConflictResolutionAction, IncomingConflictPayload};
 use livrarr_domain::identity_layer::{self as ilr};
 use livrarr_domain::identity_layer::{
     EditionRepository, IdentityRoadService, ReviewActor, ReviewResolutionCommand,
     WorkIdentityRepository,
 };
-use livrarr_domain::services::{IdentityConflictService, WorkIdentityRepository as _};
 use livrarr_domain::UserRole;
 use livrarr_server::auth_crypto::{AuthCryptoService, RealAuthCrypto};
 use livrarr_server::state::AppState;
@@ -168,11 +164,8 @@ async fn build_route_harness() -> RouteHarness {
         livrarr_metadata::english_identity_resolver::ResolverConfig::default(),
     );
     let db_arc = Arc::new(db.clone());
-    let queue = Arc::new(
-        livrarr_metadata::DefaultProviderQueueBuilder::new()
-            .with_identity_route_dispatch()
-            .build(db_arc.clone()),
-    );
+    let queue =
+        Arc::new(livrarr_metadata::DefaultProviderQueueBuilder::new().build(db_arc.clone()));
     let enrichment_service = Arc::new(livrarr_metadata::EnrichmentServiceImpl::new(
         db_arc,
         queue.clone(),
@@ -324,11 +317,6 @@ async fn build_route_harness() -> RouteHarness {
                 ),
             )
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
@@ -1314,49 +1302,6 @@ async fn cli_identity_conflict_is_refused_by_name() {
     assert_cli_refusal(ilr::ReviewKind::IdentityConflict).await;
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ConflictFixtureKind {
-    Legacy,
-    TypedCompatibility,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ConflictControl {
-    KeepExisting,
-    AcceptSeparate,
-    ReplaceAnchor,
-    Merge,
-    Dismiss,
-}
-
-impl ConflictControl {
-    fn request(self) -> (Method, &'static str, Option<Value>) {
-        match self {
-            Self::KeepExisting => (
-                Method::POST,
-                "resolve",
-                Some(json!({"action": ConflictResolutionAction::KeepExisting})),
-            ),
-            Self::AcceptSeparate => (
-                Method::POST,
-                "resolve",
-                Some(json!({"action": ConflictResolutionAction::AcceptSeparate})),
-            ),
-            Self::ReplaceAnchor => (
-                Method::POST,
-                "resolve",
-                Some(json!({"action": ConflictResolutionAction::ReplaceAnchor})),
-            ),
-            Self::Merge => (
-                Method::POST,
-                "resolve",
-                Some(json!({"action": ConflictResolutionAction::Merge})),
-            ),
-            Self::Dismiss => (Method::POST, "dismiss", None),
-        }
-    }
-}
-
 struct ConflictFixture {
     external_id: i64,
     typed_card_id: Option<i64>,
@@ -1383,19 +1328,30 @@ async fn raise_legacy_conflict(
     work_id: i64,
     label: &str,
 ) -> i64 {
-    harness
-        .state
-        .identity_conflict_service
-        .raise(NewIdentityConflict {
-            user_id,
-            existing_work_id: work_id,
-            kind: IdentityConflictKind::IncomingDifferentOlKey,
-            incoming: incoming_conflict(label),
-            raised_by: ConflictSource::ManualAdd,
-            raised_source_path: None,
-        })
+    // Legacy rows have no production writer any more — seed the surviving
+    // table directly, mirroring the one kept runtime mint's row shape.
+    let incoming_json = serde_json::to_string(&incoming_conflict(label)).expect("payload json");
+    let id = sqlx::query(
+        "INSERT INTO work_identity_conflicts \
+         (user_id, existing_work_id, kind, incoming_payload_json, raised_at, raised_by, \
+          raised_source_path, status) \
+         VALUES (?1, ?2, 'incoming_different_ol_key', ?3, ?4, 'manual_add', NULL, 'open')",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .bind(&incoming_json)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(harness.db.pool())
+    .await
+    .expect("seed legacy conflict row")
+    .last_insert_rowid();
+    sqlx::query("UPDATE works SET identity_status = 'conflict' WHERE id = ?1 AND user_id = ?2")
+        .bind(work_id)
+        .bind(user_id)
+        .execute(harness.db.pool())
         .await
-        .expect("seed legacy conflict through production writer")
+        .expect("reflect legacy conflict badge");
+    id
 }
 
 async fn insert_typed_conflict_compatibility(
@@ -1432,173 +1388,6 @@ async fn insert_typed_conflict_compatibility(
         external_id,
         typed_card_id: Some(card_id),
     }
-}
-
-async fn seed_conflict_fixture(
-    harness: &RouteHarness,
-    kind: ConflictFixtureKind,
-) -> ConflictFixture {
-    let (work_id, _) = seed_work(&harness.db, harness.user_id, "conflict-owner").await;
-    match kind {
-        ConflictFixtureKind::Legacy => {
-            let external_id =
-                raise_legacy_conflict(harness, harness.user_id, work_id, "LEGACY").await;
-            let listed =
-                call_router_json(harness, Method::GET, "/api/v1/identity-conflict", None).await;
-            assert_eq!(listed.status, StatusCode::OK);
-            assert!(listed
-                .json
-                .as_array()
-                .expect("legacy conflict list")
-                .iter()
-                .any(|row| row["id"] == external_id && row["status"] == "open"));
-            ConflictFixture {
-                external_id,
-                typed_card_id: None,
-            }
-        }
-        ConflictFixtureKind::TypedCompatibility => {
-            insert_typed_conflict_compatibility(&harness.db, harness.user_id, work_id).await
-        }
-    }
-}
-
-async fn assert_conflict_control_refused(
-    fixture_kind: ConflictFixtureKind,
-    control: ConflictControl,
-) {
-    let harness = build_route_harness().await;
-    let fixture = seed_conflict_fixture(&harness, fixture_kind).await;
-    let before = user_state_snapshot(&harness.db, harness.user_id).await;
-    let (method, suffix, body) = control.request();
-    if matches!(control, ConflictControl::AcceptSeparate) {
-        assert!(
-            body.as_ref()
-                .and_then(Value::as_object)
-                .is_some_and(|object| !object.contains_key("winningWorkId")),
-            "the production page's Treat as Separate request has no winningWorkId"
-        );
-    }
-    let response = call_router_json(
-        &harness,
-        method,
-        format!("/api/v1/identity-conflict/{}/{suffix}", fixture.external_id),
-        body,
-    )
-    .await;
-    assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
-    assert_eq!(
-        response.json["message"],
-        continuation_message(ilr::ReviewKind::IdentityConflict),
-        "all five controls and both stores expose one captured refusal"
-    );
-    assert_eq!(
-        user_state_snapshot(&harness.db, harness.user_id).await,
-        before,
-        "{fixture_kind:?}/{control:?} must be refused before any write"
-    );
-    if let Some(card_id) = fixture.typed_card_id {
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM identity_review_cards WHERE id=?1")
-                .bind(card_id)
-                .fetch_one(harness.db.pool())
-                .await
-                .expect("typed compatibility card remains");
-        assert_eq!(status, "pending");
-    } else {
-        let typed_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM identity_review_cards WHERE user_id=?1 AND kind=?2",
-        )
-        .bind(harness.user_id)
-        .bind(ilr::ReviewKind::IdentityConflict.storage_code())
-        .fetch_one(harness.db.pool())
-        .await
-        .expect("legacy adapter invents no typed row");
-        assert_eq!(typed_count, 0);
-    }
-}
-
-// RED-UNTIL-U1: today the legacy Keep Existing endpoint 404s its listed id.
-#[tokio::test]
-async fn legacy_conflict_keep_existing_is_refused() {
-    assert_conflict_control_refused(ConflictFixtureKind::Legacy, ConflictControl::KeepExisting)
-        .await;
-}
-
-// RED-UNTIL-U1: today the legacy Treat as Separate endpoint 404s before exposing the kind guard.
-#[tokio::test]
-async fn legacy_conflict_accept_separate_is_refused_before_winning_work_validation() {
-    assert_conflict_control_refused(ConflictFixtureKind::Legacy, ConflictControl::AcceptSeparate)
-        .await;
-}
-
-// RED-UNTIL-U1: today the legacy Use New Match endpoint 404s its listed id.
-#[tokio::test]
-async fn legacy_conflict_replace_anchor_is_refused() {
-    assert_conflict_control_refused(ConflictFixtureKind::Legacy, ConflictControl::ReplaceAnchor)
-        .await;
-}
-
-// RED-UNTIL-U1: today the legacy Combine Both endpoint 404s its listed id.
-#[tokio::test]
-async fn legacy_conflict_merge_is_refused() {
-    assert_conflict_control_refused(ConflictFixtureKind::Legacy, ConflictControl::Merge).await;
-}
-
-// RED-UNTIL-U1: today the legacy Dismiss endpoint 404s its listed id.
-#[tokio::test]
-async fn legacy_conflict_dismiss_is_refused() {
-    assert_conflict_control_refused(ConflictFixtureKind::Legacy, ConflictControl::Dismiss).await;
-}
-
-// RED-UNTIL-U1: today a typed IdentityConflict Keep Existing fabricates success.
-#[tokio::test]
-async fn typed_conflict_keep_existing_is_refused() {
-    assert_conflict_control_refused(
-        ConflictFixtureKind::TypedCompatibility,
-        ConflictControl::KeepExisting,
-    )
-    .await;
-}
-
-// RED-UNTIL-U1: today typed Treat as Separate dies on missing winningWorkId instead of the kind guard.
-#[tokio::test]
-async fn typed_conflict_accept_separate_is_refused_before_winning_work_validation() {
-    assert_conflict_control_refused(
-        ConflictFixtureKind::TypedCompatibility,
-        ConflictControl::AcceptSeparate,
-    )
-    .await;
-}
-
-// RED-UNTIL-U1: today a typed IdentityConflict Use New Match fabricates success.
-#[tokio::test]
-async fn typed_conflict_replace_anchor_is_refused() {
-    assert_conflict_control_refused(
-        ConflictFixtureKind::TypedCompatibility,
-        ConflictControl::ReplaceAnchor,
-    )
-    .await;
-}
-
-// RED-UNTIL-U1: today a typed IdentityConflict Combine Both fabricates success.
-#[tokio::test]
-async fn typed_conflict_merge_is_refused() {
-    assert_conflict_control_refused(
-        ConflictFixtureKind::TypedCompatibility,
-        ConflictControl::Merge,
-    )
-    .await;
-}
-
-// RED-UNTIL-U1: today a typed IdentityConflict Dismiss fabricates a resolution.
-#[tokio::test]
-async fn typed_conflict_dismiss_is_refused() {
-    assert_conflict_control_refused(
-        ConflictFixtureKind::TypedCompatibility,
-        ConflictControl::Dismiss,
-    )
-    .await;
 }
 
 async fn assert_conflict_id_404(harness: &RouteHarness, id: i64) {
@@ -1669,12 +1458,11 @@ async fn conflict_closed_ids_remain_404() {
     let harness = build_route_harness().await;
     let (legacy_work, _) = seed_work(&harness.db, harness.user_id, "closed-legacy").await;
     let legacy_id = raise_legacy_conflict(&harness, harness.user_id, legacy_work, "CLOSED").await;
-    harness
-        .state
-        .identity_conflict_service
-        .dismiss(legacy_id, harness.user_id)
+    sqlx::query("UPDATE work_identity_conflicts SET status = 'dismissed' WHERE id = ?1")
+        .bind(legacy_id)
+        .execute(harness.db.pool())
         .await
-        .expect("close legacy row through production service");
+        .expect("close legacy row directly");
 
     let (typed_work, _) = seed_work(&harness.db, harness.user_id, "closed-typed").await;
     let typed = insert_typed_conflict_compatibility(&harness.db, harness.user_id, typed_work).await;
@@ -1970,11 +1758,14 @@ async fn inline_pending_route_affirm_is_unchanged() {
     let harness = build_route_harness().await;
     let (work_id, _) = seed_work(&harness.db, harness.user_id, "inline-affirm").await;
     let value = format!("U1-GR-{}", CASE_ID.fetch_add(1, Ordering::Relaxed));
-    harness
-        .db
-        .record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), &value)
-        .await
-        .expect("seed pending anchor through production writer");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &harness.db,
+        work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        &value,
+    )
+    .await
+    .expect("seed pending anchor through production writer");
     let generation = work_generation(&harness.db, work_id).await;
     harness.state.identity_road.test_recorder().clear();
 

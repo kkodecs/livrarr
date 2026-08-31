@@ -537,15 +537,6 @@ impl WorkDb for StubDb {
         unreachable!("not exercised by indexer citizenship pins")
     }
 
-    async fn set_identity_status(
-        &self,
-        _user_id: UserId,
-        _id: WorkId,
-        _status: IdentityStatus,
-    ) -> Result<(), DbError> {
-        unreachable!("not exercised by indexer citizenship pins")
-    }
-
     async fn update_cover_metadata(
         &self,
         _user_id: UserId,
@@ -601,10 +592,6 @@ impl WorkDb for StubDb {
     }
 
     async fn delete_work(&self, _user_id: UserId, _id: WorkId) -> Result<Work, DbError> {
-        unreachable!("not exercised by indexer citizenship pins")
-    }
-
-    async fn merge_works(&self, _req: MergeWorksDbRequest) -> Result<Work, DbError> {
         unreachable!("not exercised by indexer citizenship pins")
     }
 

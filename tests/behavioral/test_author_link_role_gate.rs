@@ -20,7 +20,7 @@ use chrono::{Duration, Utc};
 use livrarr_behavioral::stubs::{
     create_test_user, StubAuthorProviderGateway, StubEnrichmentWorkflow, StubHttpFetcher,
 };
-use livrarr_db::pool::{backfill_author_identity, backfill_normalized_identity};
+use livrarr_db::pool::backfill_author_identity;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{AuthorLinkClaim, AuthorLinkDb, GuardedRouteWrite, WorkDb};
@@ -605,9 +605,6 @@ async fn migration_079_db() -> SqliteDb {
         .run(&pool)
         .await
         .expect("apply real migrations through 079");
-    backfill_normalized_identity(&pool)
-        .await
-        .expect("run production work-identity startup repair");
     backfill_author_identity(&pool)
         .await
         .expect("run production author-identity startup repair");

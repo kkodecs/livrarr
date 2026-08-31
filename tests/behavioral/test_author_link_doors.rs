@@ -307,11 +307,6 @@ async fn build_route_harness() -> RouteHarness {
                 identity_road_arc.clone(),
             ))
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc,
         enrichment_workflow: Arc::new(
             metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(

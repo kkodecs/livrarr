@@ -372,7 +372,6 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
     let db_arc = Arc::new(db.clone());
     let queue = Arc::new(
         DefaultProviderQueueBuilder::new()
-            .with_identity_route_dispatch()
             .add_provider(
                 MetadataProvider::Goodreads,
                 ProviderClient::Goodreads(goodreads).with_call_sink(call_sink.clone()),
@@ -404,8 +403,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 http_fetcher.clone(),
                 data_dir.clone(),
             )
-            .with_resolver(identity_resolver_arc.clone())
-            .with_identity_routes_authoritative(),
+            .with_resolver(identity_resolver_arc.clone()),
         )
     };
     let discovery_service_arc = Arc::new(
@@ -538,11 +536,6 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
                 identity_road_arc.clone(),
             ))
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc,
         enrichment_workflow: Arc::new(
             metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(

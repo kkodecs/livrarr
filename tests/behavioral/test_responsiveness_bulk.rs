@@ -4,10 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use livrarr_domain::services::{
-    AddWorkResult, BulkRefreshGuard, ConvergeOutcome, MergeFieldChoiceEntry, MergePreview,
-    MergeWorksResult, PaginatedWorksView, RefreshSurface, RefreshWorkResult, RetrySummary,
-    SortDirection, SourceProviderData, UpdateWorkRequest, WorkDetailView, WorkFilter, WorkService,
-    WorkServiceError, WorkSortField,
+    AddWorkResult, BulkRefreshGuard, ConvergeOutcome, MergePreview, PaginatedWorksView,
+    RefreshSurface, RefreshWorkResult, RetrySummary, SortDirection, SourceProviderData,
+    UpdateWorkRequest, WorkDetailView, WorkFilter, WorkService, WorkServiceError, WorkSortField,
 };
 use livrarr_domain::{MediaType, UserId, Work, WorkId};
 
@@ -248,16 +247,6 @@ impl WorkService for BulkRefreshStub {
         _survivor_id: WorkId,
         _loser_id: WorkId,
     ) -> Result<MergePreview, WorkServiceError> {
-        unimplemented!("not exercised")
-    }
-
-    async fn merge_works(
-        &self,
-        _user_id: UserId,
-        _survivor_id: WorkId,
-        _loser_id: WorkId,
-        _choices: Vec<MergeFieldChoiceEntry>,
-    ) -> Result<MergeWorksResult, WorkServiceError> {
         unimplemented!("not exercised")
     }
 }

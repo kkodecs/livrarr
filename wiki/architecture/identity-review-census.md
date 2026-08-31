@@ -6,6 +6,14 @@ enumeration was at `8353c0bc` and is superseded — all four commits changed the
 exact files. Read this before writing any spec, packet or test that says "every
 card", "every door", "manual import attaches", or "dismissed".
 
+**Amended 2026-08-31 after the deletion pass** (identity-conflict-authority,
+buckets A–E): the legacy conflict endpoints, handlers, service and page are gone;
+the legacy `WorkIdentityRepository` trait shrank from 33 methods to 14 (every
+zero-caller method deleted with its SqliteDb impl); the pre-rewrite settle road,
+merge chain and startup backfill are deleted. Line anchors below were re-read
+against that tree. Open `work_identity_conflicts` rows are untouched — B4 adopts
+them.
+
 Two review rounds once failed because this census was sampled instead of
 enumerated. **Code is authoritative; re-enumerate by walking the tree, not by
 searching an index** (the code-index was ~300 lines stale in `identity_layer.rs`
@@ -20,7 +28,7 @@ statements**, down from seven at six sites:
 | # | Statement | Role |
 |---|---|---|
 | 1 | `crates/livrarr-db/src/identity_layer.rs:488`, inside `mint_reuse_or_suppress_review_card_in_tx` (defined `:417`) | **THE runtime authority.** Every production mint goes through here. |
-| 2 | `crates/livrarr-db/src/identity_layer.rs:6322`, inside `stage_legacy_identity_rows` (defined `:6202`) | Pre-activation cutover staging only. Excluded from the authority **by design** — wave-3 territory. |
+| 2 | `crates/livrarr-db/src/identity_layer.rs:6163`, inside `stage_legacy_identity_rows` (defined `:6043`) | Pre-activation cutover staging only. Excluded from the authority **by design** — wave-3 territory. |
 
 The helper owns, in one transaction: the reuse keys (PendingRoute owner-free
 trimmed on the durable Work; GroupIdentity insight-92 tuple; EditionEvidence
@@ -36,9 +44,9 @@ PendingRoute. A reuse emits none.
 | `commit_settlement_in_tx` | `identity_layer.rs:602` and `:919` | generic settlement (two arms) |
 | `commit_pending_route_review` | `identity_layer.rs:1570` | captured-route handoff / search fallback |
 | `commit_pending_route_review_with_review_context` | `identity_layer.rs:1612` | same, review-context variant |
-| `apply_evidence` | `identity_layer.rs:2427` | edition writer |
-| `apply_work_evidence` | `identity_layer.rs:2569` | edition writer (the live manual-import door reaches this one) |
-| `heal_identity_title_policy` | `pool.rs:1701` | boot-time title heal |
+| `apply_evidence` | `identity_layer.rs:2272` | edition writer |
+| `apply_work_evidence` | `identity_layer.rs:2414` | edition writer (the live manual-import door reaches this one) |
+| `heal_identity_title_policy` | `pool.rs:1125` | boot-time title heal |
 
 PendingRoute keys resolve placeholder `work_id 0` to the allocated Work through
 one shared scope function, so a real-id replay reuses its card and a second new
@@ -46,7 +54,7 @@ Work cannot steal one.
 
 `ImportIdentity` no longer has any writer: `commit_unattached_import_review` is
 **deleted** (0 hits in the tree). The variant survives only as a type — including
-in the U1 refusal arm at `services.rs:622`.
+in the U1 refusal arm at `services.rs:607`.
 
 No production producer: IdentityConflict, FieldResolution, ContributorOrder,
 MigrationRepair, InvariantRepair, ImportIdentity.
@@ -55,7 +63,7 @@ MigrationRepair, InvariantRepair, ImportIdentity.
 
 Before U1, seven of nine kinds accepted a user's decision, performed nothing,
 then wrote a `resolved` audit and bumped the generation. One wildcard-free
-`require_continuation()` (`crates/livrarr-domain/src/identity_layer/services.rs:615`)
+`require_continuation()` (`crates/livrarr-domain/src/identity_layer/services.rs:600`)
 now gates the single continuation decision point **before any validation or
 write**:
 
@@ -65,41 +73,40 @@ write**:
   which names the kind.
 
 The refusal is mapped explicitly to **HTTP 409** at every door
-(`handlers/identity_layer.rs:137`, `handlers/work.rs:589`,
-`handlers/identity_conflicts.rs:308`) and by name to the cutover CLI's
+(`handlers/identity_layer.rs:137`, `handlers/work.rs:589`) and by name to the cutover CLI's
 `ContinuationUnavailable` (stderr, exit 2) — never the database error class. The
 gate is called at `identity_road.rs:791` and mirrored in the behavioral stub
 (`stubs.rs:1101`), so the test road cannot drift from production guard ordering.
 
-The conflict endpoints prove an open same-user legacy row or pending typed card
-(404 otherwise), then refuse *before* winningWorkId/route/action validation — so
-all four page buttons and Dismiss show the same honest reason, and `ConflictCard`
-surfaces the server message instead of a fixed toast.
+The legacy conflict endpoints (`/identity-conflict/*`), their handlers, the
+`LiveIdentityConflictService`, the page SQL and the Conflicts section of the
+review page were **deleted** in the deletion pass (2026-08-31, bucket D). Until
+the card-based conflict authority (B4) lands there is no conflict door; the
+legacy `work_identity_conflicts` rows stay in place for it to adopt.
 
 ## Every door into the one continuation (`resolve_review`)
 
-Eight, by LSP references plus the CLI's direct call. Doors 1–4 and 8 now hit the
-refusal gate for the seven unbuilt kinds; doors 5–7 submit GroupIdentity /
-PendingRoute for a card minted in the same request.
+Six (eight before the deletion pass removed the two conflict endpoints), by LSP
+references plus the CLI's direct call. Doors 1–2 and 6 hit the refusal gate for
+the seven unbuilt kinds; doors 3–5 submit GroupIdentity / PendingRoute for a card
+minted in the same request.
 
 1. `/identity-review-card/{id}/resolve` — typed (`handlers/identity_layer.rs`)
 2. `/identity-review/{work_id}/resolve` — legacy alias, same handler
-3. `/identity-conflict/{id}/resolve` and 4. `/identity-conflict/{id}/dismiss`
-   (`identity_conflicts.rs`) — these load a TYPED `IdentityConflict` card by
-   `conflict_id`, while the page's list/detail read the LEGACY
-   `work_identity_conflicts` store. **Nothing mints the typed kind**, so a listed
-   row's Resolve/Dismiss cannot act — it now refuses honestly instead of
-   fabricating success. One conflict authority is wave-1's second half.
-5. Work title/author update (`handlers/work.rs` `update`) — mints a GroupIdentity
+3. Work title/author update (`handlers/work.rs` `update`) — mints a GroupIdentity
    card through `WorkUpdateRekey` and resolves it `DifferentFromAll` in the same
    request
-6. merge with choices (`merge`) — `ManualWorkMerge`, resolved `AttachOrMerge` inline
-7. affirm pending anchor (`affirm_pending_anchor`) — `AffirmPendingRoute`, resolved
+4. merge with choices (`merge`) — `ManualWorkMerge`, resolved `AttachOrMerge` inline
+5. affirm pending anchor (`affirm_pending_anchor`) — `AffirmPendingRoute`, resolved
    `Affirm` inline
-8. cutover CLI `identity-cutover resolve` (`livrarr-server/src/identity_layer.rs`)
+6. cutover CLI `identity-cutover resolve` (`livrarr-server/src/identity_layer.rs`)
+
+The former `/identity-conflict/{id}/resolve|dismiss` doors loaded a typed
+`IdentityConflict` card nothing ever minted; they are gone, and the one conflict
+authority is this feature's B-phase (IR v2).
 
 A notification rule keyed on "minted" would alert on already-resolved cards from
-doors 5–7 — which is why the U7 rule excludes inline PendingRoute.
+doors 3–5 — which is why the U7 rule excludes inline PendingRoute.
 
 ## Dismiss is a standing decision, not a card state (REQ-005, U5)
 
@@ -138,7 +145,7 @@ ListImport no longer synthesises an explicit choice for anchorless rows.
 
 ### Exactly two doors revoke — each inside its own action's transaction
 
-1. `sqlite_work_identity.rs:2338` in `apply_identity_edit_in_tx` — a successful
+1. `sqlite_work_identity.rs:1587` in `apply_identity_edit_in_tx` — a successful
    **certified identity edit** (same-value included)
 2. `identity_layer.rs:2202` in `commit_review_continuation` — a successful
    **PendingRoute Affirm** resolved through its continuation
@@ -148,11 +155,11 @@ write the ledger.
 
 ### One-time adoption of historical dismissals
 
-`adopt_identity_review_dismissals` (`pool.rs:1096`), marker
+`adopt_identity_review_dismissals` (`pool.rs:518`), marker
 `identity_review_dismissal_adoption_v1`, adopts pre-ledger user dismissals so an
 upgrade keeps prior decisions: latest equivalent wins, only a later user Affirm
 blocks, malformed rows are logged and skipped, idempotent, with rollback proven
-at the pre-commit failpoint (`identity_layer.rs:6641`).
+at the pre-commit failpoint (`identity_layer.rs:6482`).
 
 ## Cancellation is five sites; only one is the user
 
@@ -162,10 +169,10 @@ at the pre-commit failpoint (`identity_layer.rs:6641`).
 | Site | Actor |
 |---|---|
 | `dismiss_pending_review` (`identity_layer.rs:1751`) | **the user** — the only one whose `review-dismissal` audit carries a `ReviewActor` JSON actor, and the only one that writes the ledger |
-| `cancel_satisfied_pending_route_cards` (`:3468`) | `identity-engine` |
-| `cancel_equivalent_duplicate_review_cards` (`:4529`) | U7 oldest-wins duplicate cleanup (distinct non-`ReviewActor` audit) |
-| `cancel_pending_group_card` (`:5877`) | machine |
-| `heal_identity_sweep_findings` (`pool.rs:2028`) | `identity-sweep-heal` |
+| `cancel_satisfied_pending_route_cards` (`:3309`) | `identity-engine` |
+| `cancel_equivalent_duplicate_review_cards` (`:4370`) | U7 oldest-wins duplicate cleanup (distinct non-`ReviewActor` audit) |
+| `cancel_pending_group_card` (`:5718`) | machine |
+| `heal_identity_sweep_findings` (`pool.rs:1452`) | `identity-sweep-heal` |
 
 "Cancelled" therefore **never** implies a user decision — check the ledger or the
 audit actor. Nothing in the tree sets a card back to `pending`. A card's
@@ -232,14 +239,14 @@ The parsed row's title text remains a button that opens the OL search;
 
 Removed end to end by U7: HTTP struct field and TS type deleted, old clients
 still accepted, the value persists nowhere, and the cutover CLI rejects any
-nested `notes` key **recursively** before action decoding. The remaining `notes`
-hits in `sqlite_identity_conflict.rs` belong to the **legacy conflict store** —
-a different thing.
+nested `notes` key **recursively** before action decoding. The legacy conflict
+store's page SQL (the only other `notes` handling) went with the page on
+2026-08-31.
 
 ## `user_confirmed=1` is NOT identity-edit-only, and `observed_at` refreshes
 
 Three writers stamp `user_confirmed` routes: the certified identity edit
-(`sqlite_work_identity.rs` → `sync_identity_edit_route:1957`), PendingRoute
+(`sqlite_work_identity.rs` → `sync_identity_edit_route:1206`), PendingRoute
 Affirm, and any DirectAdd/ListImport settlement whose bundle carries a
 `user_choice` (`identity_road.rs:958-989`). The settlement route upsert preserves
 the bit and UserChoice/OwnedFile provenance but **REPLACES `observed_at` on every
@@ -257,22 +264,27 @@ Verified 2026-08-26 against the tree, after a contest judgment mis-framed it as
 an atomicity hole:
 
 An update is **one settle plus one continuation**, and each claims a generation
-(`tests/behavioral/test_irf_u1_refusal.rs:1851-1870`: the continuation's
+(`tests/behavioral/test_irf_u1_refusal.rs:1658`: the continuation's
 `expected_generation == generation + 1`, end state `generation + 2`; same pin at
-`:1944`, `:2015`, and `test_ilr_contracts.rs:9167`).
+`:1732`, `:1806`, and `test_ilr_contracts.rs:8966`).
 
 So when a continuation **fails**, step one's committed generation claim
 correctly survives — it is pinned as intended behaviour at
-`test_irf_u5_durable_dismissal.rs:4870-4876`. A continuation that expects
+`test_irf_u5_durable_dismissal.rs:4878-4882`. A continuation that expects
 `generation + 1` **requires** the settlement's bump to be already committed and
 visible; deferring it would jam the CAS check. This is insight 91's decision-time
 rule applied to the two-step road. Do not "fix" it.
 
-## The road-service trait is three methods; the door cannot reach the impl
+## The road-service trait is four methods; the door cannot reach the impl
 
 `IdentityRoadService` = `settle` / `resolve_review` /
-`apply_captured_route_handoff` (`identity_layer/services.rs:324+`).
-`reconcile_complete_group` is an inherent method on the impl in livrarr-metadata
-and `authority_certain` is crate-private — a handler (compile wall: domain, http,
-matching, jobs only) cannot call either. Any door-side decision that needs the
-group rule needs a **trait surface**, never a re-implementation.
+`settle_manual_import_minimum` / `apply_captured_route_handoff`
+(`identity_layer/services.rs:347-377`; corrected 2026-08-27 — an earlier version
+of this page said three methods and a private predicate). `reconcile_complete_group`
+is an inherent method on the impl in livrarr-metadata (`identity_road.rs:385`);
+`authority_certain` is `pub fn` in domain (`identity_layer/reconciliation.rs:71-81`)
+but the complete-group reconciliation still runs only on the impl — a handler
+(compile wall: domain, http, matching, jobs only) cannot reach it. The review
+continuation `resolve_review` runs on that same impl, so the group rule is
+reachable where the decision is made. Any door-side decision that needs the group
+rule needs a **trait surface**, never a re-implementation.

@@ -15,10 +15,7 @@ use livrarr_behavioral::stubs::{create_second_test_user, create_test_user};
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::test_helpers::create_test_db;
 use livrarr_db::{CreateWorkDbRequest, WorkDb, WorkDbCreate};
-use livrarr_domain::identity::{
-    AnchorSetter, AnchorType, ConflictSource, IdentityConflictKind, IncomingConflictPayload,
-    NewIdentityConflict, PendingReason,
-};
+use livrarr_domain::identity::{AnchorSetter, AnchorType};
 use livrarr_domain::services::WorkIdentityRepository;
 use livrarr_domain::{normalize_for_matching, IdentityStatus, UserId};
 use sqlx::Row;
@@ -65,21 +62,6 @@ async fn ensure_identity_generation_column(db: &SqliteDb) {
             .execute(db.pool())
             .await
             .expect("install future coordination column in an old-schema fixture");
-    }
-}
-
-fn incoming(title: &str, gr_key: Option<&str>) -> IncomingConflictPayload {
-    IncomingConflictPayload {
-        ol_key: None,
-        gr_key: gr_key.map(str::to_string),
-        hc_key: None,
-        isbn_13: None,
-        asin: None,
-        title: title.to_string(),
-        author_name: "Test Author".to_string(),
-        year: None,
-        cover_url: None,
-        top_candidates: Vec::new(),
     }
 }
 
@@ -247,77 +229,6 @@ async fn chokepoint_confirm_anchor_advances_generation() {
     );
 }
 
-/// REQ-IDs: AC-9(e) (bump half), design §Claims
-/// Directive: raise_identity_conflict advances identity_generation even though no slot changes.
-#[tokio::test]
-async fn raise_identity_conflict_advances_generation_without_slot_change() {
-    let db = create_test_db().await;
-    let user = create_test_user(&db).await;
-    let work = create_work(&db, user, "Bump Raise").await;
-    ensure_identity_generation_column(&db).await;
-    let before = generation(&db, work).await;
-    db.raise_identity_conflict(NewIdentityConflict {
-        user_id: user,
-        existing_work_id: work,
-        kind: IdentityConflictKind::IncomingDifferentGrKey,
-        incoming: incoming("Other Book", Some("999")),
-        raised_by: ConflictSource::Refresh,
-        raised_source_path: None,
-    })
-    .await
-    .expect("raise conflict");
-    let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "conflict raise must bump ({before} -> {after})"
-    );
-    // The slot columns did not change — the bump is the ONLY signal a preview has.
-    let gr: Option<String> = sqlx::query_scalar("SELECT gr_key FROM works WHERE id = ?")
-        .bind(work)
-        .fetch_one(db.pool())
-        .await
-        .expect("gr_key read");
-    assert!(gr.is_none(), "raise must not write slots");
-}
-
-/// REQ-IDs: design §Claims (create-time initialization)
-/// Directive: set_identity_pending claims/bumps before its pending-row + OL-column mutation.
-#[tokio::test]
-async fn set_identity_pending_advances_generation() {
-    let db = create_test_db().await;
-    let user = create_test_user(&db).await;
-    let work = create_work(&db, user, "Bump Pending").await;
-    ensure_identity_generation_column(&db).await;
-    let before = generation(&db, work).await;
-    db.set_identity_pending(work, PendingReason::NoCandidates, AnchorSetter::AutoSearch)
-        .await
-        .expect("set pending");
-    let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "set_identity_pending must bump ({before} -> {after})"
-    );
-}
-
-/// REQ-IDs: design §Writer coverage (raw status arms are not loopholes)
-/// Directive: set_identity_status advances identity_generation in the same statement.
-#[tokio::test]
-async fn set_identity_status_advances_generation_same_statement() {
-    let db = create_test_db().await;
-    let user = create_test_user(&db).await;
-    let work = create_work(&db, user, "Bump Status").await;
-    ensure_identity_generation_column(&db).await;
-    let before = generation(&db, work).await;
-    db.set_identity_status(user, work, IdentityStatus::NotFound)
-        .await
-        .expect("status write");
-    let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "raw identity_status write must bump ({before} -> {after})"
-    );
-}
-
 /// Post-cutover writer coverage: manual refresh must not read, rewrite, or
 /// advance the retired legacy status/generation pair.
 #[tokio::test]
@@ -334,9 +245,14 @@ async fn reset_for_manual_refresh_freezes_legacy_notfound_and_generation() {
     )
     .await
     .expect("seed anchor");
-    db.set_identity_status(user, work, IdentityStatus::NotFound)
-        .await
-        .expect("park not_found");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user,
+        work,
+        IdentityStatus::NotFound,
+    )
+    .await
+    .expect("park not_found");
     let before = generation(&db, work).await;
     db.reset_for_manual_refresh(user, work)
         .await
@@ -349,56 +265,4 @@ async fn reset_for_manual_refresh_freezes_legacy_notfound_and_generation() {
     assert_eq!(status, "not_found", "the retired badge remains frozen");
     let after = generation(&db, work).await;
     assert_eq!(after, before, "refresh is not an identity settlement");
-}
-
-/// REQ-IDs: design §Writer coverage (review dismiss is claimed)
-/// Directive: dismiss_review's status flip advances identity_generation.
-#[tokio::test]
-async fn dismiss_review_advances_generation() {
-    let db = create_test_db().await;
-    let user = create_test_user(&db).await;
-    let work = create_work(&db, user, "Bump Dismiss").await;
-    ensure_identity_generation_column(&db).await;
-    db.set_needs_review(work).await.expect("park needs_review");
-    let before = generation(&db, work).await;
-    db.dismiss_review(work).await.expect("dismiss");
-    let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "review dismiss must bump ({before} -> {after})"
-    );
-}
-
-/// REQ-IDs: design §Claims (delayed completion is generation-gated)
-/// Directive: merge_missing_anchors carries expected_generation semantics — a write
-/// that lands must advance the generation so any concurrent preview goes stale.
-#[tokio::test]
-async fn merge_missing_anchors_write_advances_generation() {
-    let db = create_test_db().await;
-    let user = create_test_user(&db).await;
-    let work = create_work(&db, user, "Bump Merge").await;
-    ensure_identity_generation_column(&db).await;
-    let before = generation(&db, work).await;
-    let merged = db
-        .merge_missing_anchors(
-            work,
-            &livrarr_domain::identity::CapturedIdentity {
-                ol_key: Some("OL424242W".to_string()),
-                gr_key: None,
-                hc_key: None,
-                isbn_13: None,
-                asin: None,
-                title: "Bump Merge".to_string(),
-                author_name: "Test Author".to_string(),
-                language: Some("en".to_string()),
-            },
-        )
-        .await
-        .expect("merge missing anchors");
-    assert!(!merged.is_empty(), "fixture must actually merge an anchor");
-    let after = generation(&db, work).await;
-    assert!(
-        after > before,
-        "landed completion must bump ({before} -> {after})"
-    );
 }

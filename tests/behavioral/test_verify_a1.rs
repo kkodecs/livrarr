@@ -208,54 +208,6 @@ fn monitor_ol_candidate_different_title() -> WorkCandidate {
     }
 }
 
-/// Part (a): Confirms that `Confirmed/TitleAuthorSearch` is stamped on the work
-/// without any call to `resolve_identity`. The service is `without_enrichment`
-/// so there is no resolver, yet the add() succeeds and the DB reflects the
-/// Confirmed status — proving the monitor pre-stamps Confirmed directly.
-///
-/// NOTE: `WorkService::add()` itself does not store `identity_status` directly —
-/// it stores via `derived_identity_status()` which gives Confirmed when a work
-/// anchor (ol/gr/hc) is present. The work's `identity_status` column IS written
-/// as "confirmed" because the OL key is present. The method column comes from
-/// the anchor setter metadata. So this test confirms the structural fact: a
-/// monitor-added work gets `identity_status = Confirmed` from a candidate that
-/// was NEVER fed through `resolve_identity()`.
-#[tokio::test]
-async fn test_verify_a1_monitor_stamps_confirmed_without_resolve() {
-    let db = common::create_test_db().await;
-    let user_id = create_user(&db).await;
-    let svc = service(db);
-
-    let result = svc
-        .add(user_id, monitor_ol_candidate())
-        .await
-        .expect("monitor-path add should succeed");
-
-    assert!(
-        result.created,
-        "A1(a): monitor-path add should create a new work (first add)"
-    );
-
-    // Verify the work exists and was created as Confirmed despite no resolver call.
-    let works = svc
-        .list(user_id, all_works_filter())
-        .await
-        .expect("list should succeed");
-
-    assert_eq!(works.len(), 1, "exactly one work should exist");
-    let work = &works[0];
-
-    // identity_status must be Confirmed because an ol_key anchor was written —
-    // but that anchor was NOT cross-provider-resolved. The monitor just stamped it.
-    assert_eq!(
-        work.identity_status,
-        livrarr_domain::IdentityStatus::Confirmed,
-        "A1(a) PROVEN: work has identity_status=Confirmed stamped by the monitor \
-         without going through resolve_identity(). OL key='OL999W' was written as \
-         a confirmed anchor directly from the bibliography, not from a resolver."
-    );
-}
-
 /// Part (b) - same title: when the monitor adds a work with an OL key and the
 /// SAME normalized title as an existing GR-only work, the adopt step
 /// (`find_normalized_match_no_anchor_for_user`) catches it because the GR-only

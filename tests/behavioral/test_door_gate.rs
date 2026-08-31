@@ -47,10 +47,9 @@ use livrarr_db::{
     SeriesDb, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::identity::{
-    AnchorConfidence, AnchorDeadEnd, AnchorSetter, AnchorType, Candidate, CandidateId,
-    CapturedIdentity, ConflictSource, ConsistencyDivergence, IdentityMethod, IdentityMode,
-    IdentityState, LatencyTier, NewIdentityConflict, PendingReason, RawHarvest, Resolution,
-    ResolvedIdentity, WorkCandidate, WorkIdentityAnchor,
+    AnchorConfidence, AnchorSetter, AnchorType, Candidate, CandidateId, CapturedIdentity,
+    ConflictSource, IdentityMethod, IdentityMode, IdentityState, LatencyTier, PendingReason,
+    RawHarvest, Resolution, ResolvedIdentity, WorkCandidate, WorkIdentityAnchor,
 };
 use livrarr_domain::seed::{
     seed_add_box, seed_author_monitor, seed_list_import, seed_manual_import, seed_readarr_import,
@@ -195,9 +194,78 @@ async fn seed_db_work(
     )
     .await
     .expect("set enrichment status");
-    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-        .await
-        .expect("set identity status");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("set identity status");
+    work.enrichment_status = status;
+    work.identity_status = IdentityStatus::Confirmed;
+    work
+}
+
+async fn seed_settled_work(
+    db: &SqliteDb,
+    user_id: UserId,
+    title: &str,
+    author: &str,
+    ol_key: Option<&str>,
+    status: EnrichmentStatus,
+) -> Work {
+    let routes: Vec<_> = ol_key
+        .map(|key| {
+            (
+                livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+                livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+                key,
+            )
+        })
+        .into_iter()
+        .collect();
+    let mut work =
+        livrarr_db::test_helpers::settle_work_fixture(db, user_id, title, author, None, &routes)
+            .await;
+    db.update_work_enrichment(
+        user_id,
+        work.id,
+        livrarr_db::UpdateWorkEnrichmentDbRequest {
+            enrichment_status: status,
+            enrichment_source: Some("fixture".to_string()),
+            title: None,
+            author_name: None,
+            year: None,
+            language: None,
+            description: None,
+            publisher: None,
+            genres: None,
+            page_count: None,
+            duration_seconds: None,
+            rating: None,
+            rating_count: None,
+            cover_url: None,
+            series_name: None,
+            series_position: None,
+            subtitle: None,
+            original_title: None,
+            narration_type: None,
+            publish_date: None,
+            narrator: None,
+            abridged: None,
+        },
+    )
+    .await
+    .expect("set enrichment status");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("set identity status");
     work.enrichment_status = status;
     work.identity_status = IdentityStatus::Confirmed;
     work
@@ -598,7 +666,7 @@ async fn b12_converge_work_runs_background_low_prefer_cache_for_unenriched() {
     assert_seam(
         "B12",
         |db, user_id, service, _workflow| async move {
-            let work = seed_db_work(
+            let work = seed_settled_work(
                 &db,
                 user_id,
                 "B12 Converge",
@@ -627,7 +695,7 @@ async fn b13_converge_work_on_enriched_work_skips_enrichment() {
     assert_seam(
         "B13",
         |db, user_id, service, _workflow| async move {
-            let work = seed_db_work(
+            let work = seed_settled_work(
                 &db,
                 user_id,
                 "B13 Converge",
@@ -640,36 +708,6 @@ async fn b13_converge_work_on_enriched_work_skips_enrichment() {
                 .converge_work(user_id, work.id, 3)
                 .await
                 .expect("converge");
-            vec![]
-        },
-        no_calls(),
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn b14_add_identity_pending_candidate_blocks_enrichment() {
-    assert_seam(
-        "B14",
-        |_db, user_id, service, _workflow| async move {
-            let mut bridge_anchors = captured("B14 Pending", "Door Author", None);
-            bridge_anchors.isbn_13 = Some("9780441172719".to_string());
-            service
-                .add(
-                    user_id,
-                    seed_add_box(
-                        seed_input("B14 Pending", "Door Author"),
-                        IdentityState::Pending {
-                            reason: PendingReason::NoCandidates,
-                            seed_anchors: Some(bridge_anchors),
-                            top_candidates: vec![],
-                        },
-                        None,
-                        false,
-                    ),
-                )
-                .await
-                .expect("pending add");
             vec![]
         },
         no_calls(),
@@ -1048,16 +1086,6 @@ impl WorkService for RecordingWorkService {
         _survivor_id: WorkId,
         _loser_id: WorkId,
     ) -> Result<MergePreview, WorkServiceError> {
-        todo!("not exercised by door-gate")
-    }
-
-    async fn merge_works(
-        &self,
-        _user_id: UserId,
-        _survivor_id: WorkId,
-        _loser_id: WorkId,
-        _choices: Vec<MergeFieldChoiceEntry>,
-    ) -> Result<MergeWorksResult, WorkServiceError> {
         todo!("not exercised by door-gate")
     }
 }
@@ -1803,16 +1831,6 @@ impl livrarr_domain::identity_layer::WorkIdentityRepository for RecordingIdentit
     > {
         Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
     }
-
-    async fn resolve_conflict_atomically(
-        &self,
-        _command: livrarr_domain::identity_layer::ResolveIdentityConflictCommand,
-    ) -> Result<
-        livrarr_domain::identity_layer::CapturedIdentity,
-        livrarr_domain::identity_layer::IdentityRepositoryError,
-    > {
-        Err(livrarr_domain::identity_layer::IdentityRepositoryError::InvalidResolution)
-    }
 }
 
 impl RecordingIdentityRepo {
@@ -1842,16 +1860,6 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
     ) -> Result<(), WorkIdentityError> {
         todo!("not exercised by door-gate")
     }
-    async fn confirm_anchor_and_recompute_badge(
-        &self,
-        _work_id: WorkId,
-        _anchor_type: AnchorType,
-        _value: &str,
-        _setter: AnchorSetter,
-    ) -> Result<(), WorkIdentityError> {
-        self.confirm_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
     async fn read_anchors_with_generation(
         &self,
         _work_id: WorkId,
@@ -1867,35 +1875,6 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
     ) -> Result<Option<CollisionInfo>, WorkIdentityError> {
         Ok(None)
     }
-    async fn affirm_anchor_claimed(
-        &self,
-        work_id: WorkId,
-        anchor_type: AnchorType,
-        value: &str,
-        setter: AnchorSetter,
-        _expected_generation: i64,
-    ) -> Result<(), WorkIdentityError> {
-        self.confirm_anchor_and_recompute_badge(work_id, anchor_type, value, setter)
-            .await
-    }
-    async fn set_identity_pending(
-        &self,
-        _work_id: WorkId,
-        _reason: PendingReason,
-        _setter: AnchorSetter,
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn set_needs_review(&self, _work_id: WorkId) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn record_review_candidates(
-        &self,
-        _work_id: WorkId,
-        _candidates: &[Candidate],
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
     async fn get_review_candidates(
         &self,
         _work_id: WorkId,
@@ -1906,28 +1885,6 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
         &self,
         _user_id: UserId,
     ) -> Result<Vec<Work>, WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn apply_review_candidate(
-        &self,
-        _work_id: WorkId,
-        _candidate: &Candidate,
-        _setter: AnchorSetter,
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn dismiss_review(&self, _work_id: WorkId) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn set_identity_confirmed(&self, _work_id: WorkId) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn set_identity_provisional(&self, _work_id: WorkId) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn verify_anchor_cache_consistency(
-        &self,
-    ) -> Result<Vec<ConsistencyDivergence>, WorkIdentityError> {
         todo!("not exercised by door-gate")
     }
     async fn find_work_by_anchor(
@@ -1943,61 +1900,6 @@ impl WorkIdentityRepository for RecordingIdentityRepo {
         _work_id: WorkId,
     ) -> Result<Vec<WorkIdentityAnchor>, WorkIdentityError> {
         Ok(self.anchors.lock().expect("anchors").clone())
-    }
-    async fn merge_missing_anchors(
-        &self,
-        _work_id: WorkId,
-        _incoming: &CapturedIdentity,
-    ) -> Result<Vec<AnchorType>, WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn detect_conflicting_anchors(
-        &self,
-        _existing_work_id: WorkId,
-        _incoming: &CapturedIdentity,
-        _source: ConflictSource,
-    ) -> Result<Vec<NewIdentityConflict>, WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn raise_identity_conflict(
-        &self,
-        _conflict: NewIdentityConflict,
-    ) -> Result<i64, WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn backfill_gr_numeric(&self) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn record_pending_anchor(
-        &self,
-        _work_id: WorkId,
-        _anchor_type: AnchorType,
-        _value: &str,
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn bump_anchor_attempt(
-        &self,
-        _work_id: WorkId,
-        _anchor_type: AnchorType,
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn list_anchor_dead_ends(
-        &self,
-        _work_id: WorkId,
-    ) -> Result<Vec<AnchorDeadEnd>, WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn clear_anchor_dead_end(
-        &self,
-        _work_id: WorkId,
-        _anchor_type: AnchorType,
-    ) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
-    }
-    async fn clear_anchor_dead_ends(&self, _work_id: WorkId) -> Result<(), WorkIdentityError> {
-        todo!("not exercised by door-gate")
     }
 }
 

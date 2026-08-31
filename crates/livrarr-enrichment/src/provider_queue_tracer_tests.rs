@@ -17,7 +17,7 @@ mod audnexus_tracer_tests {
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
     use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
+    use livrarr_db::{CreateUserDbRequest, UserDb};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole};
     use livrarr_external_data::{AudnexusClient, ProviderClient, ProviderOutcome};
     use std::sync::Arc;
@@ -63,22 +63,21 @@ mod audnexus_tracer_tests {
             .await
             .unwrap()
             .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Tracer Audiobook".to_string(),
-                author_name: "Tracer Author".to_string(),
-                author_id: None,
-                ol_key: None,
-                // REQ-006: the Audnexus dispatch derives its ASIN anchor from
-                // the work — matches the canned tracer response.
-                asin: Some("B07TRACER01".to_string()),
-                year: Some(2024),
-                cover_url: None,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        // REQ-006: the Audnexus dispatch derives its ASIN anchor from the
+        // work's active AsinEdition route — matches the canned tracer response.
+        let work = livrarr_db::test_helpers::settle_work_fixture(
+            &db,
+            user_id,
+            "Tracer Audiobook",
+            "Tracer Author",
+            None,
+            &[(
+                livrarr_domain::identity_layer::IdentityProvider::Amazon,
+                livrarr_domain::identity_layer::RouteKind::AsinEdition,
+                "B07TRACER01",
+            )],
+        )
+        .await;
         (db, work)
     }
 
@@ -179,7 +178,7 @@ mod goodreads_tracer_tests {
     use crate::provider_queue::DefaultProviderQueueBuilder;
     use crate::EnrichmentContext;
     use crate::{EnrichmentMode, ProviderQueue, ProviderQueueConfig};
-    use livrarr_db::{CreateUserDbRequest, CreateWorkDbRequest, UserDb, WorkDbCreate};
+    use livrarr_db::{CreateUserDbRequest, UserDb};
     use livrarr_domain::{MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_external_data::{GoodreadsClient, ProviderClient, ProviderOutcome};
     use livrarr_http::HttpClient;
@@ -228,20 +227,28 @@ mod goodreads_tracer_tests {
             .await
             .unwrap()
             .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Tracer Book".to_string(),
-                author_name: "Tracer Author".to_string(),
-                author_id: None,
-                ol_key: None,
-                year: Some(2024),
-                cover_url: None,
-                gr_key: gr_key.map(|s| s.to_string()),
-                ..Default::default()
+        let routes: Vec<(
+            livrarr_domain::identity_layer::IdentityProvider,
+            livrarr_domain::identity_layer::RouteKind,
+            &str,
+        )> = gr_key
+            .map(|key| {
+                vec![(
+                    livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+                    livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+                    key,
+                )]
             })
-            .await
-            .unwrap();
+            .unwrap_or_default();
+        let work = livrarr_db::test_helpers::settle_work_fixture(
+            &db,
+            user_id,
+            "Tracer Book",
+            "Tracer Author",
+            None,
+            &routes,
+        )
+        .await;
         (db, work)
     }
 

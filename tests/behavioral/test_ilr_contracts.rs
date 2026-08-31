@@ -37,7 +37,7 @@ use livrarr_domain::identity_layer::{
 };
 use livrarr_domain::services::{
     AuthorMonitorWorkflow, CoverSlotState, ListService, MaterializeRequest, MaterializeService,
-    MaterializeTags, RateBucket, SeriesQueryService, WorkIdentityRepository as _, WorkService,
+    MaterializeTags, RateBucket, SeriesQueryService, WorkService,
 };
 use livrarr_domain::{
     AuthorProvider, AuthorRouteKey, LibraryItem, MediaType, MetadataProvider, OutcomeClass,
@@ -652,13 +652,6 @@ async fn red_road_generation_contract(contract: RoadGenerationContract) {
         ) -> Result<ilr::ReviewContinuationOutcome, ilr::IdentityRepositoryError> {
             WorkIdentityRepository::commit_review_continuation(&self.inner, actor, command, cancel)
                 .await
-        }
-
-        async fn resolve_conflict_atomically(
-            &self,
-            command: ilr::ResolveIdentityConflictCommand,
-        ) -> Result<CapturedIdentity, ilr::IdentityRepositoryError> {
-            WorkIdentityRepository::resolve_conflict_atomically(&self.inner, command).await
         }
     }
 
@@ -2131,200 +2124,6 @@ async fn red_repo_commit(contract: RepoCommitContract) {
             assert_eq!(count, 1);
         }
     }
-}
-
-enum RepoConflictContract {
-    AtomicActions,
-    AmbiguousEdition,
-}
-
-async fn red_repo_conflict(contract: RepoConflictContract) {
-    let db = create_test_db().await;
-    let (user_id, author_id) = seed_identity_principals(&db, "conflict").await;
-    match contract {
-        RepoConflictContract::AtomicActions => {
-            for (index, action_name) in ["accept", "reject", "different-work"]
-                .into_iter()
-                .enumerate()
-            {
-                let route_key = RouteKey {
-                    provider: ilr::IdentityProvider::OpenLibrary,
-                    kind: ilr::RouteKind::OpenLibraryWork,
-                    value: format!("OL{}W", 9300 + index),
-                };
-                let mut commit = settlement_commit(user_id, author_id, None);
-                commit.identity_title = title(&format!("ILR Conflict Action {index}"));
-                commit.text_distinction = Some(format!("conflict-action-{index}"));
-                commit.routes = vec![ilr::WorkRoute {
-                    id: 0,
-                    user_id,
-                    owner: RouteOwner::Work(0),
-                    resolved_work_id: 0,
-                    provider: route_key.provider.clone(),
-                    kind: route_key.kind.clone(),
-                    provider_scoped_id: route_key.value.clone(),
-                    state: ilr::WorkRouteState::Active,
-                    provenance: ilr::RouteProvenance::UserChoice,
-                    user_confirmed: true,
-                    observed_at: Utc::now(),
-                }];
-                let settled = WorkIdentityRepository::commit_settlement(&db, commit)
-                    .await
-                    .expect("seed real conflict action graph");
-                let work_id = settled.identity.own_work_id;
-                let expected_generation = settled.identity.identity_generation;
-                let conflict_id = sqlx::query(
-                    "INSERT INTO identity_conflicts_v2 \
-                        (user_id, current_work_id, class, candidate_provider, candidate_kind, \
-                         candidate_value, proposed_owner_type, proposed_owner_id, status, expected_generation) \
-                     VALUES (?1, ?2, 'class_c', ?3, ?4, ?5, 'work', ?2, 'pending', ?6)",
-                )
-                .bind(user_id)
-                .bind(work_id)
-                .bind(serde_json::to_string(&route_key.provider).expect("provider JSON"))
-                .bind(serde_json::to_string(&route_key.kind).expect("kind JSON"))
-                .bind(&route_key.value)
-                .bind(expected_generation)
-                .execute(db.pool())
-                .await
-                .expect("seed pending v2 conflict")
-                .last_insert_rowid();
-                let resolution = match action_name {
-                    "accept" => ilr::IdentityConflictResolution::Accept {
-                        surviving_routes: vec![route_key.clone()],
-                        target_edition: None,
-                    },
-                    "reject" => ilr::IdentityConflictResolution::Reject {
-                        surviving_routes: vec![route_key.clone()],
-                    },
-                    "different-work" => ilr::IdentityConflictResolution::DifferentWork {
-                        winning_work_id: work_id,
-                        surviving_routes: vec![route_key.clone()],
-                        target_edition: None,
-                    },
-                    other => panic!("unexpected conflict action fixture {other}"),
-                };
-                let resolved = WorkIdentityRepository::resolve_conflict_atomically(
-                    &db,
-                    ilr::ResolveIdentityConflictCommand {
-                        user_id,
-                        conflict_id,
-                        expected_generation,
-                        resolution: resolution.clone(),
-                    },
-                )
-                .await
-                .unwrap_or_else(|error| panic!("{action_name} must commit atomically: {error}"));
-                assert_eq!(resolved.identity_generation, expected_generation + 1);
-                assert_eq!(resolved.active_routes.len(), 1);
-                assert_eq!(
-                    resolved.active_routes[0].provider_scoped_id,
-                    route_key.value
-                );
-                let (status, stored_resolution, audit_id): (String, String, Option<i64>) =
-                    sqlx::query_as(
-                        "SELECT status, resolution, audit_id FROM identity_conflicts_v2 WHERE id=?1",
-                    )
-                    .bind(conflict_id)
-                    .fetch_one(db.pool())
-                    .await
-                    .expect("read committed conflict exit");
-                assert_eq!(status, "resolved");
-                assert_eq!(
-                    serde_json::from_str::<ilr::IdentityConflictResolution>(&stored_resolution)
-                        .expect("typed stored resolution"),
-                    resolution
-                );
-                assert!(audit_id.is_some(), "{action_name} appends its audit");
-            }
-        }
-        RepoConflictContract::AmbiguousEdition => {
-            let mut commit = settlement_commit(user_id, author_id, None);
-            commit.identity_title = title("ILR Ambiguous Edition Conflict");
-            commit.text_distinction = Some("ambiguous-edition".to_string());
-            let settled = WorkIdentityRepository::commit_settlement(&db, commit)
-                .await
-                .expect("seed ambiguous Edition work");
-            let work_id = settled.identity.own_work_id;
-            let expected_generation = settled.identity.identity_generation;
-            for value in ["9780306406157", "9781861972712"] {
-                sqlx::query(
-                    "INSERT INTO editions \
-                        (user_id, work_id, format, provider_edition_id, state) \
-                     VALUES (?1, ?2, ?3, ?4, 'active')",
-                )
-                .bind(user_id)
-                .bind(work_id)
-                .bind(serde_json::to_string(&ilr::EditionFormat::Ebook).expect("format JSON"))
-                .bind(value)
-                .execute(db.pool())
-                .await
-                .expect("seed directly eligible Edition");
-            }
-            let kind = ilr::RouteKind::Isbn13Edition;
-            let conflict_id = sqlx::query(
-                "INSERT INTO identity_conflicts_v2 \
-                    (user_id, current_work_id, class, candidate_provider, candidate_kind, \
-                     candidate_value, proposed_owner_type, proposed_owner_id, status, expected_generation) \
-                 VALUES (?1, ?2, 'class_c', ?3, ?4, '9780306406157', 'work', ?2, 'pending', ?5)",
-            )
-            .bind(user_id)
-            .bind(work_id)
-            .bind(
-                serde_json::to_string(&ilr::IdentityProvider::IsbnRegistry)
-                    .expect("provider JSON"),
-            )
-            .bind(serde_json::to_string(&kind).expect("kind JSON"))
-            .bind(expected_generation)
-            .execute(db.pool())
-            .await
-            .expect("seed ambiguous Edition conflict")
-            .last_insert_rowid();
-            let result = WorkIdentityRepository::resolve_conflict_atomically(
-                &db,
-                ilr::ResolveIdentityConflictCommand {
-                    user_id,
-                    conflict_id,
-                    expected_generation,
-                    resolution: ilr::IdentityConflictResolution::Accept {
-                        surviving_routes: vec![],
-                        target_edition: None,
-                    },
-                },
-            )
-            .await;
-            assert!(matches!(
-                result,
-                Err(ilr::IdentityRepositoryError::StillAmbiguous)
-            ));
-            let (status, generation, audits): (String, i64, i64) = sqlx::query_as(
-                "SELECT c.status, w.identity_generation, \
-                        (SELECT COUNT(*) FROM identity_audit_events a \
-                          WHERE a.user_id=c.user_id AND a.work_id=c.current_work_id \
-                            AND a.event_kind='conflict-resolution') \
-                   FROM identity_conflicts_v2 c JOIN works w \
-                     ON w.user_id=c.user_id AND w.id=c.current_work_id WHERE c.id=?1",
-            )
-            .bind(conflict_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("inspect fail-closed ambiguous conflict");
-            assert_eq!(
-                (status.as_str(), generation, audits),
-                ("pending", expected_generation, 0)
-            );
-        }
-    }
-    let tables: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='identity_conflicts_v2'",
-    )
-    .fetch_one(db.pool())
-    .await
-    .expect("inspect conflict schema");
-    assert_eq!(
-        tables, 1,
-        "success arms require cards seeded through the production road"
-    );
 }
 
 enum EditionRepositoryContract {
@@ -6459,7 +6258,6 @@ async fn build_route_harness_with_provider_outcome(
     );
     let db_arc = Arc::new(db.clone());
     let mut queue_builder = livrarr_metadata::DefaultProviderQueueBuilder::new()
-        .with_identity_route_dispatch()
         .with_applicability_rule(Arc::new(|provider, work| {
             use livrarr_domain::MetadataProvider as P;
             if matches!(
@@ -6700,11 +6498,6 @@ async fn build_route_harness_with_provider_outcome(
                 ),
             )
         },
-        identity_conflict_service: Arc::new(
-            livrarr_server::services::identity_conflict_service::LiveIdentityConflictService::new(
-                db.clone(),
-            ),
-        ),
         identity_resolver: identity_resolver_arc.clone(),
         enrichment_workflow: Arc::new(
             livrarr_metadata::enrichment_workflow_service::EnrichmentWorkflowImpl::new(
@@ -8897,11 +8690,14 @@ async fn drive_router_case(harness: &RouteHarness, case: RouterCase) -> RouteRes
         RouterCase::PendingAffirm => {
             use livrarr_domain::identity::AnchorType;
             let id = seed_route_work(harness, "affirm").await;
-            harness
-                .db
-                .record_pending_anchor(id, AnchorType::new(AnchorType::GR_WORK), "10884")
-                .await
-                .expect("seed pending anchor");
+            livrarr_db::test_helpers::record_pending_anchor_fixture(
+                &harness.db,
+                id,
+                AnchorType::new(AnchorType::GR_WORK),
+                "10884",
+            )
+            .await
+            .expect("seed pending anchor");
             call_router_json(
                 harness,
                 Method::POST,
@@ -9070,11 +8866,14 @@ async fn drive_card_mint(harness: &RouteHarness, gate: CardGate) -> (i64, i64, R
         CardGate::PendingAffirm => {
             use livrarr_domain::identity::AnchorType;
             let work_id = seed_route_work(harness, "card-affirm").await;
-            harness
-                .db
-                .record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), "10884")
-                .await
-                .expect("seed pending route through production writer");
+            livrarr_db::test_helpers::record_pending_anchor_fixture(
+                &harness.db,
+                work_id,
+                AnchorType::new(AnchorType::GR_WORK),
+                "10884",
+            )
+            .await
+            .expect("seed pending route through production writer");
             let generation = work_generation(&harness.db, work_id).await;
             harness.state.identity_road.test_recorder().clear();
             let response = call_router_json(
@@ -9659,17 +9458,14 @@ async fn affirm_collision_is_structured_and_writes_nothing() {
     .execute(harness.db.pool())
     .await
     .expect("seed route owner");
-    harness
-        .db
-        .record_pending_anchor(
-            target,
-            livrarr_domain::identity::AnchorType::new(
-                livrarr_domain::identity::AnchorType::GR_WORK,
-            ),
-            route_value,
-        )
-        .await
-        .expect("seed colliding pending route");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &harness.db,
+        target,
+        livrarr_domain::identity::AnchorType::new(livrarr_domain::identity::AnchorType::GR_WORK),
+        route_value,
+    )
+    .await
+    .expect("seed colliding pending route");
     let before_generation = work_generation(&harness.db, target).await;
     let before_audits: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM identity_audit_events WHERE user_id=?1 AND work_id=?2",
@@ -10043,8 +9839,6 @@ enum CompositionContract {
     TwoTopupPatterns,
     RetryConvergenceOnly,
     RetryFailureIsolation,
-    ConflictResolveOnce,
-    ConflictDismissReject,
     ManualRefreshStructuredSubtitle,
     FetchRouteMatrix,
     EnrichmentPlanMatrix,
@@ -11568,90 +11362,6 @@ async fn red_missing_composition(contract: CompositionContract) {
             );
             assert!(request.evidence.owned_files.is_empty());
             assert!(request.evidence.minimum.is_some());
-        }
-        CompositionContract::ConflictResolveOnce | CompositionContract::ConflictDismissReject => {
-            let (author, _) = harness
-                .db
-                .create_author(CreateAuthorDbRequest {
-                    user_id: harness.user_id,
-                    name: "Identity Author legacy-conflict-adapter".to_string(),
-                    sort_name: None,
-                    ol_key: None,
-                    gr_key: None,
-                    hc_key: None,
-                    import_id: None,
-                })
-                .await
-                .expect("seed authenticated conflict author");
-            let user_id = harness.user_id;
-            let author_id = author.id;
-            let conflict_id = 90_001;
-            let mut commit = settlement_commit(user_id, author_id, None);
-            commit.routes = vec![ilr::WorkRoute {
-                id: 0,
-                user_id,
-                owner: RouteOwner::Work(0),
-                resolved_work_id: 0,
-                provider: ilr::IdentityProvider::OpenLibrary,
-                kind: ilr::RouteKind::OpenLibraryWork,
-                provider_scoped_id: "OL-CONFLICT-SURVIVOR-W".to_string(),
-                state: ilr::WorkRouteState::Active,
-                provenance: ilr::RouteProvenance::UserChoice,
-                user_confirmed: true,
-                observed_at: Utc::now(),
-            }];
-            commit.review_cards = vec![ilr::SettlementReviewCard::IdentityConflict {
-                conflict_id,
-                work_id: 0,
-            }];
-            let committed = WorkIdentityRepository::commit_settlement(&harness.db, commit)
-                .await
-                .expect("seed pending conflict card");
-            let card_id = committed.review_cards[0].id;
-            assert_ne!(card_id, conflict_id, "card id is never conflict id");
-            harness.state.identity_road.test_recorder().clear();
-            let response = if matches!(contract, CompositionContract::ConflictResolveOnce) {
-                call_router_json(
-                    &harness,
-                    Method::POST,
-                    format!("/api/v1/identity-conflict/{conflict_id}/resolve"),
-                    Some(json!({"action": "replace_anchor", "notes": null})), // old-client notes pin
-                )
-                .await
-            } else {
-                call_router_json(
-                    &harness,
-                    Method::POST,
-                    format!("/api/v1/identity-conflict/{conflict_id}/dismiss"),
-                    None,
-                )
-                .await
-            };
-            assert_eq!(
-                response.status,
-                StatusCode::CONFLICT,
-                "legacy adapter: {}",
-                response.json
-            );
-            assert_eq!(
-                response.json["message"],
-                ilr::IdentityRoadError::ContinuationUnavailable {
-                    kind: ilr::ReviewKind::IdentityConflict,
-                }
-                .to_string()
-            );
-            let calls = harness.state.identity_road.test_recorder().snapshot();
-            assert!(
-                calls.is_empty(),
-                "IdentityConflict refusal must precede resolve_review"
-            );
-            let legacy_writes: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM work_identity_conflicts WHERE status='resolved'",
-            )
-            .fetch_one(harness.db.pool())
-            .await
-            .expect("count legacy conflict writes");
-            assert_eq!(legacy_writes, 0);
         }
     }
 }
@@ -16182,8 +15892,6 @@ red_tests! {
     door_gate_manual_merge_mints_then_resolves => red_full_card_gate(CardContract::DoorManualMerge),
     door_gate_pending_affirm_mints_then_resolves => red_full_card_gate(CardContract::DoorPendingAffirm),
     door_gate_retry_incomplete_uses_convergence_visit_settle_only => red_missing_composition(CompositionContract::RetryConvergenceOnly),
-    door_gate_conflict_resolve_calls_resolve_review_once => red_missing_composition(CompositionContract::ConflictResolveOnce),
-    door_gate_conflict_dismiss_calls_resolve_review_once => red_missing_composition(CompositionContract::ConflictDismissReject),
     door_gate_legacy_grey_dismiss_route_is_absent => red_router_legacy_absent(RouterCase::GreyDismiss),
 
     // livrarr-domain.
@@ -16197,8 +15905,6 @@ red_tests! {
     read_captured_identity_cross_user_is_not_found => red_repo_read(RepoReadContract::CrossUser),
     dedup_adopt_and_race_loser_commit_once_under_generation => red_repo_commit(RepoCommitContract::DomainDedupGeneration),
     stale_route_and_key_collisions_rollback_whole_graph => red_repo_commit(RepoCommitContract::DomainCollisionRollback),
-    conflict_accept_reject_and_different_work_are_atomic => red_repo_conflict(RepoConflictContract::AtomicActions),
-    ambiguous_edition_target_stays_pending => red_repo_conflict(RepoConflictContract::AmbiguousEdition),
     edition_evidence_unknown_absent_and_contradiction => red_repo_edition(EditionRepositoryContract::UnknownAbsentContradiction),
     edition_subtitle_never_backflows_from_work => red_repo_edition(EditionRepositoryContract::NoSubtitleBackflow),
     cutover_rehearsal_two_copied_snapshots_are_byte_identical => red_cutover_trait(RehearseContract::ByteIdenticalCopies),
@@ -16355,8 +16061,6 @@ red_tests! {
     group_identity_pending_card_mint_is_idempotent_on_retrigger => red_group_identity_pending_card_mint_is_idempotent_on_retrigger(),
     http_review_all_kinds_map_bad_conflict_notfound_internal => red_missing_composition(CompositionContract::HttpReviewKinds),
     handler_compile_wall_has_only_identity_road_capability => red_handler_compile_wall(),
-    legacy_conflict_resolve_route_calls_shared_continuation_once_and_no_legacy_writer => red_missing_composition(CompositionContract::ConflictResolveOnce),
-    legacy_conflict_dismiss_route_maps_to_reject_and_calls_shared_continuation_once => red_missing_composition(CompositionContract::ConflictDismissReject),
     manual_provider_search_returns_candidates_without_identity_or_cover_mutation => red_manual_provider_search(),
     post_work_real_route_calls_settle_with_exact_directadd_matrix => red_missing_composition(CompositionContract::DirectAddMatrix),
     directadd_dedup_flags_user_and_background_refresh_waits_for_completion => red_missing_composition(CompositionContract::DirectAddWaits),

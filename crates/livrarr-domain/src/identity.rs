@@ -297,7 +297,7 @@ pub enum Resolution {
     },
 }
 
-/// Caller patience for the identity engine (`settle_identity`) — the only
+/// Caller patience for the identity capture leg — the only
 /// caller-visible knob (REQ-005). Exactly two modes (Q-003): `Interactive`
 /// (a person is waiting) and `Background` (unattended). Maps onto `LatencyTier`
 /// for the resolve call (Interactive→Interactive, Background→Background); the
@@ -319,7 +319,7 @@ pub enum ResolverVerdictKind {
     Unresolved,
 }
 
-/// Audit-only report of a `settle_identity` run (REQ-008): the badge before and
+/// Audit-only report of an identity settle run (REQ-008): the badge before and
 /// after, which anchor types were newly merged, and which verdict drove it
 /// (`None` when the terminal guard skipped resolution — REQ-006). The engine has
 /// already performed every write; no caller persists anything from this report.
@@ -526,19 +526,6 @@ pub enum ConflictResolutionAction {
 // ---------------------------------------------------------------------------
 // Consistency check output
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConsistencyDivergence {
-    CacheAhead {
-        work_id: WorkId,
-        cache: Option<String>,
-        anchor: Option<String>,
-    },
-    AnchorAhead {
-        work_id: WorkId,
-        anchor: String,
-    },
-}
 
 // ---------------------------------------------------------------------------
 // English work candidate (unified creation contract)

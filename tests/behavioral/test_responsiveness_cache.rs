@@ -16,11 +16,10 @@ use chrono::{Duration, Utc};
 use livrarr_behavioral::stubs::{StubEnrichmentWorkflow, StubHttpFetcher};
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{
-    CreateUserDbRequest, CreateWorkDbRequest, EnrichmentRetryDb, ProviderCacheEntry,
-    ProviderResponseCacheDb, ProviderRetryStateDb, UserDb, WorkDb, WorkDbCreate,
+    CreateUserDbRequest, EnrichmentRetryDb, ProviderCacheEntry, ProviderResponseCacheDb,
+    ProviderRetryStateDb, UserDb, WorkDb,
 };
 use livrarr_domain::identity::{CandidateId, CapturedIdentity, IdentityMethod, IdentityState};
-use livrarr_domain::identity_matching::identity_key;
 use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
 use livrarr_domain::services::{
     CallOperation, CallOutcomeClass, ProviderCallRecord, ProviderCallSink, RefreshSurface,
@@ -92,35 +91,47 @@ async fn seed_work(
     provider_anchor: &str,
     provider: MetadataProvider,
 ) -> Work {
-    let (normalized_title, normalized_author) = identity_key(title, "Cache Author");
-    let mut req = CreateWorkDbRequest {
-        user_id,
-        title: title.to_string(),
-        author_name: "Cache Author".to_string(),
-        normalized_title,
-        normalized_author,
-        language: Some("en".to_string()),
-        monitor_ebook: true,
-        monitor_audiobook: true,
-        ..Default::default()
+    let route = match provider {
+        MetadataProvider::GoogleBooks | MetadataProvider::Hardcover => Some((
+            livrarr_domain::identity_layer::IdentityProvider::IsbnRegistry,
+            livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+            provider_anchor,
+        )),
+        MetadataProvider::Goodreads => Some((
+            livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+            livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+            provider_anchor,
+        )),
+        MetadataProvider::OpenLibrary => Some((
+            livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+            livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+            provider_anchor,
+        )),
+        MetadataProvider::Audnexus | MetadataProvider::Audible => Some((
+            livrarr_domain::identity_layer::IdentityProvider::Amazon,
+            livrarr_domain::identity_layer::RouteKind::AsinEdition,
+            provider_anchor,
+        )),
+        MetadataProvider::Llm | MetadataProvider::Readarr => None,
     };
-
-    match provider {
-        MetadataProvider::GoogleBooks => req.isbn_13 = Some(provider_anchor.to_string()),
-        MetadataProvider::Goodreads => req.gr_key = Some(provider_anchor.to_string()),
-        MetadataProvider::Hardcover => req.isbn_13 = Some(provider_anchor.to_string()),
-        MetadataProvider::OpenLibrary => req.ol_key = Some(provider_anchor.to_string()),
-        MetadataProvider::Audnexus | MetadataProvider::Audible => {
-            req.asin = Some(provider_anchor.to_string())
-        }
-        MetadataProvider::Llm | MetadataProvider::Readarr => {}
-    }
-
-    let (work, created) = db.create_work(req).await.expect("seed work");
-    assert!(created, "fixture should create a fresh work row");
-    db.set_identity_status(user_id, work.id, IdentityStatus::Confirmed)
-        .await
-        .expect("seed confirmed identity");
+    let routes: Vec<_> = route.into_iter().collect();
+    let work = livrarr_db::test_helpers::settle_work_fixture(
+        db,
+        user_id,
+        title,
+        "Cache Author",
+        Some("en"),
+        &routes,
+    )
+    .await;
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        db,
+        user_id,
+        work.id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("seed confirmed identity");
     db.get_work(user_id, work.id)
         .await
         .expect("reload seeded work")

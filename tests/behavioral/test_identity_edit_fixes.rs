@@ -251,14 +251,22 @@ async fn f1b_a_delayed_not_found_must_not_overwrite_an_edit_made_during_the_wait
     // test is about. Seed a real bridge anchor through the production writer that also
     // recomputes the badge: the work becomes non-anchorless and unheld, exactly the
     // state `complete_add` enriches.
-    db.confirm_anchor_and_recompute_badge(
+    db.confirm_anchor(
         work_id,
         AnchorType::new(AnchorType::ISBN_13),
         "9780306406157",
         AnchorSetter::User,
     )
     .await
-    .expect("seed a bridge anchor and raise the badge");
+    .expect("seed a bridge anchor");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work_id,
+        IdentityStatus::Provisional,
+    )
+    .await
+    .expect("raise the badge");
     let seeded = db.get_work(user_id, work_id).await.expect("seeded work");
     assert!(
         !matches!(
@@ -315,11 +323,9 @@ async fn f1b_a_delayed_not_found_must_not_overwrite_an_edit_made_during_the_wait
     )
     .await
     .expect("user certifies a GR identity mid-flight");
-    let after_edit = db
-        .get_work_with_identity_generation(user_id, work_id)
+    let after_edit = livrarr_db::test_helpers::identity_generation_fixture(&db, work_id)
         .await
-        .expect("read generation after the edit")
-        .1;
+        .expect("read generation after the edit");
 
     // 4. Release the stale conclusion.
     enrichment.release();
@@ -336,11 +342,9 @@ async fn f1b_a_delayed_not_found_must_not_overwrite_an_edit_made_during_the_wait
         Some("424242"),
         "the user's certified identity must survive the delayed conclusion"
     );
-    let final_generation = db
-        .get_work_with_identity_generation(user_id, work_id)
+    let final_generation = livrarr_db::test_helpers::identity_generation_fixture(&db, work_id)
         .await
-        .expect("read final generation")
-        .1;
+        .expect("read final generation");
     assert_eq!(
         final_generation, after_edit,
         "a superseded conclusion must write nothing at all"
@@ -430,7 +434,7 @@ async fn f4b_a_same_value_commit_still_deletes_the_slots_pending_rows() {
     let work_id = create_work(&db, user_id, "Test Author Book").await;
 
     // Already user-confirmed and mirrored into the column, via the real writer.
-    db.confirm_anchor_and_recompute_badge(
+    db.confirm_anchor(
         work_id,
         AnchorType::new(AnchorType::GR_WORK),
         "123",
@@ -438,11 +442,24 @@ async fn f4b_a_same_value_commit_still_deletes_the_slots_pending_rows() {
     )
     .await
     .expect("seed the confirmed GR anchor");
+    livrarr_db::test_helpers::set_identity_status_fixture(
+        &db,
+        user_id,
+        work_id,
+        IdentityStatus::Confirmed,
+    )
+    .await
+    .expect("mirror the confirmed badge");
 
     // A stale fuzzy guess in the same slot, via the real pending writer.
-    db.record_pending_anchor(work_id, AnchorType::new(AnchorType::GR_WORK), "999")
-        .await
-        .expect("seed the stale pending guess");
+    livrarr_db::test_helpers::record_pending_anchor_fixture(
+        &db,
+        work_id,
+        AnchorType::new(AnchorType::GR_WORK),
+        "999",
+    )
+    .await
+    .expect("seed the stale pending guess");
 
     let service = WorkServiceImpl::new(
         db.clone(),
@@ -606,9 +623,14 @@ async fn f4a_clear_removes_a_pending_row_whose_value_is_empty() {
     let work = create_work(&db, user, "Unidentifiable Book").await;
 
     // The real writer the add path uses when a candidate cannot be identified.
-    db.set_identity_pending(work, PendingReason::NoCandidates, AnchorSetter::User)
-        .await
-        .expect("add path parks the work as Pending");
+    livrarr_db::test_helpers::set_identity_pending_fixture(
+        &db,
+        work,
+        PendingReason::NoCandidates,
+        AnchorSetter::User,
+    )
+    .await
+    .expect("add path parks the work as Pending");
 
     let seeded: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM work_identity_anchors \

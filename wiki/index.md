@@ -17,7 +17,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 - [RSS Sync](architecture/rss-sync.md) — automated release discovery, fuzzy matching, gap detection
 - [Usenet Pipeline](architecture/usenet-pipeline.md) — SABnzbd integration, protocol routing
 - [UI Architecture](architecture/ui-architecture.md) — React stack, auth flow, Readarr mimicry
-- [Identity Review Census](architecture/identity-review-census.md) — the 7 INSERT sites for review cards (incl. the boot-time heal), the 8 doors into the one continuation, why GroupIdentity is unsafe until wave B, what manual import really feeds the matcher
+- [Identity Review Census](architecture/identity-review-census.md) — the one mint authority and its seven callers, the 6 doors into the one continuation (the two legacy conflict doors were deleted 2026-08-31), why GroupIdentity is unsafe until wave B, what manual import really feeds the matcher
 
 ## Domain Entities
 
@@ -56,7 +56,23 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 - [Key Decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security
 
+## Insights (full text)
+
+`insights.md` is a compact index; the full verbatim text of every insight (including every
+"CORRECTED"/amendment note) lives in these theme pages under `insights/`.
+
+- [Architecture](insights/architecture.md) — crate layout, entity model, and system-level structure
+- [Coding Patterns](insights/coding-patterns.md) — Rust trait/service patterns, compile-wall mechanics, and idioms used across the workspace
+- [Metadata](insights/metadata.md) — metadata source policy, enrichment merge/status rules, and provider-agnostic metadata behavior
+- [Data & State](insights/data-and-state.md) — database, migration, and application-state rules
+- [Process](insights/process.md) — build-process, prototyping, and operational lessons that aren't specific to one subsystem
+- [Identity](insights/identity.md) — the identity matching authority, anchors, generation protocol, and identity-pipeline behavior
+- [History & Review](insights/history-and-review.md) — the work-history event log, the identity-review card surface, and the F2 identity-layer cutover ceremony
+- [Covers](insights/covers.md) — cover ranking, the cover write gate, and cover-source rules
+- [Providers & Transport](insights/providers-and-transport.md) — outbound HTTP queue, rate limiting/breakers, and per-provider API quirks
+- [Tests & Fixtures](insights/tests-and-fixtures.md) — test-suite mechanics, shared test-only state, and fixture gotchas
+
 ## Quick Reference
 
-- [Insights](insights.md) — 101 active learnings for every session
+- [Insights](insights.md) — index of 101 active learnings; each line links to its full text under `insights/`
 - [Log](log.md) — wiki change log

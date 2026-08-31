@@ -229,7 +229,7 @@ pub enum MergeFieldChoice {
     TakeLoser,
 }
 
-/// One explicit choice supplied to [`WorkService::merge_works`].
+/// One explicit merge field choice supplied by the merge door.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeFieldChoiceEntry {
     pub field: MergeableField,
@@ -263,19 +263,6 @@ pub struct MergePreview {
     pub conflicts: Vec<MergeFieldConflict>,
 }
 
-/// Outcome of [`WorkService::merge_works`].
-#[derive(Debug, Clone)]
-pub struct MergeWorksResult {
-    pub survivor: Work,
-    pub library_items_moved: usize,
-    pub grabs_moved: usize,
-    /// Non-fatal issues from the best-effort physical file reorganization
-    /// step (REQ-015 c) — e.g. a destination path collision left a file at
-    /// its prior location. The DB reassignment itself always completes in
-    /// full; these are reorg-only warnings, never a sign of lost data.
-    pub warnings: Vec<String>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum WorkServiceError {
     #[error("work not found")]
@@ -294,11 +281,6 @@ pub enum WorkServiceError {
     Cover(String),
     #[error("database error: {0}")]
     Db(#[from] DbError),
-    /// A merge left one or more conflicting fields without an explicit
-    /// choice (REQ-015 d, AC-025). The caller must re-request with a
-    /// [`MergeFieldChoiceEntry`] for every field listed.
-    #[error("merge requires an explicit choice for: {0:?}")]
-    MergeChoiceRequired(Vec<MergeableField>),
 }
 
 /// Outcome of one [`WorkService::converge_work`] pass, driving the background
@@ -568,24 +550,6 @@ pub trait WorkService: Send + Sync {
         survivor_id: WorkId,
         loser_id: WorkId,
     ) -> Result<MergePreview, WorkServiceError>;
-
-    /// Combine two works (REQ-015): `loser_id`'s library items and grabs
-    /// reassign to `survivor_id`, monitoring flags OR together, and
-    /// `choices` resolves every field [`preview_merge_works`] listed as
-    /// conflicting — a conflicting field with no matching entry refuses the
-    /// whole call (`MergeChoiceRequired`, AC-025) rather than guessing.
-    /// The DB reassignment and loser deletion happen in one transaction
-    /// (REQ-015 e); physical file reorganization under the survivor's
-    /// canonical path is a separate, best-effort follow-up performed by the
-    /// caller via `ImportService::reorganize_work_files` — this method
-    /// never touches the filesystem and never deletes a file.
-    async fn merge_works(
-        &self,
-        user_id: UserId,
-        survivor_id: WorkId,
-        loser_id: WorkId,
-        choices: Vec<MergeFieldChoiceEntry>,
-    ) -> Result<MergeWorksResult, WorkServiceError>;
 
     // ── identity-edit surface (design identity-edit r4) ──────────────────
     //

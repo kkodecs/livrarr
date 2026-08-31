@@ -88,15 +88,6 @@ pub trait WorkDb: Send + Sync {
         manual: bool,
     ) -> Result<(), DbError>;
 
-    /// Set the persisted identity-confidence badge (REQ-014 two-state split):
-    /// the flat, user-facing identity status derived from a work's anchors.
-    async fn set_identity_status(
-        &self,
-        user_id: UserId,
-        id: WorkId,
-        status: livrarr_domain::IdentityStatus,
-    ) -> Result<(), DbError>;
-
     #[allow(clippy::too_many_arguments)]
     async fn update_cover_metadata(
         &self,
@@ -148,19 +139,6 @@ pub trait WorkDb: Send + Sync {
 
     /// Delete work. Returns deleted work for file cleanup.
     async fn delete_work(&self, user_id: UserId, id: WorkId) -> Result<Work, DbError>;
-
-    /// Merge two works in one transaction (REQ-015): reassigns `loser_id`'s
-    /// library items and grabs to `survivor_id`, writes the caller-resolved
-    /// user-sovereign field values onto the survivor, then deletes the
-    /// loser row — in that order, so FK `ON DELETE CASCADE` from `works`
-    /// never fires on a row that still has children (library_items/grabs
-    /// are reassigned first, so nothing is left to cascade-delete; the
-    /// loser's identity/enrichment metadata, which is NOT reassigned, is
-    /// expected to cascade away with the row). Ownership of both ids by
-    /// `req.user_id` is re-verified inside the transaction — returns
-    /// `NotFound` if either id doesn't belong to the caller, without
-    /// revealing which (AC-024).
-    async fn merge_works(&self, req: MergeWorksDbRequest) -> Result<Work, DbError>;
 
     /// Set (or NULL) a work's series_id directly — the series-reconcile link
     /// path. Unlike `SeriesDb::link_work_to_series` this performs NO
@@ -397,20 +375,6 @@ pub struct UpdateWorkUserFieldsDbRequest {
     pub series_position: Option<Option<f64>>,
     pub monitor_ebook: Option<bool>,
     pub monitor_audiobook: Option<bool>,
-}
-
-/// Request for `WorkDb::merge_works` (REQ-015). The monitoring/series
-/// fields carry the FINAL, already-resolved values the survivor should end
-/// up with — the service layer, not the DB layer, decides the OR/conflict
-/// outcome; this request just writes it.
-pub struct MergeWorksDbRequest {
-    pub user_id: UserId,
-    pub survivor_id: WorkId,
-    pub loser_id: WorkId,
-    pub monitor_ebook: bool,
-    pub monitor_audiobook: bool,
-    pub series_name: Option<String>,
-    pub series_position: Option<f64>,
 }
 
 /// TEMP(pk-tdd): Request to apply an enrichment merge result to a work.

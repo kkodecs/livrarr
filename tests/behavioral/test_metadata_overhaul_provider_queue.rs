@@ -8,10 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
-use livrarr_db::{
-    CreateUserDbRequest, CreateWorkDbRequest, ProviderRetryState, ProviderRetryStateDb, UserDb,
-    WorkDbCreate,
-};
+use livrarr_db::{CreateUserDbRequest, ProviderRetryState, ProviderRetryStateDb, UserDb};
 use livrarr_domain::{
     MetadataProvider, OutcomeClass, PermanentFailureReason, RequestPriority, UserRole, Work,
 };
@@ -628,25 +625,39 @@ impl StubProviderQueueHarness {
             .await
             .unwrap()
             .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Queue Test Work".to_string(),
-                author_name: "Test Author".to_string(),
-                author_id: None,
-                // REQ-006: dispatch fetches only by stored anchor — the
-                // fixture carries one per scatter provider so every stub
-                // still dispatches.
-                ol_key: Some("OL777W".to_string()),
-                gr_key: Some("777".to_string()),
-                isbn_13: Some("9780000000777".to_string()),
-                asin: Some("B000QUEUE77".to_string()),
-                year: Some(2024),
-                cover_url: Some("https://example.test/cover.jpg".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        // REQ-006: dispatch fetches only by active identity route — the
+        // fixture carries one per scatter provider so every stub still
+        // dispatches.
+        let work = livrarr_db::test_helpers::settle_work_fixture(
+            &db,
+            user_id,
+            "Queue Test Work",
+            "Test Author",
+            None,
+            &[
+                (
+                    livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+                    livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+                    "OL777W",
+                ),
+                (
+                    livrarr_domain::identity_layer::IdentityProvider::Goodreads,
+                    livrarr_domain::identity_layer::RouteKind::GoodreadsBookEdition,
+                    "777",
+                ),
+                (
+                    livrarr_domain::identity_layer::IdentityProvider::IsbnRegistry,
+                    livrarr_domain::identity_layer::RouteKind::Isbn13Edition,
+                    "9780000000777",
+                ),
+                (
+                    livrarr_domain::identity_layer::IdentityProvider::Amazon,
+                    livrarr_domain::identity_layer::RouteKind::AsinEdition,
+                    "B000QUEUE77",
+                ),
+            ],
+        )
+        .await;
         (db, work)
     }
 

@@ -420,7 +420,6 @@ pub struct DefaultProviderQueueBuilder {
     call_sink: Option<Arc<dyn livrarr_domain::services::ProviderCallSink>>,
     cache_ttl: chrono::Duration,
     cache_max_rows: i64,
-    identity_routes_authoritative: bool,
 }
 
 impl Default for DefaultProviderQueueBuilder {
@@ -437,7 +436,6 @@ impl DefaultProviderQueueBuilder {
             call_sink: None,
             cache_ttl: chrono::Duration::days(7),
             cache_max_rows: 100_000,
-            identity_routes_authoritative: false,
         }
     }
 
@@ -457,14 +455,6 @@ impl DefaultProviderQueueBuilder {
         sink: Arc<dyn livrarr_domain::services::ProviderCallSink>,
     ) -> Self {
         self.call_sink = Some(sink);
-        self
-    }
-
-    /// Enable post-F2 production dispatch. Every enrichment pass reads the
-    /// Work's captured identity and derives provider queries from active routes;
-    /// legacy scalar anchors are not consulted in this mode.
-    pub fn with_identity_route_dispatch(mut self) -> Self {
-        self.identity_routes_authoritative = true;
         self
     }
 
@@ -498,7 +488,6 @@ impl DefaultProviderQueueBuilder {
             call_sink: self.call_sink,
             cache_ttl: self.cache_ttl,
             cache_max_rows: self.cache_max_rows,
-            identity_routes_authoritative: self.identity_routes_authoritative,
         }
     }
 }
@@ -518,10 +507,6 @@ where
     /// REQ-009: the store is evicted oldest-first down to this cap after a
     /// batch of real-fetch cache writes.
     cache_max_rows: i64,
-    /// True only in the post-activation production composition and faithful
-    /// production-router harnesses. Legacy queue unit tests keep their scalar
-    /// fixtures until that older surface is retired.
-    identity_routes_authoritative: bool,
 }
 
 /// Outcome of one provider's phase-1 dispatch, before terminal-budget conversion
@@ -592,16 +577,12 @@ where
     ) -> Result<ScatterGatherResult, ProviderQueueError> {
         let mut outcomes: HashMap<MetadataProvider, ProviderOutcome<NormalizedWorkDetail>> =
             HashMap::new();
-        let captured_identity = if self.identity_routes_authoritative {
-            Some(
-                self.retry_db
-                    .read_captured_identity(work.user_id, work.id)
-                    .await
-                    .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?,
-            )
-        } else {
-            None
-        };
+        let captured_identity = Some(
+            self.retry_db
+                .read_captured_identity(work.user_id, work.id)
+                .await
+                .map_err(|error| ProviderQueueError::IdentityRouteRead(error.to_string()))?,
+        );
         let route_plan = captured_identity.clone().map(|identity| {
             use crate::identity_layer::EnrichmentService as _;
             crate::identity_layer::RouteDrivenEnrichmentService::from_arc(
@@ -1337,7 +1318,6 @@ mod identity_route_dispatch_tests {
         let stub = StubProviderClient::new(MetadataProvider::Goodreads, ProviderOutcome::NotFound);
         let call_sink = Arc::new(RecordingCallSink::default());
         let queue = DefaultProviderQueueBuilder::new()
-            .with_identity_route_dispatch()
             .with_call_sink(call_sink.clone())
             .add_provider(
                 MetadataProvider::Goodreads,
@@ -1401,9 +1381,7 @@ mod circuit_open_budget_tests {
 
     use std::sync::Arc;
 
-    use livrarr_db::{
-        CreateUserDbRequest, CreateWorkDbRequest, ProviderRetryStateDb, UserDb, WorkDbCreate,
-    };
+    use livrarr_db::{CreateUserDbRequest, ProviderRetryStateDb, UserDb};
     use livrarr_domain::{Freshness, MetadataProvider, RequestPriority, UserRole, WillRetryReason};
     use livrarr_external_data::{ProviderClient, ProviderOutcome, StubProviderClient};
 
@@ -1429,18 +1407,21 @@ mod circuit_open_budget_tests {
             .await
             .unwrap()
             .id;
-        let (work, _) = db
-            .create_work(CreateWorkDbRequest {
-                user_id,
-                title: "Budget Book".to_string(),
-                author_name: "Budget Author".to_string(),
-                // OpenLibrary's REQ-006 anchor gate requires ol_key or isbn_13
-                // before the queue will dispatch to the client at all.
-                ol_key: Some("OL1W".to_string()),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        // OpenLibrary dispatch derives its query from an active OpenLibraryWork
+        // route on the captured identity.
+        let work = livrarr_db::test_helpers::settle_work_fixture(
+            &db,
+            user_id,
+            "Budget Book",
+            "Budget Author",
+            None,
+            &[(
+                livrarr_domain::identity_layer::IdentityProvider::OpenLibrary,
+                livrarr_domain::identity_layer::RouteKind::OpenLibraryWork,
+                "OL1W",
+            )],
+        )
+        .await;
         (db, work)
     }
 
