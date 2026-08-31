@@ -1,0 +1,310 @@
+metadata:
+  feature: identity-conflict-authority
+  spec_ref: spec-identity-conflict-authority.md
+  ir_ref: ir-v1-identity-conflict-authority.yaml
+  version: 1
+
+module_dependency:
+  - id: DEP-001
+    source: livrarr-handlers
+    forbidden_targets:
+      - livrarr-db
+      - livrarr-metadata
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-server
+    rationale: The compile wall is load-bearing. Identity handlers validate DTOs, forward opaque proofs through domain traits, and map typed outcomes only.
+  - id: DEP-002
+    source: livrarr-domain
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-db
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: Review, proof, route-plan, absorption, undo, and file-result types and service traits remain foundation contracts.
+  - id: DEP-003
+    source: livrarr-db
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-materialize
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: Persistence owns SQL, the production activation gate, route planning, record sealing, delete, and cutover and depends only on domain contracts.
+  - id: DEP-004
+    source: livrarr-metadata
+    forbidden_targets:
+      - livrarr-handlers
+      - livrarr-server
+      - livrarr-library
+      - livrarr-tagwrite
+      - livrarr-download
+      - livrarr-jobs
+    rationale: The identity road may use domain, db, and matching, but receives file completion through a domain trait and never reaches upward or across the compile wall.
+  - id: DEP-005
+    source: livrarr-library
+    forbidden_targets:
+      - livrarr-http
+      - livrarr-matching
+      - livrarr-external-data
+      - livrarr-identity
+      - livrarr-enrichment
+      - livrarr-metadata
+      - livrarr-download
+      - livrarr-tagwrite
+      - livrarr-jobs
+      - livrarr-handlers
+      - livrarr-server
+    rationale: The shared no-clobber file engine remains the library-layout authority and cannot call identity orchestration or handlers.
+
+forbidden_pattern:
+  - id: FP-LEGACY-CONFLICT-SQL
+    pattern: "structural: after the B4 marker, a production SQL statement names work_identity_conflicts outside livrarr-db::legacy_identity_conflict_history; before B4, close_legacy_conflicts_for_work_delete_in_tx is called by anything except SqliteWorkDelete::delete_work_set_in_tx with a borrowed LegacyPreCutoverWritePermit from its held ActivationReport; after B4 that close is called despite the report field being None; or scan_legacy_conflicts_for_cutover_in_tx is public or called outside the private activation/cutover chain"
+    description: The legacy conflict table has exactly one post-cutover production reader; its temporary close has one report-backed caller, and its cutover scan is crate-private to activation.
+    severity: P0
+    rationale: Mandatory ST-022 build-time check. The checker classifies SQL-bearing Rust syntax, proves the temporary close and private cutover scan require activation-minted marker-absent capabilities with complete supply paths, and ignores migrations and test-only code.
+  - id: FP-V2-RUNTIME-AUTHORITY
+    pattern: "structural: identity_conflicts_v2 influences a badge, review or conflict list/detail, dismissal/suppression key, action, resolution, or resolver after the B4 marker"
+    description: The v2 store remains non-authoritative staging; only counted lifecycle diagnostics may change.
+    severity: P0
+    rationale: ST-001, ST-002, and Q-021 require one user-facing conflict authority without promoting or deleting v2 staging.
+  - id: FP-ONE-ROUTE-PLAN
+    pattern: "structural: a route-changing review or conflict cell, IdentityPark choice, PendingRoute affirm, Work absorption, or Incoming creation mutates routes without livrarr-db::route_plan from locked live rows"
+    description: Every route-changing path must enter the one total route plan before any write.
+    severity: P0
+    rationale: ST-005, ST-006, ST-007, ST-021, ST-023, ST-024, ST-030, ST-034, ST-036, and A7; this is the single third-owner and same-provider-slot enforcement point.
+  - id: FP-ONE-CARD-MINT
+    pattern: "structural: a runtime INSERT into identity_review_cards outside livrarr-db::review_card_store::mint_reuse_or_suppress_review_card_in_tx"
+    description: Every native, conflict, and park card uses one mint, one reuse key, one dismissal preflight, and one notification rule.
+    severity: P0
+    rationale: ST-012 and ST-020. Cutover hydration enters the same transaction-scoped mint in its explicit adoption mode.
+  - id: FP-FROZEN-CONFLICT-STATUS
+    pattern: "structural: cfg(test)-aware production Rust writes the retired identity_status conflict scalar"
+    description: Runtime conflict production must not write the retired scalar conflict status.
+    severity: P0
+    rationale: ST-020; conflicts are orthogonal review records after the identity-layer rewrite.
+  - id: FP-SAME-BOOK-OUTSIDE-ROAD
+    pattern: "structural: a handler or a second application service evaluates title, author, or route evidence to decide CertainlySame, CertainlyDifferent, or Unsure"
+    description: Three-valued same-book classification runs only in the identity road through the shared domain predicate.
+    severity: P0
+    rationale: ST-014, ST-026, ST-040, spec section 0a, and A11 prohibit handler copies and two-valued replacements.
+  - id: FP-COHORT-DERIVATION
+    pattern: "structural: card membership is derived anywhere except derive_card_cohort, or a Work-delete site parses a review payload"
+    description: All card lifecycle consumers use sorted payload work_ids union subject and its relational membership projection.
+    severity: P0
+    rationale: ST-035, ST-042, A8, and A11; otherwise a non-subject Work can be deleted under a pending card.
+  - id: FP-AUTHORIZATION-TOTALITY
+    pattern: "structural: a typed review kind/optional-payload-free-GroupIdentityRoleKind/action/cohort-cardinality/payload-state cell is absent or duplicated in review_authorization_table, a non-GroupIdentity cell has a role kind, a payload-bearing GroupIdentityRole does not map to the indexed kind, or dispatch chooses a proof class outside that table"
+    description: Every continuation is classified by a finite static role-kind axis as card-proof, election-proof, refused, or history-only; the full role payload is bound separately in the proof and unclassified or mismatched cells fail startup.
+    severity: P0
+    rationale: Q-D1a as corrected by the round-1 review, ST-025, and A6 close the role-sensitive gaps around Incoming one-member attach, ReIdentify and MergeMembers refusals, park, refused kinds, and malformed adoption.
+  - id: FP-INCOMPLETE-DECISION-PROOF
+    pattern: "structural: an actionable card read, merge preview, or action omits an authenticated decision proof or validates only one expected_generation"
+    description: Decisions bind the full card/election snapshot, including sorted cohort generations and canonical Work-keyed field choices.
+    severity: P0
+    rationale: ST-010, ST-043, Q-D1b, and the stale-decision rule; changing keepFrom, role, fields, routes, or either member must refuse before write.
+  - id: FP-DISMISSAL-KEY-DRIFT
+    pattern: "structural: review reuse, duplicate cleanup, Dismiss, suppression, revocation, or cutover computes a standing question key outside ReviewDismissalKeyV2"
+    description: There is one versioned definition of the same question, including role, exact conflict identity, and park candidate content.
+    severity: P0
+    rationale: ST-013, ST-016, ST-027, ST-031, ST-032, ST-037, and ST-039. Unknown and adopted route-conflict questions are explicitly non-keyable.
+  - id: FP-ADOPTED-ANCHOR-INFERENCE
+    pattern: "structural: an adopted legacy route-conflict substitutes a current Work route or work_identity_anchors value for its missing contradicted route"
+    description: Every adopted route-conflict remains UnknownLegacy and non-keyable; ReplaceAnchor and Merge refuse with the identity edit as recourse.
+    severity: P0
+    rationale: ST-039, ST-048, Q-025, C2, and A10 reject reconstruction from a mutable ledger.
+  - id: FP-ARCHIVE-AS-SNAPSHOT
+    pattern: "structural: identity_route_archives restores a route, or a record_version 0 identity_merge_archives row is parsed as an undoable before-image"
+    description: Sparse route archives and v0 sentinel merge archives remain inert history.
+    severity: P0
+    rationale: ST-003, ST-004, ST-028, and Q-003; only a sealed version-1 operation is restorable.
+  - id: FP-WORK-DELETE-SQL
+    pattern: "structural: the B0-and-later production tree has other than exactly one raw DELETE FROM works statement in livrarr-db::work_delete, or a production function in livrarr-db::absorption_store contains that statement; the complete caller census is not exactly WorkDeleteOrigin::{User,ImportRollback,ListImportRollback,Absorption}; new_work_delete_authority is called other than exactly once by new_identity_authority_repository or any second SqliteWorkDelete is minted; open_absorption_operation does not receive a borrow of that repository's existing SqliteWorkDelete and store it privately on OpenAbsorptionOperation; absorb_work_into is not the sole absorption-time caller of delete_work_in_tx using that private authority and operation_writer; delete_work_in_tx does not delegate the singleton to delete_work_set_in_tx; delete_work_set_in_tx does not borrow exactly ActivationReport.legacy_pre_cutover_write_permit.as_ref(); or its Some branch is not the sole caller of close_legacy_conflicts_for_work_delete_in_tx and its None branch does not skip that close"
+    description: Physical Work deletion has one SQL statement and exactly four typed caller doors; absorption reaches the same repository-created authority through its open operation, and the report-backed optional permit makes the pre-B4 legacy close reachable and the post-B4 close impossible.
+    severity: P0
+    rationale: Mandatory ST-038 build-time check and C7-4; the exact allowed-site/count assertion does not flag its own good statement, and activation-to-report-to-repository-delete-to-open-operation construction supplies one delete and one pre-cutover close authority to all four doors without minting another.
+  - id: FP-SECOND-ABSORPTION
+    pattern: "structural: a production function repoints or copies loser-owned rows and then deletes a Work outside livrarr-db::absorption_store using livrarr-db::work_delete; absorption_store emits its own DELETE FROM works, constructs a SqliteWorkDelete, or deletes without absorb_work_into using the private OpenAbsorptionOperation work_delete and operation_writer; IdentityAuthorityRoad lacks execute_settlement_auto_merge, execute_dedup_residue_heal_absorption, or execute_article_duplicate_heal_absorption; one of those doors omits the complete MachineAbsorptionSnapshot or bypasses IdentityAuthorityRepository::execute_absorption(RecordedAbsorptionRequest); pairwise user execute bypasses that same repository door; UserElection admits anything except UserAbsorptionOrigin::{ManualPair,ReviewContinuation} plus user and VerifiedElectionDecision; or MachineSnapshot admits anything except MachineAbsorptionOrigin::{SettlementAutoMerge,DedupResidueHeal,ArticleDuplicateHeal} plus its complete snapshot"
+    description: No second absorption implementation, delete statement or delete authority, unrecorded caller path, or crossed user/machine provenance may survive or emerge; the named wrappers fix a closed variant before all five paths converge.
+    severity: P0
+    rationale: Mandatory ST-038 build-time check and ST-029; all five typed callers enter the one IdentityAuthorityRepository::execute_absorption(RecordedAbsorptionRequest) door, which alone lends its existing delete authority into and opens and seals a complete operation. The request variant, not a free origin or actor, determines caller provenance, record projection, history anchor, DTOs, and B0 refusal naming.
+  - id: FP-ABSORPTION-PROVENANCE
+    pattern: "structural: IdentityAuthorityRepository::execute_absorption or any command DTO accepts a free AbsorptionOrigin, AbsorptionActor, or AbsorptionCaller; a named user or machine road wrapper chooses an origin outside its closed variant; or WorkAbsorption, AbsorptionRecordEnvelopeV1, WorksMergedHistoryAnchor, AbsorptionView, or a B0 refusal projects provenance from anything except derive_absorption_provenance(RecordedAbsorptionRequest)"
+    description: Unified origin, actor, and caller values are output projections of the closed repository request, never independently selectable inputs.
+    severity: P0
+    rationale: XAI-ARCH-R2-002 closes crossed provenance at the repository door and every neighboring record, history, view, DTO, and gate-name consumer.
+  - id: FP-DEAD-ABSORPTION-SYMBOLS
+    pattern: 'backfill_normalized_identity|merge_user_identity_state|MergeWorksDbRequest|idx_works_identity([^[:alnum:]_]|$)'
+    include:
+      - "*.rs"
+    description: The dead pre-038 backfill, its private index, its shared helper, its request type, and fixture calls must be removed rather than converted.
+    severity: P0
+    rationale: Mandatory ST-046 build-time check. The three fixtures are re-based on current migration/setup seams.
+  - id: FP-DEAD-MERGE-CHAIN
+    pattern: "structural: the former livrarr-domain WorkService::merge_works, livrarr-db WorkDb::merge_works, or livrarr-metadata WorkService merge_works chain remains defined or called"
+    description: The dead direct merge chain is deleted; the new pairwise road is a differently typed preview/execute authority, not a conversion of it.
+    severity: P0
+    rationale: Mandatory ST-046 build-time check and Q-016.
+  - id: FP-INCOMPLETE-EFFECT-MANIFEST
+    pattern: "structural: startup serves or an absorption commits while a live Work reference, recursive child, trigger effect, bare pointer, retained artifact, or reversible column is absent or multiply classified in EffectManifest"
+    description: The complete schema-derived effect closure is a startup and seal precondition.
+    severity: P0
+    rationale: ST-017, ST-029, ST-030, ST-041, ST-045, and Q-014; foreign keys or name patterns alone are incomplete.
+  - id: FP-UNSEALED-ABSORPTION
+    pattern: "structural: an absorbing caller retains a raw transaction while an operation is open; OpenAbsorptionOperation lacks either its private ImmediateTransaction or its private borrow of the repository's existing SqliteWorkDelete; absorb_work_into can compile or physically delete without both private fields; a repository or other caller invokes an absorption-time delete with a writer outside OpenAbsorptionOperation; an operation-owned member write occurs outside that operation; one operation is shared across independent folds; or an operation-owned row is written after seal outside the named scan-snapshot card-mint and causal-high-water allowlist"
+    description: Operation-owned caller writes and the sole absorption-time physical delete belong to one linear scope holding both the writer and the existing delete authority; the only post-seal effects are named causal card effects governed by the high-water rule.
+    severity: P0
+    rationale: ST-010, ST-029, ST-038, ST-045, and Q-B1; the open-operation type makes deletion without the authority fail to compile, and moved article-heal cards use the scan snapshot rather than a post-fold live read.
+  - id: FP-CARD-REPOINT
+    pattern: "structural: absorption updates an unrelated identity_review_cards.work_id to the survivor instead of resolving the initiating card and cancelling causal pending cards"
+    description: Cards preserve the question they asked; absorption never rewrites unrelated card subjects.
+    severity: P0
+    rationale: ST-017, ST-041, ST-042, Q-015, and undo causality.
+  - id: FP-SECOND-FILE-MOVER
+    pattern: "structural: absorption or undo moves, copies, removes, heals, or updates a LibraryItem path outside livrarr-library::file_reorganization"
+    description: Forward and reverse use one per-item result seam and the same no-clobber rule.
+    severity: P0
+    rationale: ST-018, ST-033, ST-049, and A1-A5; a second move rule would drift from forward behavior.
+  - id: FP-UNSAFE-FILE-MOVE
+    pattern: "structural: a file reorganization uses check-then-replace, an unconditional path update, overwrites an occupied destination, removes a source before a durable destination exists, hides a leftover source, or reports success while path record and filesystem disagree"
+    description: Every move preserves the only copy and returns an item-complete truthful outcome.
+    severity: P0
+    rationale: ST-033, ST-049, A2, A3, A4, and A5 are in-scope safety promises despite the intentionally simple recovery model.
+  - id: FP-FILE-TRANSITION-PROTOCOL
+    pattern: "structural: this feature adds a file transition journal, per-file claim, file lock protocol, startup file owner, timer, or automatic crash reconciliation"
+    description: Undo file move-back remains a simple explicit post-commit step with resumable incomplete reporting.
+    severity: P0
+    rationale: Q-026, C1, and the Q-D4 exclusion are binding scope limits.
+  - id: FP-LEGACY-CONFLICT-REQUEST
+    pattern: 'surviving_routes|target_edition|winning_work_id'
+    include:
+      - "identity_conflicts.rs"
+      - "identity_authority.rs"
+    description: The conflict HTTP request accepts only action and decision_proof; removed extra fields cannot control an outcome.
+    severity: P0
+    rationale: ST-023 and ST-034. Both the replacement authority handler and any surviving old conflict module are scanned; extra JSON keys are ignored by serde without retaining dead request fields, Treat-as-Separate never requires a winner, and route changes come from persisted payload plus the route plan.
+  - id: FP-SQLITE-SUBQUERY-CHECK
+    pattern: "structural: parse each complete CREATE TABLE statement from migration text and the applied sqlite_master schema independent of lines, whitespace, and comments; reject any CHECK expression whose parsed expression tree contains a SELECT or other subquery"
+    description: SQLite CHECK constraints may not contain subqueries and therefore cannot enforce cross-table tenancy, including when CHECK and SELECT are split across lines.
+    severity: P0
+    rationale: ST-044 on SQLite 3.45.1; separate event triggers perform the card tenant checks.
+  - id: FP-SQLITE-COMBINED-TRIGGER
+    pattern: "structural: parse each complete CREATE TRIGGER statement from migration text and the applied sqlite_master schema independent of lines, whitespace, and comments; reject a trigger event clause that combines INSERT and UPDATE with OR in either order"
+    description: SQLite requires distinct INSERT and UPDATE triggers even when a combined event clause is split across lines.
+    severity: P0
+    rationale: ST-044; the update trigger must also allow a NULL Work pointer during ON DELETE SET NULL.
+  - id: FP-SQLITE-REPLACE
+    pattern: 'INSERT[[:space:]]+OR[[:space:]]+REPLACE'
+    include:
+      - "087_*.sql"
+    description: Migration 087 must not implement idempotence by delete-and-reinsert semantics.
+    severity: P1
+    rationale: Replace can fire cascades and erase history; explicit conflict handling preserves rows and ids.
+  - id: FP-NONIMMEDIATE-WRITE
+    pattern: "structural: a livrarr-db write transaction in this feature starts through anything other than the shared BEGIN IMMEDIATE helper"
+    description: All write paths, including cutover, card reports, delete, absorption, and undo, serialize at transaction start.
+    severity: P0
+    rationale: ST-044 and the verified database convention; an undo never waits after it has written.
+  - id: FP-TWO-STEP-GENERATION-COLLAPSE
+    pattern: "structural: settlement and continuation share, defer, or collapse their two independent generation claims"
+    description: A successful update remains one settlement claim plus one continuation claim, and a failed continuation does not erase a committed settlement claim.
+    severity: P0
+    rationale: ST-009 is established behavior and explicitly out of scope to change.
+  - id: FP-NONPAIRWISE-USER-MERGE
+    pattern: "structural: a user action absorbs zero or more than one loser, or resolves a two-Work action without a preview-bound elected survivor"
+    description: User merges are pairwise in either elected direction; only a machine operation may contain several losers.
+    severity: P0
+    rationale: ST-021, Q-011, and Q-019.
+  - id: FP-NEW-SURVIVOR-SAME-COMMIT
+    pattern: "structural: a settlement creates a new Work and absorbs an existing Work in the same transaction"
+    description: Creation and absorption are separate outcomes; the structurally possible combination must fail closed.
+    severity: P0
+    rationale: ST-036 and the operation/retention model require an already durable survivor.
+  - id: FP-PARK-BYPASS
+    pattern: "structural: an IdentityPark action reads candidate cache ids as durable identity, absorbs through ChooseCandidate, or computes parked_by_conflicts without pending conflict-card authority"
+    description: Park decisions key candidate content, never absorb, and the conflict projection comes from pending cards.
+    severity: P0
+    rationale: ST-011, ST-019, ST-025, ST-032, and IdentityPark acceptance.
+  - id: FP-DANGLING-CARD-NOTIFICATION
+    pattern: "structural: a notification remains actionable after its review card is cancelled, withdrawn, or restored to a different causal state"
+    description: Notification state follows recorded card mutations and never points to a withdrawn actionable question.
+    severity: P0
+    rationale: ST-041 and Q-017.
+  - id: FP-MISSING-WORKS-MERGED-ANCHOR
+    pattern: "structural: a sealed absorption record has no worksMerged HistoryEvent carrying its record id and elected survivor, or any HistoryEvent other than that worksMerged anchor is made a transaction-fatal operation effect"
+    description: Every live absorption has a user-visible history anchor for undo, and worksMerged is the spine's sole transaction-fatal HistoryEvent exception.
+    severity: P0
+    rationale: ST-047 and the PO-adopted C7-5 resolution; the only old writer is in the chain B0 deletes, while ordinary events remain observers.
+  - id: FP-ADDED-HISTORY-ACTOR
+    pattern: "structural: Incoming DifferentFromAll includes an added HistoryEvent write in the Work/routes/user-distinct transaction, retains it in an absorption or create artifact, treats its storage failure as create failure, calls a fallible history seam, or bypasses the existing HistoryService::record plus history_events::added observer after commit"
+    description: Creation atomically writes only the Work, routes, and durable user-distinct marker; exactly one post-commit added draft follows through the existing infallible observer.
+    severity: P0
+    rationale: C7-6 preserves the canonical observer rule and leaves worksMerged as the only operation-fatal exception.
+  - id: FP-B0-ABSORPTION
+    pattern: "structural: a B0-only build can reach a Work absorption write from manual merge, review continuation, settlement AutoMerge, dedup heal, or article heal, or those five refusal names are selected independently rather than derived from the closed RecordedAbsorptionRequest variant"
+    description: B0 derives, names, and refuses every absorption door with zero writes.
+    severity: P0
+    rationale: AC-029 and the build-unit contract make an otherwise unsafe partial deployment observable.
+  - id: FP-CALLER-SELECTABLE-BUILD-GATE
+    pattern: "structural: a user or machine caller supplies a BuildUnitPrefix, AbsorptionCapability, RecordedAbsorptionPermit, ActivationReport, activation-success boolean, or test bypass to an absorption door; calls crate-private open_absorption_operation directly; or reaches absorption outside the one repository execute_absorption(RecordedAbsorptionRequest) method whose implementation consults the sealed ActivationReport it consumed at construction"
+    description: Build-unit authorization is repository-held production activation state; user execute supplies only its closed user origin, user, and verified election, while each named machine door fixes its closed machine origin around a complete snapshot.
+    severity: P0
+    rationale: AC-029 requires the same non-bypassable production seam for server boot and behavioral prefix fixtures; the server wrapper and every absorption caller can consume but cannot mint or select the gate result.
+  - id: FP-STALE-WORKTREE-CENSUS
+    pattern: "structural: a source, SQL, caller, card, deletion, or effect census includes the known stale in-repository worktree identified by ST-015"
+    description: Compliance and completeness enumerations must exclude the known stale in-repository source copy.
+    severity: P0
+    rationale: ST-015; including it doubles and corrupts every authority count.
+  - id: FP-V2-DIAGNOSTIC-REWRITE
+    pattern: "structural: undo rewrites or deletes the retained audit row for an identity_conflicts_v2 lifecycle diagnostic, or effective_v2_diagnostic_currentness classifies a linked undoing or undone operation as current"
+    description: Diagnostic audit bytes are immutable; a linked diagnostic is current exactly while its operation is active, and undo restores the staged row without editing the audit.
+    severity: P0
+    rationale: Q-D2, ST-002, and AC-024.
+  - id: FP-CUTOVER-PARTIALITY
+    pattern: "structural: a production caller other than SqliteIdentityAuthorityActivation::activate_identity_authority can invoke the crate-private conflict cutover helper; scan_legacy_conflicts_for_cutover_in_tx is public or has any caller except that helper; any function other than activation mints MarkerAbsent, LegacyPreCutoverWritePermit, CutoverReadPermit, ConflictCutoverRequest, RecordedAbsorptionPermit, AbsorptionCapability, or ActivationReport; marker absence is inferred from a readable _livrarr_meta row; the helper lacks the activation-owned ImmediateTransaction and permit; B4 adopts, switches, counts, translates, or marks conflict authority in separate transactions; or a second completed run mutates any row"
+    description: Activation is the sole capability mint and B4 production door; its private scan/helper chain uses the same BEGIN IMMEDIATE transaction and marker-absent permit, is total over all axes, and is byte-idempotent after the marker.
+    severity: P0
+    rationale: A11, AC-021, XAI-ARCH-R2-001, and XAI-ARCH-R2-003; complete capability supply and private cutover reachability make partial authority impossible rather than merely discouraged.
+  - id: FP-SQL-OUTSIDE-DB
+    pattern: "structural: production SQL or a direct database connection for this feature appears outside livrarr-db or an immutable migration"
+    description: All identity-authority persistence remains behind typed livrarr-db surfaces.
+    severity: P0
+    rationale: The project SQL boundary and compile wall apply to every card, route, record, delete, path, and cutover operation.
+  - id: FP-HANDLER-BUSINESS-LOGIC
+    pattern: "structural: a handler classifies identity evidence, authorizes an action, plans a route, selects a survivor or field value, derives a cohort or dismissal key, moves a file, or opens a transaction"
+    description: Handlers validate wire shapes, call the domain service, and map typed outcomes only.
+    severity: P0
+    rationale: The project handler boundary, spec section 0a, and A11 keep semantic and persistence decisions in their named authorities.
+  - id: FP-UNSCOPED-USER-STATE
+    pattern: "structural: migration 087 creates a user-owned table without user_id, or an identity-authority repository reads or mutates a card, route, operation, conflict, dismissal, diagnostic, or LibraryItem path without the authenticated user scope"
+    description: Every new user-owned row and every repository operation is tenant-scoped end to end.
+    severity: P0
+    rationale: The canonical tenancy invariant applies even when a globally unique id would appear sufficient; triggers and queries both retain user_id.
+  - id: FP-APPLIED-MIGRATION-EDIT
+    pattern: "structural: the implementation changes an applied migration numbered 086 or lower instead of adding migration 087 or later"
+    description: Applied migrations are immutable; every schema change for this feature is append-only from 087.
+    severity: P0
+    rationale: The project migration invariant and nonempty upgrade fixtures require old database histories to replay unchanged.

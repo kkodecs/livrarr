@@ -813,7 +813,7 @@ spec's own rows rather than to a reviewer's later prose.
    claims a generation** (`tests/behavioral/test_irf_u1_refusal.rs:1851-1870`;
    end state `generation + 2`). A committed settlement claim therefore survives a
    failed continuation *by design*, pinned at
-   `tests/behavioral/test_irf_u5_durable_dismissal.rs:4870-4876`.
+   `tests/behavioral/test_irf_u5_durable_dismissal.rs:4878-4882`.
 
    **Post-close note (2026-08-26):** a head-to-head contest judgment
    re-characterised this as an atomicity hole and the PM relayed it to the PO as

@@ -1,0 +1,3328 @@
+metadata:
+  feature: identity-conflict-authority
+  stage: v1-structural
+  spec_ref: spec-identity-conflict-authority.md
+  version: 1
+  revision: r8
+  revision_note: "r8 (pre-ratified design R3 amendment): declare the existing F2 settlement transaction owner required to connect the live route-authoritative conflict classifier to the sole runtime IdentityConflict mint."
+
+system_architecture:
+  components:
+    - name: Identity authority API and UI
+      description: Review cards, pairwise merge preview and execution, conflict actions, park actions, history, and undo.
+      type: React client plus thin Axum handlers
+    - name: Identity road
+      description: The sole application road for same-book classification, the exhaustive action authorization table, stale-decision validation, and user or machine identity decisions.
+      type: in-process Rust application service
+    - name: Identity authority store
+      description: Review-card history and membership, one transactional route plan, complete absorption records, the one Work-delete authority, dismissal keys, cutover, and legacy history reads.
+      type: SQLite through livrarr-db
+    - name: File reorganization
+      description: One shared, blocking-safe, no-clobber move engine used by both forward absorption completion and undo completion, returning an item-complete result report.
+      type: livrarr-library service
+    - name: Activation gate
+      description: Validates the supported build prefix, authorization and route tables, retention table, legacy adoption table, and schema-derived effect manifest; it is the sole mint of the sealed activation report, including the B0-B3 legacy-close permit branch, and runs the one-shot B4 authority cutover before serving requests.
+      type: livrarr-db production function with a thin livrarr-server boot caller
+    - name: Existing history observer
+      description: Receives post-commit added drafts through the existing infallible HistoryService road; worksMerged alone remains an operation-owned transaction-fatal exception.
+      type: existing livrarr-domain HistoryService implemented by livrarr-server over livrarr-db
+    - name: SQLite database
+      description: Existing user-scoped durable state for Works, routes, cards, operation records, histories, staging diagnostics, and the cutover marker.
+      type: existing SQLite 3.45.1 datastore with foreign keys enabled
+    - name: Library filesystem
+      description: Existing user library tree containing the audio files whose canonical Work paths can change during absorption and undo.
+      type: existing local or mounted filesystem
+  connections:
+    - from: Identity authority API and UI
+      to: Identity road
+      protocol: authenticated JSON/HTTP followed by domain-trait calls
+      description: Every actionable read returns an opaque decision proof; every action echoes it.
+    - from: Identity road
+      to: Identity authority store
+      protocol: compile-wall-safe domain repository trait implemented by the SQLite adapter
+      description: The adapter owns every sqlx call and BEGIN IMMEDIATE transaction; route-changing actions enter the one route plan before mutation.
+    - from: Identity road
+      to: File reorganization
+      protocol: injected domain service trait
+      description: A committed absorption or database restore is followed by the shared simple file pass; database and filesystem work are not one transaction.
+    - from: Activation gate
+      to: Identity authority store
+      protocol: typed startup checks and one BEGIN IMMEDIATE cutover transaction
+      description: Startup fails closed on an incomplete effect manifest, an unsupported B0/B1 combination, or a failed all-or-nothing cutover; repository construction passes the sealed report to the delete authority as well as the absorption gate.
+    - from: Identity road
+      to: Existing history observer
+      protocol: injected HistoryService::record after the create transaction commits
+      description: Incoming DifferentFromAll submits exactly one added draft with the persisted add_source; the infallible observer cannot refuse or roll back creation.
+    - from: Identity authority store
+      to: SQLite database
+      protocol: sqlx SQLite 3.45.1
+      description: Foreign keys remain enabled; applied migrations are immutable and this feature begins at migration 087.
+    - from: File reorganization
+      to: Library filesystem
+      protocol: spawn_blocking filesystem operations
+      description: Exclusive destination creation, no-replace rename, copy-then-remove, record compare-and-set, and truthful per-item outcomes share one primitive.
+  deployment:
+    topology: Existing single Livrarr process, React bundle, library filesystem, and SQLite database; no new service or crate.
+    notes: B0 is deliberately non-serving for absorption. B0 plus B1 is the first releasable prefix. Incomplete undo file work is resumed only by an explicit retry of that record, never by a startup owner or file-transition protocol.
+
+languages:
+  - language: Rust
+    version: edition 2021
+    usage: Domain contracts, identity-road orchestration, persistence, cutover, file reorganization, handlers, composition, and behavioral verification.
+  - language: TypeScript
+    version: "6.0"
+    usage: Typed review, conflict, merge-preview, history, park, and undo client surfaces.
+  - language: SQL
+    version: SQLite 3.45.1
+    usage: Additive migration 087, rebuilt history-preserving tables, indexes, triggers, and repository statements owned only by livrarr-db.
+
+frameworks:
+  - name: Axum
+    version: "0.8"
+    usage: Authenticated identity-review, merge, conflict, park, and undo endpoints.
+  - name: React
+    version: "19.2"
+    usage: Decision-proof-bearing review, preview, conflict, park, history, and incomplete-undo UI.
+  - name: TanStack Query
+    version: "5.96"
+    usage: Server-state reads, mutation invalidation, and explicit incomplete-undo retry.
+  - name: Tokio
+    version: "1"
+    usage: Async service traits and spawn_blocking boundaries for every blocking filesystem operation.
+  - name: SQLx
+    version: "0.8"
+    usage: SQLite migrations, schema inspection, and BEGIN IMMEDIATE write transactions.
+
+approved_libraries:
+  - name: serde
+    version: "1"
+    usage: Versioned review payloads, decision-proof payloads, mutation envelopes, and HTTP DTOs.
+  - name: serde_json
+    version: "1"
+    usage: Versioned record envelopes, exact row images, diagnostic payloads, and persisted file reports.
+  - name: chrono
+    version: "0.4"
+    usage: Card, operation, cutover, audit, and resolution timestamps.
+  - name: thiserror
+    version: "2"
+    usage: Closed domain, repository, route-plan, cutover, and file-result error vocabularies.
+  - name: trait-variant
+    version: "0.1"
+    usage: Send async identity-road, authority, repository, delete, and file-service traits.
+  - name: sqlx
+    version: "0.8"
+    usage: Sole SQLite access in livrarr-db.
+  - name: tokio
+    version: "1"
+    usage: Async orchestration and blocking-file isolation.
+  - name: hmac
+    version: "0.12"
+    usage: Existing server-side authentication of opaque decision proofs.
+  - name: sha2
+    version: "0.10"
+    usage: Existing digest primitive for decision snapshots and file identity checks.
+  - name: data-encoding
+    version: "2"
+    usage: Existing URL-safe transport encoding for opaque authenticated proofs.
+  - name: tempfile
+    version: "3"
+    usage: Existing cross-device copy staging inside the shared no-clobber file primitive.
+
+modules:
+  - name: identity_authority_contracts
+    crate: livrarr-domain
+    responsibility: Own the closed review, proof, absorption, undo, route-plan, cutover, and file-result vocabulary plus compile-wall-safe service traits.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: []
+    public_api:
+      types:
+        - kind: enum
+          name: ReviewKind
+          fields:
+            - { name: IdentityConflict, type: unit }
+            - { name: PendingRoute, type: unit }
+            - { name: GroupIdentity, type: unit }
+            - { name: IdentityPark, type: unit }
+            - { name: FieldResolution, type: unit }
+            - { name: ContributorOrder, type: unit }
+            - { name: EditionEvidence, type: unit }
+            - { name: ImportIdentity, type: unit }
+            - { name: MigrationRepair, type: unit }
+            - { name: InvariantRepair, type: unit }
+        - kind: enum
+          name: SettlementReviewCard
+          fields:
+            - { name: IdentityConflict, type: ConflictCardPayloadV1 }
+            - { name: PendingRoute, type: "{ work_id: WorkId, candidate: ParkedRouteCandidate }" }
+            - { name: GroupIdentity, type: GroupIdentityPayloadV2 }
+            - { name: IdentityPark, type: IdentityParkPayloadV1 }
+            - { name: FieldResolution, type: "{ work_id: WorkId, evidence_ids: Vec<i64> }" }
+            - { name: ContributorOrder, type: "{ work_id: WorkId, contributors: Vec<WorkContributor> }" }
+            - { name: EditionEvidence, type: "{ edition_id: EditionId, evidence_ids: Vec<i64> }" }
+            - { name: ImportIdentity, type: "{ work_id: Option<WorkId>, evidence: IdentityEvidenceBundle }" }
+            - { name: MigrationRepair, type: "{ legacy_key: String, reason: String }" }
+            - { name: InvariantRepair, type: "{ work_id: Option<WorkId>, invariant: String }" }
+        - kind: enum
+          name: GroupIdentityRole
+          fields:
+            - { name: ReIdentify, type: "{ work_id: WorkId, proposer: ProposalActor }" }
+            - { name: Incoming, type: "{ add_source: WorkAddSource }" }
+            - { name: MergeMembers, type: unit }
+            - { name: None, type: unit }
+            - { name: Unknown, type: unit }
+        - kind: enum
+          name: GroupIdentityRoleKind
+          fields:
+            - { name: ReIdentify, type: unit }
+            - { name: Incoming, type: unit }
+            - { name: MergeMembers, type: unit }
+            - { name: None, type: unit }
+            - { name: Unknown, type: unit }
+        - kind: enum
+          name: ProposalActor
+          fields:
+            - { name: User, type: unit }
+            - { name: Machine, type: unit }
+        - kind: enum
+          name: ReviewActionKind
+          fields:
+            - { name: GroupDifferentFromAll, type: unit }
+            - { name: GroupAttachOrMerge, type: unit }
+            - { name: PendingRouteAffirm, type: unit }
+            - { name: ConflictKeepExisting, type: unit }
+            - { name: ConflictAcceptSeparate, type: unit }
+            - { name: ConflictReplaceAnchor, type: unit }
+            - { name: ConflictMerge, type: unit }
+            - { name: Dismiss, type: unit }
+            - { name: ParkChooseCandidate, type: unit }
+            - { name: ParkDismiss, type: unit }
+            - { name: FieldChoosePreservedValue, type: unit }
+            - { name: FieldExplicitAbsence, type: unit }
+            - { name: ContributorOrderResolve, type: unit }
+            - { name: EditionChooseDirectEvidence, type: unit }
+            - { name: EditionRetainUnknownOrAbsent, type: unit }
+            - { name: EditionArchiveEmptyShell, type: unit }
+            - { name: ImportCorrectedMetadataRetry, type: unit }
+            - { name: ImportResolvingIdentifier, type: unit }
+            - { name: ImportExplicitIdentityOrMinimum, type: unit }
+            - { name: MigrationCorrectTypedValue, type: unit }
+            - { name: MigrationAssignScopeAndOwner, type: unit }
+            - { name: MigrationDiscardProvenNonIdentity, type: unit }
+            - { name: InvariantRecompute, type: unit }
+            - { name: InvariantSupplyMissingReference, type: unit }
+            - { name: InvariantDiscardMalformedDerivedRow, type: unit }
+        - kind: enum
+          name: ReviewAction
+          fields:
+            - { name: GroupDifferentFromAll, type: unit }
+            - { name: GroupAttachOrMerge, type: unit }
+            - { name: PendingRouteAffirm, type: unit }
+            - { name: ConflictKeepExisting, type: unit }
+            - { name: ConflictAcceptSeparate, type: unit }
+            - { name: ConflictReplaceAnchor, type: unit }
+            - { name: ConflictMerge, type: unit }
+            - { name: Dismiss, type: unit }
+            - { name: ParkChooseCandidate, type: "{ candidate_digest: Digest }" }
+            - { name: ParkDismiss, type: unit }
+            - { name: FieldChoosePreservedValue, type: "{ evidence_id: i64 }" }
+            - { name: FieldExplicitAbsence, type: unit }
+            - { name: ContributorOrderResolve, type: "{ partition: Vec<ContributorPartition>, order: Vec<AuthorRef>, primary: AuthorRef }" }
+            - { name: EditionChooseDirectEvidence, type: "{ evidence_id: i64 }" }
+            - { name: EditionRetainUnknownOrAbsent, type: unit }
+            - { name: EditionArchiveEmptyShell, type: unit }
+            - { name: ImportCorrectedMetadataRetry, type: "{ evidence: IdentityEvidenceBundle }" }
+            - { name: ImportResolvingIdentifier, type: "{ route: RouteKey }" }
+            - { name: ImportExplicitIdentityOrMinimum, type: "{ choice: ImportIdentityChoice }" }
+            - { name: MigrationCorrectTypedValue, type: "{ route: RouteKey }" }
+            - { name: MigrationAssignScopeAndOwner, type: "{ route: RouteKey, owner: RouteOwner }" }
+            - { name: MigrationDiscardProvenNonIdentity, type: "{ reason: String }" }
+            - { name: InvariantRecompute, type: unit }
+            - { name: InvariantSupplyMissingReference, type: "{ reference: WorkReference }" }
+            - { name: InvariantDiscardMalformedDerivedRow, type: "{ reason: String }" }
+        - kind: enum
+          name: ConflictAction
+          fields:
+            - { name: KeepExisting, type: unit }
+            - { name: AcceptSeparate, type: unit }
+            - { name: ReplaceAnchor, type: unit }
+            - { name: Merge, type: unit }
+        - kind: enum
+          name: ReviewResolutionKind
+          fields:
+            - { name: UserAction, type: ReviewActionKind }
+            - { name: MachineCancellation, type: MachineCancellationReason }
+            - { name: WorkDeleted, type: unit }
+            - { name: LegacyRecorded, type: String }
+        - kind: enum
+          name: PayloadState
+          fields:
+            - { name: NativeReadable, type: unit }
+            - { name: AdoptedReadableNonKeyable, type: unit }
+            - { name: UnknownRole, type: unit }
+            - { name: HistoryOnlyUnreadable, type: unit }
+        - kind: enum
+          name: CohortCardinality
+          fields:
+            - { name: Zero, type: unit }
+            - { name: One, type: unit }
+            - { name: Two, type: unit }
+            - { name: Many, type: unit }
+        - kind: enum
+          name: RequiredDecisionProof
+          fields:
+            - { name: Card, type: unit }
+            - { name: Election, type: unit }
+            - { name: Refuse, type: RefusalReason }
+            - { name: HistoryOnly, type: unit }
+        - kind: struct
+          name: ReviewAuthorizationCell
+          fields:
+            - { name: kind, type: ReviewKind }
+            - { name: role_kind, type: "Option<GroupIdentityRoleKind>" }
+            - { name: action, type: ReviewActionKind }
+            - { name: cohort, type: CohortCardinality }
+            - { name: payload_state, type: PayloadState }
+            - { name: required_proof, type: RequiredDecisionProof }
+        - kind: struct
+          name: WorkAbsorption
+          visibility: pub
+          projection: "origin and actor are derived by derive_absorption_provenance from the closed RecordedAbsorptionRequest variant"
+          fields:
+            - { name: record_id, type: AbsorptionRecordId }
+            - { name: user_id, type: UserId }
+            - { name: survivor_work_id, type: WorkId }
+            - { name: absorbed_work_ids, type: "Vec<WorkId>" }
+            - { name: origin, type: AbsorptionOrigin }
+            - { name: actor, type: AbsorptionActor }
+            - { name: lifecycle, type: AbsorptionLifecycle }
+            - { name: record_revision, type: i64 }
+        - kind: enum
+          name: ReviewCardPayloadV2
+          fields:
+            - { name: GroupIdentity, type: GroupIdentityPayloadV2 }
+            - { name: IdentityConflict, type: ConflictCardPayloadV1 }
+            - { name: IdentityPark, type: IdentityParkPayloadV1 }
+            - { name: OpaqueLegacyConflict, type: OpaqueLegacyConflictPayloadV1 }
+            - { name: ExistingKind, type: ExistingReviewPayload }
+        - kind: enum
+          name: ReviewCardDisplayPayload
+          fields:
+            - { name: GroupIdentity, type: GroupIdentityPayloadV2 }
+            - { name: IdentityConflict, type: ConflictCardPayloadV1 }
+            - { name: IdentityPark, type: IdentityParkPayloadV1 }
+            - { name: OpaqueLegacyHistory, type: OpaqueLegacyHistoryView }
+            - { name: ExistingKind, type: ExistingReviewPayload }
+        - kind: struct
+          name: OpaqueLegacyHistoryView
+          fields:
+            - { name: source_legacy_conflict_id, type: i64 }
+            - { name: legacy_kind, type: String }
+            - { name: legacy_source, type: String }
+            - { name: resolution_notes, type: "Option<String>" }
+            - { name: legacy_raised_at, type: String }
+            - { name: legacy_resolved_at, type: "Option<String>" }
+            - { name: history_only_reason, type: HistoryOnlyReason }
+        - kind: struct
+          name: GroupIdentityPayloadV2
+          fields:
+            - { name: role, type: GroupIdentityRole }
+            - { name: work_ids, type: "Vec<WorkId>" }
+            - { name: subject_work_id, type: "Option<WorkId>" }
+            - { name: proposed_identity, type: "Option<WorkIdentityEvidence>" }
+            - { name: merge_choices, type: "Vec<WorkKeyedFieldChoice>" }
+            - { name: proposal_digest, type: "Option<Digest>" }
+        - kind: enum
+          name: LegacyConflictKind
+          fields:
+            - { name: IncomingDifferentOlKey, type: unit }
+            - { name: IncomingDifferentGrKey, type: unit }
+            - { name: IncomingDifferentHcKey, type: unit }
+            - { name: OlRedirectCollision, type: unit }
+            - { name: QuorumTie, type: unit }
+        - kind: enum
+          name: ContradictedRoute
+          fields:
+            - { name: Exact, type: RouteKey }
+            - { name: NotApplicable, type: unit }
+            - { name: UnknownLegacy, type: unit }
+        - kind: struct
+          name: ConflictCardPayloadV1
+          fields:
+            - { name: source_legacy_conflict_id, type: "Option<i64>" }
+            - { name: class, type: IdentityConflictClass }
+            - { name: kind, type: LegacyConflictKind }
+            - { name: source, type: LegacyConflictSource }
+            - { name: incoming, type: IncomingIdentitySnapshot }
+            - { name: contradicted, type: ContradictedRoute }
+            - { name: raised_work_id, type: WorkId }
+            - { name: raised_at, type: DateTime<Utc> }
+            - { name: raised_source_path, type: "Option<String>" }
+            - { name: adopted, type: bool }
+        - kind: struct
+          name: OpaqueLegacyConflictPayloadV1
+          fields:
+            - { name: source_legacy_conflict_id, type: i64 }
+            - { name: raw_user_id, type: i64 }
+            - { name: raw_existing_work_id, type: i64 }
+            - { name: raw_kind, type: String }
+            - { name: raw_incoming_payload, type: String }
+            - { name: raw_source, type: String }
+            - { name: raw_source_path, type: "Option<String>" }
+            - { name: raw_status, type: String }
+            - { name: raw_resolution_action, type: "Option<String>" }
+            - { name: raw_resolution_notes, type: "Option<String>" }
+            - { name: raw_raised_at, type: String }
+            - { name: raw_resolved_at, type: "Option<String>" }
+            - { name: history_only_reason, type: HistoryOnlyReason }
+        - kind: struct
+          name: IdentityParkPayloadV1
+          fields:
+            - { name: work_id, type: WorkId }
+            - { name: candidates, type: "Vec<ParkCandidateIdentity>" }
+        - kind: struct
+          name: ParkCandidateIdentity
+          fields:
+            - { name: normalized_identity, type: IdentityTitleTuple }
+            - { name: primary_author_id, type: AuthorId }
+            - { name: routes, type: "Vec<RouteKey>" }
+            - { name: evidence_digest, type: Digest }
+            - { name: informational_existing_work_id, type: "Option<WorkId>" }
+        - kind: struct
+          name: ParkCandidateQuestionKey
+          fields:
+            - { name: normalized_identity, type: IdentityTitleTuple }
+            - { name: primary_author_id, type: AuthorId }
+            - { name: routes, type: "Vec<RouteKey>" }
+            - { name: evidence_digest, type: Digest }
+        - kind: enum
+          name: ReviewDismissalKeyV2
+          fields:
+            - { name: GroupIdentity, type: "{ user_id: UserId, role: GroupIdentityRole, cohort: Vec<WorkId>, proposal: Option<ProposalKey>, choices: Vec<WorkKeyedFieldChoice> }" }
+            - { name: PendingRoute, type: "{ user_id: UserId, work_id: WorkId, route: RouteKey }" }
+            - { name: EditionEvidence, type: "{ user_id: UserId, edition_id: EditionId }" }
+            - { name: IdentityConflict, type: "{ user_id: UserId, work_id: WorkId, kind: LegacyConflictKind, incoming: IncomingIdentityKey, contradicted: ContradictedRouteKey, title: IdentityTitleTuple, primary_author_id: AuthorId, year: Option<i32> }" }
+            - { name: IdentityPark, type: "{ user_id: UserId, work_id: WorkId, candidates: Vec<ParkCandidateQuestionKey> }" }
+        - kind: sealed-proof
+          name: DecisionProof
+          constructor: identity_authority_application::issue_decision_proof only
+          transport: "handler/client serialization and domain request decoding preserve opaque bytes and do not mint or authenticate a proof; verify_decision_proof must still authenticate it"
+          fields:
+            - { name: opaque, type: "private String" }
+        - kind: enum
+          name: DecisionProofPayload
+          fields:
+            - { name: Card, type: CardDecisionSnapshot }
+            - { name: Election, type: ElectionDecisionSnapshot }
+        - kind: struct
+          name: CardDecisionSnapshot
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+            - { name: card_version, type: i64 }
+            - { name: authorization, type: ReviewAuthorizationCell }
+            - { name: role, type: "Option<GroupIdentityRole>" }
+            - { name: cohort_generations, type: "Vec<WorkGeneration>" }
+            - { name: proposal_digest, type: "Option<Digest>" }
+            - { name: route_plan, type: "Option<RoutePlan>" }
+        - kind: enum
+          name: ElectionDecisionContext
+          fields:
+            - { name: DirectPair, type: unit }
+            - { name: ReviewCard, type: "{ card_id: ReviewCardId, card_version: i64, authorization: ReviewAuthorizationCell, role: Option<GroupIdentityRole>, proposal_digest: Option<Digest> }" }
+        - kind: struct
+          name: ElectionDecisionSnapshot
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: context, type: ElectionDecisionContext }
+            - { name: pair, type: "[WorkId; 2]" }
+            - { name: elected_survivor, type: WorkId }
+            - { name: cohort_generations, type: "Vec<WorkGeneration>" }
+            - { name: mergeable_fields, type: "Vec<FieldSnapshot>" }
+            - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+            - { name: route_plan, type: RoutePlan }
+        - kind: enum
+          name: IdentityDistinctness
+          fields:
+            - { name: CertainlySame, type: unit }
+            - { name: CertainlyDifferent, type: unit }
+            - { name: Unsure, type: DistinctnessCause }
+        - kind: enum
+          name: IdentityAuthorityError
+          fields:
+            - { name: InvalidRequest, type: "{ field: String, reason: String }" }
+            - { name: NotFound, type: unit }
+            - { name: Forbidden, type: unit }
+            - { name: StaleDecision, type: StaleDecisionDetail }
+            - { name: Refused, type: RefusalReason }
+            - { name: EffectManifestIncomplete, type: "Vec<UnclassifiedEffect>" }
+            - { name: Storage, type: String }
+      functions:
+        - name: derive_card_cohort
+          inputs:
+            - { name: payload_work_ids, type: "&[WorkId]" }
+            - { name: subject_work_id, type: "Option<WorkId>" }
+          output: "Vec<WorkId>"
+          errors: []
+        - name: group_identity_role_kind
+          inputs:
+            - { name: role, type: "&GroupIdentityRole" }
+          output: GroupIdentityRoleKind
+          errors: []
+        - name: review_authorization_table
+          inputs: []
+          output: "&'static [ReviewAuthorizationCell]"
+          errors: []
+        - name: validate_review_authorization_totality
+          inputs:
+            - { name: table, type: "&[ReviewAuthorizationCell]" }
+          output: "Result<(), AuthorizationTableError>"
+          errors: [MissingCell, DuplicateCell, IllegalRoleAxis, RoleKindMismatch, WrongProofClass]
+        - name: dismissal_key_v2
+          inputs:
+            - { name: card, type: "&ReviewCard" }
+          output: "Result<Option<ReviewDismissalKeyV2>, NonKeyableReason>"
+          errors: [UnreadablePayload, UnknownRole, AdoptedRouteConflict]
+        - name: derive_absorption_provenance
+          constructs: AbsorptionProvenance
+          mapping: "UserElection(ManualPair|ReviewContinuation, user_id, _) -> matching user origin, AbsorptionActor::User(user_id), and matching caller; MachineSnapshot(named origin, snapshot) -> the matching machine origin, MachineActor, and caller"
+          inputs:
+            - { name: request, type: "&RecordedAbsorptionRequest" }
+          output: AbsorptionProvenance
+          errors: []
+  - name: identity_authority_services
+    crate: livrarr-domain
+    responsibility: Expose the only compile-wall-safe application, persistence, delete, and file-reorganization seams.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts]
+    public_api:
+      types:
+        - kind: trait
+          name: IdentityAuthorityService
+          fields:
+            - { name: list_review, type: "async (ReviewListQuery) -> Result<Vec<ReviewCardView>, IdentityAuthorityError>" }
+            - { name: read_review, type: "async (UserId, ReviewCardId) -> Result<ReviewCardView, IdentityAuthorityError>" }
+            - { name: preview_review, type: "async (ReviewPreviewRequest) -> Result<ReviewDecisionPreview, IdentityAuthorityError>" }
+            - { name: resolve_review, type: "async (ReviewDecisionRequest) -> Result<ReviewDecisionOutcome, IdentityAuthorityError>" }
+            - { name: preview_merge, type: "async (MergePreviewRequest) -> Result<MergePreview, IdentityAuthorityError>" }
+            - { name: execute_merge, type: "async (MergeExecuteRequest) -> Result<AbsorptionOutcome, IdentityAuthorityError>" }
+            - { name: undo_absorption, type: "async (UndoAbsorptionRequest) -> Result<UndoOutcome, IdentityAuthorityError>" }
+            - { name: read_absorption, type: "async (UserId, AbsorptionRecordId) -> Result<AbsorptionView, IdentityAuthorityError>" }
+        - kind: trait
+          name: IdentityAuthorityRoad
+          fields:
+            - { name: list_review_snapshots, type: "async (ReviewListQuery) -> Result<Vec<ReviewCardReadSnapshot>, IdentityAuthorityError>" }
+            - { name: read_review_snapshot, type: "async (UserId, ReviewCardId) -> Result<ReviewCardReadSnapshot, IdentityAuthorityError>" }
+            - { name: preview_review, type: "async (ReviewPreviewRequest) -> Result<ReviewPreviewSnapshot, IdentityAuthorityError>" }
+            - { name: resolve_review, type: "async (VerifiedReviewDecisionRequest) -> Result<ReviewDecisionOutcome, IdentityAuthorityError>" }
+            - { name: preview_merge, type: "async (MergePreviewRequest) -> Result<MergePreviewSnapshot, IdentityAuthorityError>" }
+            - { name: execute_merge, type: "async (VerifiedMergeExecuteRequest) -> Result<AbsorptionOutcome, IdentityAuthorityError>" }
+            - { name: execute_settlement_auto_merge, type: "async (MachineAbsorptionSnapshot) -> Result<AbsorptionOutcome, IdentityAuthorityError>" }
+            - { name: execute_dedup_residue_heal_absorption, type: "async (MachineAbsorptionSnapshot) -> Result<AbsorptionOutcome, IdentityAuthorityError>" }
+            - { name: execute_article_duplicate_heal_absorption, type: "async (MachineAbsorptionSnapshot) -> Result<AbsorptionOutcome, IdentityAuthorityError>" }
+            - { name: undo_absorption, type: "async (UndoAbsorptionRequest) -> Result<UndoOutcome, IdentityAuthorityError>" }
+            - { name: read_absorption, type: "async (UserId, AbsorptionRecordId) -> Result<AbsorptionView, IdentityAuthorityError>" }
+        - kind: trait
+          name: IdentityAuthorityRepository
+          fields:
+            - { name: read_card_snapshot, type: "async (UserId, ReviewCardId) -> Result<ReviewCard, RepositoryError>" }
+            - { name: list_review_cards, type: "async (ReviewListQuery) -> Result<Vec<ReviewCard>, RepositoryError>" }
+            - { name: apply_nonabsorbing_decision, type: "async (VerifiedCardDecision) -> Result<ReviewDecisionOutcome, RepositoryError>" }
+            - { name: execute_absorption, type: "async (RecordedAbsorptionRequest) -> Result<AbsorptionCommit, RepositoryError>" }
+            - { name: restore_absorption, type: "async (UndoDatabaseRequest) -> Result<UndoDatabaseOutcome, RepositoryError>" }
+            - { name: persist_file_report, type: "async (FileReportUpdate) -> Result<AbsorptionRecord, RepositoryError>" }
+            - { name: read_absorption_view, type: "async (UserId, AbsorptionRecordId) -> Result<AbsorptionView, RepositoryError>" }
+        - kind: trait
+          name: WorkDeleteService
+          fields:
+            - { name: delete_work, type: "async (DeleteWorkRequest) -> Result<DeleteWorkOutcome, WorkDeleteError>" }
+            - { name: delete_work_set, type: "async (DeleteWorkSetRequest) -> Result<DeleteWorkOutcome, WorkDeleteError>" }
+        - kind: trait
+          name: FileReorganizationService
+          fields:
+            - { name: complete_forward, type: "async (ForwardFileRequest) -> Result<FileMoveReport, FileReorganizationError>" }
+            - { name: complete_undo, type: "async (UndoFileRequest) -> Result<FileMoveReport, FileReorganizationError>" }
+      functions:
+        - name: "IdentityAuthorityService::list_review"
+          inputs:
+            - { name: query, type: ReviewListQuery }
+          output: "Result<Vec<ReviewCardView>, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::read_review"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+          output: "Result<ReviewCardView, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::preview_review"
+          inputs:
+            - { name: request, type: ReviewPreviewRequest }
+          output: "Result<ReviewDecisionPreview, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::resolve_review"
+          inputs:
+            - { name: request, type: ReviewDecisionRequest }
+          output: "Result<ReviewDecisionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::preview_merge"
+          inputs:
+            - { name: request, type: MergePreviewRequest }
+          output: "Result<MergePreview, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::execute_merge"
+          inputs:
+            - { name: request, type: MergeExecuteRequest }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::undo_absorption"
+          inputs:
+            - { name: request, type: UndoAbsorptionRequest }
+          output: "Result<UndoOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityService::read_absorption"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: record_id, type: AbsorptionRecordId }
+          output: "Result<AbsorptionView, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::list_review_snapshots"
+          inputs:
+            - { name: query, type: ReviewListQuery }
+          output: "Result<Vec<ReviewCardReadSnapshot>, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::read_review_snapshot"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+          output: "Result<ReviewCardReadSnapshot, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::preview_review"
+          inputs:
+            - { name: request, type: ReviewPreviewRequest }
+          output: "Result<ReviewPreviewSnapshot, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::resolve_review"
+          inputs:
+            - { name: request, type: VerifiedReviewDecisionRequest }
+          output: "Result<ReviewDecisionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::preview_merge"
+          inputs:
+            - { name: request, type: MergePreviewRequest }
+          output: "Result<MergePreviewSnapshot, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::execute_merge"
+          inputs:
+            - { name: request, type: VerifiedMergeExecuteRequest }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::execute_settlement_auto_merge"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::execute_dedup_residue_heal_absorption"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::execute_article_duplicate_heal_absorption"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::undo_absorption"
+          inputs:
+            - { name: request, type: UndoAbsorptionRequest }
+          output: "Result<UndoOutcome, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRoad::read_absorption"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: record_id, type: AbsorptionRecordId }
+          output: "Result<AbsorptionView, IdentityAuthorityError>"
+          errors: [IdentityAuthorityError]
+        - name: "IdentityAuthorityRepository::read_card_snapshot"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+          output: "Result<ReviewCard, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::list_review_cards"
+          inputs:
+            - { name: query, type: ReviewListQuery }
+          output: "Result<Vec<ReviewCard>, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::apply_nonabsorbing_decision"
+          inputs:
+            - { name: request, type: VerifiedCardDecision }
+          output: "Result<ReviewDecisionOutcome, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::execute_absorption"
+          implementation_path: "begin_identity_authority_write -> plan/apply routes -> open_absorption_operation consumes the transaction and borrows &self.work_delete -> absorb_work_into uses both private operation fields -> seal_absorption_operation -> commit_sealed_absorption_operation; the repository retains no raw writer and constructs no second delete authority"
+          inputs:
+            - { name: request, type: RecordedAbsorptionRequest }
+          output: "Result<AbsorptionCommit, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::restore_absorption"
+          inputs:
+            - { name: request, type: UndoDatabaseRequest }
+          output: "Result<UndoDatabaseOutcome, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::persist_file_report"
+          inputs:
+            - { name: update, type: FileReportUpdate }
+          output: "Result<AbsorptionRecord, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "IdentityAuthorityRepository::read_absorption_view"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: record_id, type: AbsorptionRecordId }
+          output: "Result<AbsorptionView, RepositoryError>"
+          errors: [RepositoryError]
+        - name: "WorkDeleteService::delete_work"
+          inputs:
+            - { name: request, type: DeleteWorkRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [WorkDeleteError]
+        - name: "WorkDeleteService::delete_work_set"
+          inputs:
+            - { name: request, type: DeleteWorkSetRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [WorkDeleteError]
+        - name: "FileReorganizationService::complete_forward"
+          inputs:
+            - { name: request, type: ForwardFileRequest }
+          output: "Result<FileMoveReport, FileReorganizationError>"
+          errors: [FileReorganizationError]
+        - name: "FileReorganizationService::complete_undo"
+          inputs:
+            - { name: request, type: UndoFileRequest }
+          output: "Result<FileMoveReport, FileReorganizationError>"
+          errors: [FileReorganizationError]
+
+  - name: identity_authority_transaction
+    crate: livrarr-db
+    responsibility: Mint the only typed write-transaction capability for this feature, always from the shared BEGIN IMMEDIATE helper with foreign keys enabled.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts]
+    public_api:
+      types:
+        - kind: sealed-capability
+          name: ImmediateTransaction
+          constructor: begin_identity_authority_write only
+          fields:
+            - { name: connection, type: "private sqlx::SqliteConnection" }
+            - { name: immediate_mode, type: "private unit" }
+      functions:
+        - name: begin_identity_authority_write
+          constructs: ImmediateTransaction
+          inputs:
+            - { name: pool, type: "&sqlx::SqlitePool" }
+          output: "Result<ImmediateTransaction, RepositoryError>"
+          errors: [RepositoryError]
+        - name: commit_identity_authority_write
+          inputs:
+            - { name: tx, type: ImmediateTransaction }
+          output: "Result<(), RepositoryError>"
+          errors: [RepositoryError]
+
+  - name: identity_authority_activation_contracts
+    crate: livrarr-db
+    responsibility: Own the DB-local sealed activation report and its build, marker, cutover, and pre-cutover capabilities without owning a constructor; SqliteIdentityAuthorityActivation::activate_identity_authority is their only mint.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts]
+    public_api:
+      types:
+        - kind: sealed-capability-enum
+          name: AbsorptionCapability
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only"
+          fields:
+            - { name: RefuseAll, type: "{ unit: BuildUnitPrefix, reason: String }", construction: "private to activation" }
+            - { name: RecordedV1, type: RecordedAbsorptionPermit, construction: "private to activation" }
+        - kind: sealed-capability
+          name: RecordedAbsorptionPermit
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only after production validation"
+          fields:
+            - { name: constructor, type: "private to SqliteIdentityAuthorityActivation::activate_identity_authority after production validation" }
+        - kind: sealed-capability
+          name: ActivationReport
+          visibility: "pub opaque outside livrarr-db; movable by the thin server boot wrapper"
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only"
+          fields:
+            - { name: validation, type: "private Digest" }
+            - { name: build_prefix, type: BuildUnitPrefix, visibility: private }
+            - { name: absorption_capability, type: AbsorptionCapability, visibility: "crate-private; identity_authority_repository read-only" }
+            - { name: legacy_pre_cutover_write_permit, type: "Option<LegacyPreCutoverWritePermit>", visibility: "crate-private; work_delete read-only; Some only for B0-B3, None after B4" }
+            - { name: manifest_digest, type: Digest, visibility: private }
+            - { name: authorization_table_digest, type: Digest, visibility: private }
+            - { name: route_coverage_digest, type: "Option<Digest>", visibility: private }
+            - { name: retention_policy_digest, type: Digest, visibility: private }
+            - { name: legacy_adoption_digest, type: Digest, visibility: private }
+            - { name: cutover_report_digest, type: "Option<Digest>", visibility: private }
+        - kind: sealed-request
+          name: ConflictCutoverRequest
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only"
+          fields:
+            - { name: expected_marker_version, type: "private i64" }
+            - { name: manifest_digest, type: "private Digest" }
+            - { name: activation_id, type: "private Digest" }
+        - kind: sealed-capability
+          name: MarkerAbsent
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only; never inferred from _livrarr_meta"
+          fields:
+            - { name: constructor, type: "private unit" }
+        - kind: sealed-capability
+          name: LegacyPreCutoverWritePermit
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only for B0-B3"
+          fields:
+            - { name: marker_absent, type: "private MarkerAbsent" }
+            - { name: build_prefix, type: BuildUnitPrefix }
+        - kind: sealed-capability
+          name: CutoverReadPermit
+          visibility: pub(crate)
+          constructor: "SqliteIdentityAuthorityActivation::activate_identity_authority only for B4"
+          fields:
+            - { name: marker_absent, type: "private MarkerAbsent" }
+            - { name: activation_id, type: Digest }
+      functions: []
+
+  - name: review_card_store
+    crate: livrarr-db
+    responsibility: Own the sole card mint, one cohort projection, card history, V2 dismissal key persistence, card reads, resolution, cancellation, and pending-conflict projection.
+    requirements: [REQ-002, REQ-006]
+    build_units: [B0, B2, B4]
+    dependencies: [identity_authority_contracts, identity_authority_transaction]
+    public_api:
+      types:
+        - kind: struct
+          name: ReviewCardWrite
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: subject_work_id, type: "Option<WorkId>" }
+            - { name: origin, type: ReviewCardOrigin }
+            - { name: payload, type: ReviewCardPayloadV2 }
+            - { name: generation, type: i64 }
+        - kind: struct
+          name: ReviewCardMembership
+          fields:
+            - { name: card_id, type: ReviewCardId }
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: relation, type: CardMemberRelation }
+            - { name: ordinal, type: i64 }
+      functions:
+        - name: mint_reuse_or_suppress_review_card_in_tx
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: draft, type: ReviewCardWrite }
+          output: "Result<CardMintOutcome, RepositoryError>"
+          errors: [CrossTenantMember, DuplicateQuestion, UnreadablePayload, RepositoryError]
+        - name: load_review_card
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+          output: "Result<ReviewCard, RepositoryError>"
+          errors: [NotFound, RepositoryError]
+        - name: cancel_cards_naming_works_in_tx
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: user_id, type: UserId }
+            - { name: work_ids, type: "&[WorkId]" }
+            - { name: reason, type: MachineCancellationReason }
+          output: "Result<Vec<ReviewCardId>, RepositoryError>"
+          errors: [RepositoryError]
+        - name: parked_by_conflicts
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+          output: "Result<bool, RepositoryError>"
+          errors: [RepositoryError]
+
+  - name: route_plan
+    crate: livrarr-db
+    responsibility: Produce and apply the single authoritative route plan from locked live rows for every route-changing action and every absorption.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B1, B2, B4]
+    dependencies: [identity_authority_contracts, identity_authority_transaction]
+    public_api:
+      types:
+        - kind: struct
+          name: RoutePlanRequest
+          fields:
+            - { name: user_id, type: UserId }
+            - { name: action, type: RouteChangingAction }
+            - { name: cohort, type: "Vec<WorkId>" }
+            - { name: elected_survivor, type: "Option<WorkId>" }
+            - { name: proposal_routes, type: "Vec<WorkRoute>" }
+            - { name: implicated_route, type: ContradictedRoute }
+        - kind: enum
+          name: RoutePlanError
+          fields:
+            - { name: ThirdOwner, type: ThirdOwnerConflict }
+            - { name: SameProviderSlotContradiction, type: SameProviderContradiction }
+            - { name: MissingIncomingRoute, type: IdentityProvider }
+            - { name: UnknownContradictedRoute, type: unit }
+            - { name: UnsupportedRouteTaxonomy, type: RouteKey }
+            - { name: StaleRouteSnapshot, type: unit }
+        - kind: struct
+          name: RoutePlanCoverageCell
+          fields:
+            - { name: review_kind, type: "Option<ReviewKind>" }
+            - { name: group_role_kind, type: "Option<GroupIdentityRoleKind>" }
+            - { name: conflict_kind, type: "Option<LegacyConflictKind>" }
+            - { name: action, type: RouteChangingAction }
+            - { name: cohort, type: CohortCardinality }
+            - { name: effect, type: RouteEffectClass }
+        - kind: sealed-capability
+          name: ValidatedRoutePlan
+          constructor: plan_routes_in_tx only
+          fields:
+            - { name: plan, type: RoutePlan }
+            - { name: validation, type: "private Digest" }
+        - kind: enum
+          name: RouteMatrixCoverageError
+          fields:
+            - { name: UnplannedRouteChangingCell, type: ReviewAuthorizationCell }
+            - { name: DuplicatePlanner, type: RoutePlanCoverageCell }
+      functions:
+        - name: plan_routes_in_tx
+          constructs: ValidatedRoutePlan
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: request, type: RoutePlanRequest }
+          output: "Result<ValidatedRoutePlan, RoutePlanError>"
+          errors: [ThirdOwner, SameProviderSlotContradiction, MissingIncomingRoute, UnknownContradictedRoute, UnsupportedRouteTaxonomy, StaleRouteSnapshot]
+        - name: apply_route_plan_in_tx
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: plan, type: "&ValidatedRoutePlan" }
+          output: "Result<RoutePlanReceipt, RoutePlanError>"
+          errors: [StaleRouteSnapshot, RepositoryError]
+        - name: route_plan_coverage_table
+          inputs: []
+          output: "&'static [RoutePlanCoverageCell]"
+          errors: []
+        - name: validate_route_matrix_totality
+          inputs:
+            - { name: authorization, type: "&[ReviewAuthorizationCell]" }
+            - { name: coverage, type: "&[RoutePlanCoverageCell]" }
+          output: "Result<(), RouteMatrixCoverageError>"
+          errors: [UnplannedRouteChangingCell, DuplicatePlanner]
+
+  - name: absorption_store
+    crate: livrarr-db
+    responsibility: Own the only absorption implementation, schema-derived effect manifest, complete sealed operation record, causal card withdrawals, generation claims, lineage rebasing, undo database restore, and worksMerged history anchor. It depends on work_delete only through the repository-supplied SqliteWorkDelete held privately by an open operation; it contains no raw DELETE FROM works statement.
+    requirements: [REQ-004]
+    build_units: [B0, B1, B3]
+    dependencies: [identity_authority_contracts, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, route_plan, work_delete]
+    public_api:
+      types:
+        - kind: struct
+          name: EffectManifest
+          fields:
+            - { name: schema_version, type: i64 }
+            - { name: selectors, type: "Vec<EffectSelector>" }
+            - { name: bare_pointers, type: "Vec<BarePointerRegistration>" }
+            - { name: trigger_effects, type: "Vec<TriggerEffect>" }
+            - { name: digest, type: Digest }
+        - kind: sealed-capability
+          name: OpenAbsorptionOperation
+          constructor: open_absorption_operation only
+          lifetime: "'delete borrows the repository's existing SqliteWorkDelete for exactly the open-operation scope"
+          fields:
+            - { name: operation_id, type: AbsorptionRecordId }
+            - { name: caller, type: AbsorptionCaller }
+            - { name: operation_writer, type: "private ImmediateTransaction" }
+            - { name: route_plan, type: "private ValidatedRoutePlan" }
+            - { name: work_delete, type: "private &'delete SqliteWorkDelete", source: "borrowed from SqliteIdentityAuthorityRepository.work_delete; never constructed by absorption_store" }
+            - { name: manifest_digest, type: Digest }
+        - kind: sealed-operation
+          name: SealedAbsorptionOperation
+          constructor: seal_absorption_operation only
+          fields:
+            - { name: transaction, type: ImmediateTransaction, visibility: private }
+            - { name: commit, type: AbsorptionCommit, visibility: private }
+        - kind: struct
+          name: RetentionPolicyCell
+          fields:
+            - { name: record_version, type: RecordVersionClass }
+            - { name: lifecycle, type: "Option<AbsorptionLifecycle>" }
+            - { name: survivor_state, type: SurvivorRetentionState }
+            - { name: cohort_state, type: CohortRetentionState }
+            - { name: disposition, type: RecordRetentionDisposition }
+        - kind: enum
+          name: AbsorptionError
+          fields:
+            - { name: AbsorptionDisabled, type: RefusalReason }
+            - { name: StaleDecision, type: StaleDecisionDetail }
+            - { name: RoutePlan, type: RoutePlanError }
+            - { name: WorkDelete, type: WorkDeleteError }
+            - { name: IncompleteEffectClosure, type: "Vec<UnclassifiedEffect>" }
+            - { name: SealMismatch, type: Digest }
+            - { name: Repository, type: RepositoryError }
+        - kind: enum
+          name: RetentionPolicyError
+          fields:
+            - { name: MissingRetentionCell, type: String }
+            - { name: DuplicateRetentionCell, type: RetentionPolicyCell }
+            - { name: CorruptRetentionCell, type: RetentionPolicyCell }
+      functions:
+        - name: derive_effect_manifest
+          inputs:
+            - { name: pool, type: "&sqlx::SqlitePool" }
+            - { name: registry, type: "&[BarePointerRegistration]" }
+          output: "Result<EffectManifest, EffectManifestError>"
+          errors: [UnclassifiedWorkReference, UnclassifiedTrigger, SelectorOverlap, MissingReversibleColumn]
+        - name: absorb_work_into
+          delete_path: "sole absorption-time caller of SqliteWorkDelete::delete_work_in_tx; borrows operation.work_delete and operation.operation_writer, and the singleton delete delegates to delete_work_set_in_tx"
+          inputs:
+            - { name: operation, type: "&mut OpenAbsorptionOperation<'_>" }
+            - { name: absorbed_work_id, type: WorkId }
+          output: "Result<(), AbsorptionError>"
+          errors: [RoutePlanError, WorkDeleteError, IncompleteEffectClosure, RepositoryError]
+        - name: seal_absorption_operation
+          constructs: SealedAbsorptionOperation
+          inputs:
+            - { name: operation, type: "OpenAbsorptionOperation<'_>" }
+          output: "Result<SealedAbsorptionOperation, AbsorptionError>"
+          errors: [IncompleteEffectClosure, SealMismatch, RepositoryError]
+        - name: commit_sealed_absorption_operation
+          consumes: SealedAbsorptionOperation
+          inputs:
+            - { name: sealed, type: SealedAbsorptionOperation }
+          output: "Result<AbsorptionCommit, AbsorptionError>"
+          errors: [RepositoryError]
+        - name: restore_absorption_in_tx
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: request, type: UndoDatabaseRequest }
+            - { name: manifest, type: "&EffectManifest" }
+          output: "Result<UndoDatabaseOutcome, UndoError>"
+          errors: [NotFound, PreFeatureRecord, StaleAfterImage, LineageConflict, IncompleteEffectClosure, RepositoryError]
+        - name: persist_file_report
+          transaction: "begin_identity_authority_write -> one report/revision update -> commit_identity_authority_write"
+          inputs:
+            - { name: update, type: FileReportUpdate }
+          output: "Result<AbsorptionRecord, RepositoryError>"
+          errors: [NotFound, StaleRecordVersion, RepositoryError]
+        - name: read_absorption_view
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: record_id, type: AbsorptionRecordId }
+          output: "Result<AbsorptionView, RepositoryError>"
+          errors: [NotFound, RepositoryError]
+        - name: retention_policy_table
+          inputs: []
+          output: "&'static [RetentionPolicyCell]"
+          errors: []
+        - name: validate_retention_policy_totality
+          inputs:
+            - { name: table, type: "&[RetentionPolicyCell]" }
+          output: "Result<(), RetentionPolicyError>"
+          errors: [MissingRetentionCell, DuplicateRetentionCell, CorruptRetentionCell]
+    crate_private_api:
+      functions:
+        - name: open_absorption_operation
+          caller: identity_authority_repository only, after consulting its held ActivationReport; it moves the transaction and borrows its existing work_delete field, retaining no raw writer
+          constructs: OpenAbsorptionOperation
+          inputs:
+            - { name: tx, type: ImmediateTransaction }
+            - { name: work_delete, type: "&'delete SqliteWorkDelete", source: "exactly &SqliteIdentityAuthorityRepository.work_delete" }
+            - { name: permit, type: "&RecordedAbsorptionPermit" }
+            - { name: request, type: RecordedAbsorptionRequest }
+            - { name: route_plan, type: ValidatedRoutePlan }
+            - { name: manifest, type: "&EffectManifest" }
+          output: "Result<OpenAbsorptionOperation<'delete>, AbsorptionError>"
+          errors: [AbsorptionDisabled, StaleDecision, RoutePlanError, RepositoryError]
+
+  - name: work_delete
+    crate: livrarr-db
+    responsibility: Own the production tree's exactly one raw DELETE FROM works statement in delete_work_set_in_tx. Exactly one SqliteWorkDelete is constructed for a repository from the sealed ActivationReport; it retains that report, uses its optional LegacyPreCutoverWritePermit for the pre-B4 machine close, and skips the close when the post-B4 report field is None. User, ImportRollback, and ListImportRollback use that authority in their transaction scopes; execute_absorption lends the same repository instance to OpenAbsorptionOperation, whose absorb_work_into calls delete_work_in_tx with the private operation writer. delete_work_in_tx delegates a singleton set, so the four origins reach one statement, which withdraws cards before deletion, retains card history, and terminalizes v2 staging diagnostics.
+    requirements: [REQ-006]
+    build_units: [B0, B1, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, legacy_identity_conflict_history]
+    public_api:
+      types:
+        - kind: struct
+          name: SqliteWorkDelete
+          visibility: pub(crate)
+          construction: "exactly one per SqliteIdentityAuthorityRepository, returned only by new_work_delete_authority; absorption borrows that instance and never mints another"
+          fields:
+            - { name: activation_report, type: "private Arc<ActivationReport>" }
+      functions:
+        - name: new_work_delete_authority
+          visibility: pub(crate)
+          caller: new_identity_authority_repository only
+          inputs:
+            - { name: activation_report, type: "Arc<ActivationReport>" }
+          output: SqliteWorkDelete
+          errors: []
+        - name: "SqliteWorkDelete::delete_work"
+          transaction: "begin_identity_authority_write -> delete_work_in_tx -> commit_identity_authority_write"
+          inputs:
+            - { name: self, type: "&SqliteWorkDelete" }
+            - { name: request, type: DeleteWorkRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [CrossTenantWork, PendingCardCancellationFailed, ConflictCloseFailed, RepositoryError]
+        - name: "SqliteWorkDelete::delete_work_set"
+          transaction: "begin_identity_authority_write -> delete_work_set_in_tx -> commit_identity_authority_write"
+          inputs:
+            - { name: self, type: "&SqliteWorkDelete" }
+            - { name: request, type: DeleteWorkSetRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [CrossTenantWork, PendingCardCancellationFailed, ConflictCloseFailed, RepositoryError]
+        - name: "SqliteWorkDelete::delete_work_in_tx"
+          absorption_caller: "absorption_store::absorb_work_into only, through OpenAbsorptionOperation.work_delete and OpenAbsorptionOperation.operation_writer"
+          inputs:
+            - { name: self, type: "&SqliteWorkDelete" }
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: request, type: DeleteWorkRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [CrossTenantWork, PendingCardCancellationFailed, ConflictCloseFailed, RepositoryError]
+        - name: "SqliteWorkDelete::delete_work_set_in_tx"
+          absorption_path: "reached only through delete_work_in_tx's singleton delegation; absorption_store owns no physical Work-delete SQL"
+          legacy_close_branch: "Some(&LegacyPreCutoverWritePermit) calls close_legacy_conflicts_for_work_delete_in_tx; None skips it and issues no legacy-table write"
+          inputs:
+            - { name: self, type: "&SqliteWorkDelete" }
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: legacy_pre_cutover_write_permit, type: "Option<&LegacyPreCutoverWritePermit>", source: "exactly self.activation_report.legacy_pre_cutover_write_permit.as_ref()" }
+            - { name: request, type: DeleteWorkSetRequest }
+          output: "Result<DeleteWorkOutcome, WorkDeleteError>"
+          errors: [CrossTenantWork, PendingCardCancellationFailed, ConflictCloseFailed, RepositoryError]
+
+  - name: legacy_identity_conflict_history
+    crate: livrarr-db
+    responsibility: Contain every legacy-table SQL statement; typed marker-absent capabilities gate the B0-B3 close and B4 cutover scan, leaving exactly the read-only history statement reachable after the marker.
+    requirements: [REQ-006]
+    build_units: [B0, B4]
+    dependencies: [identity_authority_contracts, identity_authority_activation_contracts, identity_authority_transaction]
+    public_api:
+      types:
+        - kind: struct
+          name: LegacyConflictHistoryRow
+          fields:
+            - { name: id, type: i64 }
+            - { name: user_id, type: UserId }
+            - { name: existing_work_id, type: WorkId }
+            - { name: raw_kind, type: String }
+            - { name: raw_payload, type: String }
+            - { name: raw_source, type: String }
+            - { name: raised_source_path, type: "Option<String>" }
+            - { name: raw_status, type: String }
+            - { name: resolution_action, type: "Option<LegacyConflictResolutionAction>" }
+            - { name: raw_resolution_action, type: "Option<String>" }
+            - { name: resolution_notes, type: "Option<String>" }
+            - { name: timestamps, type: LegacyConflictTimestamps }
+      functions:
+        - name: read_legacy_conflict_history
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: conflict_id, type: i64 }
+          output: "Result<LegacyConflictHistoryRow, RepositoryError>"
+          errors: [NotFound, RepositoryError]
+    crate_private_api:
+      functions:
+        - name: close_legacy_conflicts_for_work_delete_in_tx
+          caller: SqliteWorkDelete::delete_work_set_in_tx only
+          availability: B0-B3 serving prefixes only; its marker-absent write permit is never issued after B4
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: permit, type: "&LegacyPreCutoverWritePermit" }
+            - { name: user_id, type: UserId }
+            - { name: work_ids, type: "&[WorkId]" }
+          output: "Result<Vec<LegacyConflictHistoryRow>, RepositoryError>"
+          errors: [PostCutoverWriteForbidden, RepositoryError]
+        - name: scan_legacy_conflicts_for_cutover_in_tx
+          caller: run_conflict_authority_cutover_in_activation_tx only
+          availability: B4 activation transaction with marker absent only
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: permit, type: "&CutoverReadPermit" }
+          output: "Result<Vec<LegacyConflictHistoryRow>, RepositoryError>"
+          errors: [InvalidCutoverPermit, RepositoryError]
+
+  - name: conflict_cutover
+    crate: livrarr-db
+    responsibility: Own B4's once-only all-or-nothing adoption, v2 diagnostic counting, corrected undo translation, post-marker access guard, and total legacy mapping.
+    requirements: [REQ-006]
+    build_units: [B0, B1, B4]
+    dependencies: [identity_authority_contracts, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, absorption_store, legacy_identity_conflict_history]
+    public_api:
+      types:
+        - kind: sealed-report
+          name: ConflictCutoverReport
+          visibility: pub(crate)
+          constructor: run_conflict_authority_cutover_in_activation_tx only
+          fields:
+            - { name: marker_version, type: i64 }
+            - { name: adoption_counts, type: "Vec<LegacyAdoptionCount>" }
+            - { name: adopted_pending, type: u64 }
+            - { name: adopted_resolved, type: u64 }
+            - { name: adopted_cancelled, type: u64 }
+            - { name: work_deleted_history, type: u64 }
+            - { name: non_keyable_route_conflicts, type: u64 }
+            - { name: history_only, type: u64 }
+            - { name: extra_pointer_cards_cancelled, type: u64 }
+            - { name: pointer_cards_without_row_cancelled, type: u64 }
+            - { name: translated_absorption_records, type: u64 }
+            - { name: park_cards_backfilled, type: u64 }
+            - { name: v2_pending, type: u64 }
+            - { name: v2_current_diagnostics, type: u64 }
+            - { name: inert_v1_group_dismissals, type: u64 }
+            - { name: report_digest, type: Digest }
+        - kind: struct
+          name: LegacyAdoptionCell
+          fields:
+            - { name: subject, type: LegacySubjectValidity }
+            - { name: payload, type: LegacyPayloadValidity }
+            - { name: keyability, type: LegacyKeyability }
+            - { name: status, type: LegacyConflictStatus }
+            - { name: close_provenance, type: LegacyCloseProvenance }
+            - { name: disposition, type: LegacyAdoptionDisposition }
+        - kind: struct
+          name: LegacyAdoptionCount
+          fields:
+            - { name: cell, type: LegacyAdoptionCell }
+            - { name: count, type: u64 }
+        - kind: enum
+          name: LegacyAdoptionTableError
+          fields:
+            - { name: MissingAdoptionCell, type: String }
+            - { name: DuplicateAdoptionCell, type: LegacyAdoptionCell }
+            - { name: IllegalLedgerEffect, type: LegacyAdoptionCell }
+      functions:
+        - name: effective_v2_diagnostic_currentness
+          inputs:
+            - { name: diagnostic, type: "&StagingConflictDiagnostic" }
+            - { name: operation, type: "Option<&AbsorptionRecord>" }
+          output: bool
+          errors: []
+        - name: legacy_adoption_table
+          inputs: []
+          output: "&'static [LegacyAdoptionCell]"
+          errors: []
+        - name: validate_legacy_adoption_totality
+          inputs:
+            - { name: table, type: "&[LegacyAdoptionCell]" }
+          output: "Result<(), LegacyAdoptionTableError>"
+          errors: [MissingAdoptionCell, DuplicateAdoptionCell, IllegalLedgerEffect]
+    crate_private_api:
+      functions:
+        - name: run_conflict_authority_cutover_in_activation_tx
+          caller: SqliteIdentityAuthorityActivation::activate_identity_authority only
+          constructs: ConflictCutoverReport
+          inputs:
+            - { name: tx, type: "&mut ImmediateTransaction" }
+            - { name: permit, type: CutoverReadPermit }
+            - { name: request, type: ConflictCutoverRequest }
+          output: "Result<ConflictCutoverReport, ConflictCutoverError>"
+          errors: [PointerCensusMismatch, TranslationPolarityMismatch, CountMismatch, RepositoryError]
+
+  - name: identity_authority_repository
+    crate: livrarr-db
+    responsibility: Implement IdentityAuthorityRepository by composing the sole card, route-plan, absorption, delete, legacy-history, and conflict-state authorities inside one ImmediateTransaction per action; also house the existing SQLite identity-clear, F2 settlement, runtime-conflict, and claimed-completion adapters that consume the same card authority without exposing another seam. execute_absorption moves that writer and a borrow of the repository's existing SqliteWorkDelete into OpenAbsorptionOperation; after open the repository retains neither a raw writer nor a second delete authority.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, route_plan, absorption_store, work_delete, legacy_identity_conflict_history, conflict_cutover]
+    public_api:
+      types:
+        - kind: struct
+          name: SqliteIdentityAuthorityRepository
+          transaction_ownership: "each mutating IdentityAuthorityRepository method calls begin_identity_authority_write and commits exactly once; execute_absorption moves the resulting capability into open_absorption_operation together with &self.work_delete, so only the open operation can lend the writer to the one delete authority until seal"
+          fields:
+            - { name: pool, type: "private sqlx::SqlitePool" }
+            - { name: effect_manifest, type: "private Arc<EffectManifest>" }
+            - { name: activation_report, type: "private Arc<ActivationReport>" }
+            - { name: work_delete, type: "private SqliteWorkDelete" }
+      functions:
+        - name: new_identity_authority_repository
+          construction: "wrap ActivationReport in Arc, retain one Arc on the repository, and pass an Arc clone to new_work_delete_authority"
+          inputs:
+            - { name: pool, type: "sqlx::SqlitePool" }
+            - { name: effect_manifest, type: "Arc<EffectManifest>" }
+            - { name: activation_report, type: ActivationReport }
+          output: SqliteIdentityAuthorityRepository
+          errors: []
+    crate_private_api:
+      functions:
+        - name: apply_identity_clear
+          caller: "existing WorkIdentityRepository::apply_identity_clear implementation; clear_identity_slot transports its result"
+          inputs:
+            - { name: self, type: "&SqliteDb" }
+            - { name: work_id, type: WorkId }
+            - { name: user_id, type: UserId }
+            - { name: slot, type: AnchorType }
+          output: "Result<ClearedSlot, IdentityEditError>"
+          errors: [IdentityEditError]
+        - name: raise_identity_conflict_in_tx
+          caller: "commit_settlement_in_tx on the live F2 road; raise_identity_conflict and the claimed-completion path remain pre-cutover compatibility callers; conn is borrowed from the caller's already-open immediate write transaction"
+          inputs:
+            - { name: conn, type: "&mut SqliteConnection" }
+            - { name: conflict, type: "&NewIdentityConflict" }
+          output: "Result<i64, sqlx::Error>"
+          errors: [sqlx::Error]
+        - name: commit_settlement_in_tx
+          caller: "persist_settlement plus the existing settle_manual_import_minimum attach/create arms; the live F2 IdentityRoadServiceImpl::settle reaches persist_settlement through commit_settlement_with_review_context"
+          inputs:
+            - { name: tx, type: "&mut sqlx::Transaction<'static, sqlx::Sqlite>" }
+            - { name: command, type: "&SettlementCommit" }
+            - { name: origin, type: ReviewCardMintOrigin }
+            - { name: validated_explicit_choice, type: bool }
+          output: "Result<SettlementTxResult, IdentityRepositoryError>"
+          errors: [IdentityRepositoryError]
+        - name: complete_anchors
+          caller: "existing WorkIdentityRepository::complete_anchors implementation; route-authoritative convergence supplies IdentityPark completion through this seam, while the existing async-resolver caller is pre-cutover compatibility only"
+          inputs:
+            - { name: self, type: "&SqliteDb" }
+            - { name: work_id, type: WorkId }
+            - { name: expected_generation, type: i64 }
+            - { name: completion, type: IdentityCompletion }
+          output: "Result<IdentityCompletionOutcome, WorkIdentityError>"
+          errors: [WorkIdentityError]
+
+  - name: identity_road
+    crate: livrarr-metadata
+    responsibility: Run the same-book rule inside the one identity road, authorize every typed continuation, construct pairwise elections, coordinate DB-first then file completion, hand a committed Incoming create to the existing infallible HistoryService observer without making that observer part of create success, carry a route-authoritative same-provider contradiction into the existing F2 settlement transaction, and own the existing convergence function's route-authoritative post-B4 park trigger through its existing database repository trait.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services]
+    public_api:
+      types:
+        - kind: struct
+          name: IdentityRoad
+          fields:
+            - { name: repository, type: "Arc<R> where R: IdentityAuthorityRepository" }
+            - { name: files, type: "Arc<F> where F: FileReorganizationService" }
+            - { name: history, type: "Arc<H> where H: HistoryService" }
+      functions:
+        - name: new_identity_road
+          inputs:
+            - { name: repository, type: "Arc<R> where R: IdentityAuthorityRepository" }
+            - { name: files, type: "Arc<F> where F: FileReorganizationService" }
+            - { name: history, type: "Arc<H> where H: HistoryService" }
+          output: "IdentityRoad<R, F, H>"
+          errors: []
+        - name: classify_identity_distinctness
+          inputs:
+            - { name: proposal, type: "&WorkIdentityEvidence" }
+            - { name: member, type: "&CapturedIdentity" }
+          output: IdentityDistinctness
+          errors: []
+        - name: list_review_snapshots
+          inputs:
+            - { name: query, type: ReviewListQuery }
+          output: "Result<Vec<ReviewCardReadSnapshot>, IdentityAuthorityError>"
+          errors: [Storage]
+        - name: read_review_snapshot
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: card_id, type: ReviewCardId }
+          output: "Result<ReviewCardReadSnapshot, IdentityAuthorityError>"
+          errors: [NotFound, Forbidden, Storage]
+        - name: preview_review
+          inputs:
+            - { name: request, type: ReviewPreviewRequest }
+          output: "Result<ReviewPreviewSnapshot, IdentityAuthorityError>"
+          errors: [NotFound, Forbidden, Refused, EffectManifestIncomplete, Storage]
+        - name: resolve_review
+          absorbing_request: "only an accepted absorbing card action constructs UserElection { origin: ReviewContinuation { card_id }, user_id, decision }; nonabsorbing actions construct no absorption request"
+          inputs:
+            - { name: request, type: VerifiedReviewDecisionRequest }
+          output: "Result<ReviewDecisionOutcome, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: preview_merge
+          inputs:
+            - { name: request, type: MergePreviewRequest }
+          output: "Result<MergePreviewSnapshot, IdentityAuthorityError>"
+          errors: [InvalidRequest, NotFound, Refused, Storage]
+        - name: execute_merge
+          absorbing_request: "construct UserElection { origin: ManualPair, user_id, decision }; no caller supplies a unified origin or actor"
+          inputs:
+            - { name: request, type: VerifiedMergeExecuteRequest }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: execute_settlement_auto_merge
+          absorbing_request: "construct MachineSnapshot { origin: SettlementAutoMerge, snapshot }; the named wrapper fixes the origin"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: execute_dedup_residue_heal_absorption
+          absorbing_request: "construct MachineSnapshot { origin: DedupResidueHeal, snapshot }; the named wrapper fixes the origin"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: execute_article_duplicate_heal_absorption
+          absorbing_request: "construct MachineSnapshot { origin: ArticleDuplicateHeal, snapshot }; the named wrapper fixes the origin"
+          inputs:
+            - { name: snapshot, type: MachineAbsorptionSnapshot }
+          output: "Result<AbsorptionOutcome, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: undo_absorption
+          inputs:
+            - { name: request, type: UndoAbsorptionRequest }
+          output: "Result<UndoOutcome, IdentityAuthorityError>"
+          errors: [NotFound, StaleDecision, Refused, EffectManifestIncomplete, Storage]
+        - name: read_absorption
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: record_id, type: AbsorptionRecordId }
+          output: "Result<AbsorptionView, IdentityAuthorityError>"
+          errors: [NotFound, Forbidden, Storage]
+    crate_private_api:
+      functions:
+        - name: verify_card_decision
+          caller: IdentityRoad::resolve_review only
+          constructs: VerifiedCardDecision
+          inputs:
+            - { name: self, type: "&IdentityRoad<R, F, H>" }
+            - { name: request, type: "&VerifiedReviewDecisionRequest" }
+          output: "Result<VerifiedCardDecision, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, Storage]
+        - name: verify_election_decision
+          caller: IdentityRoad::resolve_review or IdentityRoad::execute_merge only
+          constructs: VerifiedElectionDecision
+          inputs:
+            - { name: self, type: "&IdentityRoad<R, F, H>" }
+            - { name: user_id, type: UserId }
+            - { name: snapshot, type: ElectionDecisionSnapshot }
+          output: "Result<VerifiedElectionDecision, IdentityAuthorityError>"
+          errors: [StaleDecision, Refused, Storage]
+        - name: observe_created_distinct_added
+          caller: IdentityRoad::resolve_review only, after the repository has committed CreatedDistinct
+          observer: "call the injected infallible HistoryService::record exactly once with history_events::added and the persisted CreatedDistinctOutcome.add_source"
+          inputs:
+            - { name: self, type: "&IdentityRoad<R, F, H>" }
+            - { name: user_id, type: UserId }
+            - { name: created, type: "&CreatedDistinctOutcome" }
+          output: unit
+          errors: []
+        - name: converge_work
+          caller: "WorkService::converge_work thin wrapper only"
+          generic_bounds:
+            - "D: WorkDb + WorkDbCreate + AuthorDb + LibraryItemDb + GrabDb + ProvenanceDb + EnrichmentRetryDb + livrarr_db::ProviderRetryStateDb + ConfigDb + livrarr_db::SeriesDb + livrarr_db::HistoryDb + livrarr_db::AuthorLinkDb + livrarr_domain::services::WorkIdentityRepository + livrarr_domain::identity_layer::WorkIdentityRepository + Send + Sync"
+            - "E: EnrichmentWorkflow + Send + Sync"
+            - "H: HttpFetcher + Clone + Send + Sync + 'static"
+          inputs:
+            - { name: svc, type: "&WorkServiceImpl<D, E, H>" }
+            - { name: user_id, type: UserId }
+            - { name: work_id, type: WorkId }
+            - { name: threshold, type: u32 }
+            - { name: source_provider_data, type: "Option<SourceProviderData>" }
+          output: "Result<ConvergencePass, WorkServiceError>"
+          errors: [WorkServiceError]
+
+  - name: library_item_path_store
+    crate: livrarr-db
+    responsibility: Own the user-scoped LibraryItem path reads and the sole expected-path compare-and-set update used by the no-clobber reorganization result seam; library_items gains no revision column.
+    requirements: [REQ-004]
+    build_units: [B1, B3]
+    dependencies: [identity_authority_contracts, identity_authority_transaction]
+    public_api:
+      types: []
+      functions:
+        - name: list_work_item_paths
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: work_ids, type: "&[WorkId]" }
+          output: "Result<Vec<LibraryItemPathSnapshot>, RepositoryError>"
+          errors: [RepositoryError]
+        - name: compare_and_set_item_path
+          transaction: "begin_identity_authority_write -> one user/item/expected-path update -> commit_identity_authority_write"
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: item_id, type: LibraryItemId }
+            - { name: expected_path, type: "&Path" }
+            - { name: new_path, type: "&Path" }
+          output: "Result<PathCompareAndSetOutcome, RepositoryError>"
+          errors: [RepositoryError]
+
+  - name: file_reorganization
+    crate: livrarr-library
+    responsibility: Replace the split check-and-move path with one no-clobber primitive and expose the shared forward/undo item-complete result seam; reorganize_items is the sole FileMoveReport constructor and the service/work wrappers only transport its report.
+    requirements: [REQ-004]
+    build_units: [B1, B3]
+    dependencies: [identity_authority_contracts, identity_authority_services, library_item_path_store]
+    public_api:
+      types:
+        - kind: enum
+          name: NoClobberMoveOutcome
+          fields:
+            - { name: Moved, type: "{ method: MoveMethod, destination: PathBuf }" }
+            - { name: DestinationOccupied, type: "{ source: PathBuf, destination: PathBuf }" }
+            - { name: CopiedWithSourceLeft, type: "{ source: PathBuf, destination: PathBuf }" }
+            - { name: SourceMissing, type: "{ recorded: PathBuf, destination: PathBuf }" }
+            - { name: Failed, type: "{ source: PathBuf, destination: PathBuf, reason: String }" }
+        - kind: struct
+          name: FileReorganizer
+          fields:
+            - { name: item_repository, type: "Arc<D> where D: LibraryItemDb" }
+            - { name: path_builder, type: "Arc<P> where P: PathBuilder" }
+      functions:
+        - name: move_no_clobber
+          inputs:
+            - { name: request, type: NoClobberMoveRequest }
+          output: "Result<NoClobberMoveOutcome, FileReorganizationError>"
+          errors: [InvalidPath, FilesystemFailure]
+        - name: reorganize_items
+          constructs: FileMoveReport
+          inputs:
+            - { name: request, type: FileReorganizationRequest }
+          output: "Result<FileMoveReport, FileReorganizationError>"
+          errors: [InvalidPath, RepositoryFailure]
+        - name: reorganize_work_files
+          returns: "the FileMoveReport returned by reorganize_items; no second construction"
+          inputs:
+            - { name: request, type: WorkFileReorganizationRequest }
+          output: "Result<FileMoveReport, FileReorganizationError>"
+          errors: [InvalidPath, RepositoryFailure]
+
+  - name: identity_authority_activation
+    crate: livrarr-db
+    responsibility: Own the only constructor of every type in identity_authority_activation_contracts. The production function derives the compiled build prefix, validates every totality table and the live-schema effect manifest, returns a sealed ActivationReport with Some(LegacyPreCutoverWritePermit) only for B0-B3, or runs the one-shot B4 cutover and returns that field as None.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, route_plan, absorption_store, legacy_identity_conflict_history, conflict_cutover]
+    public_api:
+      types:
+        - kind: enum
+          name: ActivationCheck
+          fields:
+            - { name: AuthorizationTable, type: unit }
+            - { name: RouteMatrixCoverage, type: unit }
+            - { name: RetentionPolicy, type: unit }
+            - { name: LegacyAdoption, type: unit }
+            - { name: EffectManifest, type: unit }
+            - { name: ConflictCutover, type: unit }
+        - kind: enum
+          name: ActivationError
+          fields:
+            - { name: UnsupportedBuildPrefix, type: BuildUnitPrefix }
+            - { name: CheckFailed, type: "{ check: ActivationCheck, detail: String }" }
+            - { name: EffectManifestIncomplete, type: "Vec<UnclassifiedEffect>" }
+            - { name: ConflictCutover, type: String }
+            - { name: Storage, type: String }
+        - kind: struct
+          name: SqliteIdentityAuthorityActivation
+          fields:
+            - { name: pool, type: "private sqlx::SqlitePool" }
+      functions:
+        - name: "SqliteIdentityAuthorityActivation::activate_identity_authority"
+          constructs: [MarkerAbsent, LegacyPreCutoverWritePermit, CutoverReadPermit, ConflictCutoverRequest, RecordedAbsorptionPermit, AbsorptionCapability, ActivationReport]
+          consumes: "the ConflictCutoverReport returned by run_conflict_authority_cutover_in_activation_tx on B4, recording its digest in ActivationReport"
+          construction_branches: "B0-B3 derive marker absence from the activation-owned check and seal Some(LegacyPreCutoverWritePermit) into the report; B4 uses CutoverReadPermit plus ConflictCutoverRequest in the private cutover chain and seals None after commit; no branch infers absence from a readable _livrarr_meta row"
+          inputs:
+            - { name: self, type: "&SqliteIdentityAuthorityActivation" }
+          output: "Result<ActivationReport, ActivationError>"
+          errors: [UnsupportedBuildPrefix, CheckFailed, EffectManifestIncomplete, ConflictCutover, Storage]
+
+  - name: identity_authority_application
+    crate: livrarr-server
+    responsibility: Thinly call the livrarr-db production activation function before serve, consume its sealed report to compose the road, repository, proof codec, file service, and route handlers, and perform no prefix, table, manifest, or cutover policy itself.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_activation, identity_authority_repository, identity_road, file_reorganization, identity_authority_handlers]
+    public_api:
+      types:
+        - kind: newtype
+          name: SecretBytes
+          fields:
+            - { name: bytes, type: "private Vec<u8>" }
+        - kind: struct
+          name: AuthenticatedDecisionProofCodec
+          fields:
+            - { name: key_id, type: String }
+            - { name: signing_key, type: "private SecretBytes" }
+        - kind: struct
+          name: IdentityAuthorityApplication
+          fields:
+            - { name: road, type: "Arc<R> where R: IdentityAuthorityRoad" }
+            - { name: proof_codec, type: AuthenticatedDecisionProofCodec }
+      functions:
+        - name: issue_decision_proof
+          constructs: DecisionProof
+          inputs:
+            - { name: payload, type: DecisionProofPayload }
+          output: "Result<DecisionProof, DecisionProofError>"
+          errors: [SerializationFailure, SigningFailure]
+        - name: verify_decision_proof
+          inputs:
+            - { name: user_id, type: UserId }
+            - { name: proof, type: "&DecisionProof" }
+          output: "Result<DecisionProofPayload, DecisionProofError>"
+          errors: [Malformed, UnknownKey, InvalidAuthentication, WrongUser]
+        - name: activate_identity_authority
+          composition: "call the DB activation function, pass its report into new_identity_authority_repository, and pass the repository plus the existing file and history services into new_identity_road"
+          inputs:
+            - { name: activation, type: "&SqliteIdentityAuthorityActivation" }
+            - { name: files, type: "Arc<F> where F: FileReorganizationService" }
+            - { name: history, type: "Arc<H> where H: HistoryService" }
+          output: "Result<IdentityAuthorityApplication, ActivationError>"
+          errors: [ActivationError]
+    crate_private_api:
+      functions:
+        - name: authenticate_review_decision
+          caller: IdentityAuthorityService::resolve_review only
+          constructs: VerifiedReviewDecisionRequest
+          inputs:
+            - { name: codec, type: "&AuthenticatedDecisionProofCodec" }
+            - { name: request, type: ReviewDecisionRequest }
+          output: "Result<VerifiedReviewDecisionRequest, DecisionProofError>"
+          errors: [Malformed, UnknownKey, InvalidAuthentication, WrongUser]
+        - name: authenticate_merge_execute
+          caller: IdentityAuthorityService::execute_merge only
+          constructs: VerifiedMergeExecuteRequest
+          inputs:
+            - { name: codec, type: "&AuthenticatedDecisionProofCodec" }
+            - { name: request, type: MergeExecuteRequest }
+          output: "Result<VerifiedMergeExecuteRequest, DecisionProofError>"
+          errors: [Malformed, UnknownKey, InvalidAuthentication, WrongUser]
+
+  - name: identity_authority_handlers
+    crate: livrarr-handlers
+    responsibility: In identity_authority.rs, validate HTTP shapes, echo opaque proofs to the domain service, and map typed outcomes; in the existing Work list/detail handlers and secondary Work projection helper, transport repository-provided identity presentation fields without deriving them; contain no identity, route, SQL, or filesystem logic. The old identity_conflicts.rs module is deleted; if a routing shim remains, it only re-exports the new handler, declares no request DTO, and may not retain removed request members.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services]
+    public_api:
+      types:
+        - kind: trait
+          name: HasIdentityAuthorityService
+          fields:
+            - { name: identity_authority_service, type: "&S where S: IdentityAuthorityService" }
+        - kind: struct
+          name: ReviewListHttpQuery
+          fields:
+            - { name: statuses, type: "Vec<ReviewCardStatus>" }
+            - { name: kinds, type: "Vec<ReviewKind>" }
+            - { name: work_id, type: "Option<i64>" }
+        - kind: struct
+          name: ReviewPreviewHttpRequest
+          fields:
+            - { name: action, type: ReviewAction }
+            - { name: elected_survivor_id, type: "Option<i64>" }
+            - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+        - kind: struct
+          name: MergePreviewHttpRequest
+          fields:
+            - { name: other_work_id, type: i64 }
+            - { name: elected_survivor_id, type: i64 }
+            - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+        - kind: struct
+          name: MergeExecuteHttpRequest
+          fields:
+            - { name: decision_proof, type: String }
+        - kind: struct
+          name: DecisionHttpRequest
+          fields:
+            - { name: action, type: ReviewAction }
+            - { name: decision_proof, type: String }
+        - kind: enum
+          name: ConflictDecisionHttpAction
+          fields:
+            - { name: KeepExisting, type: unit }
+            - { name: AcceptSeparate, type: unit }
+            - { name: ReplaceAnchor, type: unit }
+            - { name: Merge, type: unit }
+            - { name: Dismiss, type: unit }
+        - kind: struct
+          name: ConflictDecisionHttpRequest
+          serde_unknown_fields: ignored
+          fields:
+            - { name: action, type: ConflictDecisionHttpAction }
+            - { name: decision_proof, type: String }
+        - kind: enum
+          name: DecisionHttpOutcome
+          fields:
+            - { name: Body, type: ReviewDecisionOutcome }
+            - { name: NoContent, type: unit }
+        - kind: struct
+          name: UndoAbsorptionHttpRequest
+          fields:
+            - { name: record_id, type: i64 }
+            - { name: expected_record_revision, type: i64 }
+      functions:
+        - name: list
+          generic_bounds:
+            - "S: HasWorkService + HasFileService + HasIdentityLayerRepository"
+          inputs:
+            - { name: state, type: "State<S>" }
+            - { name: ctx, type: AuthContext }
+            - { name: pq, type: "Query<crate::PaginationQuery>" }
+          output: "Result<Json<crate::PaginatedResponse<WorkDetailResponse>>, ApiError>"
+          errors: [ApiError]
+        - name: get
+          generic_bounds:
+            - "S: HasWorkService + HasFileService + HasIdentityLayerRepository"
+          inputs:
+            - { name: state, type: "State<S>" }
+            - { name: ctx, type: AuthContext }
+            - { name: id, type: "Path<i64>" }
+          output: "Result<Json<WorkDetailResponse>, ApiError>"
+          errors: [ApiError]
+        - name: list_review
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: query, type: ReviewListHttpQuery }
+          output: "Result<Json<Vec<ReviewCardView>>, AppError>"
+          errors: [BadRequest, Forbidden, Internal]
+        - name: get_review
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: card_id, type: i64 }
+          output: "Result<Json<ReviewCardView>, AppError>"
+          errors: [Forbidden, NotFound, Internal]
+        - name: preview_review
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: card_id, type: i64 }
+            - { name: request, type: ReviewPreviewHttpRequest }
+          output: "Result<Json<ReviewDecisionPreview>, AppError>"
+          errors: [BadRequest, Forbidden, NotFound, Conflict, Internal]
+        - name: preview_merge
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: work_id, type: i64 }
+            - { name: request, type: MergePreviewHttpRequest }
+          output: "Result<Json<MergePreview>, AppError>"
+          errors: [BadRequest, Forbidden, Conflict, Internal]
+        - name: execute_merge
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: request, type: MergeExecuteHttpRequest }
+          output: "Result<Json<AbsorptionOutcome>, AppError>"
+          errors: [BadRequest, Forbidden, NotFound, Conflict, Internal]
+        - name: resolve_review
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: card_id, type: i64 }
+            - { name: request, type: DecisionHttpRequest }
+          output: "Result<DecisionHttpOutcome, AppError>"
+          errors: [BadRequest, Forbidden, NotFound, Conflict, Internal]
+        - name: resolve_conflict
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: card_id, type: i64 }
+            - { name: request, type: ConflictDecisionHttpRequest }
+          output: "Result<DecisionHttpOutcome, AppError>"
+          errors: [BadRequest, Forbidden, NotFound, Conflict, Internal]
+        - name: undo_absorption
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: request, type: UndoAbsorptionHttpRequest }
+          output: "Result<Json<UndoOutcome>, AppError>"
+          errors: [BadRequest, Forbidden, NotFound, Conflict, Internal]
+        - name: read_absorption
+          inputs:
+            - { name: state, type: "State<S: HasIdentityAuthorityService>" }
+            - { name: record_id, type: i64 }
+          output: "Result<Json<AbsorptionView>, AppError>"
+          errors: [Forbidden, NotFound, Internal]
+    crate_private_api:
+      functions:
+        - name: project_work_identity_presentations
+          caller: "author page, series detail, and Work add/update/merge/refresh/clear-response projections only; the Work list and Work detail GET handlers do not call this helper"
+          generic_bounds:
+            - "S: HasIdentityLayerRepository"
+          inputs:
+            - { name: state, type: "&S" }
+            - { name: user_id, type: "livrarr_domain::UserId" }
+            - { name: details, type: "&mut [WorkDetailResponse]" }
+          output: "Result<(), ApiError>"
+          errors: [ApiError]
+
+  - name: identity_authority_client
+    crate: frontend
+    responsibility: Present only server-authorized actions, preserve Work-keyed choices, echo decision proofs, and show retired routes plus truthful per-file forward or undo results.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_handlers]
+    public_api:
+      types:
+        - kind: type-alias
+          name: ReviewKindDto
+          fields:
+            - { name: value, type: "'identity_conflict' | 'pending_route' | 'group_identity' | 'identity_park' | 'field_resolution' | 'contributor_order' | 'edition_evidence' | 'import_identity' | 'migration_repair' | 'invariant_repair'" }
+        - kind: type-alias
+          name: ReviewActionKindDto
+          fields:
+            - { name: value, type: "'group_different_from_all' | 'group_attach_or_merge' | 'pending_route_affirm' | 'conflict_keep_existing' | 'conflict_accept_separate' | 'conflict_replace_anchor' | 'conflict_merge' | 'dismiss' | 'park_choose_candidate' | 'park_dismiss' | 'field_choose_preserved_value' | 'field_explicit_absence' | 'contributor_order_resolve' | 'edition_choose_direct_evidence' | 'edition_retain_unknown_or_absent' | 'edition_archive_empty_shell' | 'import_corrected_metadata_retry' | 'import_resolving_identifier' | 'import_explicit_identity_or_minimum' | 'migration_correct_typed_value' | 'migration_assign_scope_and_owner' | 'migration_discard_proven_non_identity' | 'invariant_recompute' | 'invariant_supply_missing_reference' | 'invariant_discard_malformed_derived_row'" }
+        - kind: type-alias
+          name: ReviewCardStatusDto
+          fields:
+            - { name: value, type: "'pending' | 'resolved' | 'cancelled'" }
+        - kind: type-alias
+          name: GroupIdentityRoleDto
+          fields:
+            - { name: value, type: "{ kind: 're_identify'; workId: number; proposer: 'user' | 'machine' } | { kind: 'incoming'; addSource: string } | { kind: 'merge_members' | 'none' | 'unknown' }" }
+        - kind: type-alias
+          name: ReviewCardDisplayPayloadDto
+          fields:
+            - { name: value, type: "{ kind: 'group_identity'; value: GroupIdentityPayloadV2 } | { kind: 'identity_conflict'; value: ConflictCardPayloadV1 } | { kind: 'identity_park'; value: IdentityParkPayloadV1 } | { kind: 'opaque_legacy_history'; value: { sourceLegacyConflictId: number; legacyKind: string; legacySource: string; resolutionNotes: string | null; legacyRaisedAt: string; legacyResolvedAt: string | null; historyOnlyReason: string } } | { kind: 'existing'; value: ExistingReviewPayload }" }
+        - kind: interface
+          name: ReviewActionAvailabilityDto
+          fields:
+            - { name: action, type: ReviewActionKindDto }
+            - { name: proofClass, type: "'card' | 'election' | 'refused' | 'history_only'" }
+            - { name: decisionProof, type: "string | null" }
+            - { name: requiresPreview, type: boolean }
+            - { name: refusal, type: "string | null" }
+        - kind: interface
+          name: ReviewCardDto
+          fields:
+            - { name: id, type: number }
+            - { name: kind, type: ReviewKindDto }
+            - { name: subjectWorkId, type: "number | null" }
+            - { name: cohortWorkIds, type: "number[]" }
+            - { name: role, type: "GroupIdentityRoleDto | null" }
+            - { name: origin, type: string }
+            - { name: status, type: ReviewCardStatusDto }
+            - { name: payload, type: ReviewCardDisplayPayloadDto }
+            - { name: resolutionAction, type: "ReviewResolutionKind | null" }
+            - { name: resolutionNotes, type: "string | null" }
+            - { name: createdAt, type: string }
+            - { name: resolvedAt, type: "string | null" }
+            - { name: actions, type: "ReviewActionAvailabilityDto[]" }
+            - { name: historyOnlyReason, type: "string | null" }
+        - kind: interface
+          name: MergeFieldPreviewDto
+          fields:
+            - { name: field, type: string }
+            - { name: values, type: "Array<{ workId: number; present: boolean; value: unknown }>" }
+            - { name: keepFromWorkId, type: number }
+        - kind: interface
+          name: RouteRetirementDto
+          fields:
+            - { name: provider, type: string }
+            - { name: kind, type: string }
+            - { name: id, type: string }
+            - { name: userConfirmed, type: boolean }
+            - { name: reason, type: string }
+        - kind: interface
+          name: FileImpactItemDto
+          fields:
+            - { name: libraryItemId, type: number }
+            - { name: originWorkId, type: number }
+            - { name: recordedPath, type: string }
+            - { name: destinationPath, type: string }
+            - { name: willMove, type: boolean }
+        - kind: interface
+          name: FileImpactDto
+          fields:
+            - { name: items, type: "FileImpactItemDto[]" }
+            - { name: survivorCanonicalRoot, type: string }
+            - { name: explanation, type: string }
+        - kind: interface
+          name: MergePreviewDto
+          fields:
+            - { name: pair, type: "[number, number]" }
+            - { name: electedSurvivorId, type: number }
+            - { name: fields, type: "MergeFieldPreviewDto[]" }
+            - { name: retiredRoutes, type: "RouteRetirementDto[]" }
+            - { name: fileImpact, type: FileImpactDto }
+            - { name: decisionProof, type: string }
+        - kind: interface
+          name: ReviewDecisionPreviewDto
+          fields:
+            - { name: card, type: ReviewCardDto }
+            - { name: action, type: ReviewActionKindDto }
+            - { name: merge, type: "MergePreviewDto | null" }
+            - { name: decisionProof, type: string }
+        - kind: interface
+          name: FileMoveResultDto
+          fields:
+            - { name: libraryItemId, type: number }
+            - { name: originWorkId, type: number }
+            - { name: disposition, type: "'moved' | 'already_canonical' | 'record_healed' | 'destination_occupied' | 'copied_with_source_left' | 'source_missing' | 'record_mismatch' | 'move_failed' | 'record_update_failed'" }
+            - { name: recordPath, type: string }
+            - { name: fileLocations, type: "string[]" }
+            - { name: reason, type: "string | null" }
+        - kind: interface
+          name: UndoFilePreviewDto
+          fields:
+            - { name: libraryItemId, type: number }
+            - { name: currentRecordedPath, type: string }
+            - { name: restoreDestination, type: string }
+            - { name: forwardDisposition, type: "FileMoveResultDto['disposition'] | null" }
+        - kind: interface
+          name: AbsorptionViewDto
+          fields:
+            - { name: recordId, type: number }
+            - { name: recordVersion, type: number }
+            - { name: recordRevision, type: "number | null" }
+            - { name: survivorWorkId, type: "number | null" }
+            - { name: absorbedWorkIds, type: "number[]" }
+            - { name: state, type: "'active' | 'undoing' | 'undone' | null" }
+            - { name: origin, type: "string | null" }
+            - { name: undoAvailability, type: "'available' | 'already_undone' | 'retry_file_step' | 'refused'" }
+            - { name: undoRefusal, type: "string | null" }
+            - { name: forwardFiles, type: "FileMoveResultDto[] | null" }
+            - { name: forwardFileComplete, type: "boolean | null" }
+            - { name: undoFiles, type: "FileMoveResultDto[] | null" }
+            - { name: undoFileComplete, type: "boolean | null" }
+            - { name: incompleteFiles, type: "FileMoveResultDto[]" }
+            - { name: fileMovesOnUndo, type: "UndoFilePreviewDto[]" }
+            - { name: pendingQuestionIds, type: "number[]" }
+        - kind: interface
+          name: AbsorptionOutcomeDto
+          fields:
+            - { name: absorption, type: AbsorptionViewDto }
+            - { name: survivor, type: Work }
+            - { name: forwardFiles, type: "FileMoveResultDto[]" }
+        - kind: interface
+          name: ReviewDecisionOutcomeDto
+          fields:
+            - { name: kind, type: "'resolved' | 'cancelled' | 'attached' | 'created_distinct' | 'absorbed' | 'park_resolved' | 'conflict_resolved'" }
+            - { name: card, type: "ReviewCardDto | null" }
+            - { name: workId, type: "number | null" }
+            - { name: survivorWorkId, type: "number | null" }
+            - { name: absorptionRecordId, type: "number | null" }
+            - { name: files, type: "FileMoveResultDto[]" }
+            - { name: message, type: "string | null" }
+        - kind: interface
+          name: UndoOutcomeDto
+          fields:
+            - { name: recordId, type: number }
+            - { name: state, type: "'undoing' | 'undone'" }
+            - { name: alreadyUndone, type: boolean }
+            - { name: files, type: "FileMoveResultDto[]" }
+      functions:
+        - name: listReview
+          inputs:
+            - { name: query, type: ReviewListHttpQuery }
+          output: "Promise<ReviewCardDto[]>"
+          errors: [ApiError]
+        - name: getReview
+          inputs:
+            - { name: cardId, type: number }
+          output: "Promise<ReviewCardDto>"
+          errors: [ApiError]
+        - name: previewReview
+          inputs:
+            - { name: cardId, type: number }
+            - { name: request, type: ReviewPreviewHttpRequest }
+          output: "Promise<ReviewDecisionPreviewDto>"
+          errors: [ApiError]
+        - name: previewMerge
+          inputs:
+            - { name: workId, type: number }
+            - { name: request, type: MergePreviewHttpRequest }
+          output: "Promise<MergePreviewDto>"
+          errors: [ApiError]
+        - name: executeMerge
+          inputs:
+            - { name: request, type: MergeExecuteHttpRequest }
+          output: "Promise<AbsorptionOutcomeDto>"
+          errors: [ApiError]
+        - name: executeReviewDecision
+          inputs:
+            - { name: cardId, type: number }
+            - { name: request, type: DecisionHttpRequest }
+          output: "Promise<ReviewDecisionOutcomeDto | null>"
+          errors: [ApiError]
+        - name: executeConflictDecision
+          inputs:
+            - { name: cardId, type: number }
+            - { name: request, type: ConflictDecisionHttpRequest }
+          output: "Promise<ReviewDecisionOutcomeDto | null>"
+          errors: [ApiError]
+        - name: undoAbsorption
+          inputs:
+            - { name: request, type: UndoAbsorptionHttpRequest }
+          output: "Promise<UndoOutcomeDto>"
+          errors: [ApiError]
+        - name: readAbsorption
+          inputs:
+            - { name: recordId, type: number }
+          output: "Promise<AbsorptionViewDto>"
+          errors: [ApiError]
+
+  - name: identity_authority_oracles
+    crate: livrarr-behavioral
+    responsibility: House the table-totality, per-door completeness, retention, cutover, route-plan, no-clobber, and supported-prefix oracles without duplicating production policy; the boot matrix calls livrarr-db::identity_authority_activation directly and has no livrarr-server dependency.
+    requirements: [REQ-002, REQ-004, REQ-006]
+    build_units: [B0, B1, B2, B3, B4]
+    dependencies: [identity_authority_contracts, identity_authority_services, identity_authority_activation, identity_authority_repository, review_card_store, route_plan, absorption_store, work_delete, conflict_cutover, identity_road, library_item_path_store, file_reorganization, identity_authority_handlers]
+    public_api:
+      types:
+        - kind: struct
+          name: NonemptyUpgradeFixture
+          fields:
+            - { name: fixture_id, type: String }
+            - { name: source_schema_version, type: i64 }
+            - { name: seeded_case_ids, type: "Vec<String>" }
+            - { name: supported_prefixes, type: "Vec<BuildUnitPrefix>" }
+        - kind: struct
+          name: AssertionFailure
+          fields:
+            - { name: oracle, type: String }
+            - { name: case_id, type: String }
+            - { name: detail, type: String }
+      functions:
+        - name: assert_authorization_and_route_matrix_totality
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_three_valued_distinctness_matrix
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_absorption_completeness_per_caller
+          inputs:
+            - { name: caller, type: AbsorptionCaller }
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_work_delete_completeness_per_door
+          inputs:
+            - { name: origin, type: WorkDeleteOrigin }
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_effect_manifest_fail_closed
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_decision_proof_bind_matrix
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_retention_table_totality
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_cutover_totality_and_idempotence
+          inputs:
+            - { name: fixture, type: NonemptyUpgradeFixture }
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_absorption_door_routing_and_gate
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_cutover_single_production_entry
+          inputs:
+            - { name: fixture, type: NonemptyUpgradeFixture }
+            - { name: activation, type: "&SqliteIdentityAuthorityActivation" }
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_no_clobber_and_truthful_file_matrix
+          inputs: []
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+        - name: assert_supported_prefix_boot_matrix
+          inputs:
+            - { name: fixture, type: NonemptyUpgradeFixture }
+            - { name: activation, type: "&SqliteIdentityAuthorityActivation" }
+          output: "Result<(), AssertionFailure>"
+          errors: [AssertionFailure]
+
+shared_types:
+  - kind: type-alias
+    name: ReviewCardId
+    fields:
+      - { name: value, type: i64 }
+  - kind: type-alias
+    name: AbsorptionRecordId
+    fields:
+      - { name: value, type: i64 }
+  - kind: newtype
+    name: Digest
+    fields:
+      - { name: bytes, type: "private [u8; 32]" }
+  - kind: struct
+    name: WorkGeneration
+    fields:
+      - { name: work_id, type: WorkId }
+      - { name: identity_generation, type: i64 }
+      - { name: merge_generation, type: i64 }
+  - kind: struct
+    name: WorkKeyedFieldChoice
+    fields:
+      - { name: field, type: MergeableField }
+      - { name: keep_from, type: WorkId }
+  - kind: struct
+    name: FieldSnapshot
+    fields:
+      - { name: work_id, type: WorkId }
+      - { name: field, type: MergeableField }
+      - { name: value, type: OptionalFieldValue }
+  - kind: struct
+    name: RoutePlan
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: cohort, type: "Vec<WorkId>" }
+      - { name: survivor, type: "Option<WorkId>" }
+      - { name: attach, type: "Vec<RouteAttachment>" }
+      - { name: retire, type: "Vec<RouteRetirement>" }
+      - { name: third_owner_checks, type: "Vec<RouteOwnershipCheck>" }
+      - { name: snapshot_digest, type: Digest }
+  - kind: struct
+    name: RouteRetirement
+    fields:
+      - { name: route, type: RouteKey }
+      - { name: former_owner, type: RouteOwner }
+      - { name: user_confirmed, type: bool }
+      - { name: reason, type: RouteRetirementReason }
+  - kind: enum
+    name: AbsorptionOrigin
+    construction: "projection only through derive_absorption_provenance; never accepted at the repository door"
+    fields:
+      - { name: ManualPair, type: unit }
+      - { name: ReviewContinuation, type: "{ card_id: ReviewCardId }" }
+      - { name: SettlementAutoMerge, type: unit }
+      - { name: DedupResidueHeal, type: unit }
+      - { name: ArticleDuplicateHeal, type: unit }
+  - kind: enum
+    name: UserAbsorptionOrigin
+    construction: "IdentityRoad::execute_merge fixes ManualPair; an accepted absorbing IdentityRoad::resolve_review fixes ReviewContinuation { card_id }; no other constructor"
+    fields:
+      - { name: ManualPair, type: unit }
+      - { name: ReviewContinuation, type: "{ card_id: ReviewCardId }" }
+  - kind: enum
+    name: MachineAbsorptionOrigin
+    construction: "the three named IdentityRoad machine wrappers fix their matching variant; no other constructor"
+    fields:
+      - { name: SettlementAutoMerge, type: unit }
+      - { name: DedupResidueHeal, type: unit }
+      - { name: ArticleDuplicateHeal, type: unit }
+  - kind: enum
+    name: AbsorptionActor
+    construction: "projection only through derive_absorption_provenance; never accepted at the repository door"
+    fields:
+      - { name: User, type: UserId }
+      - { name: Machine, type: MachineActor }
+  - kind: struct
+    name: AbsorptionProvenance
+    constructor: derive_absorption_provenance only
+    fields:
+      - { name: caller, type: AbsorptionCaller }
+      - { name: origin, type: AbsorptionOrigin }
+      - { name: actor, type: AbsorptionActor }
+  - kind: enum
+    name: AbsorptionLifecycle
+    fields:
+      - { name: Active, type: unit }
+      - { name: Undoing, type: unit }
+      - { name: Undone, type: unit }
+  - kind: struct
+    name: RowMutation
+    fields:
+      - { name: selector, type: EffectSelectorId }
+      - { name: table, type: TableName }
+      - { name: primary_key, type: RowPrimaryKey }
+      - { name: before, type: "Option<RowImage>" }
+      - { name: after, type: "Option<RowImage>" }
+  - kind: enum
+    name: OperationCardEffectKind
+    fields:
+      - { name: Minted, type: unit }
+      - { name: Reused, type: unit }
+      - { name: ResolvedInitiator, type: unit }
+      - { name: CancelledByOperation, type: unit }
+  - kind: struct
+    name: OperationCardEffect
+    fields:
+      - { name: card_id, type: ReviewCardId }
+      - { name: effect, type: OperationCardEffectKind }
+  - kind: struct
+    name: PriorAbsorptionLineage
+    fields:
+      - { name: prior_record_id, type: AbsorptionRecordId }
+      - { name: shared_work_id, type: WorkId }
+      - { name: prior_survivor_post_generation, type: WorkGeneration }
+      - { name: current_pre_decision_generation, type: WorkGeneration }
+      - { name: matched_at_open, type: bool }
+  - kind: struct
+    name: AbsorptionRecordEnvelopeV1
+    provenance: "caller, origin, and actor are copied only from derive_absorption_provenance(request)"
+    fields:
+      - { name: operation_id, type: AbsorptionRecordId }
+      - { name: user_id, type: UserId }
+      - { name: origin, type: AbsorptionOrigin }
+      - { name: actor, type: AbsorptionActor }
+      - { name: survivor_work_id, type: WorkId }
+      - { name: absorbed_work_ids, type: "Vec<WorkId>" }
+      - { name: pre_decision_generations, type: "Vec<WorkGeneration>" }
+      - { name: survivor_post_generation, type: WorkGeneration }
+      - { name: elected_fields, type: "Vec<WorkKeyedFieldChoice>" }
+      - { name: route_plan, type: RoutePlan }
+      - { name: card_high_water_id, type: i64 }
+      - { name: card_effects, type: "Vec<OperationCardEffect>" }
+      - { name: prior_records, type: "Vec<PriorAbsorptionLineage>" }
+      - { name: mutations, type: "Vec<RowMutation>" }
+      - { name: retained_artifacts, type: "Vec<RetainedArtifact>" }
+      - { name: manifest_schema_version, type: i64 }
+      - { name: manifest_digest, type: Digest }
+  - kind: enum
+    name: AbsorptionRecord
+    fields:
+      - { name: LegacyV0, type: LegacyAbsorptionRecordV0 }
+      - { name: RecordedV1, type: RecordedAbsorptionRecordV1 }
+  - kind: struct
+    name: LegacyAbsorptionRecordV0
+    fields:
+      - { name: id, type: AbsorptionRecordId }
+      - { name: user_id, type: UserId }
+      - { name: winner_work_id, type: WorkId }
+      - { name: loser_work_id, type: WorkId }
+      - { name: preserved_fields, type: String }
+      - { name: archived_at, type: DateTime<Utc> }
+  - kind: struct
+    name: RecordedAbsorptionRecordV1
+    fields:
+      - { name: id, type: AbsorptionRecordId }
+      - { name: user_id, type: UserId }
+      - { name: survivor_work_id, type: WorkId }
+      - { name: lifecycle, type: AbsorptionLifecycle }
+      - { name: record_revision, type: i64 }
+      - { name: envelope, type: AbsorptionRecordEnvelopeV1 }
+      - { name: forward_files, type: "Option<FileMoveReport>" }
+      - { name: undo_files, type: "Option<FileMoveReport>" }
+  - kind: enum
+    name: UndoFileStep
+    fields:
+      - { name: NotStarted, type: unit }
+      - { name: Incomplete, type: FileMoveReport }
+      - { name: Complete, type: FileMoveReport }
+  - kind: enum
+    name: FileMoveDisposition
+    fields:
+      - { name: Moved, type: unit }
+      - { name: AlreadyCanonical, type: unit }
+      - { name: RecordHealed, type: unit }
+      - { name: DestinationOccupied, type: unit }
+      - { name: CopiedWithSourceLeft, type: unit }
+      - { name: SourceMissing, type: unit }
+      - { name: RecordMismatch, type: unit }
+      - { name: MoveFailed, type: unit }
+      - { name: RecordUpdateFailed, type: unit }
+  - kind: struct
+    name: FileMoveResult
+    fields:
+      - { name: library_item_id, type: LibraryItemId }
+      - { name: origin_work_id, type: WorkId }
+      - { name: recorded_path, type: PathBuf }
+      - { name: source_path, type: PathBuf }
+      - { name: destination_path, type: PathBuf }
+      - { name: file_revision_before, type: FileRevision }
+      - { name: file_revision_after, type: "Option<FileRevision>" }
+      - { name: disposition, type: FileMoveDisposition }
+      - { name: leftover_paths, type: "Vec<PathBuf>" }
+      - { name: detail, type: "Option<String>" }
+  - kind: sealed-report
+    name: FileMoveReport
+    constructor: "livrarr-library::file_reorganization::reorganize_items only; complete_forward, complete_undo, and reorganize_work_files return that value"
+    rehydration: "absorption_store may decode only versioned report bytes previously persisted from that constructor; decoding validates and fails closed and is not a second semantic mint"
+    fields:
+      - { name: direction, type: FileMoveDirection }
+      - { name: operation_id, type: AbsorptionRecordId }
+      - { name: results, type: "Vec<FileMoveResult>" }
+      - { name: complete, type: bool }
+  - kind: struct
+    name: AbsorptionCommit
+    fields:
+      - { name: record, type: AbsorptionRecord }
+      - { name: affected_library_items, type: "Vec<LibraryItemId>" }
+      - { name: history_event, type: WorksMergedHistoryAnchor }
+  - kind: struct
+    name: WorksMergedHistoryAnchor
+    provenance: "origin is copied only from derive_absorption_provenance(request); this is the sole transaction-fatal HistoryEvent"
+    fields:
+      - { name: event, type: HistoryEvent }
+      - { name: absorption_record_id, type: AbsorptionRecordId }
+      - { name: survivor_work_id, type: WorkId }
+      - { name: absorbed_work_ids, type: "Vec<WorkId>" }
+      - { name: origin, type: AbsorptionOrigin }
+  - kind: struct
+    name: ReviewCard
+    fields:
+      - { name: id, type: ReviewCardId }
+      - { name: user_id, type: UserId }
+      - { name: subject_work_id, type: "Option<WorkId>" }
+      - { name: kind, type: ReviewKind }
+      - { name: origin, type: ReviewCardOrigin }
+      - { name: generation, type: i64 }
+      - { name: card_version, type: i64 }
+      - { name: status, type: ReviewCardStatus }
+      - { name: payload, type: ReviewCardPayloadV2 }
+      - { name: cohort, type: "Vec<WorkId>" }
+      - { name: question_key, type: "Option<ReviewDismissalKeyV2>" }
+      - { name: resolution_action, type: "Option<ReviewResolutionKind>" }
+      - { name: resolution_notes, type: "Option<String>" }
+      - { name: created_at, type: DateTime<Utc> }
+      - { name: resolved_at, type: "Option<DateTime<Utc>>" }
+  - kind: struct
+    name: ConflictCard
+    fields:
+      - { name: card, type: ReviewCard }
+      - { name: payload, type: ConflictCardPayloadV1 }
+      - { name: keyability, type: ConflictKeyability }
+  - kind: struct
+    name: StagingConflictDiagnostic
+    fields:
+      - { name: source_row_id, type: i64 }
+      - { name: user_id, type: UserId }
+      - { name: original_pair, type: "[WorkId; 2]" }
+      - { name: cause, type: StagingConflictTerminalCause }
+      - { name: terminal_operation_id, type: "Option<AbsorptionRecordId>" }
+      - { name: immutable_audit_id, type: i64 }
+  - kind: enum
+    name: StagingConflictTerminalCause
+    fields:
+      - { name: WorkDeleted, type: unit }
+      - { name: SelfConflictAfterAbsorption, type: unit }
+  - kind: enum
+    name: BuildUnitPrefix
+    fields:
+      - { name: B0Only, type: unit }
+      - { name: B0B1, type: unit }
+      - { name: B0B1B2, type: unit }
+      - { name: B0B1B2B3, type: unit }
+      - { name: B0B1B2B3B4, type: unit }
+  - kind: enum
+    name: ReviewCardStatus
+    fields:
+      - { name: Pending, type: unit }
+      - { name: Resolved, type: unit }
+      - { name: Cancelled, type: unit }
+  - kind: enum
+    name: ReviewCardOrigin
+    fields:
+      - { name: WorkUpdateRekey, type: unit }
+      - { name: ManualWorkMerge, type: unit }
+      - { name: SettlementEngine, type: unit }
+      - { name: CompleteGroup, type: unit }
+      - { name: RuntimeConflict, type: unit }
+      - { name: IdentityPark, type: unit }
+      - { name: LegacyConflictAdoption, type: i64 }
+      - { name: ExistingOrigin, type: String }
+  - kind: enum
+    name: CardMemberRelation
+    fields:
+      - { name: Subject, type: unit }
+      - { name: Member, type: unit }
+  - kind: enum
+    name: ConflictKeyability
+    fields:
+      - { name: Keyable, type: ReviewDismissalKeyV2 }
+      - { name: NonKeyable, type: NonKeyableReason }
+      - { name: HistoryOnly, type: HistoryOnlyReason }
+  - kind: enum
+    name: NonKeyableReason
+    fields:
+      - { name: UnknownRole, type: unit }
+      - { name: AdoptedRouteConflict, type: unit }
+      - { name: WorkDeletedMachineClose, type: unit }
+      - { name: InertV1Shape, type: unit }
+  - kind: enum
+    name: HistoryOnlyReason
+    fields:
+      - { name: UnreadablePayload, type: unit }
+      - { name: OrphanWork, type: unit }
+      - { name: CrossTenantReference, type: unit }
+      - { name: ResolvedLegacyRow, type: unit }
+  - kind: enum
+    name: LegacyConflictSource
+    fields:
+      - { name: ManualAdd, type: unit }
+      - { name: ManualImport, type: unit }
+      - { name: ListImport, type: unit }
+      - { name: ReadarrImport, type: unit }
+      - { name: SeriesMonitor, type: unit }
+      - { name: AuthorMonitor, type: unit }
+      - { name: Refresh, type: unit }
+      - { name: ManualRetry, type: unit }
+      - { name: Convergence, type: unit }
+  - kind: enum
+    name: LegacyConflictResolutionAction
+    fields:
+      - { name: KeepExisting, type: unit }
+      - { name: AcceptSeparate, type: unit }
+      - { name: ReplaceAnchor, type: unit }
+      - { name: Merge, type: unit }
+      - { name: WorkDeleted, type: unit }
+  - kind: struct
+    name: IncomingIdentitySnapshot
+    fields:
+      - { name: routes, type: "Vec<RouteKey>" }
+      - { name: isbn_13, type: "Option<String>" }
+      - { name: asin, type: "Option<String>" }
+      - { name: title, type: IdentityTitleTuple }
+      - { name: primary_author_id, type: "Option<AuthorId>" }
+      - { name: author_name, type: String }
+      - { name: year, type: "Option<i32>" }
+      - { name: cover_url, type: "Option<String>" }
+      - { name: top_candidates, type: "Vec<Candidate>" }
+      - { name: source_path, type: "Option<PathBuf>" }
+      - { name: content_digest, type: Digest }
+  - kind: struct
+    name: IncomingIdentityKey
+    fields:
+      - { name: routes, type: "Vec<RouteKey>" }
+      - { name: title, type: IdentityTitleTuple }
+      - { name: primary_author_id, type: "Option<AuthorId>" }
+      - { name: author_name, type: String }
+      - { name: year, type: "Option<i32>" }
+  - kind: enum
+    name: ContradictedRouteKey
+    fields:
+      - { name: Exact, type: RouteKey }
+      - { name: NotApplicable, type: unit }
+  - kind: struct
+    name: ProposalKey
+    fields:
+      - { name: identity_title, type: IdentityTitleTuple }
+      - { name: primary_author_id, type: AuthorId }
+      - { name: routes, type: "Vec<RouteKey>" }
+  - kind: enum
+    name: ExistingReviewPayload
+    fields:
+      - { name: PendingRoute, type: ParkedRouteCandidate }
+      - { name: FieldResolution, type: "Vec<i64>" }
+      - { name: ContributorOrder, type: "Vec<AuthorRef>" }
+      - { name: EditionEvidence, type: "{ edition_id: EditionId, evidence_ids: Vec<i64> }" }
+      - { name: ImportIdentity, type: IdentityEvidenceBundle }
+      - { name: MigrationRepair, type: "{ legacy_key: String, reason: String }" }
+      - { name: InvariantRepair, type: "{ work_id: Option<WorkId>, invariant: String }" }
+  - kind: enum
+    name: DistinctnessCause
+    fields:
+      - { name: GreyTitle, type: TitleVerdict }
+      - { name: GreyAuthor, type: AuthorVerdict }
+      - { name: MissingEvidence, type: String }
+      - { name: RouteContradiction, type: "Vec<RouteKey>" }
+  - kind: enum
+    name: RefusalReason
+    fields:
+      - { name: AbsorptionDisabled, type: "{ door: AbsorptionCaller, unit: BuildUnitPrefix }" }
+      - { name: PairRequired, type: "{ actual_members: usize }" }
+      - { name: UnknownRole, type: unit }
+      - { name: IdentityUnsure, type: "{ work_ids: Vec<WorkId>, causes: Vec<DistinctnessCause> }" }
+      - { name: IdentityCertainlySame, type: "{ work_ids: Vec<WorkId> }" }
+      - { name: ThirdOwner, type: ThirdOwnerConflict }
+      - { name: SameProviderContradiction, type: SameProviderContradiction }
+      - { name: AdoptedConflictNeedsIdentityEdit, type: unit }
+      - { name: MissingIncomingRoute, type: IdentityProvider }
+      - { name: UnsupportedReviewKind, type: ReviewKind }
+      - { name: NewSurvivorWithAbsorption, type: unit }
+  - kind: struct
+    name: StaleDecisionDetail
+    fields:
+      - { name: card_changed, type: bool }
+      - { name: changed_work_ids, type: "Vec<WorkId>" }
+      - { name: changed_fields, type: "Vec<MergeableField>" }
+      - { name: routes_changed, type: bool }
+      - { name: reload_required, type: bool }
+  - kind: enum
+    name: OptionalFieldValue
+    fields:
+      - { name: Present, type: serde_json::Value }
+      - { name: Absent, type: unit }
+  - kind: enum
+    name: RouteChangingAction
+    fields:
+      - { name: GroupDifferentFromAll, type: GroupIdentityRole }
+      - { name: GroupAttachOrMerge, type: GroupIdentityRole }
+      - { name: IncomingAttachOne, type: unit }
+      - { name: PendingRouteAffirm, type: unit }
+      - { name: IdentityParkChooseCandidate, type: unit }
+      - { name: ManualPairAbsorption, type: unit }
+      - { name: ConflictReplaceAnchor, type: LegacyConflictKind }
+      - { name: ConflictMerge, type: LegacyConflictKind }
+      - { name: MachineAbsorption, type: MachineAbsorptionOrigin }
+  - kind: enum
+    name: RouteEffectClass
+    fields:
+      - { name: ApplyProposalAndRetireFilledSlots, type: unit }
+      - { name: AttachProposalWithoutAbsorption, type: unit }
+      - { name: ElectAndAbsorb, type: unit }
+      - { name: RetireExactAndAttach, type: unit }
+      - { name: RetireExactAttachAndGapFill, type: unit }
+      - { name: GapFillOnly, type: unit }
+      - { name: RefuseWithoutWrite, type: RefusalReason }
+  - kind: struct
+    name: RouteAttachment
+    fields:
+      - { name: route, type: RouteKey }
+      - { name: owner, type: RouteOwner }
+      - { name: provenance, type: RouteProvenance }
+      - { name: user_confirmed, type: bool }
+  - kind: struct
+    name: RouteOwnershipCheck
+    fields:
+      - { name: route, type: RouteKey }
+      - { name: allowed_owner_work_ids, type: "Vec<WorkId>" }
+      - { name: observed_owner, type: "Option<RouteOwner>" }
+  - kind: struct
+    name: ThirdOwnerConflict
+    fields:
+      - { name: route, type: RouteKey }
+      - { name: owning_work_id, type: WorkId }
+      - { name: requested_work_ids, type: "Vec<WorkId>" }
+      - { name: recourse, type: IdentityRecourse }
+  - kind: struct
+    name: SameProviderContradiction
+    fields:
+      - { name: provider, type: IdentityProvider }
+      - { name: kind, type: RouteKind }
+      - { name: routes, type: "Vec<RouteKey>" }
+      - { name: work_ids, type: "Vec<WorkId>" }
+      - { name: recourse, type: IdentityRecourse }
+  - kind: enum
+    name: IdentityRecourse
+    fields:
+      - { name: PairwiseMerge, type: unit }
+      - { name: IdentityEdit, type: unit }
+      - { name: ChoosePair, type: unit }
+      - { name: ReloadDecision, type: unit }
+      - { name: DismissOnly, type: unit }
+      - { name: LeaveParked, type: unit }
+  - kind: enum
+    name: RouteRetirementReason
+    fields:
+      - { name: ProposalReplacesSlot, type: unit }
+      - { name: ElectedSurvivorKeepsRoute, type: unit }
+      - { name: ConflictReplacesExactRoute, type: unit }
+      - { name: DuplicateCoalesced, type: unit }
+  - kind: struct
+    name: ReviewListQuery
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: statuses, type: "Vec<ReviewCardStatus>" }
+      - { name: kinds, type: "Vec<ReviewKind>" }
+      - { name: work_id, type: "Option<WorkId>" }
+  - kind: struct
+    name: ReviewCardView
+    fields:
+      - { name: id, type: ReviewCardId }
+      - { name: subject_work_id, type: "Option<WorkId>" }
+      - { name: kind, type: ReviewKind }
+      - { name: origin, type: ReviewCardOrigin }
+      - { name: role, type: "Option<GroupIdentityRole>" }
+      - { name: status, type: ReviewCardStatus }
+      - { name: payload, type: ReviewCardDisplayPayload }
+      - { name: cohort, type: "Vec<WorkId>" }
+      - { name: resolution_action, type: "Option<ReviewResolutionKind>" }
+      - { name: resolution_notes, type: "Option<String>" }
+      - { name: created_at, type: "DateTime<Utc>" }
+      - { name: resolved_at, type: "Option<DateTime<Utc>>" }
+      - { name: actions, type: "Vec<ReviewActionView>" }
+      - { name: history_only_reason, type: "Option<HistoryOnlyReason>" }
+  - kind: struct
+    name: ReviewActionView
+    fields:
+      - { name: action, type: ReviewActionKind }
+      - { name: required_proof, type: RequiredDecisionProof }
+      - { name: decision_proof, type: "Option<DecisionProof>" }
+      - { name: requires_preview, type: bool }
+      - { name: refusal, type: "Option<RefusalReason>" }
+  - kind: struct
+    name: ReviewCardReadSnapshot
+    fields:
+      - { name: card, type: ReviewCard }
+      - { name: actions, type: "Vec<ReviewActionSnapshot>" }
+      - { name: history_only_reason, type: "Option<HistoryOnlyReason>" }
+  - kind: struct
+    name: ReviewActionSnapshot
+    fields:
+      - { name: authorization, type: ReviewAuthorizationCell }
+      - { name: card_proof_payload, type: "Option<CardDecisionSnapshot>" }
+      - { name: requires_preview, type: bool }
+      - { name: refusal, type: "Option<RefusalReason>" }
+  - kind: struct
+    name: ReviewPreviewRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: card_id, type: ReviewCardId }
+      - { name: action, type: ReviewAction }
+      - { name: elected_survivor, type: "Option<WorkId>" }
+      - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+  - kind: struct
+    name: ReviewDecisionPreview
+    fields:
+      - { name: card, type: ReviewCardView }
+      - { name: authorization, type: ReviewAuthorizationCell }
+      - { name: merge, type: "Option<MergePreviewBody>" }
+      - { name: decision_proof, type: DecisionProof }
+  - kind: struct
+    name: ReviewPreviewSnapshot
+    fields:
+      - { name: card, type: ReviewCardReadSnapshot }
+      - { name: authorization, type: ReviewAuthorizationCell }
+      - { name: merge, type: "Option<MergePreviewBody>" }
+      - { name: proof_payload, type: DecisionProofPayload }
+  - kind: struct
+    name: ReviewDecisionRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: card_id, type: ReviewCardId }
+      - { name: action, type: ReviewAction }
+      - { name: decision_proof, type: DecisionProof }
+  - kind: sealed-request
+    name: VerifiedReviewDecisionRequest
+    constructor: identity_authority_application::authenticate_review_decision only
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: card_id, type: ReviewCardId }
+      - { name: action, type: ReviewAction }
+      - { name: proof, type: DecisionProofPayload }
+      - { name: authentication, type: "private Digest" }
+  - kind: sealed-decision
+    name: VerifiedCardDecision
+    constructor: identity_road::verify_card_decision only
+    fields:
+      - { name: action, type: ReviewAction }
+      - { name: snapshot, type: CardDecisionSnapshot }
+      - { name: validation, type: "private Digest" }
+  - kind: sealed-decision
+    name: VerifiedElectionDecision
+    constructor: identity_road::verify_election_decision only
+    fields:
+      - { name: snapshot, type: ElectionDecisionSnapshot }
+      - { name: validation, type: "private Digest" }
+  - kind: enum
+    name: ReviewDecisionOutcome
+    fields:
+      - { name: Resolved, type: ReviewCardView }
+      - { name: Cancelled, type: ReviewCardView }
+      - { name: Attached, type: CapturedIdentity }
+      - { name: CreatedDistinct, type: CreatedDistinctOutcome }
+      - { name: Absorbed, type: AbsorptionOutcome }
+      - { name: ParkResolved, type: ParkResolutionOutcome }
+      - { name: ConflictResolved, type: ConflictResolutionOutcome }
+  - kind: struct
+    name: CreatedDistinctOutcome
+    fields:
+      - { name: work, type: Work }
+      - { name: add_source, type: WorkAddSource }
+      - { name: reviewed_member_ids, type: "Vec<WorkId>" }
+  - kind: struct
+    name: MergePreviewRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: work_pair, type: "[WorkId; 2]" }
+      - { name: elected_survivor, type: WorkId }
+      - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+      - { name: card_id, type: "Option<ReviewCardId>" }
+  - kind: struct
+    name: MergePreviewBody
+    fields:
+      - { name: work_pair, type: "[WorkId; 2]" }
+      - { name: elected_survivor, type: WorkId }
+      - { name: fields, type: "Vec<FieldSnapshot>" }
+      - { name: keep_from, type: "Vec<WorkKeyedFieldChoice>" }
+      - { name: route_plan, type: RoutePlan }
+      - { name: file_impact, type: FileImpactPreview }
+  - kind: struct
+    name: FileImpactPreview
+    fields:
+      - { name: items, type: "Vec<FileImpactItemPreview>" }
+      - { name: survivor_canonical_root, type: PathBuf }
+      - { name: explanation, type: String }
+  - kind: struct
+    name: FileImpactItemPreview
+    fields:
+      - { name: library_item_id, type: LibraryItemId }
+      - { name: origin_work_id, type: WorkId }
+      - { name: recorded_path, type: PathBuf }
+      - { name: preview_destination, type: PathBuf }
+      - { name: will_move, type: bool }
+  - kind: struct
+    name: MergePreview
+    fields:
+      - { name: body, type: MergePreviewBody }
+      - { name: decision_proof, type: DecisionProof }
+  - kind: struct
+    name: MergePreviewSnapshot
+    fields:
+      - { name: body, type: MergePreviewBody }
+      - { name: proof_payload, type: ElectionDecisionSnapshot }
+  - kind: struct
+    name: MergeExecuteRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: decision_proof, type: DecisionProof }
+  - kind: sealed-request
+    name: VerifiedMergeExecuteRequest
+    constructor: identity_authority_application::authenticate_merge_execute only
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: proof, type: ElectionDecisionSnapshot }
+      - { name: authentication, type: "private Digest" }
+  - kind: enum
+    name: AbsorptionCaller
+    construction: "projection only through derive_absorption_provenance and used for B0 named refusal/completeness classification"
+    fields:
+      - { name: ManualMerge, type: unit }
+      - { name: ReviewContinuation, type: unit }
+      - { name: SettlementAutoMerge, type: unit }
+      - { name: DedupResidueHeal, type: unit }
+      - { name: ArticleDuplicateHeal, type: unit }
+  - kind: enum
+    name: RecordedAbsorptionRequest
+    construction: "only IdentityRoad::execute_merge, an accepted absorbing IdentityRoad::resolve_review, execute_settlement_auto_merge, execute_dedup_residue_heal_absorption, and execute_article_duplicate_heal_absorption construct the matching closed variant"
+    fields:
+      - { name: UserElection, type: "{ origin: UserAbsorptionOrigin, user_id: UserId, decision: VerifiedElectionDecision }" }
+      - { name: MachineSnapshot, type: "{ origin: MachineAbsorptionOrigin, snapshot: MachineAbsorptionSnapshot }" }
+  - kind: struct
+    name: MachineAbsorptionSnapshot
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: survivor_work_id, type: WorkId }
+      - { name: absorbed_work_ids, type: "Vec<WorkId>" }
+      - { name: member_generations, type: "Vec<WorkGeneration>" }
+      - { name: scan_generation, type: i64 }
+  - kind: struct
+    name: AbsorptionOutcome
+    fields:
+      - { name: absorption, type: AbsorptionView }
+      - { name: survivor, type: Work }
+      - { name: forward_files, type: FileMoveReport }
+  - kind: struct
+    name: AbsorptionView
+    provenance: "origin is projected from the stored, derived record provenance; no DTO accepts it as a command input"
+    fields:
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: record_version, type: i64 }
+      - { name: record_revision, type: "Option<i64>" }
+      - { name: survivor_work_id, type: "Option<WorkId>" }
+      - { name: absorbed_work_ids, type: "Vec<WorkId>" }
+      - { name: lifecycle, type: "Option<AbsorptionLifecycle>" }
+      - { name: origin, type: "Option<AbsorptionOrigin>" }
+      - { name: availability, type: UndoAvailability }
+      - { name: forward_files, type: "Option<FileMoveReport>" }
+      - { name: undo_files, type: "Option<FileMoveReport>" }
+      - { name: incomplete_files, type: "Vec<FileMoveResult>" }
+      - { name: file_moves_on_undo, type: "Vec<UndoFilePreview>" }
+      - { name: pending_questions_to_withdraw, type: "Vec<ReviewCardId>" }
+  - kind: enum
+    name: UndoAvailability
+    fields:
+      - { name: Available, type: unit }
+      - { name: AlreadyUndone, type: unit }
+      - { name: RetryFileStep, type: unit }
+      - { name: Refused, type: UndoRefusalReason }
+  - kind: enum
+    name: UndoRefusalReason
+    fields:
+      - { name: PreFeatureRecord, type: unit }
+      - { name: MissingOrForeignRecord, type: unit }
+      - { name: AfterImageMismatch, type: "{ table: TableName, key: RowPrimaryKey }" }
+  - kind: struct
+    name: UndoFilePreview
+    fields:
+      - { name: library_item_id, type: LibraryItemId }
+      - { name: current_recorded_path, type: PathBuf }
+      - { name: restore_destination, type: PathBuf }
+      - { name: forward_disposition, type: "Option<FileMoveDisposition>" }
+  - kind: struct
+    name: UndoAbsorptionRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: expected_record_revision, type: i64 }
+  - kind: struct
+    name: UndoDatabaseRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: expected_record_revision, type: i64 }
+  - kind: struct
+    name: UndoDatabaseOutcome
+    fields:
+      - { name: record, type: AbsorptionRecord }
+      - { name: restored_work_ids, type: "Vec<WorkId>" }
+      - { name: recorded_forward_results, type: "Vec<FileMoveResult>" }
+      - { name: file_candidates, type: "Vec<FileReorganizationItem>" }
+      - { name: cancelled_post_operation_cards, type: "Vec<ReviewCardId>" }
+  - kind: struct
+    name: UndoOutcome
+    fields:
+      - { name: absorption, type: AbsorptionView }
+      - { name: files, type: UndoFileStep }
+      - { name: already_undone, type: bool }
+  - kind: struct
+    name: FileReportUpdate
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: expected_record_revision, type: i64 }
+      - { name: direction, type: FileMoveDirection }
+      - { name: report, type: FileMoveReport }
+  - kind: enum
+    name: FileMoveDirection
+    fields:
+      - { name: Forward, type: unit }
+      - { name: Undo, type: unit }
+  - kind: struct
+    name: ForwardFileRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: survivor_work_id, type: WorkId }
+      - { name: item_ids, type: "Vec<LibraryItemId>" }
+  - kind: struct
+    name: UndoFileRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: record_id, type: AbsorptionRecordId }
+      - { name: recorded_forward_results, type: "Vec<FileMoveResult>" }
+      - { name: file_candidates, type: "Vec<FileReorganizationItem>" }
+      - { name: restored_works, type: "Vec<WorkId>" }
+  - kind: struct
+    name: FileReorganizationRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: operation_id, type: AbsorptionRecordId }
+      - { name: direction, type: FileMoveDirection }
+      - { name: items, type: "Vec<FileReorganizationItem>" }
+  - kind: struct
+    name: FileReorganizationItem
+    fields:
+      - { name: library_item_id, type: LibraryItemId }
+      - { name: origin_work_id, type: WorkId }
+      - { name: expected_recorded_path, type: PathBuf }
+      - { name: canonical_destination, type: PathBuf }
+      - { name: expected_file_revision, type: FileRevision }
+  - kind: struct
+    name: LibraryItemPathSnapshot
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: item_id, type: LibraryItemId }
+      - { name: work_id, type: WorkId }
+      - { name: recorded_path, type: PathBuf }
+  - kind: struct
+    name: WorkFileReorganizationRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: operation_id, type: AbsorptionRecordId }
+      - { name: work_id, type: WorkId }
+      - { name: origin_work_ids, type: "Vec<WorkId>" }
+  - kind: struct
+    name: NoClobberMoveRequest
+    fields:
+      - { name: source, type: PathBuf }
+      - { name: destination, type: PathBuf }
+      - { name: expected_file_revision, type: FileRevision }
+  - kind: enum
+    name: FileReorganizationError
+    fields:
+      - { name: InvalidPath, type: PathBuf }
+      - { name: RepositoryFailure, type: String }
+      - { name: FilesystemFailure, type: "{ path: PathBuf, reason: String }" }
+  - kind: enum
+    name: PathCompareAndSetOutcome
+    fields:
+      - { name: Updated, type: unit }
+      - { name: StalePath, type: LibraryItemPathSnapshot }
+      - { name: Missing, type: unit }
+  - kind: enum
+    name: WorkDeleteOrigin
+    fields:
+      - { name: User, type: unit }
+      - { name: ImportRollback, type: unit }
+      - { name: ListImportRollback, type: unit }
+      - { name: Absorption, type: AbsorptionRecordId }
+  - kind: struct
+    name: DeleteWorkOutcome
+    fields:
+      - { name: deleted_work_ids, type: "Vec<WorkId>" }
+      - { name: cancelled_card_ids, type: "Vec<ReviewCardId>" }
+      - { name: legacy_closes, type: u64 }
+      - { name: staging_diagnostics, type: u64 }
+  - kind: struct
+    name: DeleteWorkRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: work_id, type: WorkId }
+      - { name: origin, type: WorkDeleteOrigin }
+  - kind: struct
+    name: DeleteWorkSetRequest
+    fields:
+      - { name: user_id, type: UserId }
+      - { name: work_ids, type: "Vec<WorkId>" }
+      - { name: origin, type: WorkDeleteOrigin }
+  - kind: enum
+    name: MachineCancellationReason
+    fields:
+      - { name: WorkDeleted, type: unit }
+      - { name: AbsorptionInvalidated, type: AbsorptionRecordId }
+      - { name: UndoPostOperation, type: AbsorptionRecordId }
+      - { name: CutoverDuplicate, type: i64 }
+  - kind: enum
+    name: ConflictResolutionOutcome
+    fields:
+      - { name: Resolved, type: ReviewCardView }
+      - { name: Cancelled, type: ReviewCardView }
+  - kind: enum
+    name: ParkResolutionOutcome
+    fields:
+      - { name: CandidateChosen, type: CapturedIdentity }
+      - { name: Dismissed, type: ReviewCardView }
+  - kind: newtype
+    name: EffectSelectorId
+    fields:
+      - { name: value, type: String }
+  - kind: newtype
+    name: TableName
+    fields:
+      - { name: value, type: String }
+  - kind: struct
+    name: RowPrimaryKey
+    fields:
+      - { name: columns, type: "Vec<(String, ScalarValue)>" }
+  - kind: struct
+    name: RowImage
+    fields:
+      - { name: columns, type: "Vec<(String, ScalarValue)>" }
+      - { name: digest, type: Digest }
+  - kind: enum
+    name: EffectPolicy
+    fields:
+      - { name: Reversible, type: unit }
+      - { name: RetainedRow, type: unit }
+      - { name: RetainedContent, type: unit }
+      - { name: SelfEffect, type: unit }
+      - { name: NotMemberOwned, type: unit }
+  - kind: enum
+    name: RecordVersionClass
+    fields:
+      - { name: V0, type: unit }
+      - { name: V1, type: unit }
+      - { name: Unknown, type: i64 }
+  - kind: enum
+    name: SurvivorRetentionState
+    fields:
+      - { name: Live, type: unit }
+      - { name: BeingAbsorbed, type: unit }
+      - { name: DeletedOutsideAbsorption, type: unit }
+      - { name: MissingCorruptly, type: unit }
+  - kind: enum
+    name: CohortRetentionState
+    fields:
+      - { name: Canonical, type: unit }
+      - { name: ListedLoserLive, type: unit }
+      - { name: ListedLoserMissing, type: unit }
+      - { name: CrossTenantCorrupt, type: unit }
+  - kind: enum
+    name: RecordRetentionDisposition
+    fields:
+      - { name: RetainRestorable, type: unit }
+      - { name: RetainHistoryOnly, type: unit }
+      - { name: CaptureThenCascade, type: unit }
+      - { name: CascadePermanently, type: unit }
+      - { name: RefuseCorrupt, type: unit }
+  - kind: struct
+    name: EffectSelector
+    fields:
+      - { name: id, type: EffectSelectorId }
+      - { name: table, type: TableName }
+      - { name: ownership_path, type: OwnershipPath }
+      - { name: precedence, type: i64 }
+      - { name: policy, type: EffectPolicy }
+      - { name: reversible_columns, type: "Vec<String>" }
+  - kind: struct
+    name: BarePointerRegistration
+    fields:
+      - { name: table, type: TableName }
+      - { name: column_or_json_path, type: String }
+      - { name: owner_kind_guard, type: "Option<String>" }
+      - { name: policy, type: EffectPolicy }
+      - { name: introduced_schema_version, type: i64 }
+  - kind: struct
+    name: TriggerEffect
+    fields:
+      - { name: trigger_name, type: String }
+      - { name: source_table, type: TableName }
+      - { name: target_table, type: TableName }
+      - { name: policy, type: EffectPolicy }
+  - kind: struct
+    name: UnclassifiedEffect
+    fields:
+      - { name: table, type: TableName }
+      - { name: reference, type: String }
+      - { name: reason, type: String }
+  - kind: enum
+    name: RetainedArtifact
+    fields:
+      - { name: ResolvingReviewCard, type: ReviewCardId }
+      - { name: IdentityAuditEvent, type: i64 }
+      - { name: WorksMergedHistoryEvent, type: i64 }
+  - kind: enum
+    name: MachineActor
+    fields:
+      - { name: Settlement, type: unit }
+      - { name: DedupHeal, type: unit }
+      - { name: ArticleHeal, type: unit }
+      - { name: WorkDelete, type: unit }
+      - { name: Cutover, type: unit }
+  - kind: struct
+    name: LegacyConflictTimestamps
+    fields:
+      - { name: raised_at, type: DateTime<Utc> }
+      - { name: resolved_at, type: "Option<DateTime<Utc>>" }
+  - kind: enum
+    name: LegacySubjectValidity
+    fields:
+      - { name: LiveSameUser, type: unit }
+      - { name: Missing, type: unit }
+      - { name: CrossTenant, type: unit }
+  - kind: enum
+    name: LegacyPayloadValidity
+    fields:
+      - { name: Readable, type: unit }
+      - { name: Unreadable, type: unit }
+  - kind: enum
+    name: LegacyKeyability
+    fields:
+      - { name: Keyable, type: unit }
+      - { name: NonKeyable, type: NonKeyableReason }
+      - { name: NotEvaluated, type: unit }
+  - kind: enum
+    name: LegacyConflictStatus
+    fields:
+      - { name: Open, type: unit }
+      - { name: Resolved, type: unit }
+      - { name: Dismissed, type: unit }
+  - kind: enum
+    name: LegacyCloseProvenance
+    fields:
+      - { name: UserOrDeployed, type: unit }
+      - { name: WorkDeleted, type: unit }
+      - { name: NotApplicable, type: unit }
+  - kind: enum
+    name: LegacyAdoptionDisposition
+    fields:
+      - { name: PendingKeyable, type: unit }
+      - { name: PendingNonKeyable, type: unit }
+      - { name: ResolvedHistory, type: unit }
+      - { name: CancelledWithDismissal, type: unit }
+      - { name: CancelledWithoutDismissal, type: unit }
+      - { name: OpaqueHistory, type: HistoryOnlyReason }
+  - kind: enum
+    name: DecisionProofError
+    fields:
+      - { name: Malformed, type: unit }
+      - { name: UnknownKey, type: unit }
+      - { name: InvalidAuthentication, type: unit }
+      - { name: WrongUser, type: unit }
+      - { name: SerializationFailure, type: String }
+      - { name: SigningFailure, type: String }
+  - kind: enum
+    name: RepositoryError
+    fields:
+      - { name: NotFound, type: unit }
+      - { name: Constraint, type: String }
+      - { name: Decode, type: String }
+      - { name: Storage, type: String }
+  - kind: enum
+    name: AuthorizationTableError
+    fields:
+      - { name: MissingCell, type: ReviewAuthorizationCell }
+      - { name: DuplicateCell, type: ReviewAuthorizationCell }
+      - { name: IllegalRoleAxis, type: ReviewAuthorizationCell }
+      - { name: RoleKindMismatch, type: ReviewAuthorizationCell }
+      - { name: WrongProofClass, type: ReviewAuthorizationCell }
+  - kind: enum
+    name: EffectManifestError
+    fields:
+      - { name: UnclassifiedWorkReference, type: UnclassifiedEffect }
+      - { name: UnclassifiedTrigger, type: TriggerEffect }
+      - { name: SelectorOverlap, type: "Vec<EffectSelectorId>" }
+      - { name: MissingReversibleColumn, type: "{ table: TableName, column: String }" }
+  - kind: enum
+    name: UndoError
+    fields:
+      - { name: NotFound, type: unit }
+      - { name: PreFeatureRecord, type: AbsorptionRecordId }
+      - { name: StaleAfterImage, type: "{ table: TableName, key: RowPrimaryKey }" }
+      - { name: LineageConflict, type: AbsorptionRecordId }
+      - { name: IncompleteEffectClosure, type: "Vec<UnclassifiedEffect>" }
+      - { name: Repository, type: RepositoryError }
+  - kind: enum
+    name: WorkDeleteError
+    fields:
+      - { name: CrossTenantWork, type: WorkId }
+      - { name: PendingCardCancellationFailed, type: ReviewCardId }
+      - { name: ConflictCloseFailed, type: i64 }
+      - { name: Repository, type: RepositoryError }
+  - kind: enum
+    name: ConflictCutoverError
+    fields:
+      - { name: PointerCensusMismatch, type: String }
+      - { name: TranslationPolarityMismatch, type: AbsorptionRecordId }
+      - { name: CountMismatch, type: String }
+      - { name: Repository, type: RepositoryError }
+  - kind: enum
+    name: CardMintOutcome
+    fields:
+      - { name: Minted, type: ReviewCard }
+      - { name: ReusedPending, type: ReviewCard }
+      - { name: SuppressedByResolution, type: ReviewCardId }
+      - { name: SuppressedByDismissal, type: i64 }
+  - kind: struct
+    name: RoutePlanReceipt
+    fields:
+      - { name: applied_plan_digest, type: Digest }
+      - { name: attached_route_ids, type: "Vec<i64>" }
+      - { name: retired_route_ids, type: "Vec<i64>" }
+  - kind: enum
+    name: ScalarValue
+    fields:
+      - { name: "Null", type: unit }
+      - { name: Integer, type: i64 }
+      - { name: Real, type: f64 }
+      - { name: Text, type: String }
+      - { name: Blob, type: "Vec<u8>" }
+  - kind: enum
+    name: OwnershipPath
+    fields:
+      - { name: DirectForeignKey, type: "{ column: String }" }
+      - { name: RecursiveForeignKey, type: "{ columns: Vec<String> }" }
+      - { name: RegisteredBarePointer, type: String }
+      - { name: TriggerEffect, type: String }
+  - kind: enum
+    name: MoveMethod
+    fields:
+      - { name: SameDeviceNoReplace, type: unit }
+      - { name: CrossDeviceExclusiveCopy, type: unit }
+
+domain_entities:
+  - Work
+  - Author
+  - Series
+  - LibraryItem
+  - Grab
+  - CapturedIdentity
+  - IdentityStatus
+  - IdentityConflict
+  - PlaybackProgress
+  - Bookmark
+  - KashLink
+  - AudiobookChapter
+  - HistoryEvent
+  - AuthorRoute
+  - Edition
+  - WorkRoute
+  - WorkAbsorption
+
+amendments:
+  - date: "2026-08-29"
+    status: adopted (PO, 2026-08-29; canonical model amended the same day)
+    entity: WorkAbsorption
+    change: Adopt the recorded, user-visible, undoable WorkAbsorption concept as the 21st canonical spine entity.
+    reason: It has a durable survivor-scoped lifetime, an active-to-undone lifecycle, user-visible history and file outcomes, and invariants consumed by Work deletion, review cards, routes, undo, and startup activation. The adopted entity is present in domain_entities and identity_authority_contracts exposes the public WorkAbsorption struct required by the canonical reverse gate.
+
+dependency_graph:
+  - { source: livrarr-db, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-domain }
+  - { source: livrarr-metadata, target: livrarr-db }
+  - { source: livrarr-metadata, target: livrarr-matching }
+  - { source: livrarr-library, target: livrarr-domain }
+  - { source: livrarr-library, target: livrarr-db }
+  - { source: livrarr-server, target: livrarr-domain }
+  - { source: livrarr-server, target: livrarr-db }
+  - { source: livrarr-server, target: livrarr-metadata }
+  - { source: livrarr-server, target: livrarr-library }
+  - { source: livrarr-server, target: livrarr-handlers }
+  - { source: livrarr-handlers, target: livrarr-domain }
+  - { source: livrarr-handlers, target: livrarr-http }
+  - { source: livrarr-behavioral, target: livrarr-domain }
+  - { source: livrarr-behavioral, target: livrarr-db }
+  - { source: livrarr-behavioral, target: livrarr-matching }
+  - { source: livrarr-behavioral, target: livrarr-metadata }
+  - { source: livrarr-behavioral, target: livrarr-library }
+  - { source: livrarr-behavioral, target: livrarr-handlers }
+
+data_flow:
+  sources:
+    - entity: ReviewCard
+      origin: settlement, edit, merge, conflict, park, cutover, and boot-heal decisions
+      description: Every producer submits a typed draft through the sole mint; the sole cohort derivation materializes every named Work.
+    - entity: ConflictCard
+      origin: runtime route contradiction or B4 legacy adoption
+      description: Runtime cards carry the exact contradicted route; adopted route-conflict cards carry UnknownLegacy and are non-keyable.
+    - entity: DecisionProof
+      origin: authenticated card read or elected merge preview
+      description: The server signs a complete card or election snapshot; informational counts are excluded.
+    - entity: RoutePlan
+      origin: locked live route rows inside the action transaction
+      description: Every proposal, attachment, retirement, gap-fill, and absorption uses the same planner and third-owner checks.
+    - entity: AbsorptionRecord
+      origin: user pair merge, absorbing review continuation, machine auto-merge, dedup heal, or article heal
+      description: One sealed row covers the whole operation, including caller writes before and after the physical loser deletion.
+    - entity: AbsorptionView
+      origin: user-scoped projection of an AbsorptionRecord plus current card, lifecycle, and file state
+      description: The projection exposes undo availability and effects without exposing generic row images.
+    - entity: FileMoveReport
+      origin: shared forward or undo file reorganization
+      description: Every affected item has a truthful disposition, both locations when mismatched, and named leftover copies.
+    - entity: StagingConflictDiagnostic
+      origin: lifecycle-triggered close of identity_conflicts_v2
+      description: The audit is immutable and effective currentness is derived from the linked absorption lifecycle.
+    - entity: IdentityParkPayloadV1
+      origin: a Work entering the identity park state
+      description: Exactly one card records candidate identity content rather than consume-once candidate ids.
+    - entity: HistoryEvent
+      origin: committed Incoming DifferentFromAll creation or sealed Work absorption
+      description: Creation emits an added draft after commit through the existing infallible observer; absorption alone owns an in-transaction worksMerged anchor.
+  sinks:
+    - entity: ReviewCard
+      destination: identity_review_cards and identity_review_card_members
+      description: Pending cards always name live same-user Works; resolved and cancelled cards and membership survive Work deletion as history.
+    - entity: ConflictCard
+      destination: review list, conflict detail, dismissal ledger when keyable, and audit history
+      description: Review cards are the only post-cutover user-facing conflict authority.
+    - entity: DecisionProof
+      destination: authenticated HTTP client and action validation
+      description: The client echoes the opaque proof; the authority verifies authentication and every bound live snapshot before writing.
+    - entity: RoutePlan
+      destination: route mutations and AbsorptionRecord envelope
+      description: Applied attachments and retirements equal the preview-bound plan and are retained for undo and audit.
+    - entity: AbsorptionRecord
+      destination: identity_merge_archives, internal undo authority, and record-id reference from Work history
+      description: Version-1 rows cascade with the surviving Work and retain complete undo state for that lifetime; their generic row images never cross the API.
+    - entity: AbsorptionView
+      destination: merge and undo responses, Work history UI, and explicit retry UI
+      description: The view names the record, lifecycle, affected Works, planned reverse paths, pending-card withdrawals, and truthful file outcomes.
+    - entity: FileMoveReport
+      destination: absorption record, merge or undo response, and history UI
+      description: Forward results are persisted after commit; undo remains incomplete until all records and locations are truthful.
+    - entity: StagingConflictDiagnostic
+      destination: retained audit and cutover counts only
+      description: It never drives badges, lists, suppression, actions, or resolution.
+    - entity: IdentityParkPayloadV1
+      destination: review card, dismissal key, park list, and typed continuation
+      description: Candidate selection never absorbs and dismissal reverts the Work to pending.
+    - entity: HistoryEvent
+      destination: existing history service and Work history projection
+      description: An added observer failure is absorbed and cannot alter create success; a worksMerged storage failure is the sole exception and rolls back its absorption transaction.
+  state_machines:
+    - entity: AbsorptionRecord
+      states: [legacy_v0_history, open_unsealed, active, undoing, undone]
+      transitions:
+        - { from: open_unsealed, to: active, trigger: "the completeness seal succeeds and the version-1 operation commits" }
+        - { from: active, to: undoing, trigger: "database restore commits and the file step is not yet complete" }
+        - { from: undoing, to: undone, trigger: "initial completion or explicit retry makes every recorded item truthful without clobber or copy loss" }
+        - { from: undone, to: undone, trigger: "an idempotent undo retry returns AlreadyUndone with zero writes" }
+    - entity: ReviewCard
+      states: [pending, resolved, cancelled]
+      transitions:
+        - { from: pending, to: resolved, trigger: "an authorized typed continuation commits" }
+        - { from: pending, to: cancelled, trigger: "user dismiss, supersession, Work deletion, absorption withdrawal, or cutover duplicate cleanup" }
+        - { from: resolved, to: pending, trigger: "undo restores a reversible pre-operation question; the operation's resolving card is excluded" }
+        - { from: cancelled, to: pending, trigger: "undo restores a reversible pre-operation question; retained resolution artifacts are excluded" }
+    - entity: ConflictCard
+      states: [pending_keyable, pending_non_keyable, resolved, cancelled, history_only]
+      transitions:
+        - { from: pending_keyable, to: resolved, trigger: "KeepExisting, AcceptSeparate, ReplaceAnchor, or Merge" }
+        - { from: pending_keyable, to: cancelled, trigger: "Dismiss with a V2 standing key" }
+        - { from: pending_non_keyable, to: resolved, trigger: "KeepExisting or AcceptSeparate for this card only" }
+        - { from: pending_non_keyable, to: cancelled, trigger: "cancel-only Dismiss" }
+        - { from: pending_keyable, to: history_only, trigger: "Work deletion or corrupt ownership discovered before action" }
+        - { from: pending_non_keyable, to: history_only, trigger: "Work deletion or payload becomes unreadable before action" }
+        - { from: resolved, to: pending_keyable, trigger: "undo restores a reversible exact-route question that was not the operation's resolving card" }
+        - { from: resolved, to: pending_non_keyable, trigger: "undo restores a reversible adopted UnknownLegacy question that was not the operation's resolving card" }
+        - { from: cancelled, to: pending_keyable, trigger: "undo restores a reversible exact-route question" }
+        - { from: cancelled, to: pending_non_keyable, trigger: "undo restores a reversible adopted UnknownLegacy question" }
+    - entity: UndoFileStep
+      states: [not_started, incomplete, complete]
+      transitions:
+        - { from: not_started, to: complete, trigger: "every recorded forward-moved item is already canonical, healed, or moved back" }
+        - { from: not_started, to: incomplete, trigger: "any item is occupied, duplicated, missing, mismatched, or cannot update its record" }
+        - { from: incomplete, to: complete, trigger: "explicit retry resolves every remaining item" }
+    - entity: StagingConflictDiagnostic
+      states: [pending_staging, terminal_diagnostic_current, terminal_diagnostic_historical]
+      transitions:
+        - { from: pending_staging, to: terminal_diagnostic_current, trigger: "Work deletion or absorption makes the pair self-referential" }
+        - { from: terminal_diagnostic_current, to: terminal_diagnostic_historical, trigger: "linked absorption changes from active to undoing or undone; currentness is derived and the audit row is unchanged" }
+        - { from: terminal_diagnostic_historical, to: pending_staging, trigger: "undo restores the original pending row image" }
+  invariants:
+    - Review-card authority is exhaustive over review kind, optional payload-free GroupIdentityRoleKind, action, cohort cardinality, and payload state; role_kind is Option::None for every non-GroupIdentity kind, and a missing, duplicate, illegally role-indexed, or payload-kind-mismatched authorization cell fails startup closed. The full payload-bearing GroupIdentityRole is bound separately in card and election proofs.
+    - Incoming × GroupAttachOrMerge × One × NativeReadable requires a proposal-bound card proof and performs the one-member attach plan; ReIdentify, MergeMembers, and GroupIdentityRoleKind::None × GroupAttachOrMerge × One are explicit refused cells, and MergeMembers × GroupDifferentFromAll is refused; all refused cells remain write-free.
+    - A non-absorbing action accepts only a card proof; an absorbing action accepts only an election proof; every refused or history-only cell remains write-free.
+    - An actionable card read emits one ReviewActionView per authorization cell. Each non-absorbing action carries its own card proof; an absorbing action carries no card proof and names the required preview that mints its election proof.
+    - Decision proofs bind user, card/version when present, the complete sorted cohort generations, role, proposal, all mergeable field values and presence, canonical Work-keyed keep-from choices, route plan, retirements, and elected survivor. Informational counts never stale a decision.
+    - The deployed expected-generation-only ReviewResolutionCommand and unbound merge/conflict request shapes are retired at B0; no compatibility adapter may invoke a mutation without the new authenticated proof.
+    - ConflictDecisionHttpRequest declares only action and decision_proof; serde ignores unknown legacy JSON members, and no retired request member can become an input to the outcome.
+    - The sole cohort is sorted unique payload work_ids union subject_work_id. Mint, delete, cutover, dismissal, and undo consume its relational projection; no delete site parses payload JSON.
+    - Same-book certainty is evaluated only inside the identity road and remains three-valued; Unsure never means different.
+    - Every user absorption is pairwise and preview-bound to either elected survivor. A machine operation may absorb several losers only when its whole route plan has no contradiction.
+    - IdentityAuthorityRepository has exactly one absorption door, execute_absorption(RecordedAbsorptionRequest). User execute supplies UserElection with only UserAbsorptionOrigin plus UserId; the settlement AutoMerge, dedup-residue heal, and article-duplicate heal enter through three named IdentityAuthorityRoad methods that supply MachineSnapshot with only MachineAbsorptionOrigin plus the operation's complete loser set, member generations, and scan_generation.
+    - RecordedAbsorptionRequest makes crossed provenance unrepresentable. UserElection admits only ManualPair or ReviewContinuation and derives AbsorptionActor::User; MachineSnapshot admits only SettlementAutoMerge, DedupResidueHeal, or ArticleDuplicateHeal and derives the matching MachineActor. AbsorptionOrigin, AbsorptionActor, AbsorptionCaller, record envelopes, WorkAbsorption, worksMerged anchors, views, DTOs, and B0 refusal names are projections of that variant and are never free repository inputs.
+    - No road or machine caller can pass an absorption permit, capability, prefix, or activation result. The repository alone consults the sealed ActivationReport it consumed at construction, returns the B0 named refusal before open under RefuseAll, and accesses crate-private open_absorption_operation only under RecordedV1.
+    - A machine same-provider contradiction refuses the entire component before an operation opens and mints or reuses a GroupIdentity review card; no machine tie-break retires either id.
+    - Every route-changing matrix cell and every absorption plans from locked live rows through route_plan. A route active on a third Work refuses before any write, and a Work-scoped provider slot never ends with two active ids.
+    - "Route-plan ownership follows the existing taxonomy: OpenLibrary and Hardcover Work ids are Work-scoped; a legacy Goodreads book id, ISBN-13, and ASIN are Edition-scoped. Other same-provider Edition routes are not implicated by a Work-route conflict."
+    - Incoming DifferentFromAll creates only when every member is certainly different and stamps durable user-distinct state on the created Work.
+    - Incoming DifferentFromAll create commits the Work, its routes, and its durable user-distinct marker all-or-nothing and leaves every reviewed member's identity fields and routes unchanged. After that commit, the identity road hands exactly one history_events::added draft carrying the persisted add_source to the existing infallible HistoryService::record observer; an observer write failure cannot refuse or roll back the create, and worksMerged remains the sole transaction-fatal HistoryEvent exception.
+    - Every absorption opens one version-1 operation record before its first operation-owned member write, records the schema-complete before/after closure, seals after its last such write, or rolls back whole; only named scan-snapshot card effects may follow under the causal high-water rule.
+    - A settlement MachineSnapshot with several losers seals exactly one WorkAbsorption naming the full loser set. Dedup and article scans call the same repository door once per pair/component, so sibling operations remain independently recorded and undoable.
+    - OpenAbsorptionOperation linearly owns the ImmediateTransaction while an operation is open and privately borrows the repository's existing SqliteWorkDelete for that scope; no caller retains a raw writer and no second delete authority is minted. absorb_work_into is the only absorption-time caller of delete_work_in_tx, using those two private fields. A successful completeness seal alone moves the transaction into SealedAbsorptionOperation, and commit_sealed_absorption_operation is that seal's only consumer.
+    - Undo resolves every recorded selector, table, key column, and reversible column through the current validated EffectManifest; serialized envelope strings are data and are never interpolated as SQL identifiers.
+    - The effect manifest combines the live foreign-key graph, triggers, retained-content policies, and a checked registry of non-FK Work pointers; unclassified references, triggers, overlaps, or post-seal writes fail startup or commit closed.
+    - Each record pins its manifest schema version and digest. A later migration that changes a covered table must register a typed compatibility mapping before startup can accept new operations or undo an older record.
+    - Each active prior record whose survivor is a member has a typed lineage edge recording its survivor post-generation and this operation's pre-decision generation; nested or sibling undo refuses unless the recorded edge still matches after permitted rebases.
+    - Generic RowMutation images and the version-1 envelope remain repository-internal; every HTTP surface uses the sanitized AbsorptionView projection.
+    - The sole Work delete authority owns the only production statement that physically deletes Works and has exactly four origins: User, ImportRollback, ListImportRollback, and Absorption. new_work_delete_authority is called exactly once during repository construction. For absorption, open_absorption_operation privately stores a borrow of that existing authority beside its writer, and absorb_work_into alone calls delete_work_in_tx; absorption_store contains no DELETE FROM works. delete_work_in_tx delegates to delete_work_set_in_tx, which borrows exactly the authority's optional LegacyPreCutoverWritePermit and is the sole caller of the crate-private legacy close. Some closes a pre-B4 loser's open row as machine work_deleted inside the still-open operation and records that close; None after B4 skips the close and leaves the legacy table byte-identical. The authority also cancels pending cards by membership, preserves history, and stages counted v2 diagnostics.
+    - Absorption resolves only its initiating card and withdraws every other pending card it invalidates; it records every minted, reused, resolved, or cancelled card id and never repoints unrelated cards to the survivor.
+    - The initiating resolving card is retained through undo with its resolution content and audit unchanged; only its Work pointer follows the reversible lineage. Other pre-operation questions restore from their before-images and post-operation merged-graph questions are cancelled.
+    - "Notifications are reversible effects of the cards they name: withdrawal removes actionability, restoration restores it, and no notification points to a withdrawn actionable card."
+    - Settlement and continuation keep their two separate generation claims. Every absorbed member is claimed, and undo advances generations on every restored Work.
+    - A version-1 absorption record lives exactly as long as its survivor, including when undone. V0 archive rows remain inert history and are never treated as restorable.
+    - Database undo validates every non-file after-image and restores every before-image in one BEGIN IMMEDIATE transaction or refuses whole. A forward-moved item's path alone leaves generic row equality; the recorded forward after-location must still equal the user-scoped LibraryItem path until reverse, any unrelated row change refuses, and the truthful current path remains until the file step.
+    - Undo advances every restored Work generation. Undo of a machine operation also stamps durable user-distinct state on every restored member, preventing a later machine re-merge while preserving the user merge door.
+    - Forward and undo file completion share one no-clobber engine. It never overwrites a destination occupied before or during a move, never destroys the only copy, reports a leftover source, and names both locations whenever record and filesystem disagree.
+    - A file batch may fail before its first item on invalid input or repository preflight; after any item side effect begins, filesystem and record failures are per-item dispositions and the batch returns one result for every requested item.
+    - After an absorption or database restore commits, incomplete file work is successful result data in FileMoveReport and AbsorptionView, never an error that implies the database transaction rolled back.
+    - File completion has no transition journal, file claims, lock protocol, startup owner, automatic crash reconciliation, or timer. An incomplete undo is visible and only explicitly retried.
+    - ReviewDismissalKeyV2 is the only new key definition. V1 GroupIdentity remains live only when proposed is None; other V1 group rows are retained but inert. Adopted route-conflict and Unknown-role cards never write a dismissal key.
+    - A keyable KeepExisting or AcceptSeparate resolution suppresses only its exact persisted question key; a keyable Dismiss writes the same key to the standing dismissal ledger. Non-keyable Keep, Accept, and Dismiss affect only that card.
+    - IdentityPark has one card per parked Work and keys candidate identity content, never consume-once ids. Candidate existing_work_id is informational and choosing a candidate cannot absorb.
+    - Newly raised conflict cards persist the exact contradicted route. QuorumTie uses NotApplicable. Every adopted route-conflict uses UnknownLegacy; the current route or mutable anchor ledger is never substituted.
+    - identity_conflicts_v2 remains staging only. Its lifecycle diagnostics are immutable audit; currentness is derived from the linked operation lifecycle and it never affects a user surface.
+    - A v2 diagnostic linked to an absorption is current if and only if that operation is active; undoing and undone are historical because the database question has already been restored.
+    - A v2 staging row closes only when its current Work is deleted or absorption makes its Work-typed pair self-referential; a row pointing at a third Work stays pending, and B4 counts each pending row or current diagnostic exactly once.
+    - B4 performs pointer census, total legacy hydration/adoption, corrected record translation, diagnostic counting, authority switch, and marker in one BEGIN IMMEDIATE transaction. It runs once, changes nothing on a second run, and does not globally refuse an operation whose database restore is complete and files remain pending.
+    - SqliteIdentityAuthorityActivation::activate_identity_authority is the sole constructor of MarkerAbsent, LegacyPreCutoverWritePermit, CutoverReadPermit, ConflictCutoverRequest, RecordedAbsorptionPermit, AbsorptionCapability, and ActivationReport. For B0-B3 it seals the legacy write permit into the report; for B4 it passes the cutover permit and request to the crate-private helper, whose only scan call is also crate-private, using the same ImmediateTransaction that writes the marker. It never exposes a raw marker or a second constructor.
+    - After the B4 marker, no production statement except the named legacy history reader names work_identity_conflicts and every user conflict operation enters review-card authority.
+    - No SQL exists outside livrarr-db, handlers contain no business or file logic, every user-scoped query carries user_id, applied migrations remain immutable, and every write transaction is BEGIN IMMEDIATE.
+
+build_units:
+  - id: B0
+    name: shared contracts, schema, delete authority, and dead surface
+    modules: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, absorption_store, work_delete, legacy_identity_conflict_history, conflict_cutover, identity_authority_activation, identity_authority_repository, identity_road, identity_authority_application, identity_authority_handlers, identity_authority_client, identity_authority_oracles]
+    capability: "ActivationReport carries AbsorptionCapability::RefuseAll plus Some(LegacyPreCutoverWritePermit). The five refusal names are projections of the closed user/machine request variants—manual merge, review continuation, settlement AutoMerge, dedup heal, and article heal—and all refuse with zero absorption writes. Repository construction uses the report to construct exactly one SqliteWorkDelete, which borrows its permit only for the pre-B4 legacy close. IdentityPark actions also remain refused."
+    release_status: non-releasable alone
+  - id: B1
+    name: recorded operation and route-plan enforcement
+    modules: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, route_plan, absorption_store, work_delete, conflict_cutover, identity_authority_activation, identity_authority_repository, identity_road, library_item_path_store, file_reorganization, identity_authority_application, identity_authority_oracles]
+    capability: "AbsorptionCapability::RecordedV1 is read only from the repository's held ActivationReport. UserElection admits only ManualPair or ReviewContinuation plus user and verified election; MachineSnapshot admits only SettlementAutoMerge, DedupResidueHeal, or ArticleDuplicateHeal plus its complete snapshot. The named road wrapper fixes the variant, and derived provenance feeds the record, views, B0 names, and worksMerged anchor. The one repository door opens and seals one operation with one route plan, its moved ImmediateTransaction, and a private borrow of the repository's sole SqliteWorkDelete; absorb_work_into routes every loser through that authority and card withdrawal. A user pair lacking the B2-supported preview remains a named refusal."
+    release_status: "first releasable prefix is exactly B0+B1; B0 and B1 ship in one release"
+  - id: B2
+    name: role matrix, three-valued decisions, survivor election, preview, and stale proof
+    modules: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, route_plan, identity_authority_activation, identity_authority_repository, identity_road, identity_authority_application, identity_authority_handlers, identity_authority_client, identity_authority_oracles]
+    capability: "Activates the complete 5-by-2 GroupIdentity matrix and preview-bound pairwise user decisions. Incoming DifferentFromAll commits Work, routes, and user-distinct marker together, then submits one added draft to the existing infallible history observer."
+    release_status: releasable prefix B0+B1+B2
+  - id: B3
+    name: database undo and simple file move-back
+    modules: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, absorption_store, identity_authority_activation, identity_authority_repository, identity_road, library_item_path_store, file_reorganization, identity_authority_application, identity_authority_handlers, identity_authority_client, identity_authority_oracles]
+    capability: "Activates whole-operation database restore, nested and sibling lineage, machine distinctness, causal card withdrawal, shared forward/undo file reports, and explicit incomplete retry."
+    release_status: releasable prefix B0+B1+B2+B3
+  - id: B4
+    name: conflict adoption, action matrix, park authority, projection, and guard
+    modules: [identity_authority_contracts, identity_authority_services, identity_authority_activation_contracts, identity_authority_transaction, review_card_store, route_plan, work_delete, legacy_identity_conflict_history, conflict_cutover, identity_authority_activation, identity_authority_repository, identity_road, identity_authority_application, identity_authority_handlers, identity_authority_client, identity_authority_oracles]
+    capability: "Runs the one-shot cutover through the crate-private scan/helper chain, returns an ActivationReport whose legacy-close permit is None, and activates the 5-by-4 conflict matrix, non-keyable adopted cards, IdentityPark, parked_by_conflicts, and the post-marker legacy guard. Work deletion then skips legacy close and cannot infer marker absence from _livrarr_meta."
+    release_status: releasable full prefix B0+B1+B2+B3+B4
+
+notes:
+  - "REQ-008 belongs to the superseded v2 CLI and is explicitly out of scope; this architecture adds no CLI surface."
