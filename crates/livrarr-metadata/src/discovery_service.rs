@@ -323,13 +323,13 @@ where
         lookup_goodreads(ctx, &term, lang),
     );
 
-    // Cap each provider to its top 9 (relevance-ordered), then round-robin in
+    // Cap each provider to its top 3 (relevance-ordered), then round-robin in
     // chunks of 3 so the strongest matches from every provider lead. Order is
     // language-aware: English leads with the anchor-id providers (Hardcover,
     // OpenLibrary), then Google Books, then Goodreads (scrape, often blocked)
     // last. Non-English leads with Google Books — the foreign-language
     // metadata provider — then OpenLibrary, Hardcover, Goodreads.
-    const PER_PROVIDER: usize = 9;
+    const PER_PROVIDER: usize = 3;
     let mut lists = if lang == "en" {
         vec![
             take_lookup("Hardcover", &term, hc),
