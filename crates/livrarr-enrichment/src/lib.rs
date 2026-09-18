@@ -741,7 +741,10 @@ where
             );
         }
 
-        let priority_model = PriorityModel::for_language(work.language.as_deref());
+        // Cover reselection reads only the cover resolutions out of the merge,
+        // and both cover slots rank by their own table — so this runs on the
+        // engine's own model rather than building a descriptive order here.
+        let priority_model = self.merge_engine.priority_model(work.language.as_deref());
         let output = self
             .merge_engine
             .merge(MergeInput {
@@ -1117,8 +1120,12 @@ where
         // the merge (REQ-014); identity_not_found keeps its identity-track
         // sources only.
 
-        // Determine priority model based on work language
-        let priority_model = PriorityModel::for_language(current_work.language.as_deref());
+        // REQ-001: the provider order comes from the merge engine, which holds
+        // the policy loaded at startup — the same order the cached-reuse path
+        // above resolves with.
+        let priority_model = self
+            .merge_engine
+            .priority_model(current_work.language.as_deref());
 
         // Step 9: CAS retry loop — max 3 attempts
         const MAX_CAS_ATTEMPTS: usize = 3;

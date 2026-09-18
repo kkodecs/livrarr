@@ -106,7 +106,7 @@ async fn test_mc_merge_payload_anchors_do_not_change_inline_external_or_ledger_s
         external_id_values(db.list_external_ids(user_id, work.id).await.unwrap());
     let before_anchors = db.list_anchors(work.id).await.unwrap();
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: before_work.clone(),
             current_provenance: Vec::new(),
@@ -160,7 +160,7 @@ async fn test_mc_f1_foreign_fixture_keeps_anchors_and_series_name_unchanged() {
     // test_mc_refresh_orchestration) and verified end-to-end against the
     // forensic DB at the Test stage.
     let (_db, _user_id, work) = seeded_work().await;
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: Work {
                 series_name: None,

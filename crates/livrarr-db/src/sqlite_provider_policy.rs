@@ -22,12 +22,26 @@ impl ProviderPolicyDb for SqliteDb {
         .await
         .map_err(map_db_err)?;
 
-        // Group rows into per-language (ebook, audiobook) entry lists.
+        // Group rows into per-language (ebook, audiobook) entry lists. A row the
+        // policy vocabulary cannot express — an unknown kind or provider, or a
+        // rank outside the stored range — fails the load (REQ-004). Clamping or
+        // skipping it would silently run a different priority order than the one
+        // the database holds.
         let mut grouped: HashMap<String, (Vec<ProviderRef>, Vec<ProviderRef>)> = HashMap::new();
         for (language, kind, provider, rank) in rows {
             let kind: ListKind = from_str(&kind)?;
             let provider: MetadataProvider = from_str(&provider)?;
-            let rank = u8::try_from(rank).unwrap_or(u8::MAX);
+            let rank = u8::try_from(rank).map_err(|_| DbError::IncompatibleData {
+                detail: format!(
+                    "provider_policy rank {rank} for {} in the '{language}' {} list is outside \
+                     the supported range 0-255",
+                    provider.record_key(),
+                    match kind {
+                        ListKind::Ebook => "ebook",
+                        ListKind::Audiobook => "audiobook",
+                    }
+                ),
+            })?;
             let entry = ProviderRef { provider, rank };
             let lists = grouped.entry(language).or_default();
             match kind {

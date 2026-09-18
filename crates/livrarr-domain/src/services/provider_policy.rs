@@ -49,6 +49,15 @@ impl ProviderList {
 
 /// Per-language selection policy (REQ-003): two self-contained priority lists.
 /// Foreign-language lists exclude Hardcover + OpenLibrary (REQ-014/DD-003).
+///
+/// Enrichment reads the two lists as (REQ-003):
+/// * `ebook` — the ordinary-metadata order, covering both content fields and the
+///   description;
+/// * `audiobook` — the audio-detail order (narrator, duration, narration type,
+///   abridged).
+///
+/// Neither list orders covers. Cover selection keeps its own rank table so a
+/// metadata reorder here cannot move a cover.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderPolicy {
     pub ebook: ProviderList,
@@ -86,11 +95,51 @@ impl ProviderPolicySnapshot {
             .cloned()
             .unwrap_or_else(|| self.generic.clone())
     }
+
+    /// Startup gate (REQ-001): the snapshot a process is about to enrich from
+    /// must be able to answer every language it will be asked about. The generic
+    /// group backs unlisted languages and the English group backs English and
+    /// its aliases, so both are required; an explicitly stored language group
+    /// resolves standalone, so an empty list there is a configuration error too,
+    /// not a silent fall-through to the generic order.
+    pub fn validate(&self) -> Result<(), ProviderPolicyError> {
+        self.validate_group("*", &self.generic)?;
+        match self.by_language.get("en") {
+            Some(english) => self.validate_group("en", english)?,
+            None => return Err(ProviderPolicyError::MissingGroup("en".to_string())),
+        }
+        let mut languages: Vec<&String> = self.by_language.keys().collect();
+        languages.sort();
+        for language in languages {
+            self.validate_group(language, &self.by_language[language])?;
+        }
+        Ok(())
+    }
+
+    fn validate_group(
+        &self,
+        language: &str,
+        policy: &ProviderPolicy,
+    ) -> Result<(), ProviderPolicyError> {
+        for kind in [ListKind::Ebook, ListKind::Audiobook] {
+            if policy.list_for(kind).entries.is_empty() {
+                return Err(ProviderPolicyError::EmptyList {
+                    language: language.to_string(),
+                    kind,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Error building a provider policy from rows (AC-015).
+/// Error building or validating a provider policy (AC-015, REQ-001).
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderPolicyError {
     #[error("provider {0:?} appears more than once within a single list")]
     DuplicateInList(MetadataProvider),
+    #[error("provider priorities are missing the required '{0}' language group")]
+    MissingGroup(String),
+    #[error("the '{language}' {kind:?} provider priority list is empty")]
+    EmptyList { language: String, kind: ListKind },
 }

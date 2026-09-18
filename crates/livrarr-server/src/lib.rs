@@ -168,6 +168,7 @@ pub mod log_surface;
 pub mod rate_limit;
 pub use livrarr_matching as matching;
 pub mod email_service;
+pub mod enrichment_composition;
 pub mod history_service;
 pub mod identity_layer;
 pub mod import_io_service;

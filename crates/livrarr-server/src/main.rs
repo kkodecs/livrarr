@@ -157,15 +157,28 @@ async fn main() {
     )
     .with_capture_dir(data_dir.join("captures/goodreads"))
     .with_live_config(live_metadata_config.clone());
-    let (provider_queue, enrichment_service) = build_enrichment_pipeline(
-        &db,
-        &http_fetcher,
-        enrichment_goodreads_client,
-        &live_metadata_config,
-        &call_sink,
-        &transport_cache,
-        &config.metadata_cache,
-    );
+    // Reads the stored provider priorities (REQ-001) — after migrations, before
+    // anything serves a request or enriches in the background. A database the
+    // pipeline cannot be built from stops startup rather than quietly running a
+    // different order.
+    let (provider_queue, enrichment_service) =
+        match livrarr_server::enrichment_composition::build_enrichment_pipeline(
+            &db,
+            &http_fetcher,
+            enrichment_goodreads_client,
+            &live_metadata_config,
+            &call_sink,
+            &transport_cache,
+            &config.metadata_cache,
+        )
+        .await
+        {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                error!("enrichment provider priorities could not be loaded: {error}");
+                std::process::exit(1);
+            }
+        };
 
     let svc_db = db.clone();
     let svc_enrichment = enrichment_service.clone();
@@ -1051,156 +1064,6 @@ async fn build_metadata_config_and_cache(
     ));
 
     (live_metadata_config, transport_cache)
-}
-
-/// Build the live `DefaultProviderQueue` + `EnrichmentServiceImpl` from a
-/// startup-time snapshot of `MetadataConfig`. Live config changes (token
-/// added, URL changed) require a server restart for now — runtime reload
-/// comes alongside the orchestration cutover.
-fn build_enrichment_pipeline(
-    db: &livrarr_db::sqlite::SqliteDb,
-    http_fetcher: &livrarr_http::fetcher::HttpFetcherImpl,
-    goodreads_client: livrarr_external_data::GoodreadsClient,
-    live_metadata_config: &livrarr_external_data::live_config::LiveMetadataConfig,
-    call_sink: &Arc<dyn livrarr_domain::services::ProviderCallSink>,
-    transport_cache: &Arc<livrarr_external_data::transport_cache::TransportCache>,
-    metadata_cache: &livrarr_server::config::MetadataCacheConfig,
-) -> (
-    Arc<livrarr_server::state::LiveProviderQueue>,
-    Arc<livrarr_server::state::LiveEnrichmentService>,
-) {
-    use livrarr_domain::MetadataProvider as P;
-    use livrarr_metadata as m;
-
-    let cfg_snapshot = live_metadata_config.snapshot();
-
-    let queue_cfg = |provider| m::ProviderQueueConfig {
-        provider,
-        max_attempts: 5,
-    };
-
-    let mut builder = m::DefaultProviderQueueBuilder::new();
-
-    // Audnexus — always available. URL is captured at startup; if you
-    // want a custom audnexus_url to take effect live too, that's a
-    // small follow-up (same LiveMetadataConfig pattern).
-    builder = builder.add_provider(
-        P::Audnexus,
-        livrarr_external_data::ProviderClient::Audnexus(
-            livrarr_external_data::AudnexusClient::new(
-                http_fetcher.clone(),
-                cfg_snapshot.audnexus_url.clone(),
-            ),
-        )
-        .with_call_sink(call_sink.clone()),
-        queue_cfg(P::Audnexus),
-    );
-
-    // OpenLibrary — always available, no credentials needed.
-    builder = builder.add_provider(
-        P::OpenLibrary,
-        livrarr_external_data::ProviderClient::OpenLibrary(
-            livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
-        )
-        .with_call_sink(call_sink.clone()),
-        queue_cfg(P::OpenLibrary),
-    );
-
-    // Hardcover — always registered. The client itself reads the live
-    // config per-fetch; if `hardcover_enabled=false` or the token is
-    // empty, it returns NotFound without a network call. Enabling HC
-    // via the UI takes effect on the next enrichment.
-    builder = builder.add_provider(
-        P::Hardcover,
-        livrarr_external_data::ProviderClient::Hardcover(
-            livrarr_external_data::HardcoverClient::new(
-                http_fetcher.clone(),
-                live_metadata_config.clone(),
-            ),
-        )
-        .with_call_sink(call_sink.clone()),
-        queue_cfg(P::Hardcover),
-    );
-
-    // Goodreads — always registered. The LLM extraction fallback for
-    // foreign-language pages reads live config per-fetch.
-    builder = builder.add_provider(
-        P::Goodreads,
-        livrarr_external_data::ProviderClient::Goodreads(goodreads_client)
-            .with_call_sink(call_sink.clone()),
-        queue_cfg(P::Goodreads),
-    );
-
-    // Google Books — always registered. Reads API key from live config per-fetch.
-    builder = builder.add_provider(
-        P::GoogleBooks,
-        livrarr_external_data::ProviderClient::GoogleBooks(
-            livrarr_external_data::GoogleBooksClient::new(
-                http_fetcher.clone(),
-                live_metadata_config.clone(),
-            ),
-        )
-        .with_call_sink(call_sink.clone()),
-        queue_cfg(P::GoogleBooks),
-    );
-
-    // Audible — always registered. Unauthenticated API, no config needed.
-    builder = builder.add_provider(
-        P::Audible,
-        livrarr_external_data::ProviderClient::Audible(
-            livrarr_external_data::audible::AudibleCatalogClient::new(http_fetcher.clone(), 5 * 60),
-        )
-        .with_call_sink(call_sink.clone()),
-        queue_cfg(P::Audible),
-    );
-
-    builder = builder.with_applicability_rule(Arc::new(|provider, work| {
-        if matches!(
-            livrarr_external_data::language::provider_priority(work.language.as_deref()),
-            livrarr_external_data::language::ProviderPriority::English
-        ) {
-            return !matches!(provider, P::GoogleBooks);
-        }
-        matches!(
-            provider,
-            P::Goodreads | P::Audnexus | P::GoogleBooks | P::Audible
-        )
-    }));
-
-    // Pipeline-level skip records (no anchor / policy) flow through the
-    // queue's own sink seam (REQ-001).
-    builder = builder.with_call_sink(call_sink.clone());
-
-    // Persistent provider-response cache (REQ-009): TOML-configured TTL
-    // and row cap, no env-var override (Servarr convention).
-    builder = builder.with_provider_cache(
-        chrono::Duration::days(metadata_cache.ttl_days as i64),
-        metadata_cache.max_rows,
-    );
-
-    let db_arc = Arc::new(db.clone());
-    let queue = Arc::new(builder.build(db_arc.clone()));
-
-    // Merge engine: purely deterministic (REQ-005) — the per-merge priority
-    // model comes from `MergeInput`; no LLM is consulted anywhere in merge.
-    let merge_engine = Arc::new(m::DefaultMergeEngine::new(m::PriorityModel::english()));
-
-    let llm_configured = live_metadata_config.snapshot().llm_enabled;
-    // Author-name observation (REQ-002): every successful provider payload's
-    // author name is retained as a ranked variant, so the library can converge on
-    // the spelling the providers agree on instead of the first one imported.
-    let name_observer = Arc::new(
-        livrarr_metadata::author_name_variant_observer::DbAuthorNameObservationSink::new(
-            db_arc.clone(),
-        ),
-    );
-    let service = Arc::new(
-        m::EnrichmentServiceImpl::new(db_arc, queue.clone(), merge_engine, llm_configured)
-            .with_transport_cache(transport_cache.clone())
-            .with_call_sink(call_sink.clone())
-            .with_author_name_observer(name_observer),
-    );
-    (queue, service)
 }
 
 /// Pre-warm SQLite's page cache so the first request isn't slow.

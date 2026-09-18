@@ -9,19 +9,24 @@
 //! to resolve the final value.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use livrarr_db::{
     ApplyEnrichmentMergeRequest, SetFieldProvenanceRequest, UpdateWorkEnrichmentDbRequest,
 };
 use livrarr_domain::{
-    DissentReason, EnrichmentStatus, FieldProvenance, MergeResolved, NarrationType, Work, WorkField,
+    services::ProviderPolicySnapshot, DissentReason, EnrichmentStatus, FieldProvenance,
+    MergeResolved, NarrationType, Work, WorkField,
 };
 use livrarr_external_data::NormalizedWorkDetail;
 
 use crate::cover_resolution;
 use crate::{EnrichmentMode, ReconstructedOutcome};
 
-/// TEMP(pk-tdd): priority order per field group for merge resolution.
+/// Priority order per field group for one merge. `content`/`description` carry
+/// the ordinary-metadata order and `audio` the audio-detail order — both come
+/// from the stored policy in production. `cover` carries the ebook cover order
+/// and is always a cover rank table, never a stored metadata priority.
 #[derive(Debug, Clone)]
 pub struct PriorityModel {
     pub content: Vec<livrarr_domain::MetadataProvider>,
@@ -31,9 +36,11 @@ pub struct PriorityModel {
 }
 
 impl PriorityModel {
-    /// English content/description order is unchanged by N2 (cover-only
-    /// consolidation); `cover`/`audio` are derived from the single rank table
-    /// (S1) — see `cover_rank::CoverRankModel::EbookEnglish`/`Audiobook`.
+    /// A hardcoded English order for standalone and test compositions that do
+    /// not load a stored policy. `cover`/`audio` are derived from the single
+    /// rank table (S1) — see `cover_rank::CoverRankModel::EbookEnglish`/
+    /// `Audiobook`. Production orders come from the database (REQ-001), so
+    /// nothing on the server path builds a metadata order from here.
     pub fn english() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -58,9 +65,10 @@ impl PriorityModel {
         }
     }
 
-    /// Foreign content/description order is unchanged by N2; `cover`/`audio`
-    /// are derived from the single rank table (S1) — see
-    /// `cover_rank::CoverRankModel::EbookForeign`/`Audiobook`.
+    /// A hardcoded foreign-language order, the counterpart of
+    /// [`PriorityModel::english`] and likewise for standalone and test
+    /// compositions only; `cover`/`audio` are derived from the single rank
+    /// table (S1) — see `cover_rank::CoverRankModel::EbookForeign`/`Audiobook`.
     pub fn foreign() -> Self {
         use livrarr_domain::MetadataProvider as P;
         Self {
@@ -87,7 +95,8 @@ impl PriorityModel {
         }
     }
 
-    /// Select model based on work language.
+    /// Select a hardcoded model from the work language, for the same
+    /// standalone and test compositions as [`PriorityModel::english`].
     pub fn for_language(language: Option<&str>) -> Self {
         match livrarr_external_data::language::provider_priority(language) {
             livrarr_external_data::language::ProviderPriority::English => Self::english(),
@@ -135,6 +144,12 @@ pub enum MergeError {
 /// is negligible compared to the prior scatter-gather.
 #[trait_variant::make(Send)]
 pub trait MergeEngine: Send + Sync {
+    /// The provider order this engine resolves `language` with (REQ-001).
+    /// Every `MergeInput` the enrichment service builds takes its model from
+    /// here, so a fresh provider dispatch and a cached-payload reuse resolve
+    /// fields against one policy rather than two independently written orders.
+    fn priority_model(&self, language: Option<&str>) -> PriorityModel;
+
     async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError>;
 
     /// Merge from already-fetched per-provider payloads — zero provider network
@@ -149,9 +164,24 @@ pub trait MergeEngine: Send + Sync {
     ) -> Result<MergeOutput, MergeError>;
 }
 
-/// Deterministic merge engine (REQ-004/REQ-005, P-C): pure and zero-LLM. The
-/// per-merge priority model is taken from `MergeInput`; the engine is stateless.
-pub struct DefaultMergeEngine;
+/// Where an engine's provider order comes from.
+enum PrioritySource {
+    /// One model, used as written for every language. Standalone and test
+    /// compositions that supply their own order; never a production default.
+    Fixed(PriorityModel),
+    /// The provider policy loaded from the database at startup (REQ-001). The
+    /// language's ebook list orders ordinary metadata, its audiobook list orders
+    /// audio details; covers keep their own rank table either way.
+    Policy(Arc<ProviderPolicySnapshot>),
+}
+
+/// Deterministic merge engine (REQ-004/REQ-005, P-C): pure and zero-LLM. It owns
+/// the provider order for the merges it performs — either a caller-supplied
+/// model or the startup policy snapshot (REQ-001) — so the network path and the
+/// cached-payload path cannot drift apart.
+pub struct DefaultMergeEngine {
+    priorities: PrioritySource,
+}
 
 /// Build the DB apply-request from a computed merge output, rewriting the
 /// per-row ids to the target (user_id, work_id). Shared by the network
@@ -184,26 +214,77 @@ pub fn build_apply_request(
 }
 
 impl DefaultMergeEngine {
-    /// Construct the deterministic merge engine. `priority_model` is accepted for
-    /// call-site compatibility; the per-merge model comes from `MergeInput`.
-    pub fn new(_priority_model: PriorityModel) -> Self {
-        Self
+    /// Construct the engine around one explicit model, used for every language.
+    /// This is the standalone/test composition — production builds the engine
+    /// from the stored policy with [`DefaultMergeEngine::from_policy`].
+    pub fn new(priority_model: PriorityModel) -> Self {
+        Self {
+            priorities: PrioritySource::Fixed(priority_model),
+        }
+    }
+
+    /// Construct the engine around the provider policy loaded from the database
+    /// at startup (REQ-001). The snapshot is immutable for the life of the
+    /// process: a row edited afterwards takes effect on the next restart.
+    pub fn from_policy(policy: Arc<ProviderPolicySnapshot>) -> Self {
+        Self {
+            priorities: PrioritySource::Policy(policy),
+        }
     }
 }
 
 impl DefaultMergeEngine {
     /// Compatibility constructor for call sites that previously supplied an LLM
     /// caller. The merge is purely deterministic now (REQ-005/D-010), so the
-    /// caller and its configured flag are accepted and discarded.
-    pub fn new_with_llm<L>(_priority_model: PriorityModel, _llm: L, _llm_configured: bool) -> Self
+    /// caller and its configured flag are accepted and discarded; the priority
+    /// model is honoured exactly as in [`DefaultMergeEngine::new`].
+    pub fn new_with_llm<L>(priority_model: PriorityModel, _llm: L, _llm_configured: bool) -> Self
     where
         L: livrarr_domain::services::LlmCaller + Send + Sync,
     {
-        Self
+        Self::new(priority_model)
+    }
+}
+
+/// Derive the merge order for `language` from a stored policy (REQ-002/REQ-003).
+///
+/// The ebook list orders ordinary metadata — content and description share it;
+/// the audiobook list orders audio details. Covers are deliberately NOT read
+/// from the policy: both cover slots keep their own rank table, so editing a
+/// metadata priority cannot move a cover (REQ-003).
+///
+/// English aliases (`eng`, `en-GB`, an unknown language) all resolve to the
+/// stored English group through the existing classifier. A foreign work resolves
+/// on its normalized code and falls back to the generic group standalone.
+fn model_from_policy(policy: &ProviderPolicySnapshot, language: Option<&str>) -> PriorityModel {
+    let foreign = matches!(
+        livrarr_external_data::language::provider_priority(language),
+        livrarr_external_data::language::ProviderPriority::Foreign
+    );
+    let key = match language.filter(|_| foreign) {
+        Some(language) => livrarr_domain::normalize_language(language),
+        None => "en".to_string(),
+    };
+    let group = policy.for_language(&key);
+    let ordinary: Vec<livrarr_domain::MetadataProvider> =
+        group.ebook.entries.iter().map(|e| e.provider).collect();
+    PriorityModel {
+        description: ordinary.clone(),
+        content: ordinary,
+        cover: crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::for_ebook(foreign))
+            .to_vec(),
+        audio: group.audiobook.entries.iter().map(|e| e.provider).collect(),
     }
 }
 
 impl MergeEngine for DefaultMergeEngine {
+    fn priority_model(&self, language: Option<&str>) -> PriorityModel {
+        match &self.priorities {
+            PrioritySource::Fixed(model) => model.clone(),
+            PrioritySource::Policy(policy) => model_from_policy(policy, language),
+        }
+    }
+
     async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         // REQ-005/D-010: the merge is purely deterministic — ZERO LLM, even when a
         // caller is configured. Language routing (REQ-014/#133) is enforced here at
@@ -246,7 +327,7 @@ impl MergeEngine for DefaultMergeEngine {
             current_provenance,
             provider_results,
             mode: EnrichmentMode::Manual,
-            priority_model: PriorityModel::for_language(language),
+            priority_model: self.priority_model(language),
         };
         self.merge(input).await
     }
@@ -740,9 +821,13 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
             &eligible_providers,
         )
     };
+    // REQ-003: the audiobook cover slot ranks by the cover table, not by the
+    // audio-detail order. Reordering audio providers for metadata must not
+    // reselect a cover, and the cover-quality and containment rules that sit
+    // downstream of this resolution are unchanged.
     let audiobook_cover_resolution = cover_resolution::resolve_cover(
         livrarr_domain::CoverMediaType::Audiobook,
-        &pm.audio,
+        crate::cover_rank::rank_table(crate::cover_rank::CoverRankModel::Audiobook),
         &eligible_providers,
     );
     // 6. Status classification (REQ-019): Enriched iff >=1 meaningful text field

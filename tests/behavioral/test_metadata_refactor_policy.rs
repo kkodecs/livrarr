@@ -211,3 +211,140 @@ fn provider_list_rejects_duplicate_within_one_list_but_accepts_cross_list_reuse(
         MetadataProvider::Hardcover
     );
 }
+
+// OpenAI tests to append to the existing policy test target after writer handback.
+// Replace ../../crates/livrarr-db/migrations/088_provider_policy_enrichment_defaults.sql with the author's actual new migration filename.
+mod priority_migration_regression {
+    use super::*;
+    const NEW_POLICY: &str = include_str!(
+        "../../crates/livrarr-db/migrations/088_provider_policy_enrichment_defaults.sql"
+    );
+    async fn legacy() -> livrarr_db::sqlite::SqliteDb {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../crates/livrarr-db/migrations/057_provider_policy.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        livrarr_db::sqlite::SqliteDb::new(pool)
+    }
+    fn entries(list: &ProviderList) -> Vec<(MetadataProvider, u8)> {
+        list.entries.iter().map(|p| (p.provider, p.rank)).collect()
+    }
+    #[tokio::test]
+    async fn upgrades_legacy_defaults_and_preserves_explicit_custom_lists() {
+        let db = legacy().await;
+        sqlx::query("INSERT INTO provider_policy (language,kind,provider,rank) VALUES ('en','ebook','goodreads',0),('en','ebook','hardcover',1),('fr','ebook','readarr',0),('fr','audiobook','audnexus',0)").execute(db.pool()).await.unwrap();
+        let before = db.load_provider_policy_snapshot().await.unwrap();
+        sqlx::raw_sql(NEW_POLICY).execute(db.pool()).await.unwrap();
+        let after = db.load_provider_policy_snapshot().await.unwrap();
+        assert_eq!(
+            entries(&before.for_language("en").ebook),
+            entries(&after.for_language("en").ebook)
+        );
+        assert_eq!(before.for_language("fr"), after.for_language("fr"));
+        assert_eq!(
+            after
+                .generic
+                .ebook
+                .entries
+                .iter()
+                .map(|p| p.provider)
+                .collect::<Vec<_>>(),
+            vec![
+                MetadataProvider::GoogleBooks,
+                MetadataProvider::Goodreads,
+                MetadataProvider::Readarr,
+                MetadataProvider::Audible
+            ]
+        );
+        assert_eq!(
+            after.for_language("en").audiobook.entries[0].provider,
+            MetadataProvider::Audible
+        );
+    }
+    #[tokio::test]
+    async fn preserves_nondefault_generic_order_and_does_not_reseed_on_restart() {
+        let db = legacy().await;
+        sqlx::query("DELETE FROM provider_policy WHERE language='*' AND kind='ebook'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO provider_policy(language,kind,provider,rank) VALUES('*','ebook','readarr',0),('*','ebook','google_books',1)").execute(db.pool()).await.unwrap();
+        let before = db.load_provider_policy_snapshot().await.unwrap();
+        sqlx::raw_sql(NEW_POLICY).execute(db.pool()).await.unwrap();
+        assert_eq!(
+            entries(&before.generic.ebook),
+            entries(
+                &db.load_provider_policy_snapshot()
+                    .await
+                    .unwrap()
+                    .generic
+                    .ebook
+            )
+        );
+        sqlx::query("UPDATE provider_policy SET rank=7 WHERE language='en' AND kind='ebook' AND provider='google_books'").execute(db.pool()).await.unwrap();
+        let first = db.load_provider_policy_snapshot().await.unwrap();
+        let second = db.load_provider_policy_snapshot().await.unwrap();
+        assert_eq!(first.for_language("en"), second.for_language("en"));
+        assert_eq!(
+            second
+                .for_language("en")
+                .ebook
+                .entries
+                .iter()
+                .find(|p| p.provider == MetadataProvider::GoogleBooks)
+                .unwrap()
+                .rank,
+            7
+        );
+    }
+    #[tokio::test]
+    async fn rejects_invalid_persisted_values() {
+        for sql in [
+            "UPDATE provider_policy SET rank=-1",
+            "UPDATE provider_policy SET rank=256",
+            "UPDATE provider_policy SET kind='unknown-kind'",
+            "UPDATE provider_policy SET provider='unknown-provider'",
+        ] {
+            let db = legacy().await;
+            // One row avoids the PK collision hiding the invalid-value check.
+            sqlx::query("DELETE FROM provider_policy WHERE kind='audiobook'")
+                .execute(db.pool())
+                .await
+                .unwrap();
+            sqlx::query(sql).execute(db.pool()).await.unwrap();
+            assert!(
+                db.load_provider_policy_snapshot().await.is_err(),
+                "invalid policy accepted: {sql}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn initializes_missing_generic_groups() {
+        for kind in ["ebook", "audiobook"] {
+            let db = legacy().await;
+            sqlx::query("DELETE FROM provider_policy WHERE language='*' AND kind=?")
+                .bind(kind)
+                .execute(db.pool())
+                .await
+                .unwrap();
+            sqlx::raw_sql(NEW_POLICY).execute(db.pool()).await.unwrap();
+            let snapshot = db.load_provider_policy_snapshot().await.unwrap();
+            let list = if kind == "ebook" {
+                snapshot.generic.ebook
+            } else {
+                snapshot.generic.audiobook
+            };
+            assert!(
+                !list.entries.is_empty(),
+                "missing generic {kind} list must receive defaults"
+            );
+        }
+    }
+}

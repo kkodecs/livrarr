@@ -195,6 +195,10 @@ impl StubMergeEngine {
 }
 
 impl MergeEngine for StubMergeEngine {
+    fn priority_model(&self, language: Option<&str>) -> livrarr_metadata::PriorityModel {
+        livrarr_metadata::PriorityModel::for_language(language)
+    }
+
     async fn merge(&self, inputs: MergeInput) -> Result<MergeOutput, MergeError> {
         self.seen_inputs.lock().await.push(inputs);
         self.outputs

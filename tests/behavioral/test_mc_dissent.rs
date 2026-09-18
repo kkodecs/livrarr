@@ -67,7 +67,7 @@ async fn test_mc_provider_conflict_isolates_dissent_and_clean_providers_still_me
         ),
     ]);
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: current_work("fr"),
             current_provenance: Vec::new(),
@@ -108,7 +108,7 @@ async fn test_mc_language_incompatible_known_payload_records_dissent_unknown_lan
         ),
     ]);
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: current_work("fr"),
             current_provenance: Vec::new(),
@@ -175,7 +175,7 @@ async fn test_mc_field_dissent_rows_from_merge_are_queryable_in_db() {
 #[tokio::test]
 async fn test_mc_foreign_work_drops_hc_ol_payloads_on_cached_and_network_merge_paths() {
     // REQ-012 / AC-014
-    let engine = DefaultMergeEngine;
+    let engine = DefaultMergeEngine::new(PriorityModel::foreign());
     let payloads = std::collections::HashMap::from([
         (
             MetadataProvider::Hardcover,
@@ -250,7 +250,7 @@ async fn test_mc_language_incompatible_content_field_page_count_year_dissented_a
         ),
     ]);
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: current_work("fr"),
             current_provenance: Vec::new(),
@@ -293,7 +293,7 @@ async fn test_mc_language_incompatible_audio_fields_exempt_from_dissent_guard() 
         },
     )]);
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: current_work("fr"),
             current_provenance: Vec::new(),
@@ -346,7 +346,7 @@ async fn test_mc_language_incompatible_series_position_dissented_and_suppressed(
         ),
     ]);
 
-    let output = DefaultMergeEngine
+    let output = DefaultMergeEngine::new(PriorityModel::foreign())
         .merge(MergeInput {
             current_work: current_work("fr"),
             current_provenance: Vec::new(),
