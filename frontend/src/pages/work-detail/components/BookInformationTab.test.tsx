@@ -90,6 +90,9 @@ describe("Book information identity-layer presentation", () => {
     const mounted = mountWorkRoute();
     try {
       await vi.waitFor(() => expect(mounted.container.textContent).toContain(FROZEN_SIBLING_COPY));
+      expect(mounted.container.textContent).toContain("Merging is currently unavailable.");
+      expect(Array.from(mounted.container.querySelectorAll("button"))
+        .some((button) => /merge/i.test(button.textContent ?? ""))).toBe(false);
       const panel = mounted.container.querySelector<HTMLElement>(
         '[data-testid="identity-sibling-panel"]',
       );
@@ -108,6 +111,14 @@ describe("Book information identity-layer presentation", () => {
       }
 
       expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+
+      const edit = Array.from(mounted.container.querySelectorAll("button"))
+        .find((button) => button.textContent?.trim() === "Edit");
+      expect(edit).toBeDefined();
+      await act(async () => edit!.click());
+      expect(document.querySelector<HTMLInputElement>('input[name="title"]')?.readOnly).toBe(true);
+      expect(document.querySelector<HTMLInputElement>('input[name="authorName"]')?.readOnly).toBe(true);
+      expect(document.querySelector<HTMLInputElement>('input[name="seriesName"]')?.readOnly).toBe(false);
     } finally {
       mounted.cleanup();
       api.restore();

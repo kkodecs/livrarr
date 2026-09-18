@@ -134,7 +134,8 @@ fn map_identity_road_error(error: IdentityRoadError) -> ApiError {
                 reason: error.to_string(),
             }
         }
-        IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
+        IdentityRoadError::MergingUnavailable
+        | IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
             reason: error.to_string(),
         },
         IdentityRoadError::Database(message) => ApiError::Internal(message),
@@ -143,6 +144,9 @@ fn map_identity_road_error(error: IdentityRoadError) -> ApiError {
 
 fn map_identity_repository_error(error: IdentityRepositoryError) -> ApiError {
     match error {
+        IdentityRepositoryError::MergingUnavailable => ApiError::Conflict {
+            reason: error.to_string(),
+        },
         IdentityRepositoryError::NotFound => ApiError::NotFound,
         IdentityRepositoryError::UnauthorizedScope => ApiError::Forbidden,
         IdentityRepositoryError::StaleGeneration

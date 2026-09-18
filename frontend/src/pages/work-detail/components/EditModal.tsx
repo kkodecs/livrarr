@@ -74,14 +74,17 @@ export function EditModal({
           <span className="mb-1 block text-sm font-medium text-zinc-300">
             Title
           </span>
-          <input {...register("title")} className="input-field" />
+          <input {...register("title")} readOnly className="input-field" />
         </label>
         <label className="block">
           <span className="mb-1 block text-sm font-medium text-zinc-300">
             Author
           </span>
-          <input {...register("authorName")} className="input-field" />
+          <input {...register("authorName")} readOnly className="input-field" />
         </label>
+        <p className="text-xs text-muted">
+          Title and author changes are temporarily unavailable. You can still edit the other fields.
+        </p>
         <div className="grid grid-cols-2 gap-3">
           <label className="block">
             <span className="mb-1 block text-sm font-medium text-zinc-300">

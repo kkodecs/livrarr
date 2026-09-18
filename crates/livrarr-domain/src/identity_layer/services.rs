@@ -48,8 +48,13 @@ fn continuation_owner(kind: ReviewKind) -> &'static str {
     }
 }
 
+/// Temporary containment: combining existing books is unavailable until the
+/// merge implementation has been completed and independently accepted.
+pub const WORK_MERGING_AVAILABLE: bool = false;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum IdentityRoadError {
+    #[error("Merging is currently unavailable.")]
+    MergingUnavailable,
     #[error("invalid door evidence")]
     InvalidDoorEvidence,
     #[error("stale generation")]
@@ -84,6 +89,8 @@ pub enum IdentityRoadError {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum IdentityRepositoryError {
+    #[error("Merging is currently unavailable.")]
+    MergingUnavailable,
     #[error("not found")]
     NotFound,
     #[error("database error: {0}")]
@@ -595,9 +602,12 @@ pub trait IdentityCutoverService: Send + Sync {
 // Free deterministic functions.
 // ---------------------------------------------------------------------------
 
-/// Exhaustive continuation availability. Only `PendingRoute` and
-/// `GroupIdentity` may proceed; every other kind is refused by name.
+/// Exhaustive continuation availability. PendingRoute stays available;
+/// temporary merge containment also refuses GroupIdentity without mutation.
 pub fn require_continuation(kind: ReviewKind) -> Result<(), IdentityRoadError> {
+    if kind == ReviewKind::GroupIdentity && !WORK_MERGING_AVAILABLE {
+        return Err(IdentityRoadError::MergingUnavailable);
+    }
     match kind {
         ReviewKind::PendingRoute | ReviewKind::GroupIdentity => Ok(()),
         ReviewKind::IdentityConflict

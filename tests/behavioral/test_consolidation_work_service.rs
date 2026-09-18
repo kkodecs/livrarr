@@ -1009,7 +1009,7 @@ async fn seed_library_item(
 }
 
 #[tokio::test]
-async fn test_merge_preview_counts_and_conflicts() {
+async fn test_merge_preview_is_temporarily_unavailable() {
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
@@ -1061,20 +1061,15 @@ async fn test_merge_preview_counts_and_conflicts() {
     .await
     .unwrap();
 
-    let preview = svc
+    let error = svc
         .preview_merge_works(user_id, survivor_id, loser_id)
         .await
-        .unwrap();
+        .unwrap_err();
 
-    // Only SeriesName conflicts — both sides share the same series_position.
-    assert_eq!(preview.library_items_moving, 2);
-    assert_eq!(preview.grabs_moving, 1);
-    assert!(preview.monitor_ebook_result);
-    assert!(preview.monitor_audiobook_result);
-    assert_eq!(preview.conflicts.len(), 1);
-    assert_eq!(preview.conflicts[0].field, MergeableField::SeriesName);
-    assert_eq!(preview.conflicts[0].survivor_value, "Foo");
-    assert_eq!(preview.conflicts[0].loser_value, "Bar");
+    assert!(matches!(error, WorkServiceError::Validation(_)));
+    assert!(error
+        .to_string()
+        .contains("Merging is currently unavailable."));
 }
 
 #[tokio::test]

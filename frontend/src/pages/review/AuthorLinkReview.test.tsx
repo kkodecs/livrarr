@@ -251,7 +251,7 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     }
   });
 
-  it("finishes a merge from the typed GroupIdentity card", async () => {
+  it("retains an unresolved GroupIdentity card while merging is unavailable", async () => {
     let resolved = false;
     const { calls } = stub((call) => {
       if (call.path === "/identity-review") {
@@ -299,25 +299,12 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     const review = mountWith(client, <ReviewPage />);
     try {
       await vi.waitFor(
-        () => expect(review.container.textContent).toContain("Confirm Merge"),
+        () => expect(review.container.textContent).toContain("Merging is currently unavailable"),
         { timeout: 5000 },
       );
-      await clickButton(review.container, "Confirm Merge");
-      await vi.waitFor(() => {
-        const resolveCall = calls.find(
-          (call) =>
-            call.path === "/identity-review-card/219/resolve" && call.method === "POST",
-        );
-        expect(resolveCall?.body).toEqual({
-          command: {
-            GroupIdentity: {
-              card_id: 219,
-              expected_generation: 9,
-              action: { AttachOrMerge: { anchor: 216 } },
-            },
-          },
-        });
-      });
+      expect(review.container.textContent).toContain("Merge Survivor");
+      expect(review.container.textContent).not.toContain("Confirm Merge");
+      expect(calls.some((call) => call.method === "POST")).toBe(false);
     } finally {
       review.cleanup();
     }

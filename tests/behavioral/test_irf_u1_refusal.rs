@@ -39,6 +39,46 @@ use tower::ServiceExt;
 static CASE_ID: AtomicU64 = AtomicU64::new(1);
 static LIVRARR_BINARY: OnceLock<PathBuf> = OnceLock::new();
 
+// The PO stopped merge development on 2026-09-07. This exercises the real
+// authenticated HTTP doors; a read-only refusal must not mint a review card.
+#[tokio::test]
+async fn containment_manual_merge_is_read_only_unavailable() {
+    let harness = build_route_harness().await;
+    let (survivor, _) = seed_work(&harness.db, harness.user_id, "contained-survivor").await;
+    let (loser, _) = seed_work(&harness.db, harness.user_id, "contained-loser").await;
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
+    for (method, suffix, body) in [
+        (Method::GET, "/preview", None),
+        (Method::POST, "", Some(json!({"choices": []}))),
+    ] {
+        let response = call_router_json(
+            &harness,
+            method,
+            format!("/api/v1/work/{survivor}/merge/{loser}{suffix}"),
+            body,
+        )
+        .await;
+        assert!(
+            response.status.is_client_error(),
+            "{} {}",
+            response.status,
+            response.json
+        );
+        assert!(
+            response
+                .json
+                .to_string()
+                .contains("Merging is currently unavailable"),
+            "{}",
+            response.json
+        );
+        assert_eq!(
+            user_state_snapshot(&harness.db, harness.user_id).await,
+            before
+        );
+    }
+}
+
 struct RouteHarness {
     app: Router,
     state: AppState,
@@ -985,12 +1025,12 @@ fn irf_u1_guard_refuses_all_seven_unavailable_kinds() {
     }
 }
 
-// PIN: GroupIdentity and PendingRoute remain the only available continuations.
+// PIN: containment refuses GroupIdentity while PendingRoute remains available.
 #[test]
-fn irf_u1_guard_keeps_group_and_pending_available() {
+fn irf_u1_guard_contains_group_and_keeps_pending_available() {
     assert_eq!(
         ilr::require_continuation(ilr::ReviewKind::GroupIdentity),
-        Ok(())
+        Err(ilr::IdentityRoadError::MergingUnavailable)
     );
     assert_eq!(
         ilr::require_continuation(ilr::ReviewKind::PendingRoute),
@@ -1482,35 +1522,35 @@ async fn conflict_closed_ids_remain_404() {
     assert_conflict_id_404(&harness, typed.external_id).await;
 }
 
-async fn mint_group_via_manual_merge(harness: &RouteHarness, label: &str) -> (i64, i64, i64, i64) {
-    let (survivor, _) = seed_work(&harness.db, harness.user_id, &format!("{label}-survivor")).await;
+async fn mint_existing_group(harness: &RouteHarness, label: &str) -> (i64, i64, i64, i64) {
+    // Persist a pre-containment card through the real writer: new HTTP merge
+    // requests are disabled, but existing installations retain these records.
+    let (survivor, author_id) =
+        seed_work(&harness.db, harness.user_id, &format!("{label}-survivor")).await;
     let (loser, _) = seed_work(&harness.db, harness.user_id, &format!("{label}-loser")).await;
-    let generation = work_generation(&harness.db, survivor).await;
-    let preview = call_router_json(
-        harness,
-        Method::GET,
-        format!("/api/v1/work/{survivor}/merge/{loser}/preview"),
-        None,
-    )
-    .await;
-    assert_eq!(preview.status, StatusCode::OK, "{}", preview.json);
-    let minted = call_router_json(
-        harness,
-        Method::POST,
-        format!("/api/v1/work/{survivor}/merge/{loser}"),
-        Some(json!({"choices": []})),
-    )
-    .await;
-    assert_eq!(minted.status, StatusCode::ACCEPTED, "{}", minted.json);
-    assert_eq!(minted.json["kind"], "GroupIdentity");
-    let card_id = minted.json["cardId"]
-        .as_i64()
-        .expect("manual merge returns card id");
-    let expected_generation = minted.json["expectedGeneration"]
-        .as_i64()
-        .expect("manual merge returns scalar claim");
-    assert_eq!(expected_generation, generation + 1);
-    (survivor, loser, card_id, expected_generation)
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, survivor)
+            .await
+            .unwrap();
+    let card = ilr::SettlementReviewCard::GroupIdentity {
+        work_ids: vec![survivor, loser],
+        proposed_identity: None,
+        merge_choices: vec![],
+    };
+    let mut command = settlement_commit(
+        harness.user_id,
+        author_id,
+        &captured.identity_title.main,
+        card,
+    );
+    command.existing_work_id = Some(survivor);
+    command.identity_title = captured.identity_title;
+    command.expected_generation = work_generation(&harness.db, survivor).await;
+    let committed = WorkIdentityRepository::commit_settlement(&harness.db, command)
+        .await
+        .unwrap();
+    let card = committed.review_cards[0];
+    (survivor, loser, card.id, card.generation)
 }
 
 async fn mint_pending_route_card(
@@ -1540,33 +1580,52 @@ async fn mint_pending_route_card(
     (work_id, minted, route)
 }
 
-async fn assert_group_available_through(ingress: ReviewHttpIngress) {
+async fn assert_group_contained_through(ingress: ReviewHttpIngress) {
     let harness = build_route_harness().await;
-    let (survivor, _loser, card_id, generation) =
-        mint_group_via_manual_merge(&harness, "available-group").await;
-    let response = call_router_json(
-        &harness,
-        Method::POST,
-        ingress.path(card_id),
-        Some(json!({"command": {
-            "GroupIdentity": {
-                "card_id": card_id,
-                "expected_generation": generation,
-                "action": "DifferentFromAll"
-            }
-        }})),
-    )
-    .await;
-    assert!(response.status.is_success(), "{}", response.json);
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM identity_review_cards WHERE user_id=?1 AND id=?2")
-            .bind(harness.user_id)
-            .bind(card_id)
-            .fetch_one(harness.db.pool())
-            .await
-            .expect("read GroupIdentity status");
-    assert_eq!(status, "resolved");
-    assert_eq!(work_generation(&harness.db, survivor).await, generation + 1);
+    let (survivor, _, card_id, generation) = mint_existing_group(&harness, "contained-group").await;
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
+    for action in [
+        ilr::GroupIdentityAction::DifferentFromAll,
+        ilr::GroupIdentityAction::AttachOrMerge { anchor: survivor },
+    ] {
+        let command = ReviewResolutionCommand::GroupIdentity {
+            card_id,
+            expected_generation: generation,
+            action,
+        };
+        let response = call_router_json(
+            &harness,
+            Method::POST,
+            ingress.path(card_id),
+            Some(json!({"command": command})),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
+        assert_eq!(
+            response.json["message"],
+            "Merging is currently unavailable."
+        );
+        let direct = WorkIdentityRepository::commit_review_continuation(
+            &harness.db,
+            ReviewActor::AuthenticatedUser {
+                user_id: harness.user_id,
+            },
+            command,
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(
+            matches!(
+                direct,
+                Err(ilr::IdentityRepositoryError::MergingUnavailable)
+            ),
+            "{direct:?}"
+        );
+        assert_eq!(
+            user_state_snapshot(&harness.db, harness.user_id).await,
+            before
+        );
+    }
 }
 
 async fn assert_pending_available_through(ingress: ReviewHttpIngress) {
@@ -1602,11 +1661,11 @@ async fn assert_pending_available_through(ingress: ReviewHttpIngress) {
     assert_eq!(confirmed, 1);
 }
 
-// PIN: the typed and legacy-alias doors retain the current GroupIdentity continuation (including its wave-B defect).
+// PO containment: both aliases refuse existing GroupIdentity cards without writes.
 #[tokio::test]
-async fn group_identity_remains_available_through_both_review_routes() {
-    assert_group_available_through(ReviewHttpIngress::Typed).await;
-    assert_group_available_through(ReviewHttpIngress::LegacyAlias).await;
+async fn group_identity_is_contained_through_both_review_routes() {
+    assert_group_contained_through(ReviewHttpIngress::Typed).await;
+    assert_group_contained_through(ReviewHttpIngress::LegacyAlias).await;
 }
 
 // PIN: the typed and legacy-alias doors retain the current PendingRoute continuation.
@@ -1616,140 +1675,80 @@ async fn pending_route_remains_available_through_both_review_routes() {
     assert_pending_available_through(ReviewHttpIngress::LegacyAlias).await;
 }
 
-// PIN: inline update still uses GroupIdentity::DifferentFromAll and preserves today's mutation/audit/response.
+// PO containment: identity edits refuse early; non-identity edits remain available.
 #[tokio::test]
-async fn inline_work_update_different_from_all_is_unchanged() {
+async fn inline_identity_edits_are_refused_before_writes_but_metadata_edits_work() {
     let harness = build_route_harness().await;
-    let (work_id, _) = seed_work(&harness.db, harness.user_id, "inline-update").await;
-    let generation = work_generation(&harness.db, work_id).await;
-    harness.state.identity_road.test_recorder().clear();
-
-    let response = call_router_json(
-        &harness,
-        Method::PUT,
-        format!("/api/v1/work/{work_id}"),
-        Some(json!({"title": "U1 Explicit Updated Title"})),
-    )
-    .await;
-    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
-    assert_eq!(response.json["id"], work_id);
-    assert_eq!(response.json["title"], "U1 Explicit Updated Title");
-
-    let calls = harness.state.identity_road.test_recorder().snapshot();
-    assert_eq!(calls.len(), 2, "update is one settle plus one continuation");
-    assert!(matches!(
-        &calls[0],
-        livrarr_server::identity_layer::IdentityRoadCall::Settle(request)
-            if request.origin == ilr::IdentityRoadOrigin::WorkUpdateRekey
-    ));
-    let (card_id, expected_generation) = match &calls[1] {
-        livrarr_server::identity_layer::IdentityRoadCall::Resolve {
-            actor: ReviewActor::AuthenticatedUser { user_id },
-            command:
-                ReviewResolutionCommand::GroupIdentity {
-                    card_id,
-                    expected_generation,
-                    action: ilr::GroupIdentityAction::DifferentFromAll,
-                },
-        } if *user_id == harness.user_id => (*card_id, *expected_generation),
-        other => panic!("update continuation changed: {other:?}"),
-    };
-    assert_eq!(expected_generation, generation + 1);
-    assert_eq!(work_generation(&harness.db, work_id).await, generation + 2);
-    let (status, card_generation, audits): (String, i64, i64) = sqlx::query_as(
-        "SELECT c.status, c.generation, (SELECT COUNT(*) FROM identity_audit_events a \
-            WHERE a.user_id=?1 AND a.event_kind='review-resolution' \
-              AND json_extract(a.payload, '$.GroupIdentity.card_id')=?2) \
-         FROM identity_review_cards c WHERE c.user_id=?1 AND c.id=?2",
-    )
-    .bind(harness.user_id)
-    .bind(card_id)
-    .fetch_one(harness.db.pool())
-    .await
-    .expect("read inline update audit/card");
-    assert_eq!(
-        (status.as_str(), card_generation, audits),
-        ("resolved", generation + 1, 1)
-    );
-}
-
-// PIN: inline merge-with-choices still uses GroupIdentity::AttachOrMerge, including the known no-archive wave-B defect.
-#[tokio::test]
-async fn inline_merge_with_choices_attach_or_merge_is_unchanged() {
-    let harness = build_route_harness().await;
-    let (survivor, _) = seed_work(&harness.db, harness.user_id, "inline-merge-survivor").await;
-    let (loser, _) = seed_work(&harness.db, harness.user_id, "inline-merge-loser").await;
-    let generation = work_generation(&harness.db, survivor).await;
-    let preview = call_router_json(
+    let (work_id, _) = seed_work(&harness.db, harness.user_id, "contained-update").await;
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
+    let authors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authors")
+        .fetch_one(harness.db.pool())
+        .await
+        .unwrap();
+    for body in [
+        json!({"title": "New title"}),
+        json!({"authorName": "New author"}),
+    ] {
+        let response = call_router_json(
+            &harness,
+            Method::PUT,
+            format!("/api/v1/work/{work_id}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
+        assert_eq!(
+            response.json["message"],
+            "Merging is currently unavailable."
+        );
+        assert_eq!(
+            user_state_snapshot(&harness.db, harness.user_id).await,
+            before
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM authors")
+                .fetch_one(harness.db.pool())
+                .await
+                .unwrap(),
+            authors
+        );
+    }
+    let work = call_router_json(
         &harness,
         Method::GET,
-        format!("/api/v1/work/{survivor}/merge/{loser}/preview"),
+        format!("/api/v1/work/{work_id}"),
         None,
     )
     .await;
-    assert_eq!(preview.status, StatusCode::OK, "{}", preview.json);
-    harness.state.identity_road.test_recorder().clear();
+    let edited = call_router_json(&harness, Method::PUT, format!("/api/v1/work/{work_id}"), Some(json!({"title": work.json["title"], "authorName": work.json["authorName"], "monitorEbook": false}))).await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.json);
+    assert_eq!(edited.json["monitorEbook"], false);
+    assert_eq!(edited.json["title"], work.json["title"]);
+}
 
+// PO containment: merge choices cannot bypass the refusal or mint a new card.
+#[tokio::test]
+async fn inline_merge_with_choices_is_refused_without_minting_a_card() {
+    let harness = build_route_harness().await;
+    let (survivor, _) = seed_work(&harness.db, harness.user_id, "contained-choices-survivor").await;
+    let (loser, _) = seed_work(&harness.db, harness.user_id, "contained-choices-loser").await;
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
     let response = call_router_json(
         &harness,
         Method::POST,
         format!("/api/v1/work/{survivor}/merge/{loser}"),
-        Some(json!({"choices": [{
-            "field": "series_name",
-            "choice": "keep_survivor"
-        }]})),
+        Some(json!({"choices": [{"field":"series_name","choice":"keep_survivor"}]})),
     )
     .await;
-    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
-    assert_eq!(response.json["survivor"]["id"], survivor);
-    assert_eq!(response.json["libraryItemsMoved"], 0);
-    assert_eq!(response.json["grabsMoved"], 0);
-
-    let calls = harness.state.identity_road.test_recorder().snapshot();
-    assert_eq!(calls.len(), 2, "merge is one settle plus one continuation");
-    assert!(matches!(
-        &calls[0],
-        livrarr_server::identity_layer::IdentityRoadCall::Settle(request)
-            if matches!(
-                &request.origin,
-                ilr::IdentityRoadOrigin::ManualWorkMerge { loser_work_id, .. }
-                    if *loser_work_id == loser
-            )
-    ));
-    let (card_id, expected_generation) = match &calls[1] {
-        livrarr_server::identity_layer::IdentityRoadCall::Resolve {
-            actor: ReviewActor::AuthenticatedUser { user_id },
-            command:
-                ReviewResolutionCommand::GroupIdentity {
-                    card_id,
-                    expected_generation,
-                    action: ilr::GroupIdentityAction::AttachOrMerge { anchor },
-                },
-        } if *user_id == harness.user_id && *anchor == survivor => (*card_id, *expected_generation),
-        other => panic!("merge continuation changed: {other:?}"),
-    };
-    assert_eq!(expected_generation, generation + 1);
-    assert_eq!(work_generation(&harness.db, survivor).await, generation + 2);
-    let loser_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM works WHERE user_id=?1 AND id=?2")
-            .bind(harness.user_id)
-            .bind(loser)
-            .fetch_one(harness.db.pool())
-            .await
-            .expect("read known current merge effect");
-    assert_eq!(loser_count, 0, "pin only; wave B owns archival correctness");
-    let (status, audits): (String, i64) = sqlx::query_as(
-        "SELECT c.status, (SELECT COUNT(*) FROM identity_audit_events a \
-            WHERE a.user_id=?1 AND a.event_kind='review-resolution' \
-              AND json_extract(a.payload, '$.GroupIdentity.card_id')=?2) \
-         FROM identity_review_cards c WHERE c.user_id=?1 AND c.id=?2",
-    )
-    .bind(harness.user_id)
-    .bind(card_id)
-    .fetch_one(harness.db.pool())
-    .await
-    .expect("read inline merge audit/card");
-    assert_eq!((status.as_str(), audits), ("resolved", 1));
+    assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
+    assert_eq!(
+        response.json["message"],
+        "Merging is currently unavailable."
+    );
+    assert_eq!(
+        user_state_snapshot(&harness.db, harness.user_id).await,
+        before
+    );
 }
 
 // PIN: inline pending-route Affirm retains its scalar claim, route mutation, audit, and 204 response.
@@ -1826,10 +1825,9 @@ async fn inline_pending_route_affirm_is_unchanged() {
 
 // PIN: ReviewProposalInvalidated remains a 409 row in the typed mapper.
 #[tokio::test]
-async fn typed_mapper_keeps_review_proposal_invalidation_at_409() {
+async fn contained_review_stays_read_only_when_a_member_has_been_deleted() {
     let harness = build_route_harness().await;
-    let (survivor, loser, card_id, _) =
-        mint_group_via_manual_merge(&harness, "mapper-invalidated").await;
+    let (survivor, loser, card_id, _) = mint_existing_group(&harness, "mapper-invalidated").await;
     let deleted = call_router_json(
         &harness,
         Method::DELETE,
@@ -1863,7 +1861,7 @@ async fn typed_mapper_keeps_review_proposal_invalidation_at_409() {
     assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
     assert_eq!(
         response.json["message"],
-        "review proposal invalidated: proposed merge work no longer exists"
+        "Merging is currently unavailable."
     );
     assert_eq!(
         user_state_snapshot(&harness.db, harness.user_id).await,
@@ -1898,6 +1896,63 @@ async fn typed_mapper_keeps_review_kind_mismatch_at_400() {
         response.json
     );
     assert_eq!(response.json["message"], "review kind mismatch");
+    assert_eq!(
+        user_state_snapshot(&harness.db, harness.user_id).await,
+        before
+    );
+}
+
+#[tokio::test]
+async fn containment_direct_settlement_and_startup_heals_cannot_absorb() {
+    let harness = build_route_harness().await;
+    let (survivor, author_id) = seed_work(&harness.db, harness.user_id, "direct-survivor").await;
+    let (loser, _) = seed_work(&harness.db, harness.user_id, "direct-loser").await;
+    let captured =
+        WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, survivor)
+            .await
+            .unwrap();
+    let before = user_state_snapshot(&harness.db, harness.user_id).await;
+    let mut command = settlement_commit(
+        harness.user_id,
+        author_id,
+        &captured.identity_title.main,
+        ilr::SettlementReviewCard::GroupIdentity {
+            work_ids: vec![survivor, loser],
+            proposed_identity: None,
+            merge_choices: vec![],
+        },
+    );
+    command.existing_work_id = Some(survivor);
+    command.identity_title = captured.identity_title;
+    command.expected_generation = work_generation(&harness.db, survivor).await;
+    command.review_cards.clear();
+    command.absorbed_work_ids = vec![loser];
+    let result = WorkIdentityRepository::commit_settlement(&harness.db, command).await;
+    assert!(
+        matches!(
+            result,
+            Err(ilr::IdentityRepositoryError::MergingUnavailable)
+        ),
+        "{result:?}"
+    );
+    let before_markers: Vec<(String, String)> =
+        sqlx::query_as("SELECT key,value FROM _livrarr_meta ORDER BY key")
+            .fetch_all(harness.db.pool())
+            .await
+            .unwrap();
+    livrarr_db::identity_layer::heal_identity_dedup_residue(harness.db.pool())
+        .await
+        .unwrap();
+    livrarr_db::pool::heal_identity_title_policy(harness.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>("SELECT key,value FROM _livrarr_meta ORDER BY key")
+            .fetch_all(harness.db.pool())
+            .await
+            .unwrap(),
+        before_markers
+    );
     assert_eq!(
         user_state_snapshot(&harness.db, harness.user_id).await,
         before

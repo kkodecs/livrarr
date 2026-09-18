@@ -1,5 +1,9 @@
 # Wiki Change Log
 
+## 2026-09-07 — temporary merge containment
+
+Recorded the PO-approved containment patch in `decisions/merge-containment.md`: backend and UI restrictions, safe remaining workflows, startup marker preservation, and the title/author edit limitation. Implementation documentation only; full merge work remains stopped and no deployment is claimed.
+
 ## 2026-07-25 — import-pipeline.md: only EPUB gets tagged, and the failure path repairs nothing
 
 **Updated page:** `wiki/architecture/import-pipeline.md`. Seventeenth documentarian pass.

@@ -586,7 +586,8 @@ fn map_identity_road_error(error: livrarr_domain::identity_layer::IdentityRoadEr
         | IdentityRoadError::InvalidResolution => ApiError::BadRequest(error.to_string()),
         IdentityRoadError::ProviderBoundary => ApiError::BadGateway(error.to_string()),
         IdentityRoadError::Cancelled => ApiError::ServiceUnavailable,
-        IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
+        IdentityRoadError::MergingUnavailable
+        | IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
             reason: error.to_string(),
         },
         IdentityRoadError::Database(message) => ApiError::Internal(message),
@@ -768,7 +769,7 @@ pub async fn update<
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-    Json(req): Json<UpdateWorkRequest>,
+    Json(mut req): Json<UpdateWorkRequest>,
 ) -> Result<Response, ApiError> {
     use crate::types::api_error::FieldError;
     use livrarr_domain::services::UpdateWorkRequest as DomainUpdateWorkRequest;
@@ -816,6 +817,31 @@ pub async fn update<
     }
     if !errors.is_empty() {
         return Err(ApiError::Validation { errors });
+    }
+
+    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+        && (req.title.is_some() || req.author_name.is_some())
+    {
+        let current = state.work_service().get(ctx.user.id, id).await?;
+        let identity_changed = req
+            .title
+            .as_ref()
+            .and_then(Option::as_ref)
+            .is_some_and(|title| title != &current.title)
+            || req
+                .author_name
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_some_and(|author| author != &current.author_name);
+        if identity_changed {
+            return Err(map_identity_road_error(
+                livrarr_domain::identity_layer::IdentityRoadError::MergingUnavailable,
+            ));
+        }
+        // Forms submit unchanged identity fields with ordinary metadata edits.
+        // Do not route them through re-identification or write them back stale.
+        req.title = None;
+        req.author_name = None;
     }
 
     if req.title.is_some() || req.author_name.is_some() {
@@ -957,6 +983,9 @@ fn map_identity_repository_error(
 ) -> ApiError {
     use livrarr_domain::identity_layer::IdentityRepositoryError;
     match error {
+        IdentityRepositoryError::MergingUnavailable => ApiError::Conflict {
+            reason: error.to_string(),
+        },
         IdentityRepositoryError::NotFound => ApiError::NotFound,
         IdentityRepositoryError::StaleGeneration
         | IdentityRepositoryError::ReviewProposalInvalidated(_)

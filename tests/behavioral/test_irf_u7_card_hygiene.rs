@@ -1551,6 +1551,7 @@ async fn seed_title_heal_collision(db: &SqliteDb, user_id: i64) -> (i64, i64, i6
 // on the next boot, and a changed-cohort key mints. U5 owns Dismiss/replay
 // suppression (`startup_heal_suppresses_on_second_boot_but_changed_cohort_key_mints`).
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn second_boot_reuses_startup_heal_card_and_changed_cohort_members_mint() {
     let _serial = U7_TRACE_LOCK.lock().await;
     let db = create_activated_test_db().await;
@@ -1854,6 +1855,7 @@ async fn pre_u7_equivalent_duplicates_collapse_oldest_wins_without_review_actor(
 
 // RED-UNTIL-U7: today update, merge-with-choices, and affirm already emit no notification, but each mints through generic settlement's local insert rather than the shared newly-minted-and-still-pending notification gate.
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn registered_inline_doors_mint_then_resolve_and_emit_zero_notifications() {
     let _serial = U7_TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;

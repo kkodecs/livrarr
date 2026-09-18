@@ -118,25 +118,11 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
     : null;
   const canResolve =
     card.workId != null &&
-    ((card.kind === "GroupIdentity" && group != null) ||
-      (card.kind === "PendingRoute" && pendingRoute != null));
+    card.kind === "PendingRoute" && pendingRoute != null;
 
   const resolve = useMutation({
     mutationFn: () => {
       if (card.workId == null) throw new Error("Review card is not attached to a work");
-      if (card.kind === "GroupIdentity" && group != null) {
-        const action =
-          group.work_ids.length > 1
-            ? { AttachOrMerge: { anchor: card.workId } }
-            : "DifferentFromAll";
-        return resolveIdentityReviewCard(card.id, {
-          GroupIdentity: {
-            card_id: card.id,
-            expected_generation: card.generation,
-            action,
-          },
-        });
-      }
       if (card.kind === "PendingRoute" && pendingRoute != null) {
         return resolveIdentityReviewCard(card.id, {
           PendingRoute: {
@@ -149,7 +135,7 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
       throw new Error("This review kind is not actionable here yet");
     },
     onSuccess: () => {
-      toast.success(card.kind === "GroupIdentity" ? "Merge completed" : "Book linked");
+      toast.success("Book linked");
       queryClient.invalidateQueries({ queryKey: ["identity-review-cards"] });
       queryClient.invalidateQueries({ queryKey: ["works"] });
       if (card.workId != null) {
@@ -198,7 +184,13 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
           Dismiss
         </button>
       </div>
-      {card.kind === "EditionEvidence" ? (
+      {card.kind === "GroupIdentity" ? (
+        <p className="mt-2 text-sm text-muted">
+          Merging is currently unavailable. This question remains unresolved;
+          your existing books and files are unchanged.
+          {group && group.work_ids.length > 1 && ` ${group.work_ids.length} books need review.`}
+        </p>
+      ) : card.kind === "EditionEvidence" ? (
         <div className="mt-2 text-sm text-muted">
           <p>
             not yet actionable — EditionEvidence; handled by its post-wave-B continuation feature
@@ -242,7 +234,7 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
             disabled={pending}
             className="rounded bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
           >
-            {card.kind === "GroupIdentity" ? "Confirm Merge" : "Link it"}
+            Link it
           </button>
           {pendingRoute && (
             <HelpTip text="Link this book to the provider entry after you have checked the match." />

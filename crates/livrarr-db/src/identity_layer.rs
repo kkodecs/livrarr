@@ -545,6 +545,11 @@ async fn commit_settlement_in_tx(
     origin: ReviewCardMintOrigin,
     validated_explicit_choice: bool,
 ) -> Result<SettlementTxResult, IdentityRepositoryError> {
+    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+        && !command.absorbed_work_ids.is_empty()
+    {
+        return Err(IdentityRepositoryError::MergingUnavailable);
+    }
     let primary = command
         .contributors
         .iter()
@@ -1867,6 +1872,11 @@ impl WorkIdentityRepository for SqliteDb {
         authorize_review_actor(&actor, pending.user_id)?;
         if command.kind() != pending.kind {
             return Err(IdentityRepositoryError::ReviewKindMismatch);
+        }
+        if pending.kind == ReviewKind::GroupIdentity
+            && !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+        {
+            return Err(IdentityRepositoryError::MergingUnavailable);
         }
         let is_pending_route = pending.kind == ReviewKind::PendingRoute;
         if is_pending_route {
@@ -3528,6 +3538,9 @@ async fn absorb_work_into(
     winner_work_id: WorkId,
     loser_work_id: WorkId,
 ) -> Result<AbsorptionCounts, IdentityRepositoryError> {
+    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE {
+        return Err(IdentityRepositoryError::MergingUnavailable);
+    }
     if winner_work_id == loser_work_id {
         return Ok(AbsorptionCounts::default());
     }
@@ -5331,6 +5344,9 @@ pub struct IdentityDedupResidueHealReport {
 pub async fn heal_identity_dedup_residue(
     pool: &SqlitePool,
 ) -> Result<IdentityDedupResidueHealReport, String> {
+    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE {
+        return Ok(IdentityDedupResidueHealReport::default());
+    }
     let marker: Option<String> = sqlx::query_scalar(
         "SELECT value FROM _livrarr_meta WHERE key='identity_dedup_residue_heal_generation'",
     )

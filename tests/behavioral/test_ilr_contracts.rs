@@ -1848,9 +1848,9 @@ async fn red_repo_commit(contract: RepoCommitContract) {
                 .execute(db.pool())
                 .await
                 .expect("remove test-helper-only legacy dedup index");
-            // Model a previously duplicated all-common cohort so the road's
-            // absorption transaction can be exercised. The road restores one
-            // legal row before this directive returns.
+            // Model a previously duplicated all-common cohort admitted by older
+            // versions. Containment must retain both rows for review; production
+            // settlement writers create the fixture after dropping legacy indexes.
             sqlx::query("DROP INDEX IF EXISTS idx_works_identity_v2")
                 .execute(db.pool())
                 .await
@@ -1952,17 +1952,17 @@ async fn red_repo_commit(contract: RepoCommitContract) {
                     existing_work_id: None,
                 })
                 .await
-                .expect("road adopts one winner and absorbs its broad-group sibling");
-            let ilr::IdentityRoadOutcome::Settled {
-                work_id: winner_id,
-                created,
-                ..
-            } = outcome
-            else {
-                panic!("authority-certain broad group must settle")
-            };
-            assert!(!created, "broad-group adoption reuses the survivor");
-            assert_eq!(winner_id, first.identity.own_work_id);
+                .expect("road parks the broad group for review");
+            assert!(
+                matches!(
+                    outcome,
+                    ilr::IdentityRoadOutcome::ReviewPending {
+                        kind: ilr::ReviewKind::GroupIdentity,
+                        ..
+                    }
+                ),
+                "multi-work absorption must remain reviewable: {outcome:?}"
+            );
             let remaining: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM works WHERE user_id=?1 AND normalized_identity_main=?2",
             )
@@ -1970,41 +1970,32 @@ async fn red_repo_commit(contract: RepoCommitContract) {
             .bind("identity road fixture")
             .fetch_one(db.pool())
             .await
-            .expect("count post-absorption group");
-            assert_eq!(remaining, 1);
-            let archive: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM identity_merge_archives \
-                 WHERE user_id=?1 AND winner_work_id=?2 AND loser_work_id=?3",
-            )
-            .bind(user_id)
-            .bind(winner_id)
-            .bind(second.identity.own_work_id)
-            .fetch_one(db.pool())
-            .await
-            .expect("observe loser archive row");
-            assert_eq!(archive, 1);
-            let contributor_roles: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM work_contributor_roles \
-                 WHERE user_id=?1 AND work_id=?2 AND author_id=?3 AND role='translator'",
-            )
-            .bind(user_id)
-            .bind(winner_id)
-            .bind(secondary.id)
-            .fetch_one(db.pool())
-            .await
-            .expect("observe absorbed contributor role");
-            assert_eq!(contributor_roles, 1);
-            let route_states: Vec<String> = sqlx::query_scalar(
-                "SELECT state FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2 \
-                 ORDER BY provider_scoped_id",
-            )
-            .bind(user_id)
-            .bind(winner_id)
-            .fetch_all(db.pool())
-            .await
-            .expect("observe active union plus retired archive route");
-            assert_eq!(route_states.len(), 3);
-            assert!(route_states.iter().any(|state| state == "retired"));
+            .expect("count preserved group");
+            assert_eq!(remaining, 2);
+            let archives: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM identity_merge_archives WHERE user_id=?1")
+                    .bind(user_id)
+                    .fetch_one(db.pool())
+                    .await
+                    .expect("count merge archives");
+            assert_eq!(archives, 0);
+            for (work_id, expected_routes, expected_roles) in [
+                (first.identity.own_work_id, 1, 0),
+                (second.identity.own_work_id, 2, 1),
+            ] {
+                let (routes, roles): (i64, i64) = sqlx::query_as(
+                    "SELECT \
+                     (SELECT COUNT(*) FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2), \
+                     (SELECT COUNT(*) FROM work_contributor_roles WHERE user_id=?1 AND work_id=?2 AND author_id=?3 AND role='translator')",
+                )
+                .bind(user_id)
+                .bind(work_id)
+                .bind(secondary.id)
+                .fetch_one(db.pool())
+                .await
+                .expect("read each original book's route and contributor ownership");
+                assert_eq!((routes, roles), (expected_routes, expected_roles));
+            }
 
             // The same directive also observes a generation race synchronized
             // after both road decisions and before either repository claim.
@@ -5302,8 +5293,10 @@ async fn red_real_cli_cutover_ceremony() {
         .output()
         .expect("resolve the real colliding cohort through the CLI");
     assert!(
-        resolve.status.success(),
-        "real CLI cohort resolution failed:\n{}",
+        !resolve.status.success()
+            && String::from_utf8_lossy(&resolve.stderr)
+                .contains("Merging is currently unavailable."),
+        "real CLI must refuse the contained cohort:\n{}",
         String::from_utf8_lossy(&resolve.stderr)
     );
     let after_resolve_list = std::process::Command::new(&binary)
@@ -5314,8 +5307,9 @@ async fn red_real_cli_cutover_ceremony() {
         .expect("list after real cohort resolution");
     assert!(
         after_resolve_list.status.success()
-            && String::from_utf8_lossy(&after_resolve_list.stdout).contains("ReviewList([])"),
-        "resolved cohort must leave no pending cards: stdout={:?}, stderr={:?}",
+            && String::from_utf8_lossy(&after_resolve_list.stdout)
+                .contains(&format!("card_id: {card_id}")),
+        "contained cohort must retain its pending card: stdout={:?}, stderr={:?}",
         String::from_utf8_lossy(&after_resolve_list.stdout),
         String::from_utf8_lossy(&after_resolve_list.stderr),
     );
@@ -5343,8 +5337,8 @@ async fn red_real_cli_cutover_ceremony() {
             .fetch_one(&pool)
             .await
             .expect("count pending cards after resolved Apply");
-    assert_eq!(resolved_apply_status, "ready");
-    assert_eq!(pending_after_reapply, 0);
+    assert_eq!(resolved_apply_status, "blocked");
+    assert_eq!(pending_after_reapply, 1);
     pool.close().await;
 
     let snapshot_pool = livrarr_db::pool::create_sqlite_pool(snapshot_dir.path())
@@ -5365,26 +5359,23 @@ async fn red_real_cli_cutover_ceremony() {
     );
     snapshot_pool.close().await;
 
-    // Bug reproduction: identity-layer-rewrite — the ceremony must end at the
-    // real production post-migration boot seam. Apply writes schema_version 83,
-    // so both the compatibility gate and authority readiness must accept the
-    // ceremonied nonempty database before Livrarr can serve.
+    // A legacy database with unresolved collisions must remain blocked. Fresh
+    // and already-active startup are covered independently by the readiness tests.
     let startup_pool = livrarr_db::pool::create_sqlite_pool(data_dir.path())
         .await
-        .expect("reopen the ceremonied database for production startup");
+        .expect("reopen the blocked database for production startup");
     livrarr_db::pool::check_version_gate(&startup_pool)
         .await
-        .expect("production startup accepts this binary's schema 83 migration output");
+        .expect("the blocked database retains this binary's schema");
     let startup_readiness =
         livrarr_server::identity_layer::ensure_identity_authority_ready_before_serve(
             livrarr_db::sqlite::SqliteDb::new(startup_pool.clone()),
         )
-        .await
-        .expect("production readiness activates the ceremonied nonempty database");
-    assert_eq!(
+        .await;
+    assert!(matches!(
         startup_readiness,
-        ilr::IdentityAuthorityReadiness::ActivatedFresh
-    );
+        Err(livrarr_server::identity_layer::StartupError::CutoverRequired)
+    ));
     startup_pool.close().await;
 }
 
@@ -15873,9 +15864,10 @@ async fn round13_search_fallback_precondition_and_applicability_boundary() {
 }
 
 macro_rules! red_tests {
-    ($($name:ident => $body:expr),+ $(,)?) => {
+    ($($(#[$meta:meta])* $name:ident => $body:expr),+ $(,)?) => {
         $(
             #[tokio::test]
+            $(#[$meta])*
             async fn $name() {
                 ($body).await;
             }
@@ -15885,10 +15877,12 @@ macro_rules! red_tests {
 
 red_tests! {
     // tdd_execution_policy — ten mandatory real-door gates.
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     door_gate_work_update_rekey_mints_then_resolves => red_full_card_gate(CardContract::DoorWorkUpdate),
     door_gate_legacy_identity_preview_route_is_absent => red_router_legacy_absent(RouterCase::LegacyPreview),
     door_gate_legacy_identity_commit_route_is_absent => red_router_legacy_absent(RouterCase::LegacyCommit),
     door_gate_legacy_identity_clear_route_is_absent => red_router_legacy_absent(RouterCase::LegacyClear),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     door_gate_manual_merge_mints_then_resolves => red_full_card_gate(CardContract::DoorManualMerge),
     door_gate_pending_affirm_mints_then_resolves => red_full_card_gate(CardContract::DoorPendingAffirm),
     door_gate_retry_incomplete_uses_convergence_visit_settle_only => red_missing_composition(CompositionContract::RetryConvergenceOnly),
@@ -15898,7 +15892,9 @@ red_tests! {
     identity_road_every_listed_settle_door_reaches_one_settle => red_missing_composition(CompositionContract::EveryDoorOneSettle),
     identity_road_rejects_each_door_matrix_violation_before_side_effects => red_road_door_matrix(),
     identity_road_existing_paths_claim_their_predecision_snapshot => red_road_generation_contract(RoadGenerationContract::DomainPredecisionSnapshot),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     interactive_review_requires_freshly_minted_card => red_full_card_gate(CardContract::DomainInteractiveFresh),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     http_and_cli_resolve_share_exact_continuation => red_review_entries(ReviewEntryContract::HttpCliParity),
     review_kind_scope_generation_and_cancel_fail_closed => red_review_entries(ReviewEntryContract::FailClosedMatrix),
     read_captured_identity_projects_edition_routes_and_primary_ordinal => red_repo_read(RepoReadContract::Projection),
@@ -15925,7 +15921,7 @@ red_tests! {
     one_format_needed_panel_and_independent_nowhere_to_look => red_cover_policy(CoverContract::SharedFormatPanel),
 
     // livrarr-db.
-    commit_settlement_absorbs_anchor_match_adopt_normalized_dedup_and_race_loser => red_repo_commit(RepoCommitContract::DbBranchMatrix),
+    containment_automatic_multi_work_group_stays_reviewable_without_absorption => red_repo_commit(RepoCommitContract::DbBranchMatrix),
     commit_settlement_stale_route_key_and_database_failures_rollback => red_repo_commit(RepoCommitContract::DbFaultRollback),
     transfer_route_zero_one_many_target_matrix => red_db_transfer(TransferContract::ZeroOneMany),
     transfer_route_fault_each_statement_rolls_back => red_db_transfer(TransferContract::StatementRollback),
@@ -15942,13 +15938,19 @@ red_tests! {
     pre_cutover_fixture_covers_complete_groups_badges_reviews_and_attempts => red_pre_cutover_helper(PreCutoverContract::Categories),
     pre_cutover_helper_cannot_clear_active_marker => red_pre_cutover_helper(PreCutoverContract::CannotClearActive),
     ordinary_create_test_db_has_new_index_no_old_work_index_and_active_marker => red_db_readiness(DbReadinessContract::OrdinaryHelperIndexes),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     existing_provider_titles_heal_once_with_generation_audit => title_policy_heal_rewrites_existing_rows_atomically(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     title_policy_heal_collision_parks_group_review_and_retries_marker => title_policy_heal_parks_colliding_cohort(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     article_variant_heal_folds_one_sided_volume_and_preserves_routes => article_variant_heal_folds_one_sided_volume_and_preserves_routes_contract(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     article_variant_heal_parks_work_key_contradiction_with_current_card => article_variant_heal_parks_contradictory_work_routes_with_current_generation(),
     article_variant_heal_ignores_more_than_leading_article_difference => article_variant_heal_does_not_fold_a_larger_title_difference(),
     startup_heal_reowns_work_owned_edition_routes_once_with_one_generation_audit => route_taxonomy_heal_reowns_legacy_edition_routes_once(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     startup_heal_folds_dedup_orphan_and_cleans_duplicate_group_cards => dedup_residue_startup_heal_folds_orphan_and_cleans_duplicate_cards(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     startup_heal_keeps_one_equivalent_pending_group_card => dedup_residue_startup_heal_keeps_one_equivalent_pending_card(),
     startup_heal_round10_reopens_bridges_reclassifies_dishonest_enrichment_and_deletes_only_safe_readarr_orphans => round10_residue_heal_is_exact_marker_gated_and_conservative(),
     startup_heal_round11_reclears_only_convergence_bridge_attempts_once => round11_attempt_reheal_is_exact_marker_gated_and_idempotent(),
@@ -15983,6 +15985,7 @@ red_tests! {
     dedup_adopt_race_loser_have_no_second_writer => red_road_generation_contract(RoadGenerationContract::MetadataNoSecondWriter),
     existing_work_paths_use_predecision_generation_and_never_resubmit_stale => red_road_generation_contract(RoadGenerationContract::MetadataNeverResubmitStale),
     p4_human_flags_machine_decides_only_certain => red_missing_composition(CompositionContract::P4HumanMatrix),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     interactive_card_origination_is_one_commit_then_typed_resolution => red_full_card_gate(CardContract::MetadataInteractiveCommit),
     complete_group_enumerates_broad_candidates_all_distinctions_and_all_pairs => red_road_reconcile(ReconcileContract::CompleteGroupPairs),
     every_singular_field_conflict_has_disposition_or_card => red_road_reconcile(ReconcileContract::SingularFieldDisposition),
@@ -15990,6 +15993,7 @@ red_tests! {
     author_inheritance_primary_only_agree_review_absent_matrix => red_road_author_inheritance(),
     all_three_capture_triggers_call_settle_before_completion => red_road_capture(CaptureContract::ThreeTriggers),
     empty_capture_is_idempotent_and_sibling_safe => red_road_capture(CaptureContract::EmptyNoop),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     resolve_every_review_kind_through_http_and_cli_same_graph => red_review_entries(ReviewEntryContract::NineKindsParity),
     resolve_scope_kind_generation_cancel_database_errors_leave_pending => red_review_entries(ReviewEntryContract::PendingOnErrors),
     list_confirm_real_rows_call_settle_and_flag_human_duplicates => red_missing_composition(CompositionContract::ListRealRows),
@@ -16056,21 +16060,30 @@ red_tests! {
     live_add_fanout_persists_goodreads_hardcover_and_isbn_in_one_settlement => red_live_add_fanout_routes_share_settlement(),
     live_add_uses_v2_status_and_audits_every_identity_generation => red_live_add_v2_status_and_generation_audits(),
     v2_real_add_writes_one_birth_history_fact => red_v2_real_add_writes_one_birth_history_fact(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     direct_add_dedup_review_reuses_existing_work => red_direct_add_dedup_review_reuses_existing_work(),
     direct_add_article_variant_reuses_survivor => article_variant_add_real_door_reuses_survivor(),
     group_identity_pending_card_mint_is_idempotent_on_retrigger => red_group_identity_pending_card_mint_is_idempotent_on_retrigger(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     http_review_all_kinds_map_bad_conflict_notfound_internal => red_missing_composition(CompositionContract::HttpReviewKinds),
     handler_compile_wall_has_only_identity_road_capability => red_handler_compile_wall(),
     manual_provider_search_returns_candidates_without_identity_or_cover_mutation => red_manual_provider_search(),
     post_work_real_route_calls_settle_with_exact_directadd_matrix => red_missing_composition(CompositionContract::DirectAddMatrix),
     directadd_dedup_flags_user_and_background_refresh_waits_for_completion => red_missing_composition(CompositionContract::DirectAddWaits),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     work_update_identity_edit_mints_then_resolves_group_card => red_full_card_gate(CardContract::HandlerWorkHappy),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     work_update_missing_resolved_or_generation_stale_card_fails_closed => red_full_card_gate(CardContract::HandlerWorkFailClosed),
     work_update_monitor_only_does_not_touch_identity_generation_or_key => red_monitor_only_graph_unchanged(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     manual_merge_preview_then_post_mints_then_resolves_group_card => red_full_card_gate(CardContract::HandlerManualHappy),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     identity_review_card_list_resolve_and_dismiss_are_complete_http_paths => review_card_dismissal_is_scoped_audited_and_generation_neutral(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     group_identity_card_revalidates_after_settlement_and_invalidates_specifically => red_group_identity_stale_card(),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     manual_merge_missing_resolved_or_generation_stale_card_fails_closed => red_full_card_gate(CardContract::HandlerManualFailClosed),
+    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     manual_merge_field_review_and_file_warning_do_not_escape_atomic_identity_commit => red_missing_composition(CompositionContract::ManualMergeAtomicFields),
     pending_affirm_maps_only_to_po_ratified_pending_route_kind => red_missing_composition(CompositionContract::PendingAffirmKind),
     pending_affirm_mints_then_resolves_with_user_provenance => red_full_card_gate(CardContract::HandlerPendingHappy),
@@ -16083,7 +16096,7 @@ red_tests! {
     registered_convergence_tick_calls_metadata_handoff_before_checkpoint => red_server_convergence(ConvergenceContract::RegisteredHandoff),
     convergence_tick_cancel_and_database_control_errors_are_typed_while_work_failure_isolated => red_server_convergence(ConvergenceContract::ControlErrorsTyped),
     clap_real_binary_parses_rehearse_list_show_resolve_apply_and_default_serve => red_server_cutover(ServerCutoverContract::LibraryCommandBinding),
-    cutover_real_cli_two_invocation_ceremony_reuses_data_dir_rehearsal_ledger => red_real_cli_cutover_ceremony(),
+    containment_real_cli_preserves_rehearsal_and_keeps_collisions_blocked => red_real_cli_cutover_ceremony(),
     cutover_subcommands_hold_exclusive_lock_and_never_bind_http_or_start_jobs => red_server_cutover(ServerCutoverContract::ExclusiveNoRuntime),
     cutover_error_matrix_not_snapshot_report_kind_generation_action_cancel_database => red_server_cutover(ServerCutoverContract::ErrorMatrix),
     production_startup_active_empty_and_nonempty_inactive_boundaries => red_server_readiness(ServerReadinessContract::StartupBoundaries),

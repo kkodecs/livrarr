@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import * as Tabs from "@radix-ui/react-tabs";
-import { RefreshCw, Pencil, Trash2, GitMerge } from "lucide-react";
+import { RefreshCw, Pencil, Trash2 } from "lucide-react";
 import {
   getWork,
   refreshWork,
@@ -27,7 +27,6 @@ import { ReleasesTab } from "./components/ReleasesTab";
 import { HistoryTab } from "./components/HistoryTab";
 import { BookInformationTab } from "./components/BookInformationTab";
 import { EditModal } from "./components/EditModal";
-import { MergeDialog } from "./components/MergeDialog";
 
 export default function WorkDetailPage() {
   const { id } = useParams();
@@ -86,7 +85,6 @@ export default function WorkDetailPage() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [mergeOpen, setMergeOpen] = useState(false);
 
   useEffect(() => {
     if (coverPollBaseline === undefined) return;
@@ -173,13 +171,7 @@ export default function WorkDetailPage() {
             <Pencil size={14} />
             Edit
           </button>
-          <button
-            onClick={() => setMergeOpen(true)}
-            className="btn-secondary inline-flex items-center gap-1.5"
-          >
-            <GitMerge size={14} />
-            Merge Duplicate
-          </button>
+          <span className="text-xs text-muted">Merging is currently unavailable.</span>
           <button
             onClick={() => setDeleteOpen(true)}
             className="btn-secondary inline-flex items-center gap-1.5 text-red-400 hover:text-red-300"
@@ -229,7 +221,6 @@ export default function WorkDetailPage() {
               work={work}
               onRefresh={() => refreshMutation.mutate()}
               refreshing={refreshMutation.isPending}
-              onMergeWorks={() => setMergeOpen(true)}
             />
           </Tabs.Content>
         </Tabs.Root>
@@ -248,8 +239,6 @@ export default function WorkDetailPage() {
           await deleteMutation.mutateAsync();
         }}
       />
-
-      <MergeDialog work={work} open={mergeOpen} onOpenChange={setMergeOpen} />
     </>
   );
 }

@@ -3562,6 +3562,7 @@ async fn provider_identity_handoff_returns_changed_sibling_and_none_only_when_al
 
 // RED-UNTIL-U5: today a second startup title-policy heal after user Dismiss mints the equivalent GroupIdentity card again because cancellation is not durable and no ledger is consulted.
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn startup_heal_suppresses_on_second_boot_but_changed_cohort_key_mints() {
     let _serial = TRACE_LOCK.lock().await;
     let db = create_activated_test_db().await;
@@ -4147,6 +4148,7 @@ async fn pending_key_excludes_owner_but_includes_user_work_and_trimmed_route_tup
 
 // RED-UNTIL-U5: today there is no standing ledger to challenge the three inline origins; update, merge-with-choices, and affirm mint then resolve only because SuppressedByDismissal is unreachable.
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn registered_update_merge_and_affirm_bypass_exact_tombstones_byte_identically() {
     let _serial = TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;
@@ -4966,6 +4968,7 @@ async fn registered_affirm_revokes_all_member_keys_in_its_continuation_transacti
 
 // RED-UNTIL-U5: today title/author update, merge, DirectAdd, ListImport choice, and refused EditionEvidence resolution have no ledger to preserve; the negative revocation policy is unobservable.
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn all_non_revoking_user_actions_preserve_tombstones_and_reopen_no_card() {
     let _serial = TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;
@@ -5236,6 +5239,7 @@ async fn satisfied_route_machine_cancellation_writes_no_tombstone() {
 
 // PIN: dedup-residue heal's machine cancellation is not a ReviewActor Dismiss, writes no ledger, and the same semantic proposal continues through U7's normal reuse path.
 #[tokio::test]
+#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
 async fn dedup_residue_machine_cancellation_writes_no_tombstone() {
     let _serial = TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;

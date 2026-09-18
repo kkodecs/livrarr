@@ -814,6 +814,9 @@ async fn upsert_adopted_dismissal(
 pub async fn heal_identity_title_policy(
     pool: &SqlitePool,
 ) -> Result<IdentityTitlePolicyHealReport, String> {
+    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE {
+        return Ok(IdentityTitlePolicyHealReport::default());
+    }
     let mut tx = crate::pool::begin_write(pool)
         .await
         .map_err(|error| format!("begin identity title-policy heal: {error}"))?;

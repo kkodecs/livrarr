@@ -1822,6 +1822,11 @@ where
 
         let survivor = self.get(user_id, survivor_id).await?;
         let loser = self.get(user_id, loser_id).await?;
+        if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE {
+            return Err(WorkServiceError::Validation(
+                livrarr_domain::identity_layer::IdentityRoadError::MergingUnavailable.to_string(),
+            ));
+        }
 
         let items = self
             .db

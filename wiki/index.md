@@ -54,6 +54,7 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 ## Decisions
 
+- [Temporary work merge containment](decisions/merge-containment.md) — the September 2026 pause, disabled paths, preserved workflows, and title/author edit limitation
 - [Key Decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security
 
 ## Insights (full text)

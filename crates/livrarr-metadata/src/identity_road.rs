@@ -94,6 +94,14 @@ where
         request: IdentityRoadRequest,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         validate_road_request(&request)?;
+        if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+            && matches!(
+                request.origin,
+                IdentityRoadOrigin::ManualWorkMerge { .. } | IdentityRoadOrigin::WorkUpdateRekey
+            )
+        {
+            return Err(IdentityRoadError::MergingUnavailable);
+        }
         let mut existing_work_id = selected_existing_work(&request)?;
         let mut existing = match existing_work_id {
             Some(work_id) => Some(
@@ -469,6 +477,12 @@ where
         );
         let action = match &evaluation {
             CompleteGroupEvaluation::Create => CompleteGroupReconciliationAction::CommitDifferent,
+            CompleteGroupEvaluation::AutoMerge { .. }
+                if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+                    && broad_main_author_candidates.len() > 1 =>
+            {
+                CompleteGroupReconciliationAction::Review
+            }
             CompleteGroupEvaluation::AutoMerge { .. } => {
                 CompleteGroupReconciliationAction::AutoMerge
             }
@@ -788,10 +802,10 @@ where
             .load_pending_review(actor.clone(), command.card_id())
             .await
             .map_err(map_repository_error)?;
-        require_continuation(pending.kind)?;
         if pending.kind != command.kind() {
             return Err(IdentityRoadError::ReviewKindMismatch);
         }
+        require_continuation(pending.kind)?;
         if pending.kind != livrarr_domain::identity_layer::ReviewKind::PendingRoute
             && pending.generation != command.expected_generation()
         {
@@ -1225,6 +1239,9 @@ fn map_repository_error(
     error: livrarr_domain::identity_layer::IdentityRepositoryError,
 ) -> IdentityRoadError {
     match error {
+        livrarr_domain::identity_layer::IdentityRepositoryError::MergingUnavailable => {
+            IdentityRoadError::MergingUnavailable
+        }
         livrarr_domain::identity_layer::IdentityRepositoryError::NotFound => {
             IdentityRoadError::NotFound
         }
