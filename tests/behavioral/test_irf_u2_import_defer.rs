@@ -36,6 +36,377 @@ use tower::ServiceExt;
 
 const ISBN_FIXTURE: &str = "9780306406157";
 
+// These regressions reuse the real router/SQLite harness below. Only Readarr's
+// external HTTP service is a local fixture; materialization is never mocked.
+#[cfg(unix)]
+mod readarr_independent_copies {
+    use super::*;
+    use livrarr_db::{CreateLibraryItemDbRequest, LibraryItemDb, TagStatus};
+    use livrarr_domain::services::ReadarrImportWorkflow;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    #[derive(Clone, Copy)]
+    enum Existing {
+        Absent,
+        OrphanLink,
+        RecordedLink,
+        RecordedSourceLink,
+        RecordedEdited,
+        OtherWork,
+        WrongSize,
+        SamePath,
+        TargetSymlink,
+        UnwritableParent,
+    }
+
+    struct RestorePermissions(PathBuf, std::fs::Permissions);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+
+    struct AbortServer(tokio::task::JoinHandle<()>);
+    impl Drop for AbortServer {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn identity(path: &Path) -> (u64, u64) {
+        let metadata = std::fs::metadata(path).unwrap();
+        (metadata.dev(), metadata.ino())
+    }
+
+    async fn check(case: Existing) {
+        let mut harness = build_route_harness().await;
+        let root = configure_root(&harness, MediaType::Ebook).await;
+        let root_id = harness.db.list_root_folders().await.unwrap()[0].id;
+        let relative = format!("{}/Copy Author/Readarr Copy.epub", harness.user_id);
+        let target = root.join(&relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let source = if matches!(case, Existing::SamePath) {
+            target.clone()
+        } else {
+            incoming_path(&harness, "Readarr Copy.epub")
+        };
+        write_epub(&source, "Readarr Copy");
+        let source_before = std::fs::read(&source).unwrap();
+        let author_id = seed_author(&harness.db, harness.user_id, "Copy Author").await;
+        let work_id = seed_work(
+            &harness.db,
+            harness.user_id,
+            author_id,
+            "Readarr Copy",
+            None,
+        )
+        .await;
+        let peer = harness.tmp.path().join("previous-library-link.epub");
+        // Prove this fixture permits hardlinks: a cross-device fallback would
+        // conceal the original Readarr bug.
+        std::fs::hard_link(&source, &peer).unwrap();
+        assert_eq!(identity(&source), identity(&peer));
+        std::fs::remove_file(&peer).unwrap();
+        match case {
+            Existing::Absent | Existing::SamePath => {}
+            Existing::OrphanLink
+            | Existing::RecordedSourceLink
+            | Existing::OtherWork
+            | Existing::UnwritableParent => {
+                std::fs::hard_link(&source, &target).unwrap();
+            }
+            Existing::RecordedLink => {
+                // The source may have been replaced since the old import.
+                // Preserve the edited library bytes and separate every link,
+                // even when source and destination no longer share an inode.
+                std::fs::write(&peer, b"existing edited library content").unwrap();
+                std::fs::hard_link(&peer, &target).unwrap();
+            }
+            Existing::RecordedEdited | Existing::WrongSize => {
+                std::fs::write(&target, b"existing edited library content").unwrap();
+            }
+            Existing::TargetSymlink => {
+                std::os::unix::fs::symlink(&source, &target).unwrap();
+            }
+        }
+        let permissions_before = target.exists().then(|| {
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+            std::fs::metadata(&target).unwrap().permissions()
+        });
+        let _restore_permissions = if matches!(case, Existing::UnwritableParent) {
+            let parent = target.parent().unwrap();
+            let guard = RestorePermissions(
+                parent.to_owned(),
+                std::fs::metadata(parent).unwrap().permissions(),
+            );
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+            assert!(
+                tempfile::NamedTempFile::new_in(parent).is_err(),
+                "fixture must actually deny staging writes"
+            );
+            Some(guard)
+        } else {
+            None
+        };
+        let target_before = std::fs::read(&target).ok();
+        let target_identity_before = target.exists().then(|| identity(&target));
+        let owner = if matches!(case, Existing::OtherWork) {
+            seed_work(
+                &harness.db,
+                harness.user_id,
+                author_id,
+                "Another Book",
+                None,
+            )
+            .await
+        } else {
+            work_id
+        };
+        // Constructed-state justification: these are real writer-produced
+        // rows and real files from a prior successful import, or an orphan
+        // left between file publication and row creation. No outcome is injected.
+        let existing_id = if matches!(
+            case,
+            Existing::RecordedLink
+                | Existing::RecordedSourceLink
+                | Existing::RecordedEdited
+                | Existing::OtherWork
+        ) {
+            Some(
+                harness
+                    .db
+                    .create_library_item(CreateLibraryItemDbRequest {
+                        user_id: harness.user_id,
+                        work_id: owner,
+                        root_folder_id: root_id,
+                        path: relative.clone(),
+                        media_type: MediaType::Ebook,
+                        file_size: std::fs::metadata(&target).unwrap().len() as i64,
+                        import_id: None,
+                        tag_status: TagStatus::Pending,
+                        tagged_at_generation: 0,
+                    })
+                    .await
+                    .unwrap()
+                    .id,
+            )
+        } else {
+            None
+        };
+
+        let source_for_http = source.clone();
+        let source_size = source_before.len();
+        let payload = move |uri: axum::http::Uri| {
+            let value = match uri.path() {
+                "/api/v1/system/status" => json!({"appName": "Readarr", "version": "test"}),
+                "/api/v1/author" => json!([{"id": 1, "authorName": "Copy Author"}]),
+                "/api/v1/book" => {
+                    json!([{"id": 2, "authorId": 1, "title": "Readarr Copy", "monitored": true}])
+                }
+                "/api/v1/bookfile" => json!([{"id": 3, "authorId": 1, "bookId": 2,
+                    "path": source_for_http, "size": source_size}]),
+                "/api/v1/rootfolder" => {
+                    json!([{"id": 4, "path": source_for_http.parent().unwrap()}])
+                }
+                "/api/v1/edition" => json!([]),
+                _ => panic!("unexpected fixture endpoint: {uri}"),
+            };
+            async move { axum::Json(value) }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = AbortServer(tokio::spawn(async move {
+            axum::serve(listener, Router::new().fallback(payload))
+                .await
+                .unwrap();
+        }));
+        harness.state.readarr_import_wf = Arc::new(
+            livrarr_server::readarr_import_workflow::LiveReadarrImportWorkflow::new(
+                livrarr_http::fetcher::HttpFetcherImpl::new().unwrap(),
+                harness.state.readarr_import_service.clone(),
+                harness.state.readarr_import_progress.clone(),
+                harness.state.data_dir.clone(),
+                harness.state.work_service.clone(),
+                harness.db.clone(),
+                harness.state.import_workflow.clone(),
+            )
+            .with_identity_road(harness.state.identity_road.clone()),
+        );
+        harness
+            .state
+            .readarr_import_wf
+            .add_origin(url.clone())
+            .await
+            .unwrap();
+        harness.app = livrarr_server::router::build_router(
+            harness.state.clone(),
+            harness.tmp.path().join("no-ui"),
+        );
+        let response = call_router_json(
+            &harness.app,
+            &harness.api_key,
+            Method::POST,
+            "/api/v1/import/readarr/start",
+            Some(json!({
+                "url": url, "apiKey": "local-fixture-key", "readarrRootFolderId": 4,
+                "livrarrRootFolderId": root_id, "filesOnly": true
+            })),
+        )
+        .await;
+        assert!(response.status.is_success(), "{:?}", response);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !harness.state.readarr_import_progress.lock().await.running {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Readarr run completes");
+        drop(server);
+        let progress = harness.state.readarr_import_progress.lock().await;
+        assert_eq!(
+            progress.files_processed, 1,
+            "run reached file import: {progress:?}"
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), source_before);
+        if matches!(
+            case,
+            Existing::OtherWork
+                | Existing::WrongSize
+                | Existing::SamePath
+                | Existing::TargetSymlink
+                | Existing::UnwritableParent
+        ) {
+            assert!(
+                !progress.errors.is_empty(),
+                "import must report refusal: {progress:?}"
+            );
+            assert!(
+                progress
+                    .errors
+                    .iter()
+                    .any(|e| e.starts_with("File for 'Readarr Copy':")),
+                "the file operation must report the refusal: {progress:?}"
+            );
+            if matches!(case, Existing::OtherWork | Existing::WrongSize) {
+                assert!(
+                    progress.errors.iter().any(|e| e.contains("path collision")),
+                    "{progress:?}"
+                );
+            }
+            assert_eq!(std::fs::read(&target).unwrap(), target_before.unwrap());
+            assert_eq!(Some(identity(&target)), target_identity_before);
+            if matches!(case, Existing::TargetSymlink) {
+                assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+            }
+            assert!(harness
+                .db
+                .list_library_items_by_work(harness.user_id, work_id)
+                .await
+                .unwrap()
+                .is_empty());
+            if let Some(id) = existing_id {
+                assert_eq!(
+                    harness
+                        .db
+                        .list_library_items_by_work(harness.user_id, owner)
+                        .await
+                        .unwrap()[0]
+                        .id,
+                    id
+                );
+            }
+        } else {
+            assert!(progress.errors.is_empty(), "{progress:?}");
+            let rows = harness
+                .db
+                .list_library_items_by_work(harness.user_id, work_id)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].path, relative);
+            if let Some(permissions) = permissions_before {
+                assert_eq!(
+                    std::fs::metadata(&target).unwrap().permissions(),
+                    permissions
+                );
+            }
+            if let Some(id) = existing_id {
+                assert_eq!(rows[0].id, id);
+            }
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                target_before.unwrap_or_else(|| source_before.clone())
+            );
+            assert_ne!(
+                identity(&source),
+                identity(&target),
+                "Readarr must create an independent copy"
+            );
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().nlink(),
+                1,
+                "retry retained an old hardlink"
+            );
+            let peer_before = std::fs::read(&peer).ok();
+            // File::create truncates in place; an atomic replace would hide a link.
+            std::fs::write(&target, b"changed library copy").unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), source_before);
+            if let Some(bytes) = peer_before {
+                assert_eq!(std::fs::read(&peer).unwrap(), bytes);
+            }
+        }
+        assert_eq!(harness.provider_attempts.load(Ordering::SeqCst), 0);
+    }
+
+    /// REQ-001 / AC-001: real Readarr route, real importer, hardlinks available.
+    #[tokio::test]
+    async fn new_import_is_independent() {
+        check(Existing::Absent).await;
+    }
+    /// REQ-002 / AC-002: a crashed pre-fix import left a linked orphan.
+    #[tokio::test]
+    async fn orphan_retry_is_independent() {
+        check(Existing::OrphanLink).await;
+    }
+    /// REQ-002 / AC-003: preserve existing library edits and the LibraryItem ID.
+    #[tokio::test]
+    async fn recorded_retry_separates_old_link_and_keeps_edits() {
+        check(Existing::RecordedLink).await;
+    }
+    #[tokio::test]
+    async fn recorded_retry_separates_current_source_link() {
+        check(Existing::RecordedSourceLink).await;
+    }
+    #[tokio::test]
+    async fn recorded_retry_keeps_independent_edits() {
+        check(Existing::RecordedEdited).await;
+    }
+    /// REQ-003 / AC-004: ownership and collision rejection still precede writes.
+    #[tokio::test]
+    async fn another_works_target_is_unchanged() {
+        check(Existing::OtherWork).await;
+    }
+    #[tokio::test]
+    async fn mismatched_orphan_is_unchanged() {
+        check(Existing::WrongSize).await;
+    }
+    #[tokio::test]
+    async fn same_path_is_refused_without_mutation() {
+        check(Existing::SamePath).await;
+    }
+    #[tokio::test]
+    async fn target_symlink_is_refused_without_mutation() {
+        check(Existing::TargetSymlink).await;
+    }
+    #[tokio::test]
+    async fn staging_failure_preserves_existing_link_and_bytes() {
+        check(Existing::UnwritableParent).await;
+    }
+}
+
 struct RouteHarness {
     app: Router,
     state: AppState,

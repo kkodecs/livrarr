@@ -2951,11 +2951,16 @@ impl ImportRunner {
                 &rd_file.path,
             );
 
+            // Library imports copy. A hardlinked library file would share
+            // its bytes with Readarr's original, so editing one name (tag
+            // writing, a later library edit) reaches back into the other.
             // The shared import core's adopt/dedup outcome matrix decides
             // existing-target handling: row for this work at this path →
             // Skipped; orphan file matching the source's size → Adopted;
-            // otherwise → PathCollision. A re-run after a crashed prior
-            // migration therefore adopts its already-hardlinked files.
+            // otherwise → PathCollision. Under `Copy` both existing-target
+            // outcomes first separate the target from every other name for
+            // its bytes, keeping the target's own contents, so a re-run
+            // after a crashed prior migration repairs its linked files.
             let rel_path = dest
                 .strip_prefix(livrarr_root_path)
                 .map(|p| p.to_string_lossy().to_string())
@@ -2972,7 +2977,7 @@ impl ImportRunner {
                         source,
                         target_relative: rel_path,
                         media_type,
-                        materialization: livrarr_domain::services::Materialization::HardlinkFirst,
+                        materialization: livrarr_domain::services::Materialization::Copy,
                         import_id: Some(self.import_id.clone()),
                         extract_chapters: false,
                     },

@@ -175,12 +175,37 @@ where
                 .iter()
                 .any(|li| li.root_folder_id == req.root_folder_id && li.path == req.target_relative)
             {
+                // A recorded target is only "already imported" once it is
+                // storage this library owns alone: an earlier hardlinked
+                // import leaves its bytes shared with the source, so the
+                // skip separates them before reporting the file done.
+                if req.materialization == Materialization::Copy {
+                    ensure_independent_target(&req.source, &target)
+                        .await
+                        .map_err(ImportWorkflowError::ImportFailed)?;
+                }
                 return Ok(ImportFileOutcome::Skipped {
                     reason: SkipReason::AlreadyImported,
                 });
             }
 
-            // Adoption: create the row from the on-disk file, no file I/O.
+            // A different work's row can already claim this exact path.
+            // Settle that before any byte of the existing target moves:
+            // `create_library_item`'s own cross-work rejection below runs
+            // too late to protect a file separation has already rewritten.
+            match self
+                .db
+                .find_library_item_by_path(user_id, req.root_folder_id, &req.target_relative)
+                .await
+            {
+                Ok(Some(existing)) if existing.work_id != req.work_id => {
+                    return Err(ImportWorkflowError::PathCollision(req.target_relative));
+                }
+                Ok(_) => {}
+                Err(e) => return Err(ImportWorkflowError::Db(e)),
+            }
+
+            // Adoption: create the row from the on-disk file.
             // Copy/HardlinkFirst must confirm the file is actually ours —
             // a colliding different book virtually never matches size.
             let file_size: i64 = match req.materialization {
@@ -213,6 +238,16 @@ where
                     target_size.unwrap_or(0) as i64
                 }
             };
+
+            // An adopted file is only ours once it is the sole name for its
+            // bytes. This runs after the size check, so a mismatched orphan
+            // is still rejected untouched, and before the row exists, so a
+            // failed separation adopts nothing.
+            if req.materialization == Materialization::Copy {
+                ensure_independent_target(&req.source, &target)
+                    .await
+                    .map_err(ImportWorkflowError::ImportFailed)?;
+            }
 
             let item = match self
                 .db
@@ -1406,6 +1441,53 @@ mod import_recovery_tests {
         );
     }
 
+    /// REQ-002/003: a failed durable publication of a retry must surface an
+    /// error with complete file contents and no adopted LibraryItem.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn copy_retry_fsync_failure_preserves_contents_without_adoption() {
+        let (db, workflow, user_id, work_id, root_folder_id, root_dir) = seed().await;
+        let source = root_dir.path().join("source.epub");
+        let target_relative = "retry/book.epub";
+        let target = root_dir.path().join(target_relative);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"complete original contents").unwrap();
+        std::fs::hard_link(&source, &target).unwrap();
+        fsync_test_failpoint::arm(target.parent().unwrap().to_owned());
+        let result = workflow
+            .import_file(
+                user_id,
+                ImportFileRequest {
+                    work_id,
+                    root_folder_id,
+                    source: source.clone(),
+                    target_relative: target_relative.into(),
+                    media_type: MediaType::Ebook,
+                    materialization: Materialization::Copy,
+                    import_id: None,
+                    extract_chapters: false,
+                },
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ImportWorkflowError::ImportFailed(_))),
+            "retry must surface failed durability: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            b"complete original contents"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"complete original contents"
+        );
+        assert!(db
+            .list_library_items_by_work(user_id, work_id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn hardlink_first_copy_fallback_never_persists_when_data_fsync_fails() {
         // Force the hard_link attempt to fail (EEXIST — a file already sits
@@ -1782,6 +1864,89 @@ async fn materialize_hardlink_first(src: &Path, dst: &Path) -> Result<u64, Strin
     })
     .await
     .expect("spawn_blocking panicked")
+}
+
+/// Makes `target` the only name for its own bytes, so a later in-place write
+/// through it can never reach the source or any other hardlink. Copies the
+/// TARGET's current contents — never the source's — through a random sibling
+/// tempfile, fsyncs the data, publishes with an atomic rename, then fsyncs the
+/// directory. An error leaves the target exactly as it was: nothing but the
+/// rename is visible at that pathname, and the tempfile is removed on drop.
+///
+/// The directory fsync runs even when no copy was needed. An earlier attempt
+/// can have published a separated target and then failed its own fsync, so a
+/// link count of one alone does not prove the rename behind it is durable.
+///
+/// Refuses, without touching anything, where an independent destination cannot
+/// exist at that pathname: `source` and `target` resolving to one path, or a
+/// symlinked `target` (writing through it would mutate its referent instead).
+/// On Unix a link count of one means the file is already independent and the
+/// copy is skipped; other platforms copy unconditionally.
+async fn ensure_independent_target(source: &Path, target: &Path) -> Result<(), String> {
+    let source = source.to_path_buf();
+    let target = target.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&target)
+            .map_err(|e| format!("cannot stat import target: {e}"))?;
+        if metadata.is_symlink() {
+            return Err("import target is a symlink; refusing to write through it".to_string());
+        }
+        if !metadata.is_file() {
+            return Err("import target is not a regular file".to_string());
+        }
+        // A missing source cannot be canonicalized and does not prove the
+        // target has no other links — fall back to the literal pathnames and
+        // let the separation proceed.
+        let same_path = match (
+            std::fs::canonicalize(&source),
+            std::fs::canonicalize(&target),
+        ) {
+            (Ok(source), Ok(target)) => source == target,
+            _ => source == target,
+        };
+        if same_path {
+            return Err(
+                "source and import target are the same path; no independent copy is possible"
+                    .to_string(),
+            );
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| "import target has no parent directory".to_string())?;
+
+        #[cfg(unix)]
+        let already_independent = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.nlink() <= 1
+        };
+        #[cfg(not(unix))]
+        let already_independent = false;
+
+        if !already_independent {
+            let mut current = std::fs::File::open(&target)
+                .map_err(|e| format!("open import target failed: {e}"))?;
+            // Same reservation shape as the staging write above, so a crash
+            // between create and rename leaves a file the startup staging
+            // sweep already knows how to remove.
+            let mut tmp = tempfile::Builder::new()
+                .prefix(STAGING_PREFIX)
+                .tempfile_in(parent)
+                .map_err(|e| format!("separation tempfile create failed: {e}"))?;
+            std::io::copy(&mut current, tmp.as_file_mut())
+                .map_err(|e| format!("copy failed: {e}"))?;
+            tmp.as_file()
+                .set_permissions(metadata.permissions())
+                .map_err(|e| format!("cannot preserve target permissions: {e}"))?;
+            tmp.as_file()
+                .sync_all()
+                .map_err(|e| format!("data fsync failed: {e}"))?;
+            tmp.persist(&target)
+                .map_err(|e| format!("rename failed: {e}"))?;
+        }
+        fsync_dir(parent).map_err(|e| format!("dir fsync failed: {e}"))
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("spawn task panicked: {e}")))
 }
 
 // ---------------------------------------------------------------------------
