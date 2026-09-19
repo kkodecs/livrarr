@@ -358,7 +358,7 @@ function LibraryResult({ work }: { work: WorkDetailResponse }) {
         workId={work.id}
         title={work.title}
         authorName={work.authorName}
-        className="h-32 w-[88px]"
+        className="h-[166.4px] w-[114.4px]"
         iconSize={14}
       />
       <span className="min-w-0 truncate font-medium text-sm text-zinc-100">
@@ -393,10 +393,10 @@ function OlResult({
           <img
             src={work.coverUrl}
             alt=""
-            className="h-32 w-[88px] shrink-0 rounded bg-zinc-700 object-cover"
+            className="h-[166.4px] w-[114.4px] shrink-0 rounded bg-zinc-700 object-cover"
           />
         ) : (
-          <div className="flex h-32 w-[88px] shrink-0 items-center justify-center rounded bg-zinc-700 text-[10px] text-zinc-500">
+          <div className="flex h-[166.4px] w-[114.4px] shrink-0 items-center justify-center rounded bg-zinc-700 text-[10px] text-zinc-500">
             ?
           </div>
         )}

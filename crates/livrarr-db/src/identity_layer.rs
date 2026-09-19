@@ -982,6 +982,39 @@ fn map_author_db(error: crate::DbError) -> IdentityRepositoryError {
     IdentityRepositoryError::Database(error.to_string())
 }
 
+/// Work ids in one broad normalized-main + primary-author group. A stored
+/// main matches by exact equality first; otherwise the shared title authority
+/// decides, so an ordinary spelling variant such as "&" versus "and" finds
+/// the existing row while its stored key stays untouched. Subtitle, volume,
+/// route and author distinctions remain with the evaluation that follows.
+async fn broad_group_work_ids_on(
+    conn: &mut SqliteConnection,
+    user_id: UserId,
+    normalized_main: &str,
+    primary_author_id: AuthorId,
+) -> Result<Vec<WorkId>, IdentityRepositoryError> {
+    use livrarr_domain::identity_matching::{parse_title, title_verdict, TitleVerdict};
+
+    let rows: Vec<(WorkId, String)> = sqlx::query_as(
+        "SELECT id, normalized_identity_main FROM works \
+          WHERE user_id = ?1 AND primary_author_id = ?2 ORDER BY id",
+    )
+    .bind(user_id)
+    .bind(primary_author_id)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(repo_db)?;
+    let query = parse_title(normalized_main);
+    Ok(rows
+        .into_iter()
+        .filter(|(_, stored)| {
+            stored == normalized_main
+                || title_verdict(&query, &parse_title(stored)) == TitleVerdict::Same
+        })
+        .map(|(id, _)| id)
+        .collect())
+}
+
 async fn captured_identity_on(
     conn: &mut SqliteConnection,
     user_id: UserId,
@@ -1228,17 +1261,12 @@ impl WorkIdentityRepository for SqliteDb {
         normalized_main: String,
         primary_author_id: AuthorId,
     ) -> Result<Vec<CapturedIdentity>, IdentityRepositoryError> {
-        let ids: Vec<i64> = sqlx::query_scalar(
-            "SELECT id FROM works \
-              WHERE user_id = ?1 AND normalized_identity_main = ?2 \
-                AND primary_author_id = ?3 ORDER BY id",
-        )
-        .bind(user_id)
-        .bind(normalized_main)
-        .bind(primary_author_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(repo_db)?;
+        let ids = {
+            // Release the connection before the per-member reads below: the
+            // test pool is single-connection.
+            let mut conn = self.pool().acquire().await.map_err(repo_db)?;
+            broad_group_work_ids_on(&mut conn, user_id, &normalized_main, primary_author_id).await?
+        };
         let mut identities = Vec::with_capacity(ids.len());
         for work_id in ids {
             identities.push(self.read_captured_identity(user_id, work_id).await?);
@@ -1384,17 +1412,13 @@ impl WorkIdentityRepository for SqliteDb {
                     adopt_unambiguous_author(&command.author, &names).map(|index| stored[index].0)
                 });
             if let Some(author_id) = author_id {
-                let ids: Vec<WorkId> = sqlx::query_scalar(
-                    "SELECT id FROM works \
-                      WHERE user_id = ?1 AND normalized_identity_main = ?2 \
-                        AND primary_author_id = ?3 ORDER BY id",
+                let ids = broad_group_work_ids_on(
+                    &mut tx,
+                    command.user_id,
+                    &identity_title.normalized_main,
+                    author_id,
                 )
-                .bind(command.user_id)
-                .bind(&identity_title.normalized_main)
-                .bind(author_id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(repo_db)?;
+                .await?;
                 let mut members = Vec::with_capacity(ids.len());
                 for work_id in ids {
                     let identity = captured_identity_on(&mut tx, command.user_id, work_id).await?;
@@ -1407,6 +1431,8 @@ impl WorkIdentityRepository for SqliteDb {
                         identity_title: identity_title.clone(),
                         primary_author_id: author_id,
                         text_distinction: None,
+                        // The manual-import minimum carries no provider routes.
+                        routes: Vec::new(),
                     },
                     members,
                 );

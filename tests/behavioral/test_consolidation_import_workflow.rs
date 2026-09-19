@@ -11,6 +11,7 @@ use livrarr_db::{
     CreateUserDbRequest, CreateWorkDbRequest, DownloadClientDb, GrabDb, LibraryItemDb,
     RootFolderDb, UserDb, WorkDb, WorkDbCreate,
 };
+use livrarr_domain::identity_matching::identity_key;
 use livrarr_domain::services::*;
 use livrarr_domain::*;
 use livrarr_handlers::context::{
@@ -60,11 +61,14 @@ async fn setup_prereqs(db: &SqliteDb, user_id: i64) -> (i64, i64) {
         .await
         .unwrap();
 
+    let (normalized_title, normalized_author) = identity_key("Test Book", "Test Author");
     let (work, _) = db
         .create_work(CreateWorkDbRequest {
             user_id,
             title: "Test Book".into(),
             author_name: "Test Author".into(),
+            normalized_title,
+            normalized_author,
             ..Default::default()
         })
         .await
@@ -418,18 +422,26 @@ async fn test_import_grab_path_traversal_rejected() {
     // WF-IMPORT-004, test.import.path_traversal: Given path traversal in torrent name, rejects the file
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
-    let (client_id, _) = setup_prereqs(&db, user_id).await;
+    let (client_id, prerequisite_work_id) = setup_prereqs(&db, user_id).await;
 
     // Create a work with a malicious author name containing ..
-    let (work, _) = db
+    let (normalized_title, normalized_author) = identity_key("../../etc/passwd", "../../root");
+    let (work, created) = db
         .create_work(CreateWorkDbRequest {
             user_id,
             title: "../../etc/passwd".into(),
             author_name: "../../root".into(),
+            normalized_title,
+            normalized_author,
             ..Default::default()
         })
         .await
         .unwrap();
+    assert!(created, "fixture must create the malicious Work");
+    assert_ne!(
+        work.id, prerequisite_work_id,
+        "fixture must not reuse the normal prerequisite Work"
+    );
 
     let source_dir = create_source_dir(&["book.epub"]);
     let source_path = source_dir.path().to_str().unwrap();

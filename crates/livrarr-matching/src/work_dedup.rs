@@ -399,14 +399,14 @@ mod tests {
     fn normalize_title_strips_punctuation_and_collapses_whitespace() {
         // FLIPPED under the identity authority (Phase 5, sanctioned): the
         // old alnum-filter deleted apostrophes in place ("philosophers");
-        // the authority's canonical phrase folds EVERY non-alphanumeric to
-        // a token boundary, so an apostrophe now yields a separate token
-        // ("philosopher s"). One recipe everywhere — no bypass cleaning;
+        // the authority's canonical phrase folds apostrophes to token
+        // boundaries ("philosopher s") and preserves '&' as "and".
+        // One recipe everywhere — no bypass cleaning;
         // recognition's Levenshtein still catches elided-apostrophe forms
         // in file names.
         assert_eq!(
             normalize_title_for_match("Harry Potter & the Philosopher's Stone"),
-            "harry potter the philosopher s stone"
+            "harry potter and the philosopher s stone"
         );
     }
 

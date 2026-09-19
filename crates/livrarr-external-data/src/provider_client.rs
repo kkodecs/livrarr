@@ -1003,10 +1003,9 @@ impl<F: HttpFetcher> HardcoverClient<F> {
         &self.live_config
     }
 
-    /// Anchor-only fetch (REQ-006). ISBN is the working anchor tier; no
-    /// by-hc_key detail query exists in the current Hardcover integration, so
-    /// the HcKey arm is a recorded gap that reports NotFound rather than
-    /// falling back to text search.
+    /// Anchor-only fetch (REQ-006). A Hardcover Work id fetches the book
+    /// directly (`books_by_pk`); an ISBN searches for the edition and must find
+    /// it in the hit's `isbns`. Neither arm falls back to text search.
     async fn fetch_by_anchor_query(
         &self,
         query: &AnchorQuery,

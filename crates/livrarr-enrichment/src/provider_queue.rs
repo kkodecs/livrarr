@@ -87,6 +87,52 @@ fn text_decisive_search_capture(
     }
 }
 
+/// One provider whose own title/primary-author search leg this pass will run.
+struct SearchDispatchEntry {
+    provider: MetadataProvider,
+    client: ProviderClient,
+}
+
+/// Spawn one provider-local search leg per entry and fold their captures.
+/// The pre-scatter wave (anchor-less or terminally missed providers) and the
+/// same-pass wave after a healthy anchored miss share this one runner.
+async fn run_search_legs(
+    entries: Vec<SearchDispatchEntry>,
+    seed_title: &str,
+    seed_author: &str,
+    language: Option<&str>,
+    active_routes: &[WorkRoute],
+    priority: livrarr_domain::RequestPriority,
+) -> SearchFallbackCapture {
+    let mut search_set = JoinSet::new();
+    for entry in entries {
+        search_set.spawn(run_identity_search_fallback(
+            entry.provider,
+            entry.client,
+            seed_title.to_string(),
+            seed_author.to_string(),
+            language.map(str::to_string),
+            active_routes.to_vec(),
+            priority,
+        ));
+    }
+    let mut folded = SearchFallbackCapture::default();
+    while let Some(joined) = search_set.join_next().await {
+        match joined {
+            Ok(capture) => {
+                folded.accounting = folded.accounting.combine(capture.accounting);
+                folded.provider_identity.extend(capture.provider_identity);
+                folded.route_proposals.extend(capture.route_proposals);
+            }
+            Err(error) => {
+                folded.accounting = folded.accounting.combine(LedgerPassAccounting::LegFailed);
+                warn!("identity search fallback task failed: {error}");
+            }
+        }
+    }
+    folded
+}
+
 fn search_route_kind(provider: MetadataProvider) -> Option<(IdentityProvider, RouteKind)> {
     match provider {
         MetadataProvider::OpenLibrary => {
@@ -285,8 +331,8 @@ async fn run_identity_search_fallback(
 
 /// REQ-006 anchor derivation: the anchor query each provider's enrichment
 /// fetch uses, from the work's stored anchors. Empty/whitespace values count
-/// as absent. Hardcover prefers ISBN (the working by-key path — see the HcKey
-/// gap note in provider_client.rs); OpenLibrary prefers its own key.
+/// as absent. Hardcover and OpenLibrary prefer their own Work key; an edition
+/// ISBN names one edition the catalog may not carry even when it has the Work.
 fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<AnchorQuery> {
     fn present(v: &Option<String>) -> Option<String> {
         v.as_deref()
@@ -297,9 +343,9 @@ fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<Anchor
     match provider {
         MetadataProvider::GoogleBooks => present(&work.isbn_13).map(AnchorQuery::Isbn13),
         MetadataProvider::Goodreads => present(&work.gr_key).map(AnchorQuery::GrKey),
-        MetadataProvider::Hardcover => present(&work.isbn_13)
-            .map(AnchorQuery::Isbn13)
-            .or_else(|| present(&work.hc_key).map(AnchorQuery::HcKey)),
+        MetadataProvider::Hardcover => present(&work.hc_key)
+            .map(AnchorQuery::HcKey)
+            .or_else(|| present(&work.isbn_13).map(AnchorQuery::Isbn13)),
         MetadataProvider::OpenLibrary => present(&work.ol_key)
             .map(AnchorQuery::OlKey)
             .or_else(|| present(&work.isbn_13).map(AnchorQuery::Isbn13)),
@@ -312,8 +358,9 @@ fn derive_anchor_query(provider: MetadataProvider, work: &Work) -> Option<Anchor
 }
 
 /// F2 cutover anchor derivation: production enrichment reads only active
-/// identity routes. The returned query preserves the legacy provider-specific
-/// preference order while keeping the route table authoritative.
+/// identity routes. A provider's own Work route outranks an edition ISBN
+/// (REQ-001): the ISBN names one edition, which the catalog may not carry
+/// even when it has the Work. The route table stays authoritative.
 fn derive_route_anchor_query(
     provider: MetadataProvider,
     routes: &[WorkRoute],
@@ -346,14 +393,12 @@ fn derive_route_anchor_query(
                         .map(AnchorQuery::Isbn13)
                 })
         }
-        MetadataProvider::Hardcover => {
-            find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition)
-                .map(AnchorQuery::Isbn13)
-                .or_else(|| {
-                    find(IdentityProvider::Hardcover, RouteKind::HardcoverWork)
-                        .map(AnchorQuery::HcKey)
-                })
-        }
+        MetadataProvider::Hardcover => find(IdentityProvider::Hardcover, RouteKind::HardcoverWork)
+            .map(AnchorQuery::HcKey)
+            .or_else(|| {
+                find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition)
+                    .map(AnchorQuery::Isbn13)
+            }),
         MetadataProvider::GoogleBooks => {
             find(IdentityProvider::IsbnRegistry, RouteKind::Isbn13Edition).map(AnchorQuery::Isbn13)
         }
@@ -621,16 +666,14 @@ where
 
         // Partition providers into: skip (not applicable / anchor-less /
         // restart-resumed) and dispatch. The dispatch tuple carries the
-        // derived anchor query (REQ-006).
+        // derived anchor query (REQ-006) and whether a healthy miss may
+        // continue into the provider's own search (REQ-002).
         struct DispatchEntry {
             provider: MetadataProvider,
             client: ProviderClient,
             config: ProviderQueueConfig,
             anchor: AnchorQuery,
-        }
-        struct SearchDispatchEntry {
-            provider: MetadataProvider,
-            client: ProviderClient,
+            search_eligible: bool,
         }
         let mut to_dispatch: Vec<DispatchEntry> = Vec::new();
         let mut to_search: Vec<SearchDispatchEntry> = Vec::new();
@@ -733,47 +776,36 @@ where
                 client: entry.client.clone(),
                 config: entry.config.clone(),
                 anchor,
+                search_eligible,
             });
         }
 
         let priority = context.priority;
         let language = work.language.clone();
         let mut provider_chase_attempted = false;
-        let search_leg_fired = !to_search.is_empty();
+        let mut search_leg_fired = !to_search.is_empty();
         // REQ-027: the pass's ledger accounting folds every spawned leg —
         // search legs and probes here, anchored fetches below. One failed leg
         // anywhere makes the pass non-burnable (`LegFailed` absorbs).
         let mut ledger_accounting = LedgerPassAccounting::Idle;
         let mut search_provider_identity = Vec::new();
         let mut search_route_proposals = Vec::new();
-        if let Some((seed_title, seed_author)) = search_seed {
-            let mut search_set = JoinSet::new();
-            for entry in to_search {
+        if let Some((seed_title, seed_author)) = search_seed.as_ref() {
+            if !to_search.is_empty() {
                 provider_chase_attempted = true;
-                search_set.spawn(run_identity_search_fallback(
-                    entry.provider,
-                    entry.client,
-                    seed_title.clone(),
-                    seed_author.clone(),
-                    language.clone(),
-                    active_routes.clone(),
-                    priority,
-                ));
             }
-            while let Some(joined) = search_set.join_next().await {
-                match joined {
-                    Ok(capture) => {
-                        ledger_accounting = ledger_accounting.combine(capture.accounting);
-                        search_provider_identity.extend(capture.provider_identity);
-                        search_route_proposals.extend(capture.route_proposals);
-                    }
-                    Err(error) => {
-                        ledger_accounting =
-                            ledger_accounting.combine(LedgerPassAccounting::LegFailed);
-                        warn!("identity search fallback task failed: {error}");
-                    }
-                }
-            }
+            let wave = run_search_legs(
+                to_search,
+                seed_title,
+                seed_author,
+                language.as_deref(),
+                &active_routes,
+                priority,
+            )
+            .await;
+            ledger_accounting = ledger_accounting.combine(wave.accounting);
+            search_provider_identity.extend(wave.provider_identity);
+            search_route_proposals.extend(wave.route_proposals);
         }
 
         // Phase 1: scatter — spawn each provider call not already served from
@@ -890,6 +922,42 @@ where
             }
 
             outcomes.insert(provider, final_outcome);
+        }
+
+        // REQ-002: a healthy anchored miss says the catalog lacks this edition,
+        // not the Work. The provider's own title/primary-author search runs
+        // now, in the same pass, for every search-eligible provider whose
+        // anchored fetch answered NotFound. Errors, pauses, budget exhaustion,
+        // NotConfigured and cache-served payloads never enter this wave; the
+        // NotFound standing recorded above still feeds later passes.
+        let post_miss: Vec<SearchDispatchEntry> = to_dispatch
+            .iter()
+            .filter(|d| {
+                d.search_eligible
+                    && matches!(outcomes.get(&d.provider), Some(ProviderOutcome::NotFound))
+            })
+            .map(|d| SearchDispatchEntry {
+                provider: d.provider,
+                client: d.client.clone(),
+            })
+            .collect();
+        if let Some((seed_title, seed_author)) = search_seed.as_ref() {
+            if !post_miss.is_empty() {
+                search_leg_fired = true;
+                provider_chase_attempted = true;
+                let wave = run_search_legs(
+                    post_miss,
+                    seed_title,
+                    seed_author,
+                    language.as_deref(),
+                    &active_routes,
+                    priority,
+                )
+                .await;
+                ledger_accounting = ledger_accounting.combine(wave.accounting);
+                search_provider_identity.extend(wave.provider_identity);
+                search_route_proposals.extend(wave.route_proposals);
+            }
         }
 
         if wrote_to_cache {

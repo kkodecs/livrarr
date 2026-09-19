@@ -229,12 +229,15 @@ where
             }
             _ => {
                 let reconciliation = self
-                    .reconcile_complete_group(ProposedWorkIdentity {
-                        user_id: request.user_id,
-                        identity_title: identity_title.clone(),
-                        primary_author_id,
-                        text_distinction: text_distinction.clone(),
-                    })
+                    .reconcile_complete_group_with_routes(
+                        ProposedWorkIdentity {
+                            user_id: request.user_id,
+                            identity_title: identity_title.clone(),
+                            primary_author_id,
+                            text_distinction: text_distinction.clone(),
+                        },
+                        incoming_routes.clone(),
+                    )
                     .await?;
                 if let Some(reason) = manual_import_creation_defer(&request, &reconciliation) {
                     return Ok(IdentityRoadOutcome::Deferred { reason });
@@ -252,6 +255,11 @@ where
                                     .map_err(map_repository_error)?;
                                 expected_generation = winner_identity.identity_generation;
                                 routes = winner_identity.active_routes.clone();
+                                // A creation door attaching to an established
+                                // Work adopts that Work's identity title: the
+                                // incoming spelling ("&" versus "and", casing)
+                                // never rewrites the stored display or keys.
+                                identity_title = winner_identity.identity_title.clone();
                                 existing_work_id = Some(winner);
                                 existing = Some(winner_identity);
                             }
@@ -394,6 +402,18 @@ where
         &self,
         candidate: ProposedWorkIdentity,
     ) -> Result<CompleteGroupReconciliation, IdentityRoadError> {
+        self.reconcile_complete_group_with_routes(candidate, Vec::new())
+            .await
+    }
+
+    /// Group reconciliation with the candidate's own incoming provider routes
+    /// in evidence, so a same-provider Work id that contradicts an existing
+    /// member's route reaches the wrong-merge guard instead of attaching.
+    pub async fn reconcile_complete_group_with_routes(
+        &self,
+        candidate: ProposedWorkIdentity,
+        candidate_routes: Vec<WorkRoute>,
+    ) -> Result<CompleteGroupReconciliation, IdentityRoadError> {
         if candidate.user_id <= 0
             || candidate.primary_author_id <= 0
             || candidate.identity_title.normalized_main.is_empty()
@@ -421,7 +441,7 @@ where
         let candidate_evidence = WorkIdentityEvidence {
             title: candidate.identity_title.clone(),
             primary_author_id: candidate.primary_author_id,
-            routes: Vec::new(),
+            routes: candidate_routes.clone(),
         };
         let mut pairwise_outcomes = Vec::new();
         for current in &identities {
@@ -472,6 +492,7 @@ where
                 identity_title: candidate.identity_title.clone(),
                 primary_author_id: candidate.primary_author_id,
                 text_distinction: candidate.text_distinction.clone(),
+                routes: candidate_routes,
             },
             members,
         );

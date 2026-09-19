@@ -157,29 +157,26 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
 }
 
 /// The single legacy works INSERT — shared by `create_work` and
-/// `create_work_with_anchor` so the row shape has one authority. Returns the
-/// new row id, or None when the legacy normalized tuple already exists.
+/// `create_work_with_anchor` so the row shape has one authority. Callers own
+/// the collision decision: inside the same write transaction they read the
+/// rows sharing the legacy normalized tuple and validate the complete stored
+/// identity before inserting, so no SQL guard on that lossy tuple is needed.
 ///
 /// Do not name the retired `(user_id, normalized_title, normalized_author)`
 /// UNIQUE target here. Identity-v2 activation deliberately drops that index,
 /// and SQLite rejects a named `ON CONFLICT` target while preparing the
-/// statement even when no conflict occurs. The guarded SELECT remains valid
-/// on both schema generations; production creation doors use the v2 identity
-/// road, while compatibility callers can no longer hit dead SQL.
+/// statement even when no conflict occurs.
 async fn insert_work_row(
     conn: &mut sqlx::SqliteConnection,
     req: &CreateWorkDbRequest,
     now: &str,
-) -> Result<Option<i64>, DbError> {
+) -> Result<i64, DbError> {
     let result = sqlx::query(
         "INSERT INTO works (user_id, title, author_name, normalized_title, normalized_author, \
          author_id, ol_key, gr_key, year, cover_url, enrichment_status, added_at, \
          language, import_id, series_id, series_name, series_position, \
          monitor_ebook, monitor_audiobook, isbn_13, asin, description, cover_manual) \
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? \
-          WHERE NOT EXISTS (SELECT 1 FROM works \
-                             WHERE user_id = ? AND normalized_title = ? \
-                               AND normalized_author = ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unenriched', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(req.user_id)
     .bind(&req.title)
@@ -203,14 +200,10 @@ async fn insert_work_row(
     .bind(&req.asin)
     .bind(&req.description)
     .bind(req.cover_manual)
-    .bind(req.user_id)
-    .bind(&req.normalized_title)
-    .bind(&req.normalized_author)
     .execute(&mut *conn)
     .await
     .map_err(map_db_err)?;
-
-    Ok((result.rows_affected() == 1).then_some(result.last_insert_rowid()))
+    Ok(result.last_insert_rowid())
 }
 
 fn parse_enrichment_status(s: &str) -> Result<EnrichmentStatus, DbError> {
@@ -286,6 +279,187 @@ fn narration_type_str(n: &NarrationType) -> &'static str {
 
 fn normalize(s: &str) -> String {
     s.trim().to_lowercase()
+}
+
+/// Whether the identity-v2 authority is active for this database: the one
+/// switch the store consults before naming or decoding v2 columns, so its
+/// statements stay valid on databases that predate those migrations.
+pub(crate) async fn identity_authority_v2_active<'e, E>(executor: E) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
+                        WHERE key='identity_authority_v2' AND value='active')",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(map_db_err)
+}
+
+/// The exact identity key of one stored `works` row, read from the row before
+/// it becomes a `Work` (which carries no identity volume). Under the active v2
+/// authority a row's identity is the tuple `captured_identity_on` reads:
+/// `title`, the separately stored `subtitle` and `identity_volume`. A row whose
+/// normalized main is blank or `__UNMIGRATED__` is still in legacy
+/// representation, its whole identity inline in `title`, and keeps the
+/// baseline key of that title. Before activation every row is inline and no
+/// v2 column is decoded. `None` means the row cannot be keyed (a stored volume
+/// that is not numeric), which never counts as a match.
+fn stored_identity_title_key(
+    row: &sqlx::sqlite::SqliteRow,
+    v2_active: bool,
+) -> Result<Option<String>, DbError> {
+    let title: String = row.try_get("title").map_err(|e| DbError::Io(Box::new(e)))?;
+    if v2_active {
+        let normalized_main: Option<String> = row
+            .try_get("normalized_identity_main")
+            .map_err(|e| DbError::Io(Box::new(e)))?;
+        let legacy_inline = normalized_main
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|main| main.is_empty() || main == "__UNMIGRATED__");
+        if !legacy_inline {
+            let subtitle: Option<String> = row
+                .try_get("subtitle")
+                .map_err(|e| DbError::Io(Box::new(e)))?;
+            let volume: Option<String> = row
+                .try_get("identity_volume")
+                .map_err(|e| DbError::Io(Box::new(e)))?;
+            return Ok(
+                livrarr_domain::identity_matching::stored_identity_title_key(
+                    &title,
+                    subtitle.as_deref(),
+                    volume.as_deref(),
+                ),
+            );
+        }
+    }
+    Ok(Some(
+        livrarr_domain::identity_matching::identity_key(&title, "").0,
+    ))
+}
+
+/// A normalized-key hit is real only when the row's complete stored identity
+/// keys to the caller's current key. Rows keyed before `&` was read as "and"
+/// carry a lossy key ("Jekyll & Mr. Hyde" and "Jekyll Mr. Hyde" once shared
+/// one), and the current identity writer stores main, subtitle and volume
+/// apart. Recomputing from the stored identity keeps every such row findable
+/// by its equivalent spelling and refuses bare, subtitled or re-volumed
+/// variants of it.
+fn stored_identity_keys_to(
+    row: &sqlx::sqlite::SqliteRow,
+    current_title_key: &str,
+    v2_active: bool,
+) -> Result<bool, DbError> {
+    Ok(stored_identity_title_key(row, v2_active)?.as_deref() == Some(current_title_key))
+}
+
+fn validated_works(
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    current_title_key: &str,
+    v2_active: bool,
+) -> Result<Vec<Work>, DbError> {
+    let mut works = Vec::new();
+    for row in rows {
+        if stored_identity_keys_to(&row, current_title_key, v2_active)? {
+            works.push(row_to_work(row)?);
+        }
+    }
+    Ok(works)
+}
+
+/// Works whose complete stored identity keys to `norm_title`, read on the
+/// caller's connection within the user and author scope. Exact legacy-key rows
+/// come first. When none validates, the author scope is read: rows keyed by
+/// the canonical author key and, once the v2 authority is active, rows owned
+/// through either author column by an Author whose stored identity name is
+/// that key. Only the active branch names those columns, so the statement
+/// stays valid on databases that predate them. Stored rows are only read.
+async fn works_keying_to(
+    conn: &mut sqlx::SqliteConnection,
+    user_id: UserId,
+    norm_title: &str,
+    norm_author: &str,
+    without_confirmed_ol_anchor: bool,
+) -> Result<Vec<Work>, DbError> {
+    let v2_active = identity_authority_v2_active(&mut *conn).await?;
+    let anchor_clause = if without_confirmed_ol_anchor {
+        " AND NOT EXISTS (SELECT 1 FROM work_identity_anchors a \
+             WHERE a.work_id = w.id AND a.anchor_type = 'ol_work' \
+               AND a.confidence = 'confirmed')"
+    } else {
+        ""
+    };
+    let exact_sql = format!(
+        "SELECT w.* FROM works w \
+          WHERE w.user_id = ? AND w.normalized_title = ? AND w.normalized_author = ?{anchor_clause} \
+          ORDER BY w.id"
+    );
+    let exact_rows = sqlx::query(&exact_sql)
+        .bind(user_id)
+        .bind(norm_title)
+        .bind(norm_author)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(map_db_err)?;
+    let exact = validated_works(exact_rows, norm_title, v2_active)?;
+    if !exact.is_empty() {
+        return Ok(exact);
+    }
+    let alias_scope = if v2_active {
+        " OR w.author_id IN (SELECT id FROM authors \
+                              WHERE user_id = ? AND normalized_name = ?) \
+          OR w.primary_author_id IN (SELECT id FROM authors \
+                                      WHERE user_id = ? AND normalized_name = ?)"
+    } else {
+        ""
+    };
+    let scoped_sql = format!(
+        "SELECT w.* FROM works w \
+          WHERE w.user_id = ? AND (w.normalized_author = ?{alias_scope}){anchor_clause} \
+          ORDER BY w.id"
+    );
+    let mut query = sqlx::query(&scoped_sql).bind(user_id).bind(norm_author);
+    if v2_active {
+        query = query
+            .bind(user_id)
+            .bind(norm_author)
+            .bind(user_id)
+            .bind(norm_author);
+    }
+    let scoped_rows = query.fetch_all(&mut *conn).await.map_err(map_db_err)?;
+    validated_works(scoped_rows, norm_title, v2_active)
+}
+
+/// The requested identity already stored under the request's legacy tuple:
+/// the colliding row whose complete stored identity keys to the requested
+/// title. The tuple is lossy for rows keyed before `&` was read as "and" (a
+/// stored "Jekyll & Hyde" and a requested "Jekyll Hyde" share one key), so
+/// any other collision is a distinct identity. Read on the caller's
+/// connection inside its write transaction, where the read and the insert
+/// cannot interleave with another creator.
+async fn identical_legacy_collision(
+    conn: &mut sqlx::SqliteConnection,
+    req: &CreateWorkDbRequest,
+    v2_active: bool,
+) -> Result<Option<Work>, DbError> {
+    let rows = sqlx::query(
+        "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? \
+           AND normalized_author = ? ORDER BY id",
+    )
+    .bind(req.user_id)
+    .bind(&req.normalized_title)
+    .bind(&req.normalized_author)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(map_db_err)?;
+    for row in rows {
+        if stored_identity_keys_to(&row, &req.normalized_title, v2_active)? {
+            return Ok(Some(row_to_work(row)?));
+        }
+    }
+    Ok(None)
 }
 
 fn to_str<T: serde::Serialize>(v: T) -> String {
@@ -786,16 +960,8 @@ impl WorkDb for SqliteDb {
     ) -> Result<Vec<Work>, DbError> {
         let norm_title = normalize(title);
         let norm_author = normalize(author);
-        let rows = sqlx::query(
-            "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
-        )
-        .bind(user_id)
-        .bind(&norm_title)
-        .bind(&norm_author)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_db_err)?;
-        rows.into_iter().map(row_to_work).collect()
+        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
+        works_keying_to(&mut conn, user_id, &norm_title, &norm_author, false).await
     }
 
     async fn find_normalized_match_no_anchor_for_user(
@@ -809,26 +975,13 @@ impl WorkDb for SqliteDb {
         if norm_title.is_empty() || norm_author.is_empty() {
             return Ok(None);
         }
-        let row = sqlx::query(
-            "SELECT w.* FROM works w \
-             WHERE w.user_id = ? \
-               AND w.normalized_title = ? \
-               AND w.normalized_author = ? \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM work_identity_anchors a \
-                   WHERE a.work_id = w.id \
-                     AND a.anchor_type = 'ol_work' \
-                     AND a.confidence = 'confirmed' \
-               ) \
-             LIMIT 1",
+        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
+        Ok(
+            works_keying_to(&mut conn, user_id, &norm_title, &norm_author, true)
+                .await?
+                .into_iter()
+                .next(),
         )
-        .bind(user_id)
-        .bind(&norm_title)
-        .bind(&norm_author)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_db_err)?;
-        row.map(row_to_work).transpose()
     }
 
     async fn find_works_by_bridge(
@@ -1144,13 +1297,7 @@ impl WorkDb for SqliteDb {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<(), DbError> {
-        let identity_v2_active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
-                            WHERE key='identity_authority_v2' AND value='active')",
-        )
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_db_err)?;
+        let identity_v2_active: bool = identity_authority_v2_active(self.pool()).await?;
         // Recovering a terminal `not_found` identity (the LLM rejected all payloads):
         // a manual refresh re-derives identity from the work's anchors so it can
         // re-resolve + re-enrich. Other identity states are left untouched — an open
@@ -1240,13 +1387,7 @@ impl WorkDb for SqliteDb {
         // provider lacks its own Work route and has no anchor (or a terminal
         // not_found anchor). The one shared generation ledger caps both shapes.
         let now_str = now.to_rfc3339();
-        let identity_v2_active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM _livrarr_meta \
-                            WHERE key='identity_authority_v2' AND value='active')",
-        )
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_db_err)?;
+        let identity_v2_active: bool = identity_authority_v2_active(self.pool()).await?;
         let threshold = i64::from(threshold);
         if identity_v2_active {
             return sqlx::query_scalar(
@@ -1505,28 +1646,18 @@ impl WorkDb for SqliteDb {
 impl crate::WorkDbCreate for SqliteDb {
     async fn create_work(&self, req: CreateWorkDbRequest) -> Result<(Work, bool), DbError> {
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.pool().acquire().await.map_err(map_db_err)?;
-        let inserted = insert_work_row(&mut conn, &req, &now).await?;
-        drop(conn);
-
-        match inserted {
-            Some(id) => {
-                let work = self.get_work(req.user_id, id).await?;
-                Ok((work, true))
-            }
-            None => {
-                let row = sqlx::query(
-                    "SELECT * FROM works WHERE user_id = ? AND normalized_title = ? AND normalized_author = ?",
-                )
-                .bind(req.user_id)
-                .bind(&req.normalized_title)
-                .bind(&req.normalized_author)
-                .fetch_one(self.pool())
-                .await
-                .map_err(map_db_err)?;
-                Ok((row_to_work(row)?, false))
-            }
+        let mut tx = crate::pool::begin_write(self.pool())
+            .await
+            .map_err(map_db_err)?;
+        let v2_active = identity_authority_v2_active(&mut *tx).await?;
+        if let Some(existing) = identical_legacy_collision(&mut tx, &req, v2_active).await? {
+            tx.rollback().await.map_err(map_db_err)?;
+            return Ok((existing, false));
         }
+        let id = insert_work_row(&mut tx, &req, &now).await?;
+        tx.commit().await.map_err(map_db_err)?;
+        let work = self.get_work(req.user_id, id).await?;
+        Ok((work, true))
     }
 
     async fn create_work_with_anchor(
@@ -1539,39 +1670,37 @@ impl crate::WorkDbCreate for SqliteDb {
         let mut tx = crate::pool::begin_write(self.pool())
             .await
             .map_err(map_db_err)?;
-        let inserted = insert_work_row(&mut tx, &req, &now).await?;
-
-        match inserted {
-            Some(id) => {
-                crate::sqlite_work_identity::confirm_anchor_in_tx(
-                    &mut tx,
-                    id,
-                    livrarr_domain::identity::AnchorType::new(
-                        livrarr_domain::identity::AnchorType::OL_WORK,
-                    ),
-                    ol_key,
-                    anchor_setter,
-                )
-                .await
-                .map_err(|e| match e {
-                    crate::sqlite_work_identity::IdentityTxError::InvalidValue => {
-                        DbError::Constraint {
-                            message: "anchor write failed: invalid anchor value".into(),
-                        }
-                    }
-                    crate::sqlite_work_identity::IdentityTxError::Sqlx(e) => DbError::Constraint {
-                        message: format!("anchor write failed: {e}"),
-                    },
-                })?;
-                tx.commit().await.map_err(map_db_err)?;
-                let work = self.get_work(req.user_id, id).await?;
-                Ok((work, true))
-            }
-            None => {
-                drop(tx);
-                self.create_work(req).await
-            }
+        let v2_active = identity_authority_v2_active(&mut *tx).await?;
+        // An identical stored identity is returned as before, without
+        // writing the requested anchor onto it. A distinct identity is
+        // created together with its anchor in this one transaction, so an
+        // anchored creation never reports success without its anchor.
+        if let Some(existing) = identical_legacy_collision(&mut tx, &req, v2_active).await? {
+            tx.rollback().await.map_err(map_db_err)?;
+            return Ok((existing, false));
         }
+        let id = insert_work_row(&mut tx, &req, &now).await?;
+        crate::sqlite_work_identity::confirm_anchor_in_tx(
+            &mut tx,
+            id,
+            livrarr_domain::identity::AnchorType::new(
+                livrarr_domain::identity::AnchorType::OL_WORK,
+            ),
+            ol_key,
+            anchor_setter,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::sqlite_work_identity::IdentityTxError::InvalidValue => DbError::Constraint {
+                message: "anchor write failed: invalid anchor value".into(),
+            },
+            crate::sqlite_work_identity::IdentityTxError::Sqlx(e) => DbError::Constraint {
+                message: format!("anchor write failed: {e}"),
+            },
+        })?;
+        tx.commit().await.map_err(map_db_err)?;
+        let work = self.get_work(req.user_id, id).await?;
+        Ok((work, true))
     }
 }
 

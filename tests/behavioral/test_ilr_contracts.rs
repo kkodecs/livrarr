@@ -62,6 +62,10 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use tracing_test::traced_test;
 
+// Catalog lookup regressions reuse this suite's production router and HTTP harness.
+#[path = "catalog_work_lookup.rs"]
+mod catalog_work_lookup;
+
 fn title(main: &str) -> IdentityTitleTuple {
     IdentityTitleTuple {
         main: main.to_string(),
@@ -6114,6 +6118,30 @@ async fn build_route_harness_with_provider_outcome(
     discovery_transport: Option<DiscoveryTransportFixture>,
     open_library_stub_delay: Option<std::time::Duration>,
 ) -> RouteHarness {
+    build_route_harness_with_identity_http(
+        open_library_outcome,
+        identity_details,
+        discovery_transport,
+        open_library_stub_delay,
+        false,
+    )
+    .await
+}
+
+// Opt-in concrete resolver adapters for tests that cover the entire Add sequence.
+// Existing callers retain their original fixture configuration.
+async fn build_route_harness_with_identity_http(
+    open_library_outcome: Option<
+        livrarr_external_data::ProviderOutcome<livrarr_external_data::NormalizedWorkDetail>,
+    >,
+    identity_details: Vec<(
+        livrarr_domain::MetadataProvider,
+        livrarr_external_data::NormalizedWorkDetail,
+    )>,
+    discovery_transport: Option<DiscoveryTransportFixture>,
+    open_library_stub_delay: Option<std::time::Duration>,
+    identity_http: bool,
+) -> RouteHarness {
     // Bug reproduction: identity-layer-rewrite F-1 — every real-route seam in
     // this harness runs against the activated production index set.
     let db = create_activated_test_db().await;
@@ -6228,7 +6256,7 @@ async fn build_route_harness_with_provider_outcome(
     let readarr_import_progress_arc = Arc::new(tokio::sync::Mutex::new(
         livrarr_server::readarr_import_service::ReadarrImportProgress::default(),
     ));
-    let identity_clients = identity_details
+    let mut identity_clients: Vec<_> = identity_details
         .into_iter()
         .map(|(provider, detail)| {
             (
@@ -6242,8 +6270,44 @@ async fn build_route_harness_with_provider_outcome(
             )
         })
         .collect();
+    if identity_http {
+        assert!(
+            identity_clients.is_empty(),
+            "HTTP resolver must not mix in injected outcomes"
+        );
+        let transport = discovery_transport
+            .as_ref()
+            .expect("scripted resolver transport");
+        identity_clients.push((
+            MetadataProvider::OpenLibrary,
+            livrarr_external_data::ProviderClient::OpenLibrary(
+                livrarr_external_data::OpenLibraryClient::new(http_fetcher.clone()),
+            ),
+        ));
+        identity_clients.push((
+            MetadataProvider::Goodreads,
+            livrarr_external_data::ProviderClient::Goodreads(
+                livrarr_external_data::GoodreadsClient::new(
+                    http_fetcher.clone(),
+                    http_client.clone(),
+                    transport.goodreads_base_url.clone(),
+                ),
+            ),
+        ));
+        if transport.hardcover_search {
+            identity_clients.push((
+                MetadataProvider::Hardcover,
+                livrarr_external_data::ProviderClient::Hardcover(
+                    livrarr_external_data::HardcoverClient::new(
+                        http_fetcher.clone(),
+                        live_metadata_config.clone(),
+                    ),
+                ),
+            ));
+        }
+    }
     let identity_resolver_arc = livrarr_server::state::build_live_identity_resolver(
-        identity_clients,
+        identity_clients.into_iter().collect(),
         transport_cache.clone(),
         livrarr_metadata::english_identity_resolver::ResolverConfig::default(),
     );
@@ -14082,9 +14146,14 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
         )
         .await
         .expect("establish terminal dead-anchor standing");
-    assert!(first.search_provider_identity.is_empty());
+    // Catalog lookup REQ-002: a healthy ISBN miss captures the matching Work
+    // during this dispatch. This queue-only call does not itself settle it.
+    assert!(first.search_provider_identity.iter().any(|evidence| {
+        evidence.route.kind == ilr::RouteKind::OpenLibraryWork
+            && evidence.route.value == "OL-ROUND17-DEAD-ANCHOR-W"
+    }));
     assert_eq!(anchor_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(search_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(search_calls.load(Ordering::Relaxed), 1);
     assert_eq!(
         harness
             .db
@@ -14105,7 +14174,9 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
         1,
         "terminal not_found must not refetch the dead anchor"
     );
-    assert_eq!(search_calls.load(Ordering::Relaxed), 1);
+    // The first capture was observed above, not handed to settlement. The
+    // existing convergence visit searches again and applies its own capture.
+    assert_eq!(search_calls.load(Ordering::Relaxed), 2);
     let captured =
         WorkIdentityRepository::read_captured_identity(&harness.db, harness.user_id, work_id)
             .await
@@ -14177,7 +14248,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
         "the next tick must issue one new OL work-key fetch after the auto-link"
     );
     assert_eq!(anchor_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(search_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(search_calls.load(Ordering::Relaxed), 2);
     let open_library_standing = harness
         .db
         .get_retry_state(
@@ -14426,7 +14497,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
         .await
         .expect("establish ISBN-A terminal standing");
     assert_eq!(edit_a_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(edit_search_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(edit_search_calls.load(Ordering::Relaxed), 1);
 
     let preview = edited
         .state
@@ -14488,7 +14559,7 @@ async fn round18_route_graph_retry_invalidation_and_will_retry_tick_guard() {
         b_calls_before_commit + 1,
         "the next convergence pass must fetch ISBN B"
     );
-    assert_eq!(edit_search_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(edit_search_calls.load(Ordering::Relaxed), 1);
 }
 
 async fn round13_uncorroborated_search_cards_once_and_burns_to_threshold() {

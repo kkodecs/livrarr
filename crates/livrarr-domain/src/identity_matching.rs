@@ -665,20 +665,64 @@ pub fn title_id_trust(title: &TitleVerdict, a: &IdEvidence, b: &IdEvidence) -> b
 /// unused side's component is still returned deterministically as an empty
 /// string.
 pub fn identity_key(title: &str, author: &str) -> (String, String) {
-    let parsed = parse_title(title);
-    let volume_segment = rendered_volume_numbers(&parsed).join(",");
+    (
+        assemble_title_key(parse_title(title), None),
+        canonical_author_key(author),
+    )
+}
 
+/// The one key assembly behind [`identity_key`] and
+/// [`stored_identity_title_key`]: cleaned main, true subtitle, and the sorted,
+/// deduplicated volume numbers from the parse plus any explicitly stored
+/// volume, joined by `\u{1}` with trailing empty segments dropped.
+fn assemble_title_key(parsed: ParsedTitle, explicit_volume: Option<f64>) -> String {
+    let mut volumes = parsed.volume_numbers();
+    volumes.extend(explicit_volume);
     let mut segments = vec![
         parsed.main,
         parsed.subtitle.unwrap_or_default(),
-        volume_segment,
+        rendered_volumes(volumes).join(","),
     ];
     while segments.len() > 1 && segments.last().is_some_and(|s| s.is_empty()) {
         segments.pop();
     }
-    let title_key = segments.join("\u{1}");
+    segments.join("\u{1}")
+}
 
-    (title_key, canonical_author_key(author))
+/// Parse a stored identity whose subtitle may be kept apart from its main. A
+/// subtitle already inline in `main` (a legacy full title) is authoritative;
+/// a separately stored subtitle is appended only when the main carries none,
+/// or carries a different one, so nothing is counted twice. Both the exact-key
+/// seat and the tuple comparator parse stored titles through this one door.
+pub fn parse_stored_title(main: &str, subtitle: Option<&str>) -> ParsedTitle {
+    let inline = parse_title(main);
+    let Some(separate) = subtitle.map(str::trim).filter(|s| !s.is_empty()) else {
+        return inline;
+    };
+    match &inline.subtitle {
+        Some(existing) if *existing == canonical_phrase(separate) => inline,
+        _ => parse_title(&format!("{main}: {separate}")),
+    }
+}
+
+/// Exact identity key of a stored tuple: the shared parse of main plus stored
+/// subtitle, with the stored volume folded in as typed numeric evidence
+/// through the same volume normalization [`identity_key`] renders. `None`
+/// when a stored volume is present but not numeric: that evidence is not
+/// dropped, the tuple simply cannot be keyed and never matches.
+pub fn stored_identity_title_key(
+    main: &str,
+    subtitle: Option<&str>,
+    volume: Option<&str>,
+) -> Option<String> {
+    let explicit_volume = match volume.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(raw) => Some(raw.parse::<f64>().ok()?),
+        None => None,
+    };
+    Some(assemble_title_key(
+        parse_stored_title(main, subtitle),
+        explicit_volume,
+    ))
 }
 
 /// The scan/filename comparison form of the SAME recipe (never stored):
@@ -754,7 +798,11 @@ pub fn strip_leading_identity_article(normalized_main: &str) -> &str {
 /// both [`identity_key`] (comma-joined segment) and [`identity_key_flat`]
 /// (space-joined tokens).
 fn rendered_volume_numbers(parsed: &ParsedTitle) -> Vec<String> {
-    let mut volumes = parsed.volume_numbers();
+    rendered_volumes(parsed.volume_numbers())
+}
+
+/// Sort, deduplicate and render volume numbers as bare digit strings.
+fn rendered_volumes(mut volumes: Vec<f64>) -> Vec<String> {
     volumes.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
     volumes.dedup_by(|x, y| (*x - *y).abs() < 1e-9);
     volumes.iter().map(|n| n.to_string()).collect()
@@ -879,9 +927,20 @@ fn normalize_vocab(s: &str) -> String {
         .join(" ")
 }
 
-/// Canonical comparison form: accent-stripped, lowercased, punctuation
-/// folded to token boundaries, leading article dropped. CJK text folds to
-/// its bare character sequence instead (bigram comparison happens at
+/// The ampersand the comparator reads as the English word "and": ordinary
+/// spellings such as "Jekyll & Hyde" and "Jekyll and Hyde" name one Work.
+const CONJUNCTION_SYMBOL: char = '&';
+
+/// Read `&` as the word "and" before tokenising, so both spellings produce
+/// the same tokens. The word itself is never dropped: "Jekyll Mr. Hyde" stays
+/// a different title from "Jekyll and Mr. Hyde".
+fn fold_conjunction_symbol(lower: &str) -> String {
+    lower.replace(CONJUNCTION_SYMBOL, " and ")
+}
+
+/// Canonical comparison form: accent-stripped, lowercased, `&` read as "and",
+/// punctuation folded to token boundaries, leading article dropped. CJK text
+/// folds to its bare character sequence instead (bigram comparison happens at
 /// scoring time).
 fn canonical_phrase(s: &str) -> String {
     if text_norm::has_cjk(s) {
@@ -892,7 +951,7 @@ fn canonical_phrase(s: &str) -> String {
             .to_lowercase();
     }
     let stripped = text_norm::strip_combining_marks(s);
-    let lower = stripped.to_lowercase();
+    let lower = fold_conjunction_symbol(&stripped.to_lowercase());
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())

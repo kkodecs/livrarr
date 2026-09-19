@@ -194,6 +194,14 @@ pub trait WorkDb: Send + Sync {
     ) -> Result<Vec<(Option<String>, Option<String>)>, DbError>;
 
     /// Find works by normalized title + author match (for manual scan matching).
+    /// `title`/`author` are current `identity_key` components. Exact-key rows
+    /// are read first, then the same user/author scope (canonical author key
+    /// and, under the active v2 authority, the Author's stored identity name),
+    /// so rows keyed before `&` was read as "and" and rows keyed by the current
+    /// identity writer's punctuation-preserving recipe are both found. Every
+    /// hit is confirmed by recomputing the row's key from its complete stored
+    /// identity (inline title, or main plus separate subtitle and volume), so
+    /// a lossy old key never widens the match.
     ///
     /// Satisfies: IMPORT-017
     async fn find_by_normalized_match(
@@ -203,6 +211,8 @@ pub trait WorkDb: Send + Sync {
         author: &str,
     ) -> Result<Vec<Work>, DbError>;
 
+    /// Same key reading as [`Self::find_by_normalized_match`], restricted to
+    /// works without a confirmed OpenLibrary anchor (the legacy adopt path).
     async fn find_normalized_match_no_anchor_for_user(
         &self,
         user_id: UserId,

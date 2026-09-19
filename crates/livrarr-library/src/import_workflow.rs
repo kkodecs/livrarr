@@ -919,11 +919,15 @@ mod import_recovery_tests {
             })
             .await
             .unwrap();
+        let (normalized_title, normalized_author) =
+            livrarr_domain::identity_matching::identity_key("D2 Test Book", "D2 Author");
         let (work, _) = db
             .create_work(CreateWorkDbRequest {
                 user_id: user.id,
                 title: "D2 Test Book".into(),
                 author_name: "D2 Author".into(),
+                normalized_title,
+                normalized_author,
                 ..Default::default()
             })
             .await
@@ -1298,15 +1302,24 @@ mod import_recovery_tests {
         use livrarr_db::{CreateWorkDbRequest, WorkDbCreate};
 
         let (db, workflow, user_id, work_id, root_folder_id, root_dir) = seed().await;
-        let (other_work, _) = db
+        let (normalized_title, normalized_author) =
+            livrarr_domain::identity_matching::identity_key("Second In Flight", "Second Author");
+        let (other_work, created) = db
             .create_work(CreateWorkDbRequest {
                 user_id,
                 title: "Second In Flight".into(),
                 author_name: "Second Author".into(),
+                normalized_title,
+                normalized_author,
                 ..Default::default()
             })
             .await
             .unwrap();
+        assert!(created, "fixture must create the second Work");
+        assert_ne!(
+            other_work.id, work_id,
+            "fixture must target two distinct Works at the same path"
+        );
 
         let target_relative = "Shared/Path.epub";
 

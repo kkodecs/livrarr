@@ -683,6 +683,14 @@ fn strip_extracted_trailing_parentheticals(mut provider_main: &str) -> &str {
     provider_main
 }
 
+/// Parse a stored identity tuple through the shared stored-title parser, so
+/// subtitle agreement is judged by the same policy as a provider title
+/// "Main: Subtitle". The stored volume stays a separate positional input to
+/// the verdict.
+fn parse_identity_title(title: &IdentityTitleTuple) -> crate::identity_matching::ParsedTitle {
+    crate::identity_matching::parse_stored_title(&title.main, title.subtitle.as_deref())
+}
+
 pub fn evaluate_match(
     left: WorkIdentityEvidence,
     right: WorkIdentityEvidence,
@@ -693,8 +701,8 @@ pub fn evaluate_match(
         AuthorVerdict, GreyCause, IdVerdict, LanguageVerdict, TitleVerdict,
     };
 
-    let left_title = crate::identity_matching::parse_title(&left.title.main);
-    let right_title = crate::identity_matching::parse_title(&right.title.main);
+    let left_title = parse_identity_title(&left.title);
+    let right_title = parse_identity_title(&right.title);
     let mut title = crate::identity_matching::title_verdict_with_positions(
         &left_title,
         left.title
@@ -774,10 +782,12 @@ pub fn evaluate_match(
                     && left_route.provider_scoped_id == right_route.provider_scoped_id
             })
     });
-    let id = if same_work_route {
-        IdVerdict::WorkKeyEqual
-    } else if contradictory_work_route && wrong_merge.work_key_contradiction_guard {
+    // A same-provider Work-id disagreement is judged before any shared id:
+    // one matching catalog must not hide another catalog's contradiction.
+    let id = if contradictory_work_route && wrong_merge.work_key_contradiction_guard {
         IdVerdict::WorkKeyContradiction
+    } else if same_work_route {
+        IdVerdict::WorkKeyEqual
     } else if shared_edition_route && lost_match.shared_edition_id_confirmation {
         IdVerdict::EditionBridge
     } else {

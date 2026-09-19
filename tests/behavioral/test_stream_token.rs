@@ -27,6 +27,7 @@ use livrarr_db::{
     CreateLibraryItemDbRequest, CreateWorkDbRequest, LibraryItemDb, RootFolderDb, TagStatus,
     UserDb, WorkDbCreate,
 };
+use livrarr_domain::identity_matching::identity_key;
 use livrarr_domain::{AuthType, MediaType, User};
 use livrarr_handlers::context::{HasFileService, HasHmacKey};
 use livrarr_handlers::stream_token::mint_stream_token;
@@ -106,11 +107,15 @@ async fn seed_playable_item(
     std::fs::create_dir_all(root_dir.join(relative_path).parent().unwrap()).unwrap();
     std::fs::write(root_dir.join(relative_path), contents).unwrap();
 
+    let (normalized_title, normalized_author) =
+        identity_key("Stream Token Test Book", "Test Author");
     let (work_row, _) = db
         .create_work(CreateWorkDbRequest {
             user_id,
             title: "Stream Token Test Book".into(),
             author_name: "Test Author".into(),
+            normalized_title,
+            normalized_author,
             ..Default::default()
         })
         .await
@@ -278,6 +283,7 @@ async fn stream_route_rejects_a_token_for_a_different_item_in_the_url() {
     let root = ensure_root(&db, tmp.path()).await;
     let item_1 = seed_playable_item(&db, user_a, root, tmp.path(), "one.m4b", b"one").await;
     let item_2 = seed_playable_item(&db, user_a, root, tmp.path(), "two.m4b", b"two").await;
+    assert_ne!(item_1, item_2, "fixture must provide distinct LibraryItems");
 
     // A token minted for item_1 must not stream item_2, even though the
     // same user owns both — the token's own item_id claim is checked, not

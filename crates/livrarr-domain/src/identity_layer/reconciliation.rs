@@ -37,12 +37,15 @@ pub enum CompleteGroupEvaluation {
 }
 
 /// Candidate identity for the shared evaluator. The repository supplies the
-/// live group rows; this type carries no persistence capability.
+/// live group rows; this type carries no persistence capability. `routes` are
+/// the candidate's own incoming provider routes: a same-provider Work id that
+/// contradicts a member's route keeps the pair out of automatic attachment.
 #[derive(Debug, Clone)]
 pub struct CompleteGroupCandidate {
     pub identity_title: IdentityTitleTuple,
     pub primary_author_id: AuthorId,
     pub text_distinction: Option<String>,
+    pub routes: Vec<super::route::WorkRoute>,
 }
 
 /// The lost-match guards used by complete-group evaluation. Identical to the
@@ -217,7 +220,7 @@ pub fn evaluate_captured_group(
     let candidate_evidence = WorkIdentityEvidence {
         title: candidate.identity_title.clone(),
         primary_author_id: candidate.primary_author_id,
-        routes: Vec::new(),
+        routes: candidate.routes.clone(),
     };
     let mut pairwise_certain = Vec::new();
     for current in &identities {
