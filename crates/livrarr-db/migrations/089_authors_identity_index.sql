@@ -1,0 +1,14 @@
+-- Author identity index (issue #175). Both author writers, `create_author`
+-- and `create_or_adopt_author_tx`, name this partial UNIQUE index as their
+-- ON CONFLICT target, so no author can be created on a database that lacks
+-- it. Migration 077 added the column only and left the index to a startup
+-- repair that no longer runs; this migration owns the index from here on.
+--
+-- NULL keys (names that do not canonicalize) stay outside the index, and the
+-- same key may exist for different users. Existing rows are not rekeyed and
+-- nothing is merged: if one user already holds two rows with the same key,
+-- this statement fails, the migration rolls back, and startup stops without
+-- changing data. The compatibility version in _livrarr_meta is unchanged.
+-- Written on one line so the stored definition matches databases that
+-- received the index from the retired repair.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_identity ON authors(user_id, normalized_name) WHERE normalized_name IS NOT NULL;

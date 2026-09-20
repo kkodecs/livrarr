@@ -65,3 +65,7 @@ test-helpers = ["livrarr-http/test-helpers"]
 [dev-dependencies]
 livrarr-db = { workspace = true, features = ["test-helpers"] }
 livrarr-http = { workspace = true, features = ["test-helpers"] }
+
+[[test]]
+name = "test_fresh_author_index"
+path = "tests/test_fresh_author_index.rs"
