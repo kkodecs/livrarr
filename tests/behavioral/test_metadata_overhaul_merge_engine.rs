@@ -60,6 +60,8 @@ fn work_with(subtitle: Option<&str>, description: Option<&str>, cover_url: Optio
 
 fn empty_detail() -> NormalizedWorkDetail {
     NormalizedWorkDetail {
+        original_publish_date: None,
+        unclassified_publish_date: None,
         title: None,
         subtitle: None,
         original_title: None,
@@ -633,8 +635,8 @@ async fn test_merge_engine_successful_provider_field_produces_provenance_upsert(
 }
 
 #[tokio::test]
-async fn test_merge_engine_provider_owned_field_without_replacement_produces_provenance_delete() {
-    // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: provider-owned fields with no replacement preserve value and produce provenance delete entries
+async fn test_merge_engine_provider_owned_field_without_replacement_retains_value_and_provenance() {
+    // REQ-ID: R-02, R-18 | Contract: MergeEngine::merge | Behavior: provider-owned fields with no replacement retain value and provenance
     let engine = make_engine();
 
     let input = MergeInput {
@@ -662,7 +664,8 @@ async fn test_merge_engine_provider_owned_field_without_replacement_produces_pro
         resolved(&output).description.as_deref(),
         Some("existing provider description")
     );
-    assert!(has_provenance_delete(&output, WorkField::Description));
+    assert!(!has_provenance_delete(&output, WorkField::Description));
+    assert!(provenance_upsert(&output, WorkField::Description).is_none());
 }
 
 #[tokio::test]

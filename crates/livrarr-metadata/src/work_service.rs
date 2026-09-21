@@ -329,6 +329,7 @@ where
         + LibraryItemDb
         + GrabDb
         + ProvenanceDb
+        + livrarr_db::SourceReferenceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
@@ -1140,6 +1141,8 @@ where
         // duration (REQ-005).
         let _guard = EnrichingGuard::enter(self.enriching.clone(), (user_id, work_id));
 
+        attempt_initial_cover(&self.db, &self.http, &self.data_dir, user_id, work_id).await;
+
         let (enrichment_status, _identity_not_found, route_handoff) = self
             .ensure_identity_and_enrichment(
                 user_id,
@@ -1232,11 +1235,23 @@ where
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
         let cover_mtime = crate::cover::cover_file_mtime(&covers_dir, work_id);
         let audiobook_cover_mtime = crate::cover::audiobook_cover_file_mtime(&covers_dir, work_id);
+        let source_references = self
+            .db
+            .list_source_references(user_id, work_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
+        let field_sources = self
+            .db
+            .list_work_provenance(user_id, work_id)
+            .await
+            .map_err(WorkServiceError::Db)?;
         Ok(WorkDetailView {
             work,
             library_items,
             cover_mtime,
             audiobook_cover_mtime,
+            source_references,
+            field_sources,
         })
     }
 
@@ -1340,11 +1355,15 @@ where
             .into_iter()
             .map(|w| {
                 let work_items = items_by_work.remove(&w.id).unwrap_or_default();
+                // Library rows carry no per-Work source context; the single
+                // Work detail read loads it.
                 WorkDetailView {
                     work: w,
                     library_items: work_items,
                     cover_mtime: None,
                     audiobook_cover_mtime: None,
+                    source_references: Vec::new(),
+                    field_sources: Vec::new(),
                 }
             })
             .collect();
@@ -2937,6 +2956,135 @@ where
             enrichment_status,
         })
     }
+}
+
+/// The one initial image attempt for a Work the Add door created with a
+/// saved cover address. The address, its provider and the explicit-choice
+/// intent are already committed as the Work's `cover_url` /
+/// `cover_url_explicit` source reference; that address is offered exactly
+/// once, here, to the existing writers. Only the creation shape qualifies —
+/// a URL with no recorded source, no dimensions, no manual flag and no file
+/// on disk — so rows the fast path or a later cover write already described
+/// are left to the ranked enrichment path. A failed download leaves the row
+/// exactly as created: the saved address is never re-offered from here.
+async fn attempt_initial_cover<D, H>(
+    db: &D,
+    http: &H,
+    data_dir: &std::path::Path,
+    user_id: UserId,
+    work_id: WorkId,
+) where
+    D: WorkDb + livrarr_db::SourceReferenceDb + Sync,
+    H: HttpFetcher,
+{
+    let work = match db.get_work(user_id, work_id).await {
+        Ok(work) => work,
+        Err(error) => {
+            tracing::warn!(work_id, error = %error, "initial cover attempt: work row unreadable");
+            return;
+        }
+    };
+    let Some(url) = work.cover_url.clone() else {
+        return;
+    };
+    if work.cover_source.is_some()
+        || work.cover_manual
+        || work.cover_width != 0
+        || work.cover_height != 0
+    {
+        return;
+    }
+    let covers_dir = data_dir.join("covers").join(user_id.to_string());
+    let final_path = crate::cover_write_gate::final_cover_path(&covers_dir, work_id, "");
+    if tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
+        return;
+    }
+    let references = match db.list_source_references(user_id, work_id).await {
+        Ok(references) => references,
+        Err(error) => {
+            tracing::warn!(
+                work_id,
+                error = %error,
+                "initial cover attempt: source references unreadable"
+            );
+            return;
+        }
+    };
+    // The column holds the address in its stored absolute-http form while the
+    // reference keeps the supplied spelling: match the exact address first,
+    // then fall back to the Work's cover reference.
+    let is_cover_reference = |reference: &&livrarr_domain::SourceReference| {
+        matches!(
+            reference.kind,
+            SourceReferenceKind::CoverUrl | SourceReferenceKind::CoverUrlExplicit
+        )
+    };
+    let Some(reference) = references
+        .iter()
+        .filter(is_cover_reference)
+        .find(|reference| reference.value == url)
+        .or_else(|| references.iter().find(is_cover_reference))
+    else {
+        return;
+    };
+    let explicit = reference.kind == SourceReferenceKind::CoverUrlExplicit;
+    // The gate's source vocabulary: the provider's lowercase name, or `add`
+    // for a legacy address that named no provider.
+    let source = match reference.provider {
+        Some(provider) => format!("{provider:?}").to_lowercase(),
+        None => "add".to_string(),
+    };
+    let media_type = livrarr_domain::CoverMediaType::Ebook;
+    let outcome = if explicit {
+        match crate::cover_write_gate::run_user_cover_write(
+            db,
+            http,
+            user_id,
+            crate::cover_write_gate::UserCoverInput {
+                covers_dir,
+                work_id,
+                media_type,
+                payload: crate::cover_write_gate::UserCoverPayload::Url { url, source },
+            },
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(crate::cover_write_gate::UserCoverError::Validation(reason)) => {
+                tracing::warn!(
+                    work_id,
+                    reason = %reason,
+                    "initial cover attempt: explicit address rejected"
+                );
+                return;
+            }
+        }
+    } else {
+        // Same containment as ranked resolution: an automatic Goodreads
+        // address is not a cover candidate.
+        if reference.provider == Some(MetadataProvider::Goodreads)
+            && !crate::cover_resolution::GOODREADS_COVER_CANDIDATES_ENABLED
+        {
+            return;
+        }
+        crate::cover_write_gate::run_cover_write_gate(
+            db,
+            http,
+            user_id,
+            crate::cover_write_gate::CoverWriteGateInput {
+                covers_dir,
+                work_id,
+                media_type,
+                resolution: CoverResolution {
+                    url,
+                    source,
+                    media_type,
+                },
+            },
+        )
+        .await
+    };
+    tracing::info!(work_id, explicit, outcome = ?outcome, "initial cover attempt");
 }
 
 // =============================================================================

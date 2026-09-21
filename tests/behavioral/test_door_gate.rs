@@ -168,6 +168,7 @@ async fn seed_db_work(
         user_id,
         work.id,
         livrarr_db::UpdateWorkEnrichmentDbRequest {
+            original_publish_date: None,
             enrichment_status: status,
             enrichment_source: Some("fixture".to_string()),
             title: None,
@@ -232,6 +233,7 @@ async fn seed_settled_work(
         user_id,
         work.id,
         livrarr_db::UpdateWorkEnrichmentDbRequest {
+            original_publish_date: None,
             enrichment_status: status,
             enrichment_source: Some("fixture".to_string()),
             title: None,
@@ -732,6 +734,7 @@ enum WorkCall {
     RetryAllIncomplete(UserId),
     TryStartBulkRefresh(UserId),
     Get,
+    GetDetail,
 }
 
 #[derive(Clone)]
@@ -945,7 +948,13 @@ impl WorkService for RecordingWorkService {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<WorkDetailView, WorkServiceError> {
+        self.calls
+            .lock()
+            .expect("work calls")
+            .push(WorkCall::GetDetail);
         Ok(WorkDetailView {
+            source_references: Vec::new(),
+            field_sources: Vec::new(),
             work: Work {
                 id: work_id,
                 user_id,
@@ -1644,6 +1653,18 @@ impl livrarr_domain::identity_layer::IdentityRoadService for InertIdentityRoad {
         )
     }
 
+    async fn settle_creation(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+        _facts: livrarr_domain::CreationFacts,
+    ) -> Result<
+        livrarr_domain::identity_layer::IdentityRoadOutcome,
+        livrarr_domain::identity_layer::IdentityRoadError,
+    > {
+        // This stub observes door sequencing, not metadata persistence.
+        self.settle(request).await
+    }
+
     async fn resolve_review(
         &self,
         _actor: livrarr_domain::identity_layer::ReviewActor,
@@ -2077,6 +2098,7 @@ async fn c1_work_add_handler_chains_complete_add_then_delayed_refresh() {
         State(state),
         auth_context(99),
         Json(livrarr_handlers::AddWorkRequest {
+            facts: None,
             ol_key: Some("OLC1W".to_string()),
             title: "C1 Add".to_string(),
             author_name: "C1 Author".to_string(),

@@ -535,6 +535,7 @@ async fn seed_work(
     let committed = WorkIdentityRepository::commit_settlement(
         db,
         ilr::SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: None,
             add_source: None,
@@ -623,6 +624,7 @@ fn settlement_with_card(
     card: ilr::SettlementReviewCard,
 ) -> ilr::SettlementCommit {
     ilr::SettlementCommit {
+        creation_facts: None,
         user_id,
         existing_work_id: Some(captured.own_work_id),
         add_source: None,
@@ -2507,6 +2509,7 @@ async fn pending_route_placeholder_reuse_is_scoped_to_the_durable_work() {
     let created_a = WorkIdentityRepository::commit_settlement(
         &db,
         ilr::SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: None,
             add_source: None,
@@ -2603,6 +2606,7 @@ async fn pending_route_placeholder_reuse_is_scoped_to_the_durable_work() {
     let created_b = WorkIdentityRepository::commit_settlement(
         &db,
         ilr::SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: None,
             add_source: None,

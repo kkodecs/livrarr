@@ -20,6 +20,12 @@ use livrarr_metadata::{
 };
 use tokio::sync::Mutex;
 
+#[path = "add_metadata_preservation/incumbent_rank.rs"]
+mod add_metadata_preservation_rank;
+
+#[path = "add_metadata_preservation/dates.rs"]
+mod add_metadata_preservation_dates;
+
 // Regression tests use the real SQLite, queue, merge and enrichment service.
 // Only the external provider clients are fixtures. Startup wiring is checked
 // separately through the server's actual composition function.
@@ -896,6 +902,12 @@ mod provider_priority_startup_tests {
                 .await,
                 expected
             );
+            // Compare provider subsets on fresh Works: a saved Hardcover
+            // description intentionally outranks later Google-only offers.
+            let db = livrarr_db::create_test_db().await;
+            let work = self::work(&db, language).await;
+            let cache = Arc::new(TransportCache::new(Duration::from_secs(60)));
+            let service = startup(&db, &cache, &no_network()).await.unwrap();
             assert_eq!(
                 cached(
                     service.as_ref(),

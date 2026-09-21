@@ -434,6 +434,7 @@ fn extract_provider_field(field: WorkField, detail: &NormalizedWorkDetail) -> Fi
         WorkField::DurationSeconds => FieldValue::Int(detail.duration_seconds),
         WorkField::Publisher => FieldValue::Str(non_blank(&detail.publisher)),
         WorkField::PublishDate => FieldValue::Str(non_blank(&detail.publish_date)),
+        WorkField::OriginalPublishDate => FieldValue::Str(non_blank(&detail.original_publish_date)),
         WorkField::OlKey => FieldValue::Str(non_blank(&detail.ol_key)),
         WorkField::HcKey => FieldValue::Str(non_blank(&detail.hc_key)),
         WorkField::GrKey => FieldValue::Str(non_blank(&detail.gr_key)),
@@ -466,6 +467,7 @@ fn extract_current_field(field: WorkField, work: &Work) -> FieldValue {
         WorkField::DurationSeconds => FieldValue::Int(work.duration_seconds),
         WorkField::Publisher => FieldValue::Str(work.publisher.clone()),
         WorkField::PublishDate => FieldValue::Str(work.publish_date.clone()),
+        WorkField::OriginalPublishDate => FieldValue::Str(work.original_publish_date.clone()),
         WorkField::OlKey => FieldValue::Str(work.ol_key.clone()),
         WorkField::HcKey => FieldValue::Str(work.hc_key.clone()),
         WorkField::GrKey => FieldValue::Str(work.gr_key.clone()),
@@ -477,6 +479,31 @@ fn extract_current_field(field: WorkField, work: &Work) -> FieldValue {
         WorkField::Rating => FieldValue::Float(work.rating),
         WorkField::RatingCount => FieldValue::Int(work.rating_count),
         WorkField::CoverUrl => FieldValue::Str(work.cover_url.clone()),
+    }
+}
+
+/// One date meaning per provider at the shared merge boundary, for fresh and
+/// cached payloads alike. Only providers whose date is a Work-level fact may
+/// offer the original year/date: Hardcover (book release date) and
+/// OpenLibrary (first publication year) always, Goodreads only when its
+/// payload carries the classified original date — an unclassified Goodreads
+/// date (an older cache row, or an LLM-repaired page) is offered under
+/// neither meaning. Google volume dates describe one edition and are the
+/// only edition-date offers. Every other field is unaffected.
+fn date_offer_allowed(
+    field: WorkField,
+    provider: livrarr_domain::MetadataProvider,
+    detail: &NormalizedWorkDetail,
+) -> bool {
+    use livrarr_domain::MetadataProvider;
+    match field {
+        WorkField::Year | WorkField::OriginalPublishDate => match provider {
+            MetadataProvider::Hardcover | MetadataProvider::OpenLibrary => true,
+            MetadataProvider::Goodreads => detail.original_publish_date.is_some(),
+            _ => false,
+        },
+        WorkField::PublishDate => provider == MetadataProvider::GoogleBooks,
+        _ => true,
     }
 }
 
@@ -524,6 +551,7 @@ const MERGE_FIELDS: &[WorkField] = &[
     WorkField::DurationSeconds,
     WorkField::Publisher,
     WorkField::PublishDate,
+    WorkField::OriginalPublishDate,
     WorkField::Narrator,
     WorkField::NarrationType,
     WorkField::Abridged,
@@ -684,7 +712,9 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
 
     // 4. Resolve each field.
     let mut provenance_upserts = Vec::new();
-    let mut provenance_deletes = Vec::new();
+    // The merge never withdraws provenance: a field keeps its recorded source
+    // until another eligible source replaces the value.
+    let provenance_deletes: Vec<WorkField> = Vec::new();
     let mut resolved_values: HashMap<WorkField, FieldValue> = HashMap::new();
     let mut contributing_providers: Vec<livrarr_domain::MetadataProvider> = Vec::new();
 
@@ -724,6 +754,9 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
                 continue;
             }
             if let Some(Some(detail)) = eligible_providers.get(&provider) {
+                if !date_offer_allowed(field, provider, detail) {
+                    continue;
+                }
                 let val = extract_provider_field(field, detail);
                 if val.is_some() {
                     winner = Some((provider, val));
@@ -733,6 +766,31 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
         }
 
         if let Some((provider, val)) = winner {
+            // 4d. Incumbent rank: a populated value recorded from a source
+            // that ranks above the winner in this field's list stays, with
+            // its provenance untouched. A provenance row carrying a source
+            // is a Provider-setter row (the DB validator allows no other),
+            // so a recorded Readarr source ranks when listed; no source, or
+            // a source outside the applicable list, confers no precedence.
+            let current = extract_current_field(field, &inputs.current_work);
+            let incumbent_outranks_winner = current.is_some()
+                && prov_map
+                    .get(&field)
+                    .and_then(|fp| fp.source)
+                    .is_some_and(|incumbent| {
+                        let rank = |p: livrarr_domain::MetadataProvider| {
+                            priority_list.iter().position(|&q| q == p)
+                        };
+                        matches!(
+                            (rank(incumbent), rank(provider)),
+                            (Some(incumbent_rank), Some(winner_rank))
+                                if incumbent_rank < winner_rank
+                        )
+                    });
+            if incumbent_outranks_winner {
+                resolved_values.insert(field, current);
+                continue;
+            }
             // Provider wins — set value and generate provenance upsert
             resolved_values.insert(field, val);
             provenance_upserts.push(SetFieldProvenanceRequest {
@@ -747,20 +805,10 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
                 contributing_providers.push(provider);
             }
         } else {
-            // No winning provider — last-known-good
-            let current = extract_current_field(field, &inputs.current_work);
-
-            // If the field was provider-owned and current value exists,
-            // generate a provenance delete (old provider no longer claims it).
-            if current.is_some() {
-                if let Some(fp) = prov_map.get(&field) {
-                    if fp.setter == livrarr_domain::ProvenanceSetter::Provider {
-                        provenance_deletes.push(field);
-                    }
-                }
-            }
-
-            resolved_values.insert(field, current);
+            // No winning provider — last-known-good. The value and its
+            // provenance both stay: an absent, empty or unusable offer is not
+            // evidence against the source that recorded the value.
+            resolved_values.insert(field, extract_current_field(field, &inputs.current_work));
         }
     }
 
@@ -871,6 +919,7 @@ fn merge_impl(inputs: MergeInput, had_providers: bool) -> Result<MergeOutput, Me
         duration_seconds: get_int(WorkField::DurationSeconds),
         publisher: get_str(WorkField::Publisher),
         publish_date: get_str(WorkField::PublishDate),
+        original_publish_date: get_str(WorkField::OriginalPublishDate),
         narrator: get_strings(WorkField::Narrator),
         narration_type: get_narration_type(WorkField::NarrationType),
         abridged: get_bool(WorkField::Abridged),

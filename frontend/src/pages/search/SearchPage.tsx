@@ -322,7 +322,7 @@ export default function SearchPage() {
       authorOlKey: work.authorOlKey,
       year: work.year,
       coverUrl,
-      metadataSource: work.source,
+      facts: work.facts,
       language: work.language,
       detailUrl: work.detailUrl,
       coverManual,

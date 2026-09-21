@@ -1,5 +1,12 @@
 # Livrarr — Project Rules
 
+## Executive summary
+
+[Scope additions require explicit user approval](#process-discipline-from-v21-retro).
+Follow the [startup rules](#session-start-mandatory--do-these-before-any-work)
+and the existing project quality requirements. Routine choices within the agreed
+scope remain autonomous.
+
 ## Session Start (mandatory — do these before any work)
 
 1. **Read `wiki/insights.md`** — active learnings that prevent avoidable mistakes. Do this first.
@@ -67,6 +74,7 @@ See `ARCHITECTURE.md` Part 1 (Product Principles) and `PRINCIPLES.md` (universal
 
 ## Process Discipline (from v2.1 retro)
 
+- **Do not add to scope without explicit user approval (permanent PO direction, 2026-09-20).** Implement only the agreed outcomes. New features, adjacent fixes, broader refactors, recovery systems and extra deliverables require explicit approval before adding them to the active plan or dispatching design, tests or code for them. Record suggestions in the project to-do list as unapproved; a reviewer recommendation, PM decision, passing review, or instruction to "make decisions as needed" is not approval to expand scope. Routine implementation choices within the agreed scope remain autonomous. If an unexpected dependency would materially expand the work, explain it and obtain approval for that addition while continuing independent in-scope work. No response means no approval.
 - `build/foundation/cycle-retrospective.md` is created at Phase 0 start
 - CC must write to it immediately when process friction occurs (audit FAIL, hook timeout, workaround needed) — not at retro time
 - Retrospective (Phase 6) updates this CLAUDE.md with critical learnings from the cycle

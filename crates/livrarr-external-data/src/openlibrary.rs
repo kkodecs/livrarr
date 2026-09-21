@@ -7,7 +7,10 @@ use livrarr_domain::seed::iso639_1_to_3;
 use livrarr_domain::services::{
     FetchError, FetchRequest, HttpFetcher, HttpMethod, LookupResult, RateBucket, UserAgentProfile,
 };
-use livrarr_domain::RequestPriority;
+use livrarr_domain::{
+    MetadataProvider, RequestPriority, SelectedContributor, SelectedFacts, SelectedReference,
+    SourceReferenceKind,
+};
 use livrarr_http::breaker::BreakerSignal;
 use livrarr_http::outbound_queue;
 
@@ -380,28 +383,91 @@ pub async fn search_openlibrary_with_options<H: HttpFetcher + Send + Sync>(
     .await?;
     Ok(hits
         .into_iter()
-        .map(|hit| LookupResult {
-            ol_key: Some(hit.ol_key),
-            title: hit.title,
-            author_name: hit.author_name,
-            author_ol_key: hit.author_ol_key,
-            year: hit.year,
-            cover_url: hit.cover_url,
-            description: None,
-            series_name: None,
-            series_position: None,
-            source: Some("openlibrary".to_string()),
-            source_type: Some("openlibrary".to_string()),
-            language: Some(lang.to_string()),
-            detail_url: None,
-            rating: None,
-            isbn_13: hit.isbns.first().cloned(),
-            candidate_id: None,
-            hc_key: None,
-            gr_key: None,
-            asin: hit.amazon_ids.first().cloned(),
+        .map(|hit| {
+            let facts = selected_facts_from_hit(&hit);
+            LookupResult {
+                ol_key: Some(hit.ol_key),
+                title: hit.title,
+                author_name: hit.author_name,
+                author_ol_key: hit.author_ol_key,
+                year: hit.year,
+                cover_url: hit.cover_url,
+                description: None,
+                series_name: None,
+                series_position: None,
+                source: Some("openlibrary".to_string()),
+                source_type: Some("openlibrary".to_string()),
+                // The `language=` filter is the search preference, not a fact
+                // about the book; the card carries no language claim.
+                language: None,
+                detail_url: None,
+                rating: None,
+                isbn_13: hit.isbns.first().cloned(),
+                candidate_id: None,
+                hc_key: None,
+                gr_key: None,
+                asin: hit.amazon_ids.first().cloned(),
+                facts: Some(facts),
+            }
         })
         .collect())
+}
+
+/// The useful inventory one `search.json` document supplied: every credited
+/// author with its author key, the first-publication year as an original
+/// Work fact, the cover address, and every edition identifier typed by its
+/// own spelling. `search.json` carries no language, description or edition
+/// date, so those stay absent.
+fn selected_facts_from_hit(hit: &OpenLibraryIdentitySearchHit) -> SelectedFacts {
+    let contributors = hit
+        .author_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| SelectedContributor {
+            name: name.clone(),
+            provider_author_id: hit.author_keys.get(index).cloned().flatten(),
+        })
+        .collect();
+    let references = hit
+        .isbns
+        .iter()
+        .filter_map(|isbn| {
+            let typed = SelectedReference::typed_isbn(isbn);
+            if typed.is_none() {
+                tracing::debug!(
+                    isbn,
+                    "OpenLibrary isbn spelling has no ISBN-10/13 shape; not typed"
+                );
+            }
+            typed
+        })
+        .chain(hit.amazon_ids.iter().map(|id| SelectedReference {
+            kind: SourceReferenceKind::Amazon,
+            value: id.clone(),
+        }))
+        .collect();
+    SelectedFacts {
+        provider: MetadataProvider::OpenLibrary,
+        subtitle: None,
+        language: None,
+        original_year: hit.year,
+        original_publish_date: None,
+        edition_publish_date: None,
+        description: None,
+        description_truncated: false,
+        publisher: None,
+        page_count: None,
+        series_name: None,
+        series_position: None,
+        genres: Vec::new(),
+        rating: None,
+        rating_count: None,
+        cover_url: hit.cover_url.clone(),
+        bare_title: None,
+        decorated_title: None,
+        contributors,
+        references,
+    }
 }
 
 /// Rich `search.json` document used by REQ-027. All edition identifiers in
@@ -417,6 +483,12 @@ pub struct OpenLibraryIdentitySearchHit {
     pub cover_url: Option<String>,
     pub isbns: Vec<String>,
     pub amazon_ids: Vec<String>,
+    /// Every credited author name in document order; `author_name` is the
+    /// first of these.
+    pub author_names: Vec<String>,
+    /// The author key the document carried at each `author_names` entry's own
+    /// position; `None` where it carried none there.
+    pub author_keys: Vec<Option<String>>,
 }
 
 /// The single OpenLibrary search transport/parser authority shared by
@@ -532,6 +604,33 @@ pub async fn search_openlibrary_identity_hits_with_options<H: HttpFetcher + Send
                     .collect()
             };
 
+            // `author_name` and `author_key` are parallel arrays. Each kept
+            // name takes the key at its own original position, so a blank or
+            // non-string entry in either array never shifts another author's
+            // key.
+            let author_key_at = |index: usize| {
+                doc.get("author_key")
+                    .and_then(|keys| keys.get(index))
+                    .and_then(|key| key.as_str())
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(|key| key.trim_start_matches("/authors/").to_string())
+            };
+            let (author_names, author_keys): (Vec<String>, Vec<Option<String>>) = doc
+                .get("author_name")
+                .and_then(|names| names.as_array())
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    let name = name
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())?;
+                    Some((name.to_string(), author_key_at(index)))
+                })
+                .unzip();
+
             Some(OpenLibraryIdentitySearchHit {
                 ol_key,
                 title: title.to_string(),
@@ -541,6 +640,8 @@ pub async fn search_openlibrary_identity_hits_with_options<H: HttpFetcher + Send
                 cover_url,
                 isbns: strings("isbn"),
                 amazon_ids: strings("id_amazon"),
+                author_names,
+                author_keys,
             })
         })
         .collect();

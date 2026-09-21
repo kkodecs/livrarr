@@ -279,6 +279,17 @@ async fn legacy_route_db(raw_ol_key: &str) -> (SqliteDb, i64, i64) {
 async fn migration_graph() -> (SqliteDb, i64, i64, i64) {
     let db = migration_077_db().await;
     apply_migration_078(&db).await;
+    // Keep migration 078 and its trigger; add only the unrelated columns
+    // required by the current Work reader.
+    for statement in [
+        "ALTER TABLE works ADD COLUMN original_publish_date TEXT",
+        "ALTER TABLE works ADD COLUMN description_truncated INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(statement)
+            .execute(db.pool())
+            .await
+            .expect("add current Work reader columns to migration-078 fixture");
+    }
     let user_id = create_test_user(&db).await;
     let (author, _) = db
         .create_author(author_request(user_id, "Migration Matrix Author"))
@@ -761,6 +772,7 @@ async fn ac003_ac006_road_input_and_fingerprint_include_only_settled_user_owned_
     WorkIdentityRepository::commit_settlement(
         &db,
         SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: Some(work_id),
             add_source: None,

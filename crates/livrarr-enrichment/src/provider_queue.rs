@@ -1337,6 +1337,7 @@ mod identity_route_dispatch_tests {
         let settled = WorkIdentityRepository::commit_settlement(
             &db,
             SettlementCommit {
+                creation_facts: None,
                 user_id,
                 existing_work_id: None,
                 add_source: None,

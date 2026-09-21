@@ -59,6 +59,11 @@ pub struct WorkDetailView {
     pub library_items: Vec<LibraryItem>,
     pub cover_mtime: Option<i64>,
     pub audiobook_cover_mtime: Option<i64>,
+    /// Typed provider context saved with the Work (source facts, never
+    /// identity authority).
+    pub source_references: Vec<crate::SourceReference>,
+    /// Per-field provenance rows for the ordinary Work fields.
+    pub field_sources: Vec<crate::FieldProvenance>,
 }
 
 #[derive(Debug)]
@@ -185,6 +190,11 @@ pub struct LookupResult {
     pub gr_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asin: Option<String>,
+    /// The complete useful inventory the providing search result supplied,
+    /// echoed verbatim by the browser into the Add request. Resolver-produced
+    /// results carry none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facts: Option<crate::SelectedFacts>,
 }
 
 #[derive(Debug, Clone, Serialize)]

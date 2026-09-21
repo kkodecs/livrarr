@@ -39,6 +39,7 @@ mod series;
 mod series_cache;
 mod series_roster;
 mod session;
+mod source_reference;
 mod user;
 mod work;
 
@@ -74,5 +75,6 @@ pub use series::*;
 pub use series_cache::*;
 pub use series_roster::*;
 pub use session::*;
+pub use source_reference::*;
 pub use user::*;
 pub use work::*;

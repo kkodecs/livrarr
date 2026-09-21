@@ -135,6 +135,9 @@ pub enum WorkField {
     DurationSeconds,
     Publisher,
     PublishDate,
+    /// Original publication date with its supplied precision; distinct from
+    /// `PublishDate`, which describes one edition.
+    OriginalPublishDate,
     OlKey,
     HcKey,
     GrKey,

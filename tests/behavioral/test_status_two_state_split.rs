@@ -64,6 +64,8 @@ fn work_with(subtitle: Option<&str>, description: Option<&str>, cover_url: Optio
 
 fn empty_detail() -> NormalizedWorkDetail {
     NormalizedWorkDetail {
+        original_publish_date: None,
+        unclassified_publish_date: None,
         title: None,
         subtitle: None,
         original_title: None,

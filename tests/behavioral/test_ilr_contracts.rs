@@ -66,6 +66,9 @@ use tracing_test::traced_test;
 #[path = "catalog_work_lookup.rs"]
 mod catalog_work_lookup;
 
+#[path = "add_metadata_preservation/mod.rs"]
+mod add_metadata_preservation;
+
 fn title(main: &str) -> IdentityTitleTuple {
     IdentityTitleTuple {
         main: main.to_string(),
@@ -1813,6 +1816,7 @@ fn settlement_commit(
     existing_work_id: Option<i64>,
 ) -> ilr::SettlementCommit {
     ilr::SettlementCommit {
+        creation_facts: None,
         user_id,
         existing_work_id,
         add_source: None,
@@ -6147,7 +6151,6 @@ async fn build_route_harness_with_identity_http(
     let db = create_activated_test_db().await;
     let tmp = tempfile::tempdir().expect("identity-layer route harness tempdir");
     let data_dir = tmp.path().to_path_buf();
-    let data_dir_arc = Arc::new(data_dir.clone());
 
     let api_key = "identity-layer-door-api-key".to_string();
     let api_key_hash = RealAuthCrypto
@@ -6164,6 +6167,37 @@ async fn build_route_harness_with_identity_http(
         .await
         .expect("create authenticated route user");
 
+    build_route_harness_from_parts(
+        db,
+        tmp,
+        data_dir,
+        user.id,
+        api_key,
+        open_library_outcome,
+        identity_details,
+        discovery_transport,
+        open_library_stub_delay,
+        identity_http,
+    )
+    .await
+}
+
+// Reuse the same real composition with a caller-owned file database for reopen
+// assertions. Existing callers keep their original in-memory setup above.
+#[allow(clippy::too_many_arguments)]
+async fn build_route_harness_from_parts(
+    db: SqliteDb,
+    tmp: tempfile::TempDir,
+    data_dir: PathBuf,
+    user_id: i64,
+    api_key: String,
+    open_library_outcome: Option<livrarr_external_data::ProviderOutcome<NormalizedWorkDetail>>,
+    identity_details: Vec<(MetadataProvider, NormalizedWorkDetail)>,
+    discovery_transport: Option<DiscoveryTransportFixture>,
+    open_library_stub_delay: Option<Duration>,
+    identity_http: bool,
+) -> RouteHarness {
+    let data_dir_arc = Arc::new(data_dir.clone());
     let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
         db.clone(),
         RealAuthCrypto,
@@ -6190,6 +6224,16 @@ async fn build_route_harness_with_identity_http(
                 "covers.openlibrary.org",
                 "1.1.1.1:443".parse().expect("public test DNS answer"),
             );
+        for host in [
+            "books.google.com",
+            "assets.hardcover.app",
+            "i.gr-assets.com",
+        ] {
+            http_fetcher = http_fetcher.with_ssrf_preflight_test_dns(
+                host,
+                "1.1.1.1:443".parse().expect("public test DNS answer"),
+            );
+        }
     }
     let llm_http_client = livrarr_http::HttpClient::builder()
         .timeout(Duration::from_secs(60))
@@ -6652,7 +6696,7 @@ async fn build_route_harness_with_identity_http(
         state,
         api_key,
         db,
-        user_id: user.id,
+        user_id,
         open_library_stub,
         _tmp: tmp,
     }

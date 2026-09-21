@@ -239,7 +239,9 @@ fn lookup_result_from_captured(
         series_position: None,
         source_type: source.clone(),
         source,
-        language: captured.language,
+        // A captured identity's language may be the seed's search language;
+        // the card makes no book-language claim from it.
+        language: None,
         detail_url: None,
         rating: None,
         isbn_13: captured.isbn_13,
@@ -247,6 +249,7 @@ fn lookup_result_from_captured(
         hc_key: captured.hc_key,
         gr_key: captured.gr_key,
         asin: captured.asin,
+        facts: None,
     }
 }
 
@@ -559,7 +562,9 @@ where
         // then OpenLibrary (work anchors).
         let mut corpus: Vec<LookupResult> = Vec::new();
         corpus.append(&mut take_lookup("GoogleBooks", &gb_term, gb));
-        corpus.append(&mut take_lookup("OpenLibrary", &ol_term, ol));
+        let mut ol_corpus = take_lookup("OpenLibrary", &ol_term, ol);
+        stamp_openlibrary_search_language(&mut ol_corpus, &lang);
+        corpus.append(&mut ol_corpus);
         if corpus.is_empty() {
             // The whole author corpus is empty (provider error/timeout, or no
             // author-facet hits). Every file in the group falls through to the
@@ -646,12 +651,15 @@ where
                 };
                 // A lookup error (e.g. unsupported language) is treated as an
                 // abstain, mirroring how the batch treats a provider failure.
-                let candidates = match lookup(ctx, req).await {
+                let mut candidates = match lookup(ctx, req).await {
                     Ok(c) => c,
                     Err(_) => return None,
                 };
                 if candidates.is_empty() {
                     return None;
+                }
+                if let Some(lang) = file_lang {
+                    stamp_openlibrary_search_language(&mut candidates, lang);
                 }
                 let cand_refs: Vec<(&str, &str)> = candidates
                     .iter()
@@ -828,6 +836,7 @@ where
                 .as_deref()
                 .and_then(livrarr_external_data::goodreads::extract_gr_key)
                 .and_then(|k| livrarr_domain::normalization::normalize_gr_key(&k));
+            let facts = goodreads_selected_facts(&r);
             LookupResult {
                 ol_key: None,
                 title: r.title,
@@ -850,11 +859,67 @@ where
                 hc_key: None,
                 gr_key,
                 asin: None,
+                facts: Some(facts),
             }
         })
         .collect();
 
     Ok(results)
+}
+
+/// The useful inventory one Goodreads autocomplete entry supplied: the bare
+/// and decorated titles when they differ, the series decoration, the
+/// possibly shortened description, pages, rating and count, the credited
+/// author with its Goodreads author id, and the Work id as a source
+/// reference (the Book id already travels as the card's key). Autocomplete
+/// supplies no language, date, publisher or genres.
+fn goodreads_selected_facts(
+    r: &livrarr_external_data::goodreads::GoodreadsSearchResult,
+) -> SelectedFacts {
+    let decorated = r
+        .title_bare
+        .as_deref()
+        .is_some_and(|bare| bare.trim() != r.title.trim());
+    SelectedFacts {
+        provider: livrarr_domain::MetadataProvider::Goodreads,
+        subtitle: None,
+        language: None,
+        original_year: None,
+        original_publish_date: None,
+        edition_publish_date: None,
+        description: r.description.clone(),
+        description_truncated: r.description_truncated,
+        publisher: None,
+        page_count: r.page_count,
+        series_name: r.series_name.clone(),
+        series_position: r.series_position,
+        genres: Vec::new(),
+        rating: r
+            .rating
+            .as_deref()
+            .and_then(|rating| rating.parse::<f64>().ok()),
+        rating_count: r.rating_count,
+        cover_url: r.cover_url.clone(),
+        bare_title: decorated.then(|| r.title_bare.clone()).flatten(),
+        decorated_title: decorated.then(|| r.title.clone()),
+        contributors: r
+            .author
+            .iter()
+            .map(|name| SelectedContributor {
+                name: name.clone(),
+                provider_author_id: r.author_id.clone(),
+            })
+            .collect(),
+        references: r
+            .work_id
+            .iter()
+            .filter_map(|id| non_empty_text(Some(id)))
+            .map(|value| SelectedReference {
+                kind: SourceReferenceKind::GoodreadsWork,
+                value,
+            })
+            .collect(),
+    }
 }
 
 async fn lookup_openlibrary<C, H, L>(
@@ -937,11 +1002,6 @@ where
                 .and_then(|a| a.first())
                 .cloned()
                 .unwrap_or_else(|| "Unknown".to_string());
-            let year = vi
-                .published_date
-                .as_deref()
-                .and_then(|d| d.get(..4))
-                .and_then(|y| y.parse::<i32>().ok());
             let cover_url = vi
                 .image_links
                 .as_ref()
@@ -949,13 +1009,17 @@ where
             // REQ-011: never stamp the query language onto a result — a
             // payload without one stays language-unknown (#11, GB path).
             let language = vi.language.clone();
+            let facts = google_books_selected_facts(vol.id.as_deref(), vi, cover_url.clone());
 
             Some(LookupResult {
                 ol_key: None,
                 title,
                 author_name,
                 author_ol_key: None,
-                year,
+                // A volume's `publishedDate` describes that edition; the card
+                // makes no original-year claim from it (the facts carry it as
+                // the edition date).
+                year: None,
                 cover_url,
                 description: None,
                 series_name: None,
@@ -972,6 +1036,7 @@ where
                 hc_key: None,
                 gr_key: None,
                 asin: None,
+                facts: Some(facts),
             })
         })
         .collect();
@@ -1048,6 +1113,7 @@ where
             let hc_key = doc
                 .get("id")
                 .map(|v| v.to_string().trim_matches('"').to_string());
+            let facts = hardcover_selected_facts(doc, cover_url.clone());
 
             Some(LookupResult {
                 ol_key: None,
@@ -1069,6 +1135,7 @@ where
                 hc_key,
                 gr_key: None,
                 asin: None,
+                facts: Some(facts),
             })
         })
         .collect();
@@ -1121,6 +1188,196 @@ fn cover_source_rank(url: &str, foreign: bool) -> u8 {
             (len - idx + 1) as u8
         }
         None => 1,
+    }
+}
+
+/// The eager matcher's same-language guards read a candidate's `language`.
+/// OpenLibrary's search leg was filtered to the queried language, and the
+/// matcher has always treated that queried language as the OpenLibrary
+/// candidate's language for grafting and cover upgrades. The discovery card
+/// itself carries no such stamp: a search preference is not a book fact.
+fn stamp_openlibrary_search_language(results: &mut [LookupResult], lang: &str) {
+    for result in results
+        .iter_mut()
+        .filter(|r| r.source.as_deref() == Some("openlibrary") && r.language.is_none())
+    {
+        result.language = Some(lang.to_string());
+    }
+}
+
+fn non_empty_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// The useful inventory one Google Books volume supplied: its own language,
+/// edition date and publisher, description, categories, pages, rating and
+/// count, every credited author name, the volume id and the typed ISBNs.
+/// Google credits no author identifiers and dates editions only.
+fn google_books_selected_facts(
+    volume_id: Option<&str>,
+    vi: &livrarr_external_data::google_books::GbVolumeInfo,
+    cover_url: Option<String>,
+) -> SelectedFacts {
+    let references = non_empty_text(volume_id)
+        .map(|value| SelectedReference {
+            kind: SourceReferenceKind::GoogleVolume,
+            value,
+        })
+        .into_iter()
+        .chain(
+            vi.industry_identifiers
+                .iter()
+                .flatten()
+                .filter_map(|identifier| {
+                    let kind = match identifier.identifier_type.as_deref() {
+                        Some("ISBN_10") => SourceReferenceKind::Isbn10,
+                        Some("ISBN_13") => SourceReferenceKind::Isbn13,
+                        _ => return None,
+                    };
+                    let value = non_empty_text(identifier.identifier.as_deref())?;
+                    Some(SelectedReference { kind, value })
+                }),
+        )
+        .collect();
+    SelectedFacts {
+        provider: livrarr_domain::MetadataProvider::GoogleBooks,
+        subtitle: non_empty_text(vi.subtitle.as_deref()),
+        language: non_empty_text(vi.language.as_deref())
+            .map(|language| livrarr_domain::normalize_language(&language)),
+        original_year: None,
+        original_publish_date: None,
+        edition_publish_date: non_empty_text(vi.published_date.as_deref()),
+        description: vi
+            .description
+            .as_deref()
+            .map(livrarr_external_data::google_books::strip_html_tags)
+            .filter(|text| !text.is_empty()),
+        description_truncated: false,
+        publisher: non_empty_text(vi.publisher.as_deref()),
+        page_count: vi.page_count,
+        series_name: None,
+        series_position: None,
+        genres: vi
+            .categories
+            .iter()
+            .flatten()
+            .filter_map(|genre| non_empty_text(Some(genre)))
+            .collect(),
+        rating: vi.average_rating,
+        rating_count: vi.ratings_count,
+        cover_url,
+        bare_title: None,
+        decorated_title: None,
+        contributors: vi
+            .authors
+            .iter()
+            .flatten()
+            .filter_map(|name| non_empty_text(Some(name)))
+            .map(|name| SelectedContributor {
+                name,
+                provider_author_id: None,
+            })
+            .collect(),
+        references,
+    }
+}
+
+/// The useful inventory one Hardcover search document supplied: every
+/// credited contributor with its Hardcover author id, the book release date
+/// as an original-publication fact, description, featured series, genres,
+/// pages, rating and count, and every edition ISBN typed by its spelling.
+/// Hardcover's subtitle stays excluded and its search supplies no language.
+fn hardcover_selected_facts(doc: &serde_json::Value, cover_url: Option<String>) -> SelectedFacts {
+    use serde_json::Value;
+
+    let text = |pointer: &str| non_empty_text(doc.pointer(pointer).and_then(Value::as_str));
+    let strings = |field: &str| {
+        doc.get(field)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    let credited: Vec<SelectedContributor> = doc
+        .get("contributions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|contribution| {
+            let name =
+                non_empty_text(contribution.pointer("/author/name").and_then(Value::as_str))?;
+            let provider_author_id = match contribution.pointer("/author/id") {
+                Some(Value::String(id)) => non_empty_text(Some(id)),
+                Some(Value::Number(id)) => Some(id.to_string()),
+                _ => None,
+            };
+            Some(SelectedContributor {
+                name,
+                provider_author_id,
+            })
+        })
+        .collect();
+    let contributors = if credited.is_empty() {
+        strings("author_names")
+            .filter_map(|name| non_empty_text(Some(name)))
+            .map(|name| SelectedContributor {
+                name,
+                provider_author_id: None,
+            })
+            .collect()
+    } else {
+        credited
+    };
+    let release_date = text("/release_date");
+    let original_year = doc
+        .get("release_year")
+        .and_then(Value::as_i64)
+        .and_then(|year| i32::try_from(year).ok())
+        .or_else(|| {
+            release_date
+                .as_deref()
+                .and_then(|date| date.get(..4))
+                .and_then(|year| year.parse::<i32>().ok())
+        });
+    SelectedFacts {
+        provider: livrarr_domain::MetadataProvider::Hardcover,
+        subtitle: None,
+        language: None,
+        original_year,
+        original_publish_date: release_date,
+        edition_publish_date: None,
+        description: text("/description"),
+        description_truncated: false,
+        publisher: None,
+        page_count: doc
+            .get("pages")
+            .and_then(Value::as_i64)
+            .and_then(|pages| i32::try_from(pages).ok()),
+        series_name: text("/featured_series/series/name"),
+        series_position: doc
+            .pointer("/featured_series/position")
+            .and_then(Value::as_f64),
+        genres: strings("genres")
+            .map(str::trim)
+            .filter(|genre| !genre.is_empty() && !genre.contains('|'))
+            .take(5)
+            .map(str::to_string)
+            .collect(),
+        rating: doc.get("rating").and_then(Value::as_f64),
+        rating_count: doc
+            .get("ratings_count")
+            .and_then(Value::as_i64)
+            .and_then(|count| i32::try_from(count).ok()),
+        cover_url,
+        bare_title: None,
+        decorated_title: None,
+        contributors,
+        references: strings("isbns")
+            .filter_map(SelectedReference::typed_isbn)
+            .collect(),
     }
 }
 
@@ -1388,6 +1645,7 @@ mod discovery_tests {
 
     fn lr(title: &str, author: &str, isbn: Option<&str>) -> LookupResult {
         LookupResult {
+            facts: None,
             ol_key: None,
             title: title.into(),
             author_name: author.into(),

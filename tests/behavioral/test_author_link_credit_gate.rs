@@ -360,6 +360,7 @@ async fn settled_author(
     WorkIdentityRepository::commit_settlement(
         db,
         SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: Some(result.work.id),
             add_source: None,

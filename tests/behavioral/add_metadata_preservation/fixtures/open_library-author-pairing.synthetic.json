@@ -1,0 +1,12 @@
+{
+  "numFound": 1,
+  "start": 0,
+  "docs": [
+    {
+      "key": "/works/OL893414W",
+      "title": "Dune",
+      "author_name": ["Author One", "Author Two"],
+      "author_key": ["", "OL222A"]
+    }
+  ]
+}

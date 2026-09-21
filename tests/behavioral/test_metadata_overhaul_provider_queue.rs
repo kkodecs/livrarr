@@ -562,6 +562,8 @@ fn default_config(provider: MetadataProvider) -> ProviderQueueConfig {
 
 fn empty_normalized() -> NormalizedWorkDetail {
     NormalizedWorkDetail {
+        original_publish_date: None,
+        unclassified_publish_date: None,
         title: None,
         subtitle: None,
         original_title: None,

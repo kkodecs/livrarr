@@ -2,8 +2,8 @@ use livrarr_domain::services::{MergeFieldChoice, MergeableField};
 use livrarr_domain::{
     identity::CandidateId,
     identity_layer::{CapturedIdentity, IdentityProvider},
-    AuthorId, EnrichmentStatus, IdentityStatus, LibraryItemId, MediaType, NarrationType, Work,
-    WorkId,
+    AuthorId, EnrichmentStatus, IdentityStatus, LibraryItemId, MediaType, MetadataProvider,
+    NarrationType, ProvenanceSetter, SelectedFacts, SourceReferenceKind, Work, WorkField, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +56,10 @@ pub struct WorkSearchResult {
     pub gr_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asin: Option<String>,
+    /// The complete useful inventory the providing search result supplied.
+    /// The browser echoes it verbatim into the Add request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<SelectedFacts>,
 }
 
 #[trait_variant::make(Send)]
@@ -134,6 +138,10 @@ pub struct AddWorkRequest {
     pub gr_key: Option<String>,
     #[serde(default)]
     pub asin: Option<String>,
+    /// The selected result's facts, echoed verbatim from the search card.
+    /// Absent for older clients and resolver-produced cards (legacy Add).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facts: Option<SelectedFacts>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -200,7 +208,11 @@ pub struct WorkDetailResponse {
     pub page_count: Option<i32>,
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
+    /// Edition publication date with its supplied precision.
     pub publish_date: Option<String>,
+    /// Original publication date with its supplied precision; `year` is its year.
+    #[serde(default)]
+    pub original_publish_date: Option<String>,
     pub ol_key: Option<String>,
     pub hc_key: Option<String>,
     pub gr_key: Option<String>,
@@ -211,6 +223,9 @@ pub struct WorkDetailResponse {
     pub abridged: bool,
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
+    /// True while the saved description is a provider-marked shortened text.
+    #[serde(default)]
+    pub description_truncated: bool,
     pub enrichment_status: EnrichmentStatus,
     pub identity_status: IdentityStatus,
     pub enriched_at: Option<String>,
@@ -247,6 +262,62 @@ pub struct WorkDetailResponse {
     /// older-server omission that the frontend must guess around.
     pub identity_siblings: Vec<IdentitySiblingPresentation>,
     pub cover_ui_state: WorkCoverUiState,
+    /// Typed provider context saved with the Work (source facts, never
+    /// identity authority). Attached by the single-Work reads; library
+    /// listings leave it empty.
+    #[serde(default)]
+    pub source_references: Vec<SourceReferenceResponse>,
+    /// Per-field provenance for the ordinary Work fields. Attached by the
+    /// single-Work reads; library listings leave it empty.
+    #[serde(default)]
+    pub field_sources: Vec<FieldSourceResponse>,
+}
+
+/// One saved source reference. `provider` is absent for legacy input that
+/// named no provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceReferenceResponse {
+    pub provider: Option<MetadataProvider>,
+    pub kind: SourceReferenceKind,
+    pub value: String,
+    pub ordinal: i64,
+}
+
+/// Who set one ordinary Work field, and from which provider when a provider did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldSourceResponse {
+    pub field: WorkField,
+    pub source: Option<MetadataProvider>,
+    pub setter: ProvenanceSetter,
+}
+
+/// Attach the saved source references and field provenance of a single-Work
+/// read to its response.
+pub fn apply_source_facts(
+    detail: &mut WorkDetailResponse,
+    view: &livrarr_domain::services::WorkDetailView,
+) {
+    detail.source_references = view
+        .source_references
+        .iter()
+        .map(|reference| SourceReferenceResponse {
+            provider: reference.provider,
+            kind: reference.kind,
+            value: reference.value.clone(),
+            ordinal: reference.ordinal,
+        })
+        .collect();
+    detail.field_sources = view
+        .field_sources
+        .iter()
+        .map(|provenance| FieldSourceResponse {
+            field: provenance.field,
+            source: provenance.source,
+            setter: provenance.setter,
+        })
+        .collect();
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +421,7 @@ pub fn work_to_detail_with_cover_mtime(
         duration_seconds: w.duration_seconds,
         publisher: w.publisher.clone(),
         publish_date: w.publish_date.clone(),
+        original_publish_date: w.original_publish_date.clone(),
         // Identity-v2 freezes the legacy scalar columns. Every persisted Work
         // surface overlays these conservative placeholders from active routes.
         ol_key: None,
@@ -362,6 +434,7 @@ pub fn work_to_detail_with_cover_mtime(
         abridged: w.abridged,
         rating: w.rating,
         rating_count: w.rating_count,
+        description_truncated: w.description_truncated,
         enrichment_status: w.enrichment_status,
         // The retired badge is deliberately not copied into presentation.
         // Every persisted Work surface overlays the F2 projection before it
@@ -388,6 +461,8 @@ pub fn work_to_detail_with_cover_mtime(
         parked_by_conflicts: false,
         identity_siblings: Vec::new(),
         cover_ui_state: work_cover_ui_state(w, false),
+        source_references: Vec::new(),
+        field_sources: Vec::new(),
     }
 }
 

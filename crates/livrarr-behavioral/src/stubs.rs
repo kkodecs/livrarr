@@ -1049,6 +1049,7 @@ impl identity_layer::IdentityRoadService for SqlitePendingRouteRoad {
         let committed = self
             .db
             .commit_settlement(identity_layer::SettlementCommit {
+                creation_facts: None,
                 user_id: request.user_id,
                 existing_work_id: Some(work_id),
                 add_source: None,

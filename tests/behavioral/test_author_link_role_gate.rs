@@ -168,6 +168,7 @@ async fn settled_author_claim(
     WorkIdentityRepository::commit_settlement(
         db,
         SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: Some(result.work.id),
             add_source: None,
@@ -605,6 +606,17 @@ async fn migration_079_db() -> SqliteDb {
         .run(&pool)
         .await
         .expect("apply real migrations through 079");
+    // Keep the pre-080 schema under test; add only the unrelated columns
+    // required by the current Work reader.
+    for statement in [
+        "ALTER TABLE works ADD COLUMN original_publish_date TEXT",
+        "ALTER TABLE works ADD COLUMN description_truncated INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(statement)
+            .execute(&pool)
+            .await
+            .expect("add current Work reader columns to migration-079 fixture");
+    }
     backfill_author_identity(&pool)
         .await
         .expect("run production author-identity startup repair");

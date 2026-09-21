@@ -179,6 +179,10 @@ pub struct SettlementCommit {
     pub expected_generation: i64,
     /// Typed review-card drafts minted only if this settlement commits.
     pub review_cards: Vec<SettlementReviewCard>,
+    /// Facts a creation door supplied for the new Work. Written only by the
+    /// created branch, inside the same transaction as the Work row and its
+    /// birth event; an existing-Work settlement ignores them.
+    pub creation_facts: Option<crate::CreationFacts>,
 }
 
 /// A typed card draft carried into the sole settlement transaction.
@@ -356,6 +360,24 @@ pub trait IdentityRoadService: Send + Sync {
         &self,
         request: IdentityRoadRequest,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError>;
+
+    /// [`Self::settle`] for a creation door that also supplies the facts the
+    /// selected result carried. Production roads persist them in the created
+    /// branch of the same settlement transaction. A road without that
+    /// persistence refuses rather than silently dropping the facts.
+    fn settle_creation(
+        &self,
+        request: IdentityRoadRequest,
+        facts: crate::CreationFacts,
+    ) -> impl std::future::Future<Output = Result<IdentityRoadOutcome, IdentityRoadError>> + Send
+    {
+        let _ = (request, facts);
+        async move {
+            Err(IdentityRoadError::Database(
+                "this identity road cannot persist creation facts".to_string(),
+            ))
+        }
+    }
 
     async fn resolve_review(
         &self,

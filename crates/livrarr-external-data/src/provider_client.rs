@@ -923,6 +923,8 @@ fn audnexus_payload(audnexus: AudnexusResult) -> NormalizedWorkDetail {
         duration_seconds: audnexus.duration_seconds,
         publisher: None,
         publish_date: None,
+        original_publish_date: None,
+        unclassified_publish_date: None,
         hc_key: None,
         gr_key: None,
         gr_work_key: None,
@@ -1223,7 +1225,11 @@ impl<F: HttpFetcher> HardcoverClient<F> {
             page_count: hc.page_count,
             duration_seconds: None,
             publisher: hc.publisher,
-            publish_date: hc.publish_date,
+            // The book release date is a Work-level fact. The editions leg
+            // supplies an ISBN only, so no edition date is offered.
+            publish_date: None,
+            original_publish_date: hc.publish_date,
+            unclassified_publish_date: None,
             hc_key: hc.hc_key,
             gr_key: None,
             gr_work_key: None,
@@ -3371,7 +3377,12 @@ impl<F: HttpFetcher> GoodreadsClient<F> {
             page_count: detail.page_count.filter(|&p| p > 0),
             duration_seconds: None,
             publisher: None,
-            publish_date: detail.publish_date,
+            // Both detail parsers read the Work-level publication date (the
+            // "First published" line or the Work's `publicationTime`), so a
+            // parsed date is an original date, never an edition date.
+            publish_date: None,
+            original_publish_date: detail.publish_date,
+            unclassified_publish_date: None,
             hc_key: None,
             gr_key,
             gr_work_key: detail.work_id,
@@ -4259,6 +4270,11 @@ mod tests {
 
     fn hit(title: &str, title_bare: Option<&str>, author: &str) -> GoodreadsSearchResult {
         GoodreadsSearchResult {
+            author_id: None,
+            description: None,
+            description_truncated: false,
+            page_count: None,
+            rating_count: None,
             title: title.to_string(),
             title_bare: title_bare.map(str::to_string),
             author: Some(author.to_string()),

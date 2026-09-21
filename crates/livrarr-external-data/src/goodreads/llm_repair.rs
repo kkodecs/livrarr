@@ -146,11 +146,6 @@ pub async fn extract_with_llm(
         serde_json::from_str(unfenced).map_err(|_| GoodreadsFetchError::Parse)?;
 
     let nfc = crate::normalize::nfc;
-    let year = result
-        .publish_date
-        .as_deref()
-        .and_then(|d| d.get(..4))
-        .and_then(|y| y.parse::<i32>().ok());
     let cover_url = result
         .cover_url
         .as_deref()
@@ -162,7 +157,10 @@ pub async fn extract_with_llm(
         original_title: None,
         author_name: result.author.map(|s| nfc(&s)),
         description: result.description.map(|s| nfc(&s)),
-        year,
+        // A repaired page does not establish what its date means: the date
+        // is kept verbatim as unclassified and offered under neither the
+        // original nor the edition meaning.
+        year: None,
         series_name: result.series_name.map(|s| nfc(&s)),
         series_position: result.series_position,
         genres: result
@@ -175,7 +173,9 @@ pub async fn extract_with_llm(
         page_count: result.page_count.filter(|&p| p > 0),
         duration_seconds: None,
         publisher: result.publisher.map(|s| nfc(&s)),
-        publish_date: result.publish_date,
+        publish_date: None,
+        original_publish_date: None,
+        unclassified_publish_date: result.publish_date,
         hc_key: None,
         gr_key: None,
         gr_work_key: None,

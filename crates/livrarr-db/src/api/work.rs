@@ -365,6 +365,7 @@ pub struct UpdateWorkEnrichmentDbRequest {
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
     pub publish_date: Option<String>,
+    pub original_publish_date: Option<String>,
     pub narrator: Option<Vec<String>>,
     pub narration_type: Option<NarrationType>,
     pub abridged: Option<bool>,

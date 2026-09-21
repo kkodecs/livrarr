@@ -811,6 +811,19 @@ async fn commit_settlement_in_tx(
             .await
             .map_err(repo_db)?;
         }
+        // The facts the creation door supplied ride the same transaction:
+        // values, provenance and source references commit with the Work row
+        // and its birth event, or roll back together with them.
+        if let Some(facts) = command.creation_facts.as_ref() {
+            crate::sqlite_source_reference::write_creation_facts_in_tx(
+                tx,
+                command.user_id,
+                work_id,
+                facts,
+            )
+            .await
+            .map_err(|error| IdentityRepositoryError::Database(error.to_string()))?;
+        }
     }
 
     for loser_work_id in command
@@ -1498,6 +1511,7 @@ impl WorkIdentityRepository for SqliteDb {
                         routes: identity.active_routes.clone(),
                         absorbed_work_ids: Vec::new(),
                         expected_generation: identity.identity_generation,
+                        creation_facts: None,
                         review_cards: Vec::new(),
                     },
                     ReviewCardMintOrigin::CompatibilityGenericSettlement,
@@ -1555,6 +1569,7 @@ impl WorkIdentityRepository for SqliteDb {
                         absorbed_work_ids: Vec::new(),
                         expected_generation: 0,
                         review_cards: Vec::new(),
+                        creation_facts: None,
                     },
                     ReviewCardMintOrigin::CompatibilityGenericSettlement,
                     false,

@@ -60,6 +60,10 @@ pub struct GbVolumeInfo {
     pub image_links: Option<GbImageLinks>,
     #[serde(default)]
     pub industry_identifiers: Option<Vec<GbIdentifier>>,
+    #[serde(default)]
+    pub average_rating: Option<f64>,
+    #[serde(default)]
+    pub ratings_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,11 +513,6 @@ static RE_GB_SERIES: std::sync::LazyLock<regex::Regex> =
 
 pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
     let description = vi.description.as_deref().map(strip_html_tags);
-    let year = vi
-        .published_date
-        .as_deref()
-        .and_then(|d| d.get(..4))
-        .and_then(|y| y.parse::<i32>().ok());
     let language = vi
         .language
         .as_deref()
@@ -535,7 +534,9 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
         subtitle: vi.subtitle.clone(),
         author_name: vi.authors.as_ref().and_then(|a| a.first().cloned()),
         description,
-        year,
+        // A volume's `publishedDate` describes that edition only; it never
+        // supplies the Work's original publication year.
+        year: None,
         series_name,
         series_position,
         genres: vi.categories.clone(),
@@ -544,6 +545,8 @@ pub fn map_volume_to_detail(vi: &GbVolumeInfo) -> NormalizedWorkDetail {
         duration_seconds: None,
         publisher: vi.publisher.clone(),
         publish_date: vi.published_date.clone(),
+        original_publish_date: None,
+        unclassified_publish_date: None,
         hc_key: None,
         gr_key: None,
         gr_work_key: None,
@@ -984,7 +987,8 @@ mod tests {
             Some("A quiet novel & story.")
         );
         assert_eq!(detail.publish_date.as_deref(), Some("1993-03-01"));
-        assert_eq!(detail.year, Some(1993));
+        assert_eq!(detail.year, None);
+        assert_eq!(detail.original_publish_date, None);
         assert_eq!(detail.publisher.as_deref(), Some("Grove Press"));
         assert_eq!(detail.page_count, Some(160));
         assert_eq!(
@@ -1019,16 +1023,13 @@ mod tests {
         assert!(detail.isbn_13.is_none());
     }
 
-    /// REQ-013: map_volume_to_detail extracts the leading year from supported publishedDate formats.
+    /// REQ-013: map_volume_to_detail preserves edition dates without claiming original publication.
     #[test]
-    fn map_volume_to_detail_extracts_year_from_date_prefix() {
-        for (published_date, expected_year) in [
-            ("2024", Some(2024)),
-            ("2024-01", Some(2024)),
-            ("2024-01-15", Some(2024)),
-            ("unknown", None),
-        ] {
+    fn map_volume_to_detail_preserves_edition_date_precision() {
+        for published_date in ["2024", "2024-01", "2024-01-15", "unknown"] {
             let vi = GbVolumeInfo {
+                average_rating: None,
+                ratings_count: None,
                 title: None,
                 subtitle: None,
                 authors: None,
@@ -1042,7 +1043,10 @@ mod tests {
                 industry_identifiers: None,
             };
 
-            assert_eq!(map_volume_to_detail(&vi).year, expected_year);
+            let detail = map_volume_to_detail(&vi);
+            assert_eq!(detail.year, None);
+            assert_eq!(detail.original_publish_date, None);
+            assert_eq!(detail.publish_date.as_deref(), Some(published_date));
         }
     }
 

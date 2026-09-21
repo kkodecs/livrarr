@@ -17,7 +17,8 @@ use livrarr_domain::identity_layer::{
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
     guard_author_route, history_events::WorkAddSource, AuthorId, AuthorLinkError,
-    AuthorRouteEvidenceSource, AuthorRouteGuardResult, ProviderAuthorRef, UserId, WorkId,
+    AuthorRouteEvidenceSource, AuthorRouteGuardResult, CreationFacts, ProviderAuthorRef, UserId,
+    WorkId,
 };
 use livrarr_enrichment::identity_layer::EnrichmentApplyOutcome;
 use livrarr_identity::identity_layer::{
@@ -92,6 +93,26 @@ where
     pub async fn settle(
         &self,
         request: IdentityRoadRequest,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        self.settle_inner(request, None).await
+    }
+
+    /// The creation-door entry that also carries the facts the selected
+    /// result supplied. Identity decisions are unchanged: the facts reach
+    /// only the settlement commit, whose created branch persists them in
+    /// the same transaction as the Work row and its birth event.
+    pub async fn settle_creation(
+        &self,
+        request: IdentityRoadRequest,
+        facts: CreationFacts,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        self.settle_inner(request, Some(facts)).await
+    }
+
+    async fn settle_inner(
+        &self,
+        request: IdentityRoadRequest,
+        facts: Option<CreationFacts>,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         validate_road_request(&request)?;
         if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
@@ -366,6 +387,7 @@ where
                     absorbed_work_ids,
                     expected_generation,
                     review_cards,
+                    creation_facts: facts,
                 },
                 request.origin.clone(),
                 request.evidence.user_choice.is_some(),
@@ -1300,6 +1322,14 @@ where
         request: IdentityRoadRequest,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         IdentityRoadServiceImpl::settle(self, request).await
+    }
+
+    async fn settle_creation(
+        &self,
+        request: IdentityRoadRequest,
+        facts: CreationFacts,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        IdentityRoadServiceImpl::settle_creation(self, request, facts).await
     }
 
     async fn resolve_review(

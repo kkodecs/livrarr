@@ -168,6 +168,8 @@ impl WorkService for StubWorkService {
         _work_id: WorkId,
     ) -> Result<WorkDetailView, WorkServiceError> {
         Ok(WorkDetailView {
+            source_references: Vec::new(),
+            field_sources: Vec::new(),
             work: Work::default(),
             library_items: vec![],
             cover_mtime: None,

@@ -1,0 +1,2589 @@
+{
+  "google_books": {
+    "provider": "google_books",
+    "descriptionTruncated": false,
+    "genres": [
+      "Fiction"
+    ],
+    "coverUrl": "https://books.google.com/books/content?id=B1hSG45JCX4C&printsec=frontcover&img=1&zoom=0&edge=curl&source=gbs_api",
+    "contributors": [
+      {
+        "name": "Frank Herbert"
+      }
+    ],
+    "references": [
+      {
+        "kind": "google_volume",
+        "value": "B1hSG45JCX4C"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441013597"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441013593"
+      }
+    ],
+    "language": "en",
+    "publisher": "Penguin",
+    "pageCount": 548,
+    "description": "Frank Herbert’s classic masterpiece—a triumph of the imagination and one of the bestselling science fiction novels of all time. Set on the desert planet Arrakis, Dune is the story of Paul Atreides—who would become known as Muad'Dib—and of a great family's ambition to bring to fruition humankind's most ancient and unattainable dream. A stunning blend of adventure and mysticism, environmentalism and politics, Dune won the first Nebula Award, shared the Hugo Award, and formed the basis of what is undoubtedly the grandest epic in science fiction.",
+    "rating": 4.5,
+    "ratingCount": 25,
+    "editionPublishDate": "2005-08-02"
+  },
+  "open_library": {
+    "provider": "open_library",
+    "descriptionTruncated": false,
+    "genres": [],
+    "coverUrl": "https://covers.openlibrary.org/b/id/11481354-L.jpg",
+    "contributors": [
+      {
+        "name": "Frank Herbert",
+        "providerAuthorId": "OL79034A"
+      }
+    ],
+    "references": [
+      {
+        "kind": "isbn_13",
+        "value": "9788373017238"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425064344"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425080023"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450042308"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266320548"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "857657313X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266233200"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "057501864X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "057512279X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780399128967"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266320483"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "042507160X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781402523809"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "849759682X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425103811"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059320011X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450011849"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1435140745"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "8936024912741"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425266540"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172610"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0812417240"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441172717"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1556909330"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450000898"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450035697"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789997516787"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441010622"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788401469312"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340960191"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "605375479X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575104419"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8576574942"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1436233283"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340765909"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450051722"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466362819"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425046876"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575104414"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781427201430"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781435140745"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593438374"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575116781"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450051722"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575081503"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788401009129"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8373017232"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "345330523X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575035404"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786073194648"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9029002573"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "042505313X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575068566"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781399611176"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0736692401"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9877254115"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781529347869"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425036987"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575068568"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340822546"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9606232239"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425038912"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450000893"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "147323395X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576574941"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450027279"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1529347866"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1402523602"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172719"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788470021817"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425043762"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441010628"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266114042"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425054710"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425103814"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0143111582"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576571018"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381881654"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266233203"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786064304834"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266114042"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6171276898"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450027277"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781444738209"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789606232237"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1410477738"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781101658055"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059343837X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425266540"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425071601"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266307307"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781402523601"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453186834"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780736637633"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785237030778"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172665"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593438367"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450054659"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781101948712"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6073194641"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5237030777"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0801950775"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782221249482"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0606031111"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8385432167"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780426038917"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266008556"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425080021"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788412363357"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0881036366"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1402553242"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575035409"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788385432166"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340822548"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789877254112"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593200101"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266155482"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781556909337"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593200117"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575122796"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "044100749X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466356959"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425038918"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6064304839"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453317173"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9603063959"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786171276895"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425054713"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575116788"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785170103560"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593438361"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425046877"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "840100912X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780606031110"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781410477736"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9759971178"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453305236"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575073340"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576573135"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441013597"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781436233316"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0399128964"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453321227"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441013593"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450031462"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1529347858"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450031465"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780792748663"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441172636"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781529347852"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1427201439"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8417347623"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575073349"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381880572"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425053133"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781436233286"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381887534"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425043769"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575018648"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266155489"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425027066"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781473233959"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "110194871X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6064312610"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266307304"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575081505"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450035692"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450042300"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1444738208"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450054655"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340839937"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381887533"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466362818"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172634"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1399611178"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425036983"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8834718453"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8412363353"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593099322"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "978-2-266-00856-0"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441172660"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780801950773"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453186835"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1101658053"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441007493"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788417347628"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8470021818"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780881036367"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9997516788"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786586064698"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266320481"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441005901"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425064344"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786053754794"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "838188165X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789759971175"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781439501665"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453321229"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2221252055"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0426038916"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266320542"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340839935"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450011844"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "044100590X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466363408"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340765906"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059309932X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788834718452"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781402553240"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466363402"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466353771"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0792748662"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "044117261X"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1439501661"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453187047"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453317178"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "073663763X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782221252055"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789603063957"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441176205"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593200100"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8576571013"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1473696216"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6586064694"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453185678"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1402523807"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266026659"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453185676"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266026658"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453187040"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2221249488"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466356954"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5170103565"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266008552"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340960196"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780736692403"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425027066"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381880572"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788412363371"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8401469317"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1436233313"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789029002578"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441176208"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780143111580"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781473696211"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786064312617"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780812417241"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "841236337X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466353779"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788497596824"
+      },
+      {
+        "kind": "amazon",
+        "value": "B003GRIVR8"
+      },
+      {
+        "kind": "amazon",
+        "value": "B013Z2LMF6"
+      },
+      {
+        "kind": "amazon",
+        "value": "B001180MB2"
+      },
+      {
+        "kind": "amazon",
+        "value": "B002SQ5UD6"
+      },
+      {
+        "kind": "amazon",
+        "value": "9029002573"
+      },
+      {
+        "kind": "amazon",
+        "value": "059309932X"
+      },
+      {
+        "kind": "amazon",
+        "value": "1435140745"
+      },
+      {
+        "kind": "amazon",
+        "value": "B00B7NPRY8"
+      }
+    ],
+    "originalYear": 1965
+  },
+  "hardcover": {
+    "provider": "hardcover",
+    "descriptionTruncated": false,
+    "genres": [
+      "Science Fiction"
+    ],
+    "coverUrl": "https://assets.hardcover.app/books/312460/b054ec07-7893-4f0c-94ef-de4ca2bf47d6.jpg",
+    "contributors": [
+      {
+        "name": "Frank Herbert",
+        "providerAuthorId": "171873"
+      }
+    ],
+    "references": [
+      {
+        "kind": "isbn_10",
+        "value": "8417347623"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788417347628"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0792748662"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780792748663"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340960191"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340960196"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466363408"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466363402"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466363572"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466363570"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8834744292"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788834744291"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8834733797"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788834733790"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6064312610"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786064312617"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172717"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1399601784"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781399601788"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593549236"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593549230"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8576572370"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576572374"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1856958965"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781856958967"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8834739671"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788834739679"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6094274571"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786094274572"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "807214183X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788072141838"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9897831177"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789897831171"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9510484202"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789510484203"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381884101"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381884105"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381881382"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381881388"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381887534"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381887533"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8378180239"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788378180234"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1736928481"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781736928486"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3958394507"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783958394506"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9897732721"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789897732720"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1427201439"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781427201430"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6171286087"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786171286085"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5170231342"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785170897810"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9512340844"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789512340842"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593438361"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593438367"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593640330"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593640333"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441013597"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441013593"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0143111582"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780143111580"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1427201447"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781427201447"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9531318344"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789531318341"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453274466"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453274464"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "808159647X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788081596476"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1439501661"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781439501665"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6046933307"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786046933304"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059343837X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593438374"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059333471X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593334713"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593640349"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593640340"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1440631298"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781440631290"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "042505313X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425053133"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441010628"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441010622"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8385432167"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788385432166"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "044100590X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441005901"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0606031111"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780606031110"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450031462"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450031465"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0399128964"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780399128967"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450011844"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450011849"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5237030777"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785237030778"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1435140745"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781435140745"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1436233283"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781436233286"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9178934753"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789178934751"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441172660"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172665"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8401469317"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788401469312"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0801950775"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780801950773"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1402523807"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781402523809"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1444738208"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781444738209"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0881036366"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780881036367"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1101658053"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781101658055"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0812417240"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780812417241"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9896379467"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789896379469"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8381880572"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788381880572"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450035697"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450035692"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9896372489"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789896372484"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9735697483"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789735697488"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "605375479X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786053754794"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8834718453"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788834718452"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9921730746"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789921730746"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1529347866"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781529347869"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6067580640"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786067580648"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1529394430"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781529394436"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9612746567"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789612746568"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1399611178"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781399611176"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8520904882"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788520904886"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6171232386"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786171276895"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1436233313"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781436233316"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "951011376X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789510113769"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2221249482"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782221249482"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8842903051"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788842903055"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9603063959"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789603063957"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2221252055"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782221252055"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5170103565"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785170103560"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9756557273"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789756557273"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6231340066"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786231340061"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "902140768X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789021407685"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1101385456"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781101385456"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1427218366"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781427218360"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8072149415"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788072149414"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453323130"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453323131"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9934553465"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789934553462"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9021407671"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789021407678"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9612745811"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789612745813"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5171342725"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785171342722"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6001822832"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786001822834"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5171189331"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785171189334"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "7539967366"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9787539967363"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1529347858"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781529347852"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575081503"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575081505"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5171172056"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785171172053"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6258487599"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786258487596"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0593200101"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593200100"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1436233291"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781436233293"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9635663498"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789635663491"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6043684969"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786043684964"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "5170969449"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9785170969449"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8576574896"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576574897"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441172717"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441172719"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9759970112"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789759970116"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9798217192205"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "073663763X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780736637633"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453321227"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453321229"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1473696216"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781473696211"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1419759477"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781419759475"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0340839937"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780340839935"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450042308"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450042300"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450051722"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450051722"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425266540"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425266540"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8251406021"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788251406024"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266008552"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266008556"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059320011X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593200117"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8741847040"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788741847047"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450000893"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450000898"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8026922115"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788026922117"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266008560"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266008563"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266026658"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266026659"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575104414"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575104419"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8470021818"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788470021817"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9897830758"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576571018"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6586064961"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786586064964"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "658606497X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786586064971"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8371504160"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788371504167"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "059309932X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780593099322"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8886845529"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788886845526"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266320483"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266320481"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266114034"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266114035"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266307304"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266307307"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266320548"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266320542"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "2266233203"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782266233200"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6073194641"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786073194648"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "1556909330"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781556909337"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9896379459"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789896379452"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466342664"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466342667"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3785752156"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783785752159"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "6064304839"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9786064304834"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0450054659"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780450054655"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "042507160X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425071601"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0441014054"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441014057"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9178934761"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789178934768"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425036987"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425036983"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425043762"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425043769"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "345330523X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453305236"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453186834"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453186835"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9029002573"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789029002578"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425103811"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425103814"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425054713"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425054710"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425038912"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425038918"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466356959"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466356954"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8466353771"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788466353779"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "849759682X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788497596824"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8484504085"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788484504085"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425046877"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425046876"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "222112748X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9782221127483"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425064344"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425064344"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425027066"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780425027066"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575035404"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575035409"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "057512279X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575122796"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8373017232"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788373017238"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0575073349"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575073340"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "147323395X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9781473233959"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "057501864X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780575018648"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "0425080021"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3641173086"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783641173081"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3641139570"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783641139575"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453317173"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453317178"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "3453185676"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9783453185678"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8490180148"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788490180143"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "857657313X"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788576573135"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9780441000000"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9510115754"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789510115756"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "9634069037"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9789634069034"
+      },
+      {
+        "kind": "isbn_10",
+        "value": "8251406048"
+      },
+      {
+        "kind": "isbn_13",
+        "value": "9788251406048"
+      }
+    ],
+    "pageCount": 896,
+    "description": "Set on the desert planet Arrakis, Dune is the story of the boy Paul Atreides, heir to a noble family tasked with ruling an inhospitable world where the only thing of value is the “spice” melange, a drug capable of extending life and enhancing consciousness. Coveted across the known universe, melange is a prize worth killing for...\n\nWhen House Atreides is betrayed, the destruction of Paul’s family will set the boy on a journey toward a destiny greater than he could ever have imagined. And as he evolves into the mysterious man known as Muad’Dib, he will bring to fruition humankind’s most ancient and unattainable dream.",
+    "seriesName": "Dune",
+    "seriesPosition": 1.0,
+    "rating": 4.329314502239063,
+    "ratingCount": 5806,
+    "originalYear": 1965,
+    "originalPublishDate": "1965-06-01"
+  },
+  "goodreads": {
+    "provider": "goodreads",
+    "descriptionTruncated": true,
+    "genres": [],
+    "coverUrl": "https://i.gr-assets.com/images/S/compressed.photo.goodreads.com/books/1555447414i/44767458.jpg",
+    "contributors": [
+      {
+        "name": "Frank Herbert",
+        "providerAuthorId": "58"
+      }
+    ],
+    "references": [
+      {
+        "kind": "goodreads_work",
+        "value": "3634639"
+      }
+    ],
+    "pageCount": 658,
+    "description": "Set on the desert planet Arrakis, Dune is the story of the boy Paul Atreides, heir to a noble family tasked with ruling an inhospitable world where the only thing of value is …",
+    "seriesName": "Dune",
+    "seriesPosition": 1.0,
+    "rating": 4.29,
+    "ratingCount": 1709797,
+    "bareTitle": "Dune",
+    "decoratedTitle": "Dune (Dune, #1)"
+  }
+}

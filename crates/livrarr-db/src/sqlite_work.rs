@@ -6,7 +6,7 @@ use crate::sqlite_common::{absolute_http_cover_url, map_db_err, parse_dt};
 use crate::{
     ApplyEnrichmentMergeRequest, ApplyMergeOutcome, AuthorId, CreateWorkDbRequest, DbError,
     EnrichmentStatus, MediaType, NarrationType, ProvenanceSetter, UpdateWorkEnrichmentDbRequest,
-    UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkId,
+    UpdateWorkUserFieldsDbRequest, UserId, Work, WorkDb, WorkField, WorkId,
 };
 
 pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError> {
@@ -87,6 +87,9 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
         publish_date: row
             .try_get("publish_date")
             .map_err(|e| DbError::Io(Box::new(e)))?,
+        original_publish_date: row
+            .try_get("original_publish_date")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
         ol_key: row
             .try_get("ol_key")
             .map_err(|e| DbError::Io(Box::new(e)))?,
@@ -118,6 +121,9 @@ pub(crate) fn row_to_work(row: sqlx::sqlite::SqliteRow) -> Result<Work, DbError>
             .map_err(|e| DbError::Io(Box::new(e)))?,
         rating_count: row
             .try_get("rating_count")
+            .map_err(|e| DbError::Io(Box::new(e)))?,
+        description_truncated: row
+            .try_get::<bool, _>("description_truncated")
             .map_err(|e| DbError::Io(Box::new(e)))?,
         enrichment_status: parse_enrichment_status(&enrichment_status_str)?,
         identity_status: row
@@ -1090,6 +1096,13 @@ impl WorkDb for SqliteDb {
 
         // Apply work update.
         let status_str = enrichment_status_str(req.new_enrichment_status);
+        // A provider won the description this pass exactly when the merge
+        // emitted its provenance upsert; the shortened-description flag
+        // clears only when that win actually changes the stored text.
+        let description_won = req
+            .provenance_upserts
+            .iter()
+            .any(|prov| prov.field == WorkField::Description);
 
         if let Some(work_update) = req.work_update {
             let u = work_update.into_inner();
@@ -1153,9 +1166,13 @@ impl WorkDb for SqliteDb {
                  author_name = COALESCE(?, author_name), \
                  normalized_title = COALESCE(?, normalized_title), \
                  normalized_author = COALESCE(?, normalized_author), \
-                 description = ?, year = ?, series_name = ?, series_position = ?, \
+                 description = ?, \
+                 description_truncated = CASE WHEN ? AND description IS NOT ? \
+                     THEN 0 ELSE description_truncated END, \
+                 year = ?, series_name = ?, series_position = ?, \
                  genres = ?, language = COALESCE(?, language), page_count = ?, \
                  duration_seconds = ?, publisher = ?, publish_date = ?, \
+                 original_publish_date = ?, \
                  narrator = ?, narration_type = ?, \
                  abridged = ?, rating = ?, rating_count = ?, \
                  enrichment_source = ?, enrichment_status = ?, enriched_at = ?, \
@@ -1169,6 +1186,8 @@ impl WorkDb for SqliteDb {
             .bind(norm_title.as_deref())
             .bind(norm_author.as_deref())
             .bind(u.description.as_deref())
+            .bind(description_won)
+            .bind(u.description.as_deref())
             .bind(u.year)
             .bind(u.series_name.as_deref())
             .bind(u.series_position)
@@ -1178,6 +1197,7 @@ impl WorkDb for SqliteDb {
             .bind(u.duration_seconds)
             .bind(u.publisher.as_deref())
             .bind(u.publish_date.as_deref())
+            .bind(u.original_publish_date.as_deref())
             .bind(narrator_json.as_deref())
             .bind(narration_type_val)
             .bind(u.abridged)

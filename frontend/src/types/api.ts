@@ -139,6 +139,63 @@ export interface LookupResponse {
   rawAvailable: boolean;
 }
 
+export type SourceReferenceKind =
+  | "contributor_name"
+  | "open_library_author"
+  | "hardcover_author"
+  | "goodreads_author"
+  | "open_library_work"
+  | "hardcover_work"
+  | "goodreads_book"
+  | "goodreads_work"
+  | "google_volume"
+  | "isbn_10"
+  | "isbn_13"
+  | "amazon"
+  | "subtitle"
+  | "bare_title"
+  | "decorated_title"
+  | "cover_url"
+  | "cover_url_explicit"
+  | "unclassified_year";
+
+export interface SelectedContributor {
+  name: string;
+  /** The same provider's author id, when it credits one. */
+  providerAuthorId?: string | null;
+}
+
+export interface SelectedReference {
+  kind: SourceReferenceKind;
+  value: string;
+}
+
+/** Everything useful the selected search result supplied, in the provider's
+ * own terms. Echoed verbatim from the card into the Add request; never
+ * rebuilt from the visible card fields. Absent values stay absent. */
+export interface SelectedFacts {
+  provider: "google_books" | "open_library" | "hardcover" | "goodreads";
+  subtitle?: string | null;
+  language?: string | null;
+  originalYear?: number | null;
+  originalPublishDate?: string | null;
+  editionPublishDate?: string | null;
+  description?: string | null;
+  descriptionTruncated: boolean;
+  publisher?: string | null;
+  pageCount?: number | null;
+  seriesName?: string | null;
+  seriesPosition?: number | null;
+  genres: string[];
+  rating?: number | null;
+  ratingCount?: number | null;
+  coverUrl?: string | null;
+  bareTitle?: string | null;
+  decoratedTitle?: string | null;
+  contributors: SelectedContributor[];
+  references: SelectedReference[];
+}
+
 export interface WorkSearchResult {
   olKey: string | null;
   title: string;
@@ -163,6 +220,8 @@ export interface WorkSearchResult {
   hcKey?: string | null;
   grKey?: string | null;
   asin?: string | null;
+  /** The complete inventory the providing result supplied; echoed into Add. */
+  facts?: SelectedFacts | null;
 }
 
 export interface PreaddCoverCandidate {
@@ -179,7 +238,6 @@ export interface AddWorkRequest {
   authorOlKey?: string | null;
   year?: number | null;
   coverUrl?: string | null;
-  metadataSource?: string | null;
   language?: string | null;
   detailUrl?: string | null;
   coverManual?: boolean;
@@ -190,6 +248,8 @@ export interface AddWorkRequest {
   hcKey?: string | null;
   grKey?: string | null;
   asin?: string | null;
+  /** The selected result's facts, echoed verbatim from the search card. */
+  facts?: SelectedFacts | null;
 }
 
 export interface AddWorkResponse {
@@ -259,6 +319,8 @@ export interface WorkDetailResponse {
   durationSeconds: number | null;
   publisher: string | null;
   publishDate: string | null;
+  /** Original publication date with its supplied precision; `year` is its year. */
+  originalPublishDate: string | null;
   olKey: string | null;
   hcKey: string | null;
   grKey: string | null;
@@ -269,6 +331,8 @@ export interface WorkDetailResponse {
   abridged: boolean;
   rating: number | null;
   ratingCount: number | null;
+  /** True while the saved description is a provider-marked shortened text. */
+  descriptionTruncated: boolean;
   enrichmentStatus: EnrichmentStatus;
   enriching: boolean;
   identityStatus: IdentityStatus;
@@ -295,6 +359,24 @@ export interface WorkDetailResponse {
   audiobookCoverMtime?: number | null;
   identitySiblings: IdentitySiblingPresentation[];
   coverUiState: WorkCoverUiState;
+  /** Typed provider context saved with the Work; empty on library listings. */
+  sourceReferences: SourceReferenceResponse[];
+  /** Who set each ordinary field; empty on library listings. */
+  fieldSources: FieldSourceResponse[];
+}
+
+export interface SourceReferenceResponse {
+  /** Null for legacy input that named no provider. */
+  provider: string | null;
+  kind: SourceReferenceKind;
+  value: string;
+  ordinal: number;
+}
+
+export interface FieldSourceResponse {
+  field: string;
+  source: string | null;
+  setter: string;
 }
 
 export interface LibraryItemResponse {

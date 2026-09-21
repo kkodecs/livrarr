@@ -20,7 +20,16 @@ pub struct NormalizedWorkDetail {
     pub page_count: Option<i32>,
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
+    /// Edition publication date verbatim; describes one edition only.
     pub publish_date: Option<String>,
+    /// Original publication date verbatim, with the provider's precision.
+    /// Only providers whose date is a Work-level fact populate it.
+    #[serde(default)]
+    pub original_publish_date: Option<String>,
+    /// A supplied date whose meaning the producer could not establish
+    /// (LLM-repaired pages). Preserved verbatim; never merged as a date.
+    #[serde(default)]
+    pub unclassified_publish_date: Option<String>,
     pub hc_key: Option<String>,
     pub gr_key: Option<String>,
     /// Goodreads Work legacy id parsed from the already-fetched Book page.
@@ -57,6 +66,8 @@ impl From<livrarr_domain::services::SourceProviderData> for NormalizedWorkDetail
             duration_seconds: None,
             publisher: src.publisher,
             publish_date: None,
+            original_publish_date: None,
+            unclassified_publish_date: None,
             hc_key: None,
             gr_key: None,
             gr_work_key: None,

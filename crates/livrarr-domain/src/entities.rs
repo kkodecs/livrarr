@@ -403,7 +403,12 @@ pub struct Work {
     pub page_count: Option<i32>,
     pub duration_seconds: Option<i32>,
     pub publisher: Option<String>,
+    /// Edition publication date with its supplied precision.
     pub publish_date: Option<String>,
+    /// Original publication date with its supplied precision; `year` is its
+    /// year. Never filled from an edition date.
+    #[serde(default)]
+    pub original_publish_date: Option<String>,
     pub ol_key: Option<String>,
     pub hc_key: Option<String>,
     pub gr_key: Option<String>,
@@ -414,6 +419,10 @@ pub struct Work {
     pub abridged: bool,
     pub rating: Option<f64>,
     pub rating_count: Option<i32>,
+    /// True while `description` is a provider-marked shortened text; cleared
+    /// only when an eligible replacement actually changes the description.
+    #[serde(default)]
+    pub description_truncated: bool,
     pub enrichment_status: EnrichmentStatus,
     /// Identity-confidence track of the two-state split (REQ-014). Backfilled
     /// anchor-derived (D-013); see [`IdentityStatus`].

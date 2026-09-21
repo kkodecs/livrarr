@@ -35,6 +35,14 @@ pub struct GoodreadsSearchResult {
     /// these without issuing a request merely to learn them again.
     pub book_id: Option<String>,
     pub work_id: Option<String>,
+    /// The same-provider author id the autocomplete response credits.
+    pub author_id: Option<String>,
+    /// Autocomplete description as readable text, and whether Goodreads
+    /// marked it as a shortened excerpt.
+    pub description: Option<String>,
+    pub description_truncated: bool,
+    pub page_count: Option<i32>,
+    pub rating_count: Option<i32>,
 }
 
 /// Detailed metadata extracted from a Goodreads book detail page.
@@ -208,6 +216,11 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
             book_id: extract_gr_key(&detail_url)
                 .and_then(|key| key.split('.').next().map(str::to_string)),
             work_id: None,
+            author_id: None,
+            description: None,
+            description_truncated: false,
+            page_count: None,
+            rating_count: None,
         });
     }
 
@@ -218,9 +231,9 @@ pub fn parse_search_html(html: &str) -> Vec<GoodreadsSearchResult> {
 // Autocomplete (discovery) parsing
 // =============================================================================
 
-/// One entry from the Goodreads `/book/auto_complete` JSON response. Only the
-/// fields a search card needs are modeled; the rest (`workId`, `numPages`,
-/// `ratingsCount`, `description`, …) is ignored.
+/// One entry from the Goodreads `/book/auto_complete` JSON response: the
+/// fields a search card shows plus the facts a selected card carries into
+/// Add (`workId`, `numPages`, `ratingsCount`, `description`, author id).
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AutocompleteEntry {
@@ -240,6 +253,22 @@ struct AutocompleteEntry {
     book_id: Option<StringOrNumber>,
     #[serde(default)]
     work_id: Option<StringOrNumber>,
+    #[serde(default)]
+    num_pages: Option<StringOrNumber>,
+    #[serde(default)]
+    ratings_count: Option<StringOrNumber>,
+    #[serde(default)]
+    description: Option<AutocompleteDescription>,
+}
+
+/// The autocomplete `description` object: an HTML excerpt and whether
+/// Goodreads shortened it.
+#[derive(serde::Deserialize)]
+struct AutocompleteDescription {
+    #[serde(default)]
+    html: Option<String>,
+    #[serde(default)]
+    truncated: Option<bool>,
 }
 
 /// `avgRating` arrives as a string on most entries ("4.30") but as a bare JSON
@@ -271,12 +300,31 @@ impl StringOrNumber {
             StringOrNumber::N(n) => Some(n),
         }
     }
+
+    /// A whole number regardless of wire representation; fractional or
+    /// out-of-range values are not a count.
+    fn into_i32(self) -> Option<i32> {
+        let value = self.into_f64()?;
+        (value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= i32::MAX as f64)
+            .then_some(value as i32)
+    }
+
+    /// An identifier regardless of wire representation: strings verbatim,
+    /// numbers in their plain decimal form.
+    fn into_id_string(self) -> String {
+        match self {
+            StringOrNumber::S(value) => value,
+            StringOrNumber::N(value) => value.to_string(),
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
 struct AutocompleteAuthor {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    id: Option<StringOrNumber>,
 }
 
 /// Parse the Goodreads `/book/auto_complete?format=json` response into the same
@@ -315,13 +363,31 @@ pub fn parse_autocomplete_json_checked(
                 ),
                 None => (None, None),
             };
+            let (author, author_id) = match e.author {
+                Some(author) => (
+                    author.name.filter(|n| !n.trim().is_empty()),
+                    author.id.map(StringOrNumber::into_id_string),
+                ),
+                None => (None, None),
+            };
+            // The excerpt is provider text; its HTML is normalized the same
+            // way every other provider description is. A shortened marker
+            // without any text is not a description fact.
+            let (description, description_truncated) = match e.description {
+                Some(description) => {
+                    let text = description
+                        .html
+                        .map(|html| crate::google_books::strip_html_tags(&html))
+                        .filter(|text| !text.is_empty());
+                    let truncated = text.is_some() && description.truncated.unwrap_or(false);
+                    (text, truncated)
+                }
+                None => (None, false),
+            };
             Some(GoodreadsSearchResult {
                 title,
                 title_bare: e.book_title_bare.filter(|t| !t.trim().is_empty()),
-                author: e
-                    .author
-                    .and_then(|a| a.name)
-                    .filter(|n| !n.trim().is_empty()),
+                author,
                 detail_url,
                 cover_url: e
                     .image_url
@@ -337,14 +403,13 @@ pub fn parse_autocomplete_json_checked(
                     .filter(|r| !r.trim().is_empty() && r != "0.00"),
                 series_name,
                 series_position,
-                book_id: e.book_id.map(|value| match value {
-                    StringOrNumber::S(value) => value,
-                    StringOrNumber::N(value) => value.to_string(),
-                }),
-                work_id: e.work_id.map(|value| match value {
-                    StringOrNumber::S(value) => value,
-                    StringOrNumber::N(value) => value.to_string(),
-                }),
+                book_id: e.book_id.map(StringOrNumber::into_id_string),
+                work_id: e.work_id.map(StringOrNumber::into_id_string),
+                author_id,
+                description,
+                description_truncated,
+                page_count: e.num_pages.and_then(StringOrNumber::into_i32),
+                rating_count: e.ratings_count.and_then(StringOrNumber::into_i32),
             })
         })
         .collect())

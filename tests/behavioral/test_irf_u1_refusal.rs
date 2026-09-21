@@ -570,6 +570,7 @@ fn settlement_commit(
     card: ilr::SettlementReviewCard,
 ) -> ilr::SettlementCommit {
     ilr::SettlementCommit {
+        creation_facts: None,
         user_id,
         existing_work_id: None,
         add_source: None,

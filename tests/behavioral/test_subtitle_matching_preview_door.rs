@@ -215,6 +215,7 @@ async fn build_route_harness(goodreads_base_url: String) -> RouteHarness {
     let settled = WorkIdentityRepository::commit_settlement(
         &db,
         SettlementCommit {
+            creation_facts: None,
             user_id,
             existing_work_id: None,
             add_source: None,

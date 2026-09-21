@@ -792,6 +792,8 @@ fn normalized_payload(
     cover_url: Option<&str>,
 ) -> NormalizedWorkDetail {
     NormalizedWorkDetail {
+        original_publish_date: None,
+        unclassified_publish_date: None,
         title: Some(title.to_string()),
         subtitle: None,
         original_title: None,

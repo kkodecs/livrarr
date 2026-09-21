@@ -41,6 +41,8 @@ const OL_COVER: &str = "https://covers.openlibrary.org/b/id/12345-L.jpg";
 
 fn empty_detail() -> NormalizedWorkDetail {
     NormalizedWorkDetail {
+        original_publish_date: None,
+        unclassified_publish_date: None,
         title: None,
         subtitle: None,
         original_title: None,

@@ -106,6 +106,20 @@ where
         outcome
     }
 
+    async fn settle_creation(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+        facts: livrarr_domain::CreationFacts,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        // The recorded road call is the identity request; the facts are the
+        // door's descriptive payload, not identity evidence.
+        self.recorder
+            .record(IdentityRoadCall::Settle(request.clone()));
+        let outcome = self.inner.settle_creation(request, facts).await;
+        self.recorder.record_outcome(&outcome);
+        outcome
+    }
+
     async fn resolve_review(
         &self,
         actor: ReviewActor,
@@ -167,6 +181,17 @@ impl livrarr_domain::identity_layer::IdentityRoadService for AppIdentityRoad {
         match self {
             Self::Live(road) => road.settle(request).await,
             Self::Recording(road) => road.settle(request).await,
+        }
+    }
+
+    async fn settle_creation(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+        facts: livrarr_domain::CreationFacts,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        match self {
+            Self::Live(road) => road.settle_creation(request, facts).await,
+            Self::Recording(road) => road.settle_creation(request, facts).await,
         }
     }
 

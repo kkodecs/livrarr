@@ -36,6 +36,7 @@ where
         + LibraryItemDb
         + GrabDb
         + ProvenanceDb
+        + livrarr_db::SourceReferenceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb
@@ -224,6 +225,7 @@ where
         + LibraryItemDb
         + GrabDb
         + ProvenanceDb
+        + livrarr_db::SourceReferenceDb
         + EnrichmentRetryDb
         + livrarr_db::ProviderRetryStateDb
         + ConfigDb

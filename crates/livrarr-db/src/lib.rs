@@ -10,15 +10,16 @@ pub use livrarr_domain::settings::{
     EmailConfig, MediaManagementConfig, MetadataConfig, NamingConfig, ProwlarrConfig,
 };
 pub use livrarr_domain::{
-    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, CrossFormatState, DbError,
-    DownloadClient, DownloadClientId, DownloadClientImplementation, EnrichmentStatus, EventType,
-    ExternalIdRowId, ExternalIdType, FieldDissent, FieldProvenance, Grab, GrabId, GrabStatus,
-    HistoryEvent, HistoryFilter, HistoryId, Import, Indexer, IndexerConfig, IndexerId,
-    IndexerRssState, KashLink, LibraryItem, LibraryItemId, LlmProvider, MediaType, MergeResolved,
-    MetadataProvider, NarrationType, NewKashLink, Notification, NotificationId, NotificationType,
-    OutcomeClass, PlaybackProgress, ProvenanceSetter, RemotePathMapping, RemotePathMappingId,
-    RootFolder, RootFolderId, Series, Session, TagStatus, User, UserId, UserRole, Work, WorkField,
-    WorkId,
+    ApplyMergeOutcome, AudiobookChapter, Author, AuthorId, Bookmark, CreationFacts, CreationFields,
+    CreationProvenance, CrossFormatState, DbError, DownloadClient, DownloadClientId,
+    DownloadClientImplementation, EnrichmentStatus, EventType, ExternalIdRowId, ExternalIdType,
+    FieldDissent, FieldProvenance, Grab, GrabId, GrabStatus, HistoryEvent, HistoryFilter,
+    HistoryId, Import, Indexer, IndexerConfig, IndexerId, IndexerRssState, KashLink, LibraryItem,
+    LibraryItemId, LlmProvider, MediaType, MergeResolved, MetadataProvider, NarrationType,
+    NewKashLink, Notification, NotificationId, NotificationType, OutcomeClass, PlaybackProgress,
+    ProvenanceSetter, RemotePathMapping, RemotePathMappingId, RootFolder, RootFolderId, Series,
+    Session, SourceReference, SourceReferenceKind, TagStatus, User, UserId, UserRole, Work,
+    WorkField, WorkId,
 };
 
 mod api;
@@ -62,6 +63,7 @@ mod sqlite_series;
 mod sqlite_series_cache;
 mod sqlite_series_roster;
 mod sqlite_session;
+mod sqlite_source_reference;
 mod sqlite_user;
 mod sqlite_work;
 mod sqlite_work_identity;
@@ -516,6 +518,7 @@ pub mod test_helpers {
                 absorbed_work_ids: Vec::new(),
                 expected_generation: 0,
                 review_cards: Vec::new(),
+                creation_facts: None,
             },
         )
         .await

@@ -244,6 +244,8 @@ async fn test_mc_language_incompatible_content_field_page_count_year_dissented_a
                 payload: Some(NormalizedWorkDetail {
                     page_count: Some(999),
                     year: Some(1844),
+                    // A parsed Goodreads "First published" year is an original date.
+                    original_publish_date: Some("1844".to_string()),
                     ..detail("Le Comte de Monte-Cristo", "french edition", Some("fr"))
                 }),
             },

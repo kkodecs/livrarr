@@ -222,6 +222,7 @@ pub async fn lookup<S: HasDiscoveryService>(
             hc_key: r.hc_key,
             gr_key: r.gr_key,
             asin: r.asin,
+            facts: r.facts,
         })
         .collect();
 
@@ -245,7 +246,7 @@ pub async fn add<
 >(
     State(state): State<S>,
     ctx: AuthContext,
-    Json(req): Json<AddWorkRequest>,
+    Json(mut req): Json<AddWorkRequest>,
 ) -> Result<Json<AddWorkResponse>, ApiError> {
     use livrarr_domain::identity::RawHarvest;
     use livrarr_domain::seed::{seed_add_box, SeedInput, SeedLanguage};
@@ -262,6 +263,22 @@ pub async fn add<
         .as_deref()
         .map(livrarr_domain::unproxy_cover_url);
     let cover_is_manual = req.cover_manual && cover_url.is_some();
+    // What the created branch of the settlement transaction saves with the
+    // Work row: the selected result's facts, or the legacy request's own
+    // supplied language, cover address and unclassified year. Built before
+    // any write so a malformed request creates nothing.
+    let creation_facts = creation_facts_for_add(
+        req.facts.take(),
+        AddDoorInput {
+            language: req.language.as_deref(),
+            year: req.year,
+            cover_url: cover_url.as_deref(),
+            cover_manual: req.cover_manual,
+            ol_key: req.ol_key.as_deref(),
+            hc_key: req.hc_key.as_deref(),
+            gr_key: req.gr_key.as_deref(),
+        },
+    )?;
 
     // Local-only identity derivation (REQ-004): sanitize the harvest and take
     // the badge the seed itself supports — zero network before the response.
@@ -326,26 +343,28 @@ pub async fn add<
         title: candidate.fields.title.clone(),
         authors: vec![author_id],
     };
+    let road_request = livrarr_domain::identity_layer::IdentityRoadRequest {
+        user_id: ctx.user.id,
+        origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
+            livrarr_domain::identity_layer::DoorKind::DirectAdd,
+        ),
+        evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+            user_choice: Some(
+                livrarr_domain::identity_layer::UserIdentityChoice::ExplicitCreate(minimum.clone()),
+            ),
+            owned_files: Vec::new(),
+            provider_identity,
+            minimum: Some(minimum),
+        },
+        interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+        existing_work_id: None,
+    };
+    // Same road, same identity decisions; the created branch of its
+    // settlement transaction also persists the facts, and an existing or
+    // adopted Work ignores them.
     let road_outcome = state
         .identity_road_service()
-        .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
-            user_id: ctx.user.id,
-            origin: livrarr_domain::identity_layer::IdentityRoadOrigin::CreationDoor(
-                livrarr_domain::identity_layer::DoorKind::DirectAdd,
-            ),
-            evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
-                user_choice: Some(
-                    livrarr_domain::identity_layer::UserIdentityChoice::ExplicitCreate(
-                        minimum.clone(),
-                    ),
-                ),
-                owned_files: Vec::new(),
-                provider_identity,
-                minimum: Some(minimum),
-            },
-            interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
-            existing_work_id: None,
-        })
+        .settle_creation(road_request, creation_facts)
         .await
         .map_err(map_identity_road_error)?;
     let (road_work_id, road_created) = match road_outcome {
@@ -373,16 +392,22 @@ pub async fn add<
         }
     };
 
-    let work = state.work_service().get(ctx.user.id, road_work_id).await?;
+    // The initial response is built from the same single-Work view as
+    // `GET /work/{id}`, so it reports the saved values, references and
+    // provenance whether or not enrichment ever runs.
+    let view = state
+        .work_service()
+        .get_detail(ctx.user.id, road_work_id)
+        .await?;
     let result = livrarr_domain::services::AddWorkResult {
-        enrichment_status: work.enrichment_status,
-        work,
+        enrichment_status: view.work.enrichment_status,
+        work: view.work.clone(),
         created: road_created,
         author_created: author_result.is_created(),
         author_id: Some(author_id),
         messages: Vec::new(),
-        cover_mtime: None,
-        audiobook_cover_mtime: None,
+        cover_mtime: view.cover_mtime,
+        audiobook_cover_mtime: view.audiobook_cover_mtime,
     };
 
     // Background completion (REQ-004): identity fan-out + enrichment + covers
@@ -498,6 +523,7 @@ pub async fn add<
     );
     project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
         .await?;
+    crate::types::work::apply_source_facts(&mut detail, &view);
     // A created work has its completion running right now (spawned above) —
     // report it directly rather than racing the registry's first insert.
     detail.enriching = result.created;
@@ -507,6 +533,273 @@ pub async fn add<
         author_created: result.author_created,
         messages: result.messages,
     }))
+}
+
+/// The Add request's own fields the creation door still saves: the legacy
+/// hints used when no selected facts arrive, plus the primary identifiers
+/// every card echoes.
+struct AddDoorInput<'a> {
+    language: Option<&'a str>,
+    year: Option<i32>,
+    /// The request cover address after unproxying.
+    cover_url: Option<&'a str>,
+    cover_manual: bool,
+    ol_key: Option<&'a str>,
+    hc_key: Option<&'a str>,
+    gr_key: Option<&'a str>,
+}
+
+fn trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn is_absolute_http(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Everything the created branch saves with the new Work row.
+///
+/// With selected facts: every supplied value with Provider provenance, the
+/// contributors and typed identifiers as source references (a name and its
+/// same-provider author id share an ordinal), the titles the card kept
+/// apart, and the cover address with its explicit-choice intent. A copied
+/// fact is never a personal edit. Without facts (older clients and
+/// resolver-produced cards): the raw supplied language as a source-free
+/// Import fact, the cover address, and the bare year as unclassified
+/// context. The resolved default language is never persisted.
+fn creation_facts_for_add(
+    facts: Option<livrarr_domain::SelectedFacts>,
+    input: AddDoorInput<'_>,
+) -> Result<livrarr_domain::CreationFacts, ApiError> {
+    use livrarr_domain::{
+        CreationFacts, CreationFields, CreationProvenance, MetadataProvider, ProvenanceSetter,
+        SourceReference, SourceReferenceKind, WorkField,
+    };
+
+    let cover_kind = if input.cover_manual {
+        SourceReferenceKind::CoverUrlExplicit
+    } else {
+        SourceReferenceKind::CoverUrl
+    };
+
+    let Some(facts) = facts else {
+        let mut creation = CreationFacts::default();
+        if let Some(language) = trimmed(input.language) {
+            creation.fields.language = Some(language);
+            creation.provenance.push(CreationProvenance {
+                field: WorkField::Language,
+                setter: ProvenanceSetter::Import,
+                source: None,
+            });
+        }
+        if let Some(url) = trimmed(input.cover_url).filter(|url| is_absolute_http(url)) {
+            creation.fields.cover_url = Some(url.clone());
+            creation.references.push(SourceReference {
+                provider: None,
+                kind: cover_kind,
+                value: url,
+                ordinal: 0,
+            });
+        }
+        if let Some(year) = input.year {
+            creation.references.push(SourceReference {
+                provider: None,
+                kind: SourceReferenceKind::UnclassifiedYear,
+                value: year.to_string(),
+                ordinal: 0,
+            });
+        }
+        return Ok(creation);
+    };
+
+    let provider = facts.provider;
+    if !matches!(
+        provider,
+        MetadataProvider::GoogleBooks
+            | MetadataProvider::OpenLibrary
+            | MetadataProvider::Hardcover
+            | MetadataProvider::Goodreads
+    ) {
+        return Err(ApiError::BadRequest(format!(
+            "facts.provider {} is not a search provider",
+            provider.record_key()
+        )));
+    }
+    let description = trimmed(facts.description.as_deref());
+    if facts.description_truncated && description.is_none() {
+        return Err(ApiError::BadRequest(
+            "facts.descriptionTruncated requires a description".into(),
+        ));
+    }
+    let facts_cover =
+        trimmed(facts.cover_url.as_deref()).map(|url| livrarr_domain::unproxy_cover_url(&url));
+    let cover = match trimmed(input.cover_url) {
+        Some(url) => Some(url),
+        None => facts_cover.clone(),
+    };
+    if cover.as_deref().is_some_and(|url| !is_absolute_http(url)) {
+        return Err(ApiError::BadRequest(
+            "coverUrl must be an absolute http(s) address".into(),
+        ));
+    }
+    // The provider is credited for the cover address only when the saved
+    // address is the one its card supplied; any other explicit pick names
+    // no provider.
+    let cover_from_provider = cover.is_some() && cover == facts_cover;
+
+    let genres: Vec<String> = facts
+        .genres
+        .iter()
+        .filter_map(|genre| trimmed(Some(genre)))
+        .collect();
+    let fields = CreationFields {
+        language: trimmed(facts.language.as_deref()),
+        description,
+        description_truncated: facts.description_truncated,
+        year: facts.original_year,
+        original_publish_date: trimmed(facts.original_publish_date.as_deref()),
+        publish_date: trimmed(facts.edition_publish_date.as_deref()),
+        publisher: trimmed(facts.publisher.as_deref()),
+        page_count: facts.page_count,
+        series_name: trimmed(facts.series_name.as_deref()),
+        series_position: facts.series_position,
+        genres: (!genres.is_empty()).then_some(genres),
+        rating: facts.rating,
+        rating_count: facts.rating_count,
+        cover_url: cover.clone(),
+    };
+    let populated = [
+        (WorkField::Language, fields.language.is_some()),
+        (WorkField::Description, fields.description.is_some()),
+        (WorkField::Year, fields.year.is_some()),
+        (
+            WorkField::OriginalPublishDate,
+            fields.original_publish_date.is_some(),
+        ),
+        (WorkField::PublishDate, fields.publish_date.is_some()),
+        (WorkField::Publisher, fields.publisher.is_some()),
+        (WorkField::PageCount, fields.page_count.is_some()),
+        (WorkField::SeriesName, fields.series_name.is_some()),
+        (WorkField::SeriesPosition, fields.series_position.is_some()),
+        (WorkField::Genres, fields.genres.is_some()),
+        (WorkField::Rating, fields.rating.is_some()),
+        (WorkField::RatingCount, fields.rating_count.is_some()),
+        (WorkField::CoverUrl, cover_from_provider),
+    ];
+    let provenance = populated
+        .into_iter()
+        .filter(|(_, populated)| *populated)
+        .map(|(field, _)| CreationProvenance {
+            field,
+            setter: ProvenanceSetter::Provider,
+            source: Some(provider),
+        })
+        .collect();
+
+    let mut references = Vec::new();
+    let author_kind = SourceReferenceKind::author_kind_for(provider);
+    let mut contributor_ordinal = 0i64;
+    for contributor in facts.contributors {
+        let Some(name) = trimmed(Some(&contributor.name)) else {
+            continue;
+        };
+        references.push(SourceReference {
+            provider: Some(provider),
+            kind: SourceReferenceKind::ContributorName,
+            value: name,
+            ordinal: contributor_ordinal,
+        });
+        if let Some(id) = trimmed(contributor.provider_author_id.as_deref()) {
+            let Some(kind) = author_kind else {
+                return Err(ApiError::BadRequest(format!(
+                    "{} supplies no author identifier namespace",
+                    provider.record_key()
+                )));
+            };
+            references.push(SourceReference {
+                provider: Some(provider),
+                kind,
+                value: id,
+                ordinal: contributor_ordinal,
+            });
+        }
+        contributor_ordinal += 1;
+    }
+
+    // Typed identifiers: the card's extras plus the primary identifiers it
+    // echoes, each namespace keeping its own stable ordinals. A repeated
+    // identical identifier is one fact.
+    let primary = [
+        (SourceReferenceKind::OpenLibraryWork, input.ol_key),
+        (SourceReferenceKind::HardcoverWork, input.hc_key),
+        (SourceReferenceKind::GoodreadsBook, input.gr_key),
+    ];
+    let identifiers = facts
+        .references
+        .iter()
+        .map(|reference| (reference.kind, trimmed(Some(&reference.value))))
+        .chain(
+            primary
+                .into_iter()
+                .map(|(kind, value)| (kind, trimmed(value))),
+        );
+    let mut next_ordinal: std::collections::HashMap<SourceReferenceKind, i64> =
+        std::collections::HashMap::new();
+    let mut seen: std::collections::HashSet<(SourceReferenceKind, String)> =
+        std::collections::HashSet::new();
+    for (kind, value) in identifiers {
+        if !kind.is_selectable_identifier() {
+            return Err(ApiError::BadRequest(format!(
+                "facts.references kind {kind:?} is not a provider identifier"
+            )));
+        }
+        let Some(value) = value else {
+            continue;
+        };
+        if !seen.insert((kind, value.clone())) {
+            continue;
+        }
+        let ordinal = next_ordinal.entry(kind).or_insert(0);
+        references.push(SourceReference {
+            provider: Some(provider),
+            kind,
+            value,
+            ordinal: *ordinal,
+        });
+        *ordinal += 1;
+    }
+
+    for (kind, value) in [
+        (SourceReferenceKind::Subtitle, facts.subtitle),
+        (SourceReferenceKind::BareTitle, facts.bare_title),
+        (SourceReferenceKind::DecoratedTitle, facts.decorated_title),
+    ] {
+        if let Some(value) = trimmed(value.as_deref()) {
+            references.push(SourceReference {
+                provider: Some(provider),
+                kind,
+                value,
+                ordinal: 0,
+            });
+        }
+    }
+    if let Some(url) = cover {
+        references.push(SourceReference {
+            provider: cover_from_provider.then_some(provider),
+            kind: cover_kind,
+            value: url,
+            ordinal: 0,
+        });
+    }
+
+    Ok(CreationFacts {
+        fields,
+        provenance,
+        references,
+    })
 }
 
 fn candidate_provider_evidence(
@@ -742,6 +1035,7 @@ pub async fn get<S: HasWorkService + HasFileService + HasIdentityLayerRepository
         Err(error) => return Err(map_identity_repository_error(error)),
     }
     detail.enriching = state.work_service().is_enriching(ctx.user.id, id);
+    crate::types::work::apply_source_facts(&mut detail, &view);
     detail.library_items = view
         .library_items
         .iter()
