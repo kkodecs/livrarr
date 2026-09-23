@@ -809,8 +809,12 @@ where
                         )),
                         series_name: candidate.fields.series_name.clone(),
                         series_position: candidate.fields.series_position,
-                        monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
-                        monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
+                        monitor_ebook: candidate
+                            .monitor_ebook
+                            .unwrap_or(livrarr_domain::DEFAULT_MONITOR_EBOOK),
+                        monitor_audiobook: candidate
+                            .monitor_audiobook
+                            .unwrap_or(livrarr_domain::DEFAULT_MONITOR_AUDIOBOOK),
                         import_id: candidate.import_id.clone(),
                         series_id: candidate.series_id,
                         isbn_13: candidate
@@ -1008,8 +1012,12 @@ where
                         )),
                         series_name: candidate.fields.series_name.clone(),
                         series_position: candidate.fields.series_position,
-                        monitor_ebook: candidate.monitor_ebook.unwrap_or(true),
-                        monitor_audiobook: candidate.monitor_audiobook.unwrap_or(true),
+                        monitor_ebook: candidate
+                            .monitor_ebook
+                            .unwrap_or(livrarr_domain::DEFAULT_MONITOR_EBOOK),
+                        monitor_audiobook: candidate
+                            .monitor_audiobook
+                            .unwrap_or(livrarr_domain::DEFAULT_MONITOR_AUDIOBOOK),
                         import_id: candidate.import_id.clone(),
                         series_id: candidate.series_id,
                         isbn_13: candidate

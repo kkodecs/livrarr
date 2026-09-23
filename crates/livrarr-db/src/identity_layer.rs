@@ -763,9 +763,10 @@ async fn commit_settlement_in_tx(
                      normalized_author, added_at, normalized_identity_main, \
                      normalized_identity_subtitle, normalized_identity_volume, \
                      text_distinction, identity_status_v2, primary_author_id, \
-                     identity_generation, identity_title_provenance, identity_volume) \
+                     identity_generation, identity_title_provenance, identity_volume, \
+                     monitor_ebook, monitor_audiobook) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?6, ?9, ?10, \
-                         ?11, 'not_connected', ?5, 1, ?12, ?13)",
+                         ?11, 'not_connected', ?5, 1, ?12, ?13, ?14, ?15)",
         )
         .bind(command.user_id)
         .bind(&command.identity_title.main)
@@ -780,6 +781,10 @@ async fn commit_settlement_in_tx(
         .bind(command.text_distinction.as_deref().unwrap_or("common"))
         .bind(&provenance)
         .bind(&command.identity_title.volume)
+        // The created Work states its monitoring explicitly instead of
+        // inheriting the column defaults.
+        .bind(livrarr_domain::DEFAULT_MONITOR_EBOOK)
+        .bind(livrarr_domain::DEFAULT_MONITOR_AUDIOBOOK)
         .execute(&mut **tx)
         .await
         .map_err(map_settlement_sql)?;

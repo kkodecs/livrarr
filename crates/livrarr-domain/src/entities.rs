@@ -380,6 +380,13 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// The monitoring a newly created Work starts with: both formats wanted.
+/// Creation doors with no format intent of their own state these explicitly,
+/// so no Work's monitoring is decided by a column default.
+pub const DEFAULT_MONITOR_EBOOK: bool = true;
+/// See [`DEFAULT_MONITOR_EBOOK`].
+pub const DEFAULT_MONITOR_AUDIOBOOK: bool = true;
+
 /// Work entity — the primary domain object.
 ///
 /// Satisfies: SEARCH-004, SEARCH-006, SEARCH-013

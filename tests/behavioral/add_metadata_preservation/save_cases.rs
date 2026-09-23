@@ -308,3 +308,31 @@ async fn initial_incomplete_pairs_keep_missing_partners_and_contributor_associat
     assert_primary_author_only(&h, id).await;
     assert_one_birth(&h, id).await;
 }
+
+// A newly added Work monitors both formats. The Add route is the real door;
+// the assertion pins only the two monitoring observables, in the response and
+// in the stored row.
+#[tokio::test]
+async fn new_work_defaults_to_monitoring_both_formats() {
+    let _breaker = lock_breaker().await;
+    let (h, _, gate) = captured_harness(MetadataProvider::GoogleBooks).await;
+    gate.store(false, Ordering::SeqCst);
+    let added = post_add(&h, save_request()).await;
+    let id = created_id(&added);
+    for work in [&added.json["work"], &detail(&h, id).await] {
+        assert_eq!(work["monitorEbook"], true, "ebook monitored by default");
+        assert_eq!(
+            work["monitorAudiobook"], true,
+            "audiobook monitored by default"
+        );
+    }
+    let row: (bool, bool) = sqlx::query_as(
+        "SELECT monitor_ebook, monitor_audiobook FROM works WHERE user_id=?1 AND id=?2",
+    )
+    .bind(h.user_id)
+    .bind(id)
+    .fetch_one(h.db.pool())
+    .await
+    .unwrap();
+    assert_eq!(row, (true, true), "stored monitoring flags");
+}
