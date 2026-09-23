@@ -9,8 +9,13 @@ import {
 } from "@/test-support/apiStub";
 import type { WorkCoverUiState, WorkDetailResponse } from "@/types/api";
 
-const FROZEN_SIBLING_COPY =
+// Superseded 2026-09-23 by PO decision: the "Other books by this author"
+// panel and the identitySiblings response field are removed. These strings
+// pin their absence.
+const REMOVED_SIBLING_HEADING = "Other books by this author";
+const REMOVED_SIBLING_COPY =
   "Confirming this book's identity affects only this book. Other books by this author stay exactly as they are.";
+const REMOVED_SIBLING_EMPTY_STATE = "No related library books to show.";
 
 function makeWork(
   coverUiState: WorkCoverUiState,
@@ -37,22 +42,6 @@ function makeWork(
     audiobookCoverSource: null,
     audiobookCoverMtime: null,
     coverUiState,
-    identitySiblings: [
-      {
-        workId: 8,
-        title: "The First Sibling",
-        authorName: "Case Writer",
-        edition: "Ebook",
-        route: "Open Library",
-      },
-      {
-        workId: 9,
-        title: "The Second Sibling",
-        authorName: "Case Writer",
-        edition: "Audiobook",
-        route: "Goodreads",
-      },
-    ],
     ...over,
   } as unknown as WorkDetailResponse;
 }
@@ -80,7 +69,7 @@ function mountWorkRoute() {
 }
 
 describe("Book information identity-layer presentation", () => {
-  it("keeps the sibling panel informational with the frozen copy and zero mutations", async () => {
+  it("renders no sibling panel and issues zero mutations", async () => {
     const work = makeWork({
       formatNeeded: null,
       ebook: { state: "NowhereToLook" },
@@ -89,26 +78,18 @@ describe("Book information identity-layer presentation", () => {
     const api = installWorkRoute(work);
     const mounted = mountWorkRoute();
     try {
-      await vi.waitFor(() => expect(mounted.container.textContent).toContain(FROZEN_SIBLING_COPY));
-      expect(mounted.container.textContent).toContain("Merging is currently unavailable.");
+      await vi.waitFor(() =>
+        expect(mounted.container.textContent).toContain("Merging is currently unavailable."),
+      );
       expect(Array.from(mounted.container.querySelectorAll("button"))
         .some((button) => /merge/i.test(button.textContent ?? ""))).toBe(false);
-      const panel = mounted.container.querySelector<HTMLElement>(
-        '[data-testid="identity-sibling-panel"]',
-      );
-      expect(panel).not.toBeNull();
-      expect(panel?.querySelectorAll("button")).toHaveLength(0);
-
-      const siblingAffordances = Array.from(
-        panel?.querySelectorAll<HTMLAnchorElement>("[data-sibling-affordance]") ?? [],
-      );
-      expect(siblingAffordances).toHaveLength(2);
-      for (const affordance of siblingAffordances) {
-        affordance.addEventListener("click", (event) => event.preventDefault(), { once: true });
-        await act(async () => {
-          affordance.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-        });
-      }
+      expect(
+        mounted.container.querySelector('[data-testid="identity-sibling-panel"]'),
+      ).toBeNull();
+      expect(mounted.container.querySelectorAll("[data-sibling-affordance]")).toHaveLength(0);
+      expect(mounted.container.textContent).not.toContain(REMOVED_SIBLING_HEADING);
+      expect(mounted.container.textContent).not.toContain(REMOVED_SIBLING_COPY);
+      expect(mounted.container.textContent).not.toContain(REMOVED_SIBLING_EMPTY_STATE);
 
       expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
 

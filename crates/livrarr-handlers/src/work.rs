@@ -1006,30 +1006,7 @@ pub async fn get<S: HasWorkService + HasFileService + HasIdentityLayerRepository
         .await
     {
         Ok(captured) => {
-            let siblings = state
-                .identity_layer_repository()
-                .list_captured_identities_in_group(
-                    ctx.user.id,
-                    captured.identity_title.normalized_main.clone(),
-                    captured.primary_author_id,
-                )
-                .await
-                .map_err(map_identity_repository_error)?;
-            let author_name = state
-                .identity_layer_repository()
-                .read_primary_author_names(ctx.user.id, captured.primary_author_id)
-                .await
-                .map_err(map_identity_repository_error)?
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| view.work.author_name.clone());
-            crate::types::work::apply_identity_presentation(
-                &mut detail,
-                &view.work,
-                &captured,
-                siblings,
-                author_name,
-            );
+            crate::types::work::apply_identity_presentation(&mut detail, &view.work, &captured);
         }
         Err(livrarr_domain::identity_layer::IdentityRepositoryError::NotFound) => {}
         Err(error) => return Err(map_identity_repository_error(error)),

@@ -1,5 +1,4 @@
 import { RefreshCw } from "lucide-react";
-import { Link } from "react-router";
 import { BookCover } from "@/components/BookCover";
 import { HelpTip } from "@/components/HelpTip";
 import { cn } from "@/utils/cn";
@@ -10,7 +9,6 @@ import type {
   WorkDetailResponse,
   WorkCoverUiState,
   EnrichmentStatus,
-  IdentitySiblingPresentation,
   IdentityStatus,
 } from "@/types/api";
 import { StatusBadge, type BadgeTone } from "./StatusBadge";
@@ -76,7 +74,6 @@ export function BookInformationTab({
             Re-matching is paused until the open identity conflict is reviewed.
           </p>
         )}
-        <IdentitySiblingPanel siblings={work.identitySiblings} />
         <dl className="mt-4">
           <MetadataRow label="Open Library" value={identityValue(work.olKey)} />
           <MetadataRow label="Hardcover" value={identityValue(work.hcKey)} />
@@ -144,49 +141,6 @@ export function BookInformationTab({
         </p>
       </section>
 
-    </div>
-  );
-}
-
-function IdentitySiblingPanel({
-  siblings,
-}: {
-  siblings: IdentitySiblingPresentation[];
-}) {
-  return (
-    <div
-      data-testid="identity-sibling-panel"
-      className="mt-4 rounded-lg border border-border bg-zinc-900/40 p-3"
-    >
-      <div className="flex items-center gap-1.5">
-        <h4 className="text-xs font-medium text-zinc-200">Other books by this author</h4>
-        <HelpTip text="This list is informational. Open a book to change that book on its own page." />
-      </div>
-      <p className="mt-1 text-xs text-muted">
-        Confirming this book's identity affects only this book. Other books by this author stay exactly as they are.
-      </p>
-      {siblings.length > 0 ? (
-        <ul className="mt-2 divide-y divide-border/60">
-          {siblings.map((sibling) => (
-            <li key={sibling.workId}>
-              <Link
-                data-sibling-affordance
-                to={`/work/${sibling.workId}?tab=metadata`}
-                className="block py-2 text-xs transition-colors hover:text-zinc-100"
-              >
-                <span className="block font-medium text-zinc-200">{sibling.title}</span>
-                <span className="text-muted">
-                  {[sibling.authorName, sibling.edition, sibling.route]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-2 text-xs text-zinc-600">No related library books to show.</p>
-      )}
     </div>
   );
 }

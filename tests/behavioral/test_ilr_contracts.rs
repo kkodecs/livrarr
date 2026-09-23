@@ -5692,7 +5692,6 @@ async fn red_frontend_sibling() {
         "libraryItems",
         "enriching",
         "parkedByConflicts",
-        "identitySiblings",
         "coverUiState",
     ];
     let detail_fields = encoded.as_object().expect("work detail is an object");
@@ -5702,14 +5701,12 @@ async fn red_frontend_sibling() {
             "work-detail overlay dropped DTO field {field}"
         );
     }
-    let siblings = encoded["identitySiblings"]
-        .as_array()
-        .expect("production work detail emits identitySiblings");
-    assert_eq!(siblings.len(), 1, "two settled Works produce one sibling");
-    assert_eq!(siblings[0]["title"], "ILR DTO Shape");
-    assert_eq!(siblings[0]["authorName"], "Identity Author dto-shape");
-    assert_eq!(siblings[0]["edition"], "Audiobook edition");
-    assert_eq!(siblings[0]["route"], "Goodreads");
+    // Superseded 2026-09-23 by PO decision: the sibling panel and the
+    // identitySiblings response field are removed.
+    assert!(
+        !detail_fields.contains_key("identitySiblings"),
+        "work detail must no longer emit the removed identitySiblings field"
+    );
     let migrated_gr = call_router_json(
         &harness,
         Method::GET,
@@ -5738,43 +5735,37 @@ async fn red_frontend_sibling() {
         encoded["coverUiState"]["audiobook"]["state"], "NoCoverFound",
         "an enriched Work with active identity_routes must not degrade to NowhereToLook"
     );
+    // Superseded 2026-09-23 by PO decision: the Book information tab no longer
+    // renders a sibling panel at all, so the production source must carry none
+    // of its markers.
     let work_detail = strip_rust_comments(include_str!(
         "../../frontend/src/pages/work-detail/components/BookInformationTab.tsx"
     ));
-    let panel = work_detail
-        .split("function IdentitySiblingPanel")
-        .nth(1)
-        .unwrap_or_default();
-    let exact = "Confirming this book's identity affects only this book. Other books by this author stay exactly as they are.";
-    assert!(
-        panel.contains(exact),
-        "production Work detail must render the PO-frozen sibling copy"
-    );
-    for mutation_control in [
-        "useMutation(",
-        ".mutate(",
-        "onClear",
-        "onRemove",
-        "onReset",
-        "onDetach",
-        "onReplace",
+    for removed_marker in [
+        "IdentitySiblingPanel",
+        "identitySiblings",
+        "identity-sibling-panel",
+        "data-sibling-affordance",
+        "Other books by this author",
+        "Confirming this book's identity affects only this book",
+        "No related library books to show.",
     ] {
         assert!(
-            !panel.contains(mutation_control),
-            "sibling panel must be informational; found mutation control {mutation_control:?}"
+            !work_detail.contains(removed_marker),
+            "removed sibling panel still present in Book information tab: {removed_marker:?}"
         );
     }
-    // The implementation-phase render harness drives the production Work
-    // detail route, clicks every sibling affordance, and rejects mutation
-    // requests at the real frontend API boundary.
+    // The render harness still drives the production Work detail route and
+    // still rejects mutations; it must now assert the panel's absence.
     let render_harness = strip_rust_comments(include_str!(
         "../../frontend/src/pages/work-detail/components/BookInformationTab.test.tsx"
     ));
     assert!(
         render_harness.contains("<WorkDetailPage />")
-            && render_harness.contains("[data-sibling-affordance]")
+            && render_harness.contains("[data-testid=\"identity-sibling-panel\"]")
+            && render_harness.contains("toBeNull()")
             && render_harness.contains("call.method !== \"GET\""),
-        "production frontend harness must click sibling affordances and assert zero mutations"
+        "production frontend harness must assert the sibling panel is absent and zero mutations"
     );
 
     let list = call_router_json(
@@ -5973,7 +5964,15 @@ async fn red_presentation_survives_deleted_author() {
         detail.json
     );
     assert_eq!(detail.json["authorName"], "Deleted Author Presentation");
-    assert_eq!(detail.json["identitySiblings"], json!([]));
+    // Superseded 2026-09-23 by PO decision: the identitySiblings field is gone
+    // from the work-detail response entirely.
+    assert!(
+        detail
+            .json
+            .as_object()
+            .is_some_and(|fields| !fields.contains_key("identitySiblings")),
+        "degraded work detail must not emit the removed identitySiblings field"
+    );
     assert_eq!(
         detail.json["coverUiState"]["ebook"]["state"], "Selected",
         "stored Work cover remains present in the degraded projection"
@@ -16222,7 +16221,7 @@ red_tests! {
 
     // frontend contracts, exercised from the Rust behavioral target so the
     // packet's `test_ilr_*.rs` write fence remains intact.
-    ac019_sibling_panel_is_informational_and_copy_is_exact => red_frontend_sibling(),
+    ac019_sibling_panel_and_identity_siblings_field_are_removed => red_frontend_sibling(),
     presentation_reads_survive_real_author_delete_and_refresh_does_not_404 => red_presentation_survives_deleted_author(),
     cover_ui_one_shared_panel_three_slot_states_and_source_only_labels => red_frontend_cover(),
     handler_compile_wall_identity_review_route_smoke => red_handler_identity_route_smoke(),

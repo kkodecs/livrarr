@@ -266,14 +266,6 @@ export interface RefreshWorkResponse {
 
 export type CoverSourceLabel = "Provider" | "Your file" | "Yours";
 
-export interface IdentitySiblingPresentation {
-  workId: number;
-  title: string;
-  authorName: string;
-  edition?: string | null;
-  route?: string | null;
-}
-
 export interface FormatNeededCover {
   id: string;
   source: CoverSourceLabel;
@@ -357,7 +349,6 @@ export interface WorkDetailResponse {
   detailUrl?: string | null;
   coverMtime?: number | null;
   audiobookCoverMtime?: number | null;
-  identitySiblings: IdentitySiblingPresentation[];
   coverUiState: WorkCoverUiState;
   /** Typed provider context saved with the Work; empty on library listings. */
   sourceReferences: SourceReferenceResponse[];

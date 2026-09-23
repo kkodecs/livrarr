@@ -587,6 +587,10 @@ the fix in F1; the works side, and the seams that join the two, are this feature
   the routes model made obsolete (nothing is cleared by confirming). The
   panel's copy is not yet written — it is frozen with the PO at design; until
   then acceptance binds to the behavioral properties only.
+  - Superseded 2026-09-23 by PO decision: the sibling panel and the
+    `identitySiblings` response field are removed. Reason: the sibling group is
+    empty by construction in a healthy library and the heading promised an
+    author bibliography it never provided.
 
 ### Authors riding (settled in §8 of the F1 notes)
 

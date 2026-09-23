@@ -1,9 +1,8 @@
 use livrarr_domain::services::{MergeFieldChoice, MergeableField};
 use livrarr_domain::{
-    identity::CandidateId,
-    identity_layer::{CapturedIdentity, IdentityProvider},
-    AuthorId, EnrichmentStatus, IdentityStatus, LibraryItemId, MediaType, MetadataProvider,
-    NarrationType, ProvenanceSetter, SelectedFacts, SourceReferenceKind, Work, WorkField, WorkId,
+    identity::CandidateId, identity_layer::CapturedIdentity, AuthorId, EnrichmentStatus,
+    IdentityStatus, LibraryItemId, MediaType, MetadataProvider, NarrationType, ProvenanceSetter,
+    SelectedFacts, SourceReferenceKind, Work, WorkField, WorkId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -258,9 +257,6 @@ pub struct WorkDetailResponse {
     /// `derive_badge_in_tx` maintain.
     #[serde(default)]
     pub parked_by_conflicts: bool,
-    /// Siblings are always emitted. An empty list is authoritative, not an
-    /// older-server omission that the frontend must guess around.
-    pub identity_siblings: Vec<IdentitySiblingPresentation>,
     pub cover_ui_state: WorkCoverUiState,
     /// Typed provider context saved with the Work (source facts, never
     /// identity authority). Attached by the single-Work reads; library
@@ -318,16 +314,6 @@ pub fn apply_source_facts(
             setter: provenance.setter,
         })
         .collect();
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct IdentitySiblingPresentation {
-    pub work_id: WorkId,
-    pub title: String,
-    pub author_name: String,
-    pub edition: Option<String>,
-    pub route: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,7 +445,6 @@ pub fn work_to_detail_with_cover_mtime(
         audiobook_cover_mtime,
         enriching: false,
         parked_by_conflicts: false,
-        identity_siblings: Vec::new(),
         cover_ui_state: work_cover_ui_state(w, false),
         source_references: Vec::new(),
         field_sources: Vec::new(),
@@ -472,28 +457,12 @@ pub fn apply_identity_presentation(
     detail: &mut WorkDetailResponse,
     work: &Work,
     captured: &CapturedIdentity,
-    siblings: Vec<CapturedIdentity>,
-    author_name: String,
 ) {
     apply_identity_status_projection(detail, captured.status);
     apply_identifier_projection(
         detail,
         &livrarr_domain::identity_layer::project_work_identifiers(&captured.active_routes),
     );
-    detail.identity_siblings = siblings
-        .into_iter()
-        .filter(|sibling| sibling.own_work_id != captured.own_work_id)
-        .map(|sibling| IdentitySiblingPresentation {
-            work_id: sibling.own_work_id,
-            title: sibling.identity_title.main,
-            author_name: author_name.clone(),
-            edition: sibling.identity_title.volume,
-            route: sibling
-                .active_routes
-                .first()
-                .map(|route| provider_display_name(&route.provider)),
-        })
-        .collect();
     detail.cover_ui_state = work_cover_ui_state(work, !captured.active_routes.is_empty());
 }
 
@@ -529,17 +498,6 @@ pub fn apply_identity_status_projection(
         | livrarr_domain::identity_layer::IdentityStatus::Connected => IdentityStatus::Confirmed,
         livrarr_domain::identity_layer::IdentityStatus::NotConnected => IdentityStatus::Pending,
     };
-}
-
-fn provider_display_name(provider: &IdentityProvider) -> String {
-    match provider {
-        IdentityProvider::OpenLibrary => "Open Library".to_string(),
-        IdentityProvider::Goodreads => "Goodreads".to_string(),
-        IdentityProvider::Hardcover => "Hardcover".to_string(),
-        IdentityProvider::IsbnRegistry => "ISBN".to_string(),
-        IdentityProvider::Amazon => "Amazon".to_string(),
-        IdentityProvider::Other(name) => name.clone(),
-    }
 }
 
 fn work_cover_ui_state(work: &Work, has_routes: bool) -> WorkCoverUiState {
