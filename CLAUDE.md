@@ -3,16 +3,61 @@
 ## Executive summary
 
 [Scope additions require explicit user approval](#process-discipline-from-v21-retro).
-Follow the [startup rules](#session-start-mandatory--do-these-before-any-work)
-and the existing project quality requirements. Routine choices within the agreed
-scope remain autonomous.
+
+Use the [permanent model assignments](#permanent-model-assignments) for production
+code and tests: Opus 5.5 writes production code (Fable 5.1 until 2026-09-23), and each
+artifact has two assigned reviewers from other model families. [The PM never edits an artifact](#the-pm-never-edits-an-artifact-po-direction-2026-09-22);
+every fix or fold goes to a seat. The [principles](#principles) remain the
+highest project authority; follow [document stewardship](#document-stewardship)
+for durable project records.
+
+PM startup/resume/handoff: first read the short
+PM context entry at `~/Projects/kk-build/templates/claude-md/pm-context.md`.
+Use selected current state and evidence for the next decision. Mandatory rules below
+remain in force; this pointer grants no new staffing or approval authority.
 
 ## Session Start (mandatory — do these before any work)
 
-1. **Read `wiki/insights.md`** — active learnings that prevent avoidable mistakes. Do this first.
+1. **Read applicable `wiki/insights.md` learnings before work.** For PM startup, resume or process work, read the short PM context entry first, scan insight headings and open the entries relevant to the next dispatch or acceptance decision. Follow their detailed sources when needed. Implementation seats still read the full insight index before coding. All insights remain authoritative; scoped reading does not waive an applicable rule.
 2. **Use Serena MCP for ALL code navigation** — symbol lookup, dependency walking, reference tracking. Do NOT grep source files or read entire files when Serena can answer the question. Always try Serena first.
 3. **Check `wiki/` before re-deriving domain knowledge** — read `wiki/index.md` to find relevant pages before reasoning from scratch about how a subsystem works.
 4. **Update `wiki/` when you learn something new** — at block boundaries or when you discover domain knowledge a future session would need, update or create wiki pages per `/pk-wiki`. If you don't write it, the next session re-derives it.
+
+## Document stewardship
+
+**Project documents live with Livrarr (PO direction, 2026-09-07).** Store
+handoffs, session logs and feature state in `/mnt/opt/livrarr/build/state/`;
+review notes and evidence in this project's `build/reviews/`; reports in
+`build/reports/`; and product documentation in its existing `docs/` and `wiki/`.
+Use the recorded project document root when reviewing a separate source worktree.
+`~/Projects/kk-build` holds shared tooling and instructions. Existing central paths
+needed by older hooks may remain as compatibility symlinks to the project files;
+new documents and current links use the project paths. Preserve historical evidence
+and resolve existing files before replacing a legacy path.
+
+For build startup, accepted milestones and handoff, follow the
+[steward role](build/ops/document-steward/ROLE.md), which links the reusable workflow.
+Read [the continuation](build/ops/document-steward/CONTINUE.md) and only relevant
+[map entries](build/ops/document-steward/DOCUMENTS.yaml); resolve the existing seat
+from live PM state and Herdr. Routine upkeep is packet-driven within a free write window.
+
+### Executive summaries (PO direction, 2026-09-18)
+
+Start every new or substantively revised prose document with an **Executive
+summary** immediately below its title. This applies to reports, proposals, specs,
+designs, wiki pages and handoffs. Write it in plain English: lead with what the
+reader needs to know, the practical consequence, and any recommendation or decision
+needed. State material uncertainty or unfinished work clearly. Include descriptive
+links to the relevant sections farther down in the same document so the reader can
+choose how much detail to read. Keep the summary proportional to the document;
+technical detail belongs in the linked sections. Preserve accepted historical
+versions when revising an existing document.
+
+Name the exact action, object and starting condition before describing a problem.
+For example, distinguish creating a new Work, importing an ebook or audiobook
+file, and adding an existing Work again; do not call all three "adding a book."
+Use a concrete expected-versus-observed example, and distinguish what was tested
+from what is inferred about a user interface or other path.
 
 ## Design Documents — Supersede, Never Overwrite (PO-approved 2026-07-24)
 
@@ -32,7 +77,55 @@ See `ARCHITECTURE.md` Part 1 (Product Principles) and `PRINCIPLES.md` (universal
 
 - **Phase order is non-negotiable:** Spec → IR → Behavioral Tests → Code → Implementation Tests → Deploy → Retro
 - **Audit before commit, never after.** No phase-gate commit without a passing audit.
-- **Cross-family separation:** Anthropic writes code, OpenAI writes tests, Google reviews and audits. No model reviews its own family's output.
+- **Cross-family separation:** Follow the [permanent model assignments](#permanent-model-assignments) below. No model reviews its own family's output.
+
+### Permanent model assignments
+
+PO direction, 2026-09-18; coding seat changed to Opus 5.5 by PO direction 2026-09-23
+(outright swap, no contest; basis in
+`build/reports/opus-5-5-coding-seat-assessment-2026-09-23.md`). These are the permanent
+Livrarr assignments and override older generic kk-build seating defaults for the roles
+listed here.
+
+| Responsibility | Model | Reasoning effort |
+|---|---|---|
+| Write production code | Anthropic Claude Opus 5.5 (`claude-opus-5-5`) | xhigh |
+| Review production code | OpenAI GPT-6 Astra **and** Google Gemini 3.8 Flash | Astra: xhigh; Flash: `thinkingLevel: HIGH` (its ceiling) |
+| Write tests | OpenAI GPT-6 Astra | xhigh |
+| Review tests | Google Gemini 3.8 Flash **and** xAI Grok 4.6 | Flash: HIGH (ceiling); Grok: xhigh (`max` is invalid and silently ignored) |
+
+Effort record corrected 2026-09-23 (PO direction): the earlier "max" entries for Gemini and
+Grok named levels those runners do not accept. Gemini 3.x exposes `thinkingLevel` LOW/HIGH
+(newer builds add MINIMAL/MEDIUM); the seat's `.gemini/settings.json` pins HIGH. Grok's real
+enum tops out at xhigh. Other defaults from the same direction: PM (Fable 5.1) runs at
+`high`; project subagents run Opus 5.5 at `xhigh` for investigations and `high` for small
+bounded fixes (definitions under `.claude/agents/`); grounding briefs run Sonnet 5 at `high`.
+Astra at `max` is unverified; probe once before relying on it.
+
+- Both assigned reviewers independently review the same artifact revision. Both
+  passing reviews are required for acceptance; one review does not replace the pair.
+- Use the specified model versions and effort levels explicitly. Record the actual
+  runner model identifier/version and effective effort with each dispatch/review.
+  Verify the runner accepts them; report an unavailable combination rather than
+  silently substituting a model, using a floating default or lowering effort.
+- These assignments apply to future dispatches, including remaining review and
+  correction work on an active feature. Preserve the actual provenance of completed
+  work; an earlier Opus implementation must not be relabeled as Fable-authored.
+- PM coordination, test execution, and roles not listed here retain their existing
+  assignments. This change does not alter permissions or other quality gates.
+
+### The PM never edits an artifact (PO direction, 2026-09-22)
+
+The PM session coordinates and verifies; it does not produce the work. The PM must not
+edit a spec, IR, design, contract, test or production code artifact, even for a one-line
+fix, fold or draft. Every such change goes to a seat under the assignments above. The
+PM's own writes are limited to state, session logs, handoffs, packets, reviews of
+evidence, plans and the wiki. The PM still re-runs a seat's claimed commands, reads the
+diff, commits, deploys and records results; those are verification, not authoring.
+Reason: once the coordinator edits, it stops verifying, and family separation breaks
+because the same model then sits on both sides of the gate. Reviewers caught the PM's
+own folds on two consecutive rounds of the identity-conflict-authority spec (2026-08-27
+to 28); that is the failure this rule prevents.
 
 ## Rust Quality Gate
 
@@ -82,7 +175,7 @@ See `ARCHITECTURE.md` Part 1 (Product Principles) and `PRINCIPLES.md` (universal
 
 ## Architecture
 
-- 10-crate Rust workspace. All dependency arrows point toward `livrarr-domain`.
+- 17-crate Rust workspace. All dependency arrows point toward `livrarr-domain`.
 - `livrarr-server` is the composition root — depends on everything, nothing depends on it.
 - Trait-based boundaries between all modules. `SqliteDb` for production, `create_test_db()` (SQLite `:memory:`) for tests.
 - `trait-variant::make(Send)` for async traits, not `async-trait` (except where `async-trait` already used in v2).
