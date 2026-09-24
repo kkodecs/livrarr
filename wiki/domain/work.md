@@ -57,7 +57,7 @@ Every enrichable field has per-field provenance tracking:
 
 ## Presentation when a related Author is gone
 
-A Work remains the primary entity even when its related Author row is deleted. The Work-detail door must still render the user-scoped Work from data that survives on the Work row: its stored `author_name`, stored cover state, files, and other metadata. Identity siblings may be empty when no primary Author can be resolved; presentation must not invent one.
+A Work remains the primary entity even when its related Author row is deleted. The Work-detail door must still render the user-scoped Work from data that survives on the Work row: its stored `author_name`, stored cover state, files, and other metadata. Presentation must not invent a primary Author. (The `identitySiblings` field and the "Other books by this author" panel it fed were removed on 2026-09-23; the sibling group is empty by construction in a healthy library.)
 
 This is deliberately different from identity authority. `WorkIdentityRepository::read_captured_identity` is a coherent settlement/decision read and remains fail-closed when the primary Author invariant is unavailable. The HTTP Work-detail handler degrades only that read's `NotFound` after the Work service has already proved the scoped Work exists. The refresh door likewise returns the completed refresh and skips the optional captured-route settlement follow-up when no coherent identity can be read. Other storage errors still propagate. This keeps user-facing presentation available without weakening identity decisions.
 

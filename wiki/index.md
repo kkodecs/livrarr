@@ -77,3 +77,4 @@ Domain knowledge for the Livrarr project. Grows with each build cycle. Start her
 
 - [Insights](insights.md) — index of 101 active learnings; each line links to its full text under `insights/`
 - [Log](log.md) — wiki change log
+- [Merge/undo rewrite dropped (2026-09-23)](decisions/merge-undo-rewrite-dropped.md) — why the identity-conflict-authority rewrite was dropped, what replaces it, where the parked tree lives
