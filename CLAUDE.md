@@ -102,8 +102,15 @@ enum tops out at xhigh. Other defaults from the same direction: PM (Fable 5.1) r
 bounded fixes (definitions under `.claude/agents/`); grounding briefs run Sonnet 5 at `high`.
 Astra at `max` is unverified; probe once before relying on it.
 
+- **Gemini 3.8 Flash and Grok 4.6 are benched (PO direction, 2026-09-24).** Until the PO
+  reinstates a second family, GPT-6 Astra (xhigh) is the sole reviewer for production code
+  and tests, and Opus 5.5 may write tests as well as code when the PO approves it for a
+  feature (first: card-edits-lift, 2026-09-24). Basis: Gemini's spec review died on an API
+  error after 30 minutes with no output; the PO judged the two-family rounds out of
+  proportion to small features. The rows above record the pre-bench assignments.
 - Both assigned reviewers independently review the same artifact revision. Both
   passing reviews are required for acceptance; one review does not replace the pair.
+  (Suspended while the bench above is in force: one Astra pass is the review gate.)
 - Use the specified model versions and effort levels explicitly. Record the actual
   runner model identifier/version and effective effort with each dispatch/review.
   Verify the runner accepts them; report an unavailable combination rather than
