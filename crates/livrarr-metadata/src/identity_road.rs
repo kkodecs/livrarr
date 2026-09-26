@@ -12,7 +12,8 @@ use livrarr_domain::identity_layer::{
     IdentityRoadService, IdentityTitleTuple, LostMatchGuardSet, ManualImportMinimumCommand,
     ProviderIdentityEvidence, ReviewActor, ReviewResolutionCommand, RouteKey, RouteOwner,
     RouteProvenance, SettlementCommit, SettlementReviewCard, UserIdentityChoice, WorkContributor,
-    WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState, WrongMergeGuardSet,
+    WorkEditClaim, WorkIdentityEvidence, WorkIdentityRepository, WorkRoute, WorkRouteState,
+    WrongMergeGuardSet,
 };
 use livrarr_domain::services::AuthorLinkWorkflow;
 use livrarr_domain::{
@@ -94,7 +95,7 @@ where
         &self,
         request: IdentityRoadRequest,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
-        self.settle_inner(request, None).await
+        self.settle_inner(request, None, None).await
     }
 
     /// The creation-door entry that also carries the facts the selected
@@ -106,20 +107,33 @@ where
         request: IdentityRoadRequest,
         facts: CreationFacts,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
-        self.settle_inner(request, Some(facts)).await
+        self.settle_inner(request, Some(facts), None).await
+    }
+
+    /// The title/author edit entry. The edit settles only at the generation
+    /// its handler observed, and keeps the stored title tuple when the user
+    /// left the title unchanged.
+    pub async fn settle_work_edit(
+        &self,
+        request: IdentityRoadRequest,
+        claim: WorkEditClaim,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        self.settle_inner(request, None, Some(claim)).await
     }
 
     async fn settle_inner(
         &self,
         request: IdentityRoadRequest,
         facts: Option<CreationFacts>,
+        edit: Option<WorkEditClaim>,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         validate_road_request(&request)?;
+        // Every edit carries its claim, and only an edit may.
+        if matches!(request.origin, IdentityRoadOrigin::WorkUpdateRekey) != edit.is_some() {
+            return Err(IdentityRoadError::InvalidDoorEvidence);
+        }
         if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
-            && matches!(
-                request.origin,
-                IdentityRoadOrigin::ManualWorkMerge { .. } | IdentityRoadOrigin::WorkUpdateRekey
-            )
+            && matches!(request.origin, IdentityRoadOrigin::ManualWorkMerge { .. })
         {
             return Err(IdentityRoadError::MergingUnavailable);
         }
@@ -139,6 +153,21 @@ where
             .map(|identity| identity.text_distinction.clone())
             .filter(|distinction| distinction != "common");
         identity_title.provenance = request_provenance(&request);
+        // The values an edit keeps were read at its observed generation; a
+        // later identity write means they are stale, so the edit is refused
+        // rather than claiming the newer generation for them. An unchanged
+        // title keeps the whole stored tuple; only a changed title is split.
+        if let Some(claim) = edit.as_ref() {
+            let captured = existing
+                .as_ref()
+                .ok_or(IdentityRoadError::InvalidDoorEvidence)?;
+            if captured.identity_generation != claim.observed_generation {
+                return Err(IdentityRoadError::StaleGeneration);
+            }
+            if !claim.title_changed {
+                identity_title = captured.identity_title.clone();
+            }
+        }
         let incoming_routes = normalize_provider_routes(
             request.user_id,
             existing_work_id.unwrap_or_default(),
@@ -176,19 +205,24 @@ where
             });
         }
 
-        let mut expected_generation = existing
-            .as_ref()
-            .map_or(0, |identity| identity.identity_generation);
+        let mut expected_generation = edit.as_ref().map_or_else(
+            || {
+                existing
+                    .as_ref()
+                    .map_or(0, |identity| identity.identity_generation)
+            },
+            |claim| claim.observed_generation,
+        );
         let mut routes = existing
             .as_ref()
             .map_or_else(Vec::new, |identity| identity.active_routes.clone());
         let mut review_cards = Vec::new();
         let mut absorbed_work_ids = Vec::new();
 
-        // The three human re-key continuations deliberately originate a typed
-        // card. Their handlers either return it (empty merge choice) or resolve
-        // it immediately through the same road; no handler writes identity
-        // tables on the side.
+        // Pending-route affirm and manual merge originate a typed card that
+        // their handlers resolve through the same road. A title/author edit is
+        // the user's own statement about their own Work: it settles directly,
+        // with no card.
         match &request.origin {
             IdentityRoadOrigin::AffirmPendingRoute => {
                 let candidate = incoming_routes
@@ -209,13 +243,7 @@ where
                     candidate,
                 });
             }
-            IdentityRoadOrigin::WorkUpdateRekey => {
-                review_cards.push(SettlementReviewCard::GroupIdentity {
-                    work_ids: existing_work_id.into_iter().collect(),
-                    proposed_identity: Some(incoming.clone()),
-                    merge_choices: Vec::new(),
-                });
-            }
+            IdentityRoadOrigin::WorkUpdateRekey => {}
             IdentityRoadOrigin::ManualWorkMerge {
                 loser_work_id,
                 choices,
@@ -399,6 +427,12 @@ where
                 return Ok(IdentityRoadOutcome::Deferred {
                     reason: DeferReason("standing dismissal".to_string()),
                 });
+            }
+            // The identity index backstops the edit's own duplicate check.
+            Err(IdentityRepositoryError::KeyCollision)
+                if matches!(request.origin, IdentityRoadOrigin::WorkUpdateRekey) =>
+            {
+                return Err(IdentityRoadError::DuplicateIdentity);
             }
             Err(error) => return Err(map_repository_error(error)),
         };
@@ -849,6 +883,7 @@ where
             return Err(IdentityRoadError::ReviewKindMismatch);
         }
         require_continuation(pending.kind)?;
+        livrarr_domain::identity_layer::require_resolution_offered(&command)?;
         if pending.kind != livrarr_domain::identity_layer::ReviewKind::PendingRoute
             && pending.generation != command.expected_generation()
         {
@@ -1285,6 +1320,9 @@ fn map_repository_error(
         livrarr_domain::identity_layer::IdentityRepositoryError::MergingUnavailable => {
             IdentityRoadError::MergingUnavailable
         }
+        livrarr_domain::identity_layer::IdentityRepositoryError::DuplicateIdentity => {
+            IdentityRoadError::DuplicateIdentity
+        }
         livrarr_domain::identity_layer::IdentityRepositoryError::NotFound => {
             IdentityRoadError::NotFound
         }
@@ -1330,6 +1368,14 @@ where
         facts: CreationFacts,
     ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
         IdentityRoadServiceImpl::settle_creation(self, request, facts).await
+    }
+
+    async fn settle_work_edit(
+        &self,
+        request: IdentityRoadRequest,
+        claim: WorkEditClaim,
+    ) -> Result<IdentityRoadOutcome, IdentityRoadError> {
+        IdentityRoadServiceImpl::settle_work_edit(self, request, claim).await
     }
 
     async fn resolve_review(

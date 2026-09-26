@@ -1290,6 +1290,13 @@ async fn a3_list_confirm_constructible_arm_adds_imported_candidate() {
 struct InertAuthorService;
 
 impl AuthorService for InertAuthorService {
+    async fn find_existing(
+        &self,
+        _user_id: UserId,
+        _name: &str,
+    ) -> Result<Option<Author>, AuthorServiceError> {
+        Ok(None)
+    }
     async fn add(
         &self,
         _user_id: UserId,

@@ -97,8 +97,8 @@ describe("Book information identity-layer presentation", () => {
         .find((button) => button.textContent?.trim() === "Edit");
       expect(edit).toBeDefined();
       await act(async () => edit!.click());
-      expect(document.querySelector<HTMLInputElement>('input[name="title"]')?.readOnly).toBe(true);
-      expect(document.querySelector<HTMLInputElement>('input[name="authorName"]')?.readOnly).toBe(true);
+      expect(document.querySelector<HTMLInputElement>('input[name="title"]')?.readOnly).toBe(false);
+      expect(document.querySelector<HTMLInputElement>('input[name="authorName"]')?.readOnly).toBe(false);
       expect(document.querySelector<HTMLInputElement>('input[name="seriesName"]')?.readOnly).toBe(false);
     } finally {
       mounted.cleanup();

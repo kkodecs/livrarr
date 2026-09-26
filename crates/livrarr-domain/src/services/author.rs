@@ -109,6 +109,13 @@ pub trait AuthorService: Send + Sync {
         user_id: UserId,
         req: AddAuthorRequest,
     ) -> Result<AddAuthorResult, AuthorServiceError>;
+    /// The existing Author that `add` would reuse for `name` (the exact name,
+    /// else an unambiguous name match), found without writing anything.
+    async fn find_existing(
+        &self,
+        user_id: UserId,
+        name: &str,
+    ) -> Result<Option<Author>, AuthorServiceError>;
     /// Merge `loser_id` into `survivor_id` (author-dedup): works and series
     /// repoint to the survivor, monitoring intent is preserved monotonically,
     /// external keys fill survivor-first, and the loser row is deleted — one

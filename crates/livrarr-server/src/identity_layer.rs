@@ -120,6 +120,20 @@ where
         outcome
     }
 
+    async fn settle_work_edit(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+        claim: livrarr_domain::identity_layer::WorkEditClaim,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        // The recorded road call is the identity request; the claim is what
+        // the edit observed, checked by the road.
+        self.recorder
+            .record(IdentityRoadCall::Settle(request.clone()));
+        let outcome = self.inner.settle_work_edit(request, claim).await;
+        self.recorder.record_outcome(&outcome);
+        outcome
+    }
+
     async fn resolve_review(
         &self,
         actor: ReviewActor,
@@ -192,6 +206,17 @@ impl livrarr_domain::identity_layer::IdentityRoadService for AppIdentityRoad {
         match self {
             Self::Live(road) => road.settle_creation(request, facts).await,
             Self::Recording(road) => road.settle_creation(request, facts).await,
+        }
+    }
+
+    async fn settle_work_edit(
+        &self,
+        request: livrarr_domain::identity_layer::IdentityRoadRequest,
+        claim: livrarr_domain::identity_layer::WorkEditClaim,
+    ) -> Result<IdentityRoadOutcome, livrarr_domain::identity_layer::IdentityRoadError> {
+        match self {
+            Self::Live(road) => road.settle_work_edit(request, claim).await,
+            Self::Recording(road) => road.settle_work_edit(request, claim).await,
         }
     }
 

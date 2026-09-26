@@ -1,0 +1,80 @@
+[
+  {
+    "generation": 2,
+    "id": 17,
+    "kind": "GroupIdentity",
+    "payload": {
+      "GroupIdentity": {
+        "merge_choices": [],
+        "proposed_identity": {
+          "primary_author_id": 9,
+          "routes": [],
+          "title": {
+            "main": "Beta",
+            "normalized_main": "beta",
+            "normalized_subtitle": "proposed",
+            "normalized_volume": "7",
+            "provenance": "User",
+            "subtitle": "Proposed",
+            "volume": "7"
+          }
+        },
+        "work_ids": [
+          71
+        ]
+      }
+    },
+    "userId": 1,
+    "workAuthor": "Ann",
+    "workId": 71,
+    "workTitle": "Alpha"
+  },
+  {
+    "generation": 2,
+    "id": 18,
+    "kind": "GroupIdentity",
+    "payload": {
+      "GroupIdentity": {
+        "merge_choices": [],
+        "proposed_identity": {
+          "primary_author_id": 10,
+          "routes": [],
+          "title": {
+            "main": "Delta",
+            "normalized_main": "delta",
+            "normalized_subtitle": "",
+            "normalized_volume": "",
+            "provenance": "User",
+            "subtitle": null,
+            "volume": null
+          }
+        },
+        "work_ids": [
+          72
+        ]
+      }
+    },
+    "userId": 1,
+    "workAuthor": "Ann",
+    "workId": 72,
+    "workTitle": "Gamma"
+  },
+  {
+    "generation": 2,
+    "id": 19,
+    "kind": "GroupIdentity",
+    "payload": {
+      "GroupIdentity": {
+        "merge_choices": [],
+        "proposed_identity": null,
+        "work_ids": [
+          73
+        ]
+      }
+    },
+    "userId": 1,
+    "workAuthor": "Ann",
+    "workId": 73,
+    "workTitle": "Epsilon"
+  }
+]

@@ -5286,9 +5286,14 @@ async fn red_real_cli_cutover_ceremony() {
         "the single staged card must contain only the flagged cohort"
     );
 
+    // The merge answer stays refused, so the colliding cohort stays blocked.
     let action_file = data_dir.path().join("resolve-group-identity.json");
-    std::fs::write(&action_file, "\"DifferentFromAll\"")
-        .expect("write GroupIdentity resolution action");
+    std::fs::write(
+        &action_file,
+        serde_json::to_vec(&json!({"AttachOrMerge": {"anchor": cohort_work_ids[0]}}))
+            .expect("encode merge answer"),
+    )
+    .expect("write GroupIdentity resolution action");
     let resolve = std::process::Command::new(&binary)
         .arg("--data")
         .arg(data_dir.path())
@@ -7504,6 +7509,15 @@ async fn red_direct_add_dedup_review_reuses_existing_work() {
             && route.provider_scoped_id == "15839976"
     }));
 
+    let identity_before: (String, String, String) = sqlx::query_as(
+        "SELECT normalized_identity_main, normalized_identity_volume, identity_status_v2 \
+           FROM works WHERE user_id=?1 AND id=?2",
+    )
+    .bind(harness.user_id)
+    .bind(established)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read established identity before the answer");
     let resolved = call_router_json(
         &harness,
         Method::POST,
@@ -7519,19 +7533,20 @@ async fn red_direct_add_dedup_review_reuses_existing_work() {
     .await;
     assert!(
         resolved.status.is_success(),
-        "accept direct-add proposal: {}",
+        "different-book answer: {}",
         resolved.json
     );
-    let applied: (String, String) = sqlx::query_as(
-        "SELECT normalized_identity_volume, identity_status_v2 FROM works \
-          WHERE user_id=?1 AND id=?2",
+    // REQ-001: "different book" keeps the proposal off the established Work.
+    let identity_after: (String, String, String) = sqlx::query_as(
+        "SELECT normalized_identity_main, normalized_identity_volume, identity_status_v2 \
+           FROM works WHERE user_id=?1 AND id=?2",
     )
     .bind(harness.user_id)
     .bind(established)
     .fetch_one(harness.db.pool())
     .await
-    .expect("read accepted direct-add proposal");
-    assert_eq!(applied, ("1".to_string(), "user_confirmed".to_string()));
+    .expect("read established identity after the answer");
+    assert_eq!(identity_after, identity_before);
     let applied_route: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM identity_routes WHERE user_id=?1 AND resolved_work_id=?2 \
            AND provider_scoped_id='15839976' AND state='active'",
@@ -7540,8 +7555,11 @@ async fn red_direct_add_dedup_review_reuses_existing_work() {
     .bind(established)
     .fetch_one(harness.db.pool())
     .await
-    .expect("read accepted direct-add route");
-    assert_eq!(applied_route, 1);
+    .expect("read direct-add route after the answer");
+    assert_eq!(
+        applied_route, 0,
+        "the proposal's provider id is not attached"
+    );
 }
 
 // Bug reproduction: identity-layer-rewrite — retrying the same unresolved
@@ -9034,6 +9052,52 @@ async fn red_full_card_gate(contract: CardContract) {
     let harness = build_route_harness().await;
 
     let (work_id, generation, minted) = drive_card_mint(&harness, gate).await;
+    if gate == CardGate::WorkUpdate {
+        // A title/author edit is one settlement that applies the user's values:
+        // no review card is minted and no continuation runs (card-edits-lift).
+        assert_eq!(minted.status, StatusCode::OK, "{}", minted.json);
+        let calls = harness.state.identity_road.test_recorder().snapshot();
+        assert_eq!(calls.len(), 1, "an edit is one settlement");
+        assert!(matches!(
+            &calls[0],
+            livrarr_server::identity_layer::IdentityRoadCall::Settle(request)
+                if request.origin == IdentityRoadOrigin::WorkUpdateRekey
+        ));
+        assert_eq!(work_generation(&harness.db, work_id).await, generation + 1);
+        let cards: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM identity_review_cards WHERE user_id=?1 AND work_id=?2",
+        )
+        .bind(harness.user_id)
+        .bind(work_id)
+        .fetch_one(harness.db.pool())
+        .await
+        .expect("count edit cards");
+        assert_eq!(cards, 0, "an edit leaves no review card");
+        let title: String =
+            sqlx::query_scalar("SELECT title FROM works WHERE user_id=?1 AND id=?2")
+                .bind(harness.user_id)
+                .bind(work_id)
+                .fetch_one(harness.db.pool())
+                .await
+                .expect("requested title is written by the edit");
+        assert_eq!(title, "Identity choice required");
+        if matches!(contract, CardContract::HandlerWorkFailClosed) {
+            let other = seed_route_work(&harness, "card-update-stale").await;
+            let before = identity_graph_bytes(&harness.db, other).await;
+            set_identity_db_failpoint_for_tests(IdentityDbFailpoint::CommitAfterWork);
+            let failed = call_router_json(
+                &harness,
+                Method::PUT,
+                format!("/api/v1/work/{other}"),
+                Some(json!({"title": "Identity choice refused"})),
+            )
+            .await;
+            set_identity_db_failpoint_for_tests(IdentityDbFailpoint::None);
+            assert!(failed.status.is_server_error(), "{}", failed.json);
+            assert_eq!(identity_graph_bytes(&harness.db, other).await, before);
+        }
+        return;
+    }
     if gate != CardGate::ManualMerge {
         let expected_status = if gate == CardGate::PendingAffirm {
             StatusCode::NO_CONTENT
@@ -15991,7 +16055,6 @@ macro_rules! red_tests {
 
 red_tests! {
     // tdd_execution_policy — ten mandatory real-door gates.
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     door_gate_work_update_rekey_mints_then_resolves => red_full_card_gate(CardContract::DoorWorkUpdate),
     door_gate_legacy_identity_preview_route_is_absent => red_router_legacy_absent(RouterCase::LegacyPreview),
     door_gate_legacy_identity_commit_route_is_absent => red_router_legacy_absent(RouterCase::LegacyCommit),
@@ -16006,9 +16069,8 @@ red_tests! {
     identity_road_every_listed_settle_door_reaches_one_settle => red_missing_composition(CompositionContract::EveryDoorOneSettle),
     identity_road_rejects_each_door_matrix_violation_before_side_effects => red_road_door_matrix(),
     identity_road_existing_paths_claim_their_predecision_snapshot => red_road_generation_contract(RoadGenerationContract::DomainPredecisionSnapshot),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
+    #[ignore = "card-edits-lift: the edit door is one settlement with no review card; this contract duplicates door_gate_work_update_rekey_mints_then_resolves"]
     interactive_review_requires_freshly_minted_card => red_full_card_gate(CardContract::DomainInteractiveFresh),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     http_and_cli_resolve_share_exact_continuation => red_review_entries(ReviewEntryContract::HttpCliParity),
     review_kind_scope_generation_and_cancel_fail_closed => red_review_entries(ReviewEntryContract::FailClosedMatrix),
     read_captured_identity_projects_edition_routes_and_primary_ordinal => red_repo_read(RepoReadContract::Projection),
@@ -16099,7 +16161,7 @@ red_tests! {
     dedup_adopt_race_loser_have_no_second_writer => red_road_generation_contract(RoadGenerationContract::MetadataNoSecondWriter),
     existing_work_paths_use_predecision_generation_and_never_resubmit_stale => red_road_generation_contract(RoadGenerationContract::MetadataNeverResubmitStale),
     p4_human_flags_machine_decides_only_certain => red_missing_composition(CompositionContract::P4HumanMatrix),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
+    #[ignore = "card-edits-lift: the edit door is one settlement with no review card; this contract duplicates door_gate_work_update_rekey_mints_then_resolves"]
     interactive_card_origination_is_one_commit_then_typed_resolution => red_full_card_gate(CardContract::MetadataInteractiveCommit),
     complete_group_enumerates_broad_candidates_all_distinctions_and_all_pairs => red_road_reconcile(ReconcileContract::CompleteGroupPairs),
     every_singular_field_conflict_has_disposition_or_card => red_road_reconcile(ReconcileContract::SingularFieldDisposition),
@@ -16107,7 +16169,6 @@ red_tests! {
     author_inheritance_primary_only_agree_review_absent_matrix => red_road_author_inheritance(),
     all_three_capture_triggers_call_settle_before_completion => red_road_capture(CaptureContract::ThreeTriggers),
     empty_capture_is_idempotent_and_sibling_safe => red_road_capture(CaptureContract::EmptyNoop),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     resolve_every_review_kind_through_http_and_cli_same_graph => red_review_entries(ReviewEntryContract::NineKindsParity),
     resolve_scope_kind_generation_cancel_database_errors_leave_pending => red_review_entries(ReviewEntryContract::PendingOnErrors),
     list_confirm_real_rows_call_settle_and_flag_human_duplicates => red_missing_composition(CompositionContract::ListRealRows),
@@ -16174,24 +16235,20 @@ red_tests! {
     live_add_fanout_persists_goodreads_hardcover_and_isbn_in_one_settlement => red_live_add_fanout_routes_share_settlement(),
     live_add_uses_v2_status_and_audits_every_identity_generation => red_live_add_v2_status_and_generation_audits(),
     v2_real_add_writes_one_birth_history_fact => red_v2_real_add_writes_one_birth_history_fact(),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     direct_add_dedup_review_reuses_existing_work => red_direct_add_dedup_review_reuses_existing_work(),
     direct_add_article_variant_reuses_survivor => article_variant_add_real_door_reuses_survivor(),
     group_identity_pending_card_mint_is_idempotent_on_retrigger => red_group_identity_pending_card_mint_is_idempotent_on_retrigger(),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     http_review_all_kinds_map_bad_conflict_notfound_internal => red_missing_composition(CompositionContract::HttpReviewKinds),
     handler_compile_wall_has_only_identity_road_capability => red_handler_compile_wall(),
     manual_provider_search_returns_candidates_without_identity_or_cover_mutation => red_manual_provider_search(),
     post_work_real_route_calls_settle_with_exact_directadd_matrix => red_missing_composition(CompositionContract::DirectAddMatrix),
     directadd_dedup_flags_user_and_background_refresh_waits_for_completion => red_missing_composition(CompositionContract::DirectAddWaits),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     work_update_identity_edit_mints_then_resolves_group_card => red_full_card_gate(CardContract::HandlerWorkHappy),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     work_update_missing_resolved_or_generation_stale_card_fails_closed => red_full_card_gate(CardContract::HandlerWorkFailClosed),
     work_update_monitor_only_does_not_touch_identity_generation_or_key => red_monitor_only_graph_unchanged(),
     #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     manual_merge_preview_then_post_mints_then_resolves_group_card => red_full_card_gate(CardContract::HandlerManualHappy),
-    #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
+    #[ignore = "card-edits-lift: mints its card through the manual-merge door, which stays refused; dismissal coverage is card_edits_lift_ac004 and ac013 in test_irf_u1_refusal"]
     identity_review_card_list_resolve_and_dismiss_are_complete_http_paths => review_card_dismissal_is_scoped_audited_and_generation_neutral(),
     #[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
     group_identity_card_revalidates_after_settlement_and_invalidates_specifically => red_group_identity_stale_card(),

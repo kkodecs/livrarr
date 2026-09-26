@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ExternalLink, Sparkles } from "lucide-react";
 import {
+  getAuthor,
   listIdentityReview,
   listIdentityReviewCards,
   resolveIdentityReviewCard,
@@ -21,7 +22,13 @@ import type {
   IdentityReviewPark,
   IdentityReviewCandidate,
   IdentityReviewCard,
+  IdentityReviewProposal,
 } from "@/types/api";
+
+function proposedTitle(proposal: IdentityReviewProposal): string {
+  const { main, subtitle, volume } = proposal.title;
+  return `${main}${subtitle ? `: ${subtitle}` : ""}${volume ? ` (${volume})` : ""}`;
+}
 
 // Friendly source name for a candidate's contributing providers; falls back
 // to the raw snake_case value for anything not in the map.
@@ -116,13 +123,30 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
         pendingRoute.candidate.route.value,
       )
     : null;
+  const proposal = group?.proposed_identity ?? null;
+  const proposedAuthor = useQuery({
+    queryKey: ["identity-review-proposed-author", proposal?.primary_author_id],
+    queryFn: () => getAuthor(proposal!.primary_author_id),
+    enabled: proposal != null,
+    retry: false,
+  });
+  const isGroup = card.kind === "GroupIdentity" && group != null;
   const canResolve =
     card.workId != null &&
-    card.kind === "PendingRoute" && pendingRoute != null;
+    ((card.kind === "PendingRoute" && pendingRoute != null) || isGroup);
 
   const resolve = useMutation({
     mutationFn: () => {
       if (card.workId == null) throw new Error("Review card is not attached to a work");
+      if (isGroup) {
+        return resolveIdentityReviewCard(card.id, {
+          GroupIdentity: {
+            card_id: card.id,
+            expected_generation: card.generation,
+            action: "DifferentFromAll",
+          },
+        });
+      }
       if (card.kind === "PendingRoute" && pendingRoute != null) {
         return resolveIdentityReviewCard(card.id, {
           PendingRoute: {
@@ -135,7 +159,7 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
       throw new Error("This review kind is not actionable here yet");
     },
     onSuccess: () => {
-      toast.success("Book linked");
+      toast.success(isGroup ? "Kept as a separate book" : "Book linked");
       queryClient.invalidateQueries({ queryKey: ["identity-review-cards"] });
       queryClient.invalidateQueries({ queryKey: ["works"] });
       if (card.workId != null) {
@@ -185,11 +209,16 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
         </button>
       </div>
       {card.kind === "GroupIdentity" ? (
-        <p className="mt-2 text-sm text-muted">
-          Merging is currently unavailable. This question remains unresolved;
-          your existing books and files are unchanged.
-          {group && group.work_ids.length > 1 && ` ${group.work_ids.length} books need review.`}
-        </p>
+        <div className="mt-2 text-sm text-muted">
+          <p>Livrarr found something that may be the same book as this one.</p>
+          {proposal && (
+            <p className="mt-1">
+              Compared with:{" "}
+              <span className="text-zinc-200">{proposedTitle(proposal)}</span>
+              {proposedAuthor.data && ` by ${proposedAuthor.data.author.name}`}
+            </p>
+          )}
+        </div>
       ) : card.kind === "EditionEvidence" ? (
         <div className="mt-2 text-sm text-muted">
           <p>
@@ -234,10 +263,14 @@ function TypedIdentityReviewCard({ card }: { card: IdentityReviewCard }) {
             disabled={pending}
             className="rounded bg-zinc-800 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-700 disabled:opacity-50"
           >
-            Link it
+            {isGroup ? "Different book" : "Link it"}
           </button>
-          {pendingRoute && (
-            <HelpTip text="Link this book to the provider entry after you have checked the match." />
+          {isGroup ? (
+            <HelpTip text="Keep these as separate books. Nothing about your books is changed." />
+          ) : (
+            pendingRoute && (
+              <HelpTip text="Link this book to the provider entry after you have checked the match." />
+            )
           )}
         </span>
       )}

@@ -120,6 +120,19 @@ pub struct IdentityRoadRequest {
     pub existing_work_id: Option<crate::WorkId>,
 }
 
+/// What a user's title/author edit of an existing Work observed before it
+/// asked the road to settle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEditClaim {
+    /// Identity generation of the read that supplied the values the edit
+    /// keeps. The settlement claims exactly this generation, so an identity
+    /// write committed after that read refuses the edit.
+    pub observed_generation: i64,
+    /// False when the user left the title as stored: the Work keeps its whole
+    /// stored title (main, subtitle and volume) instead of a re-split one.
+    pub title_changed: bool,
+}
+
 /// Stable machine-readable reason for a deferred identity decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeferReason(pub String);

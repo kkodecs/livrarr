@@ -13,7 +13,7 @@ use super::contributor::WorkContributor;
 use super::cover::{CoverPlaceholderState, CoverSlotPresentation, WorkCoverPresentation};
 use super::door::{
     IdentityEvidenceBundle, IdentityRoadInteraction, IdentityRoadOrigin, IdentityRoadOutcome,
-    IdentityRoadRequest, OwnedFileEvidence, ProviderIdentityEvidence,
+    IdentityRoadRequest, OwnedFileEvidence, ProviderIdentityEvidence, WorkEditClaim,
 };
 use super::edition::{Edition, EditionFormat};
 use super::matching::{
@@ -48,8 +48,9 @@ fn continuation_owner(kind: ReviewKind) -> &'static str {
     }
 }
 
-/// Temporary containment: combining existing books is unavailable until the
-/// merge implementation has been completed and independently accepted.
+/// Combining existing books is not offered: manual merge, the merge answer on
+/// a review card, automatic absorption and the startup clean-ups that fold
+/// Works all refuse while this is false.
 pub const WORK_MERGING_AVAILABLE: bool = false;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum IdentityRoadError {
@@ -85,12 +86,16 @@ pub enum IdentityRoadError {
         continuation_owner(*kind)
     )]
     ContinuationUnavailable { kind: ReviewKind },
+    #[error("Another book already has this title and author.")]
+    DuplicateIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum IdentityRepositoryError {
     #[error("Merging is currently unavailable.")]
     MergingUnavailable,
+    #[error("Another book already has this title and author.")]
+    DuplicateIdentity,
     #[error("not found")]
     NotFound,
     #[error("database error: {0}")]
@@ -379,6 +384,24 @@ pub trait IdentityRoadService: Send + Sync {
         }
     }
 
+    /// [`Self::settle`] for a user's title/author edit of an existing Work,
+    /// carrying what the edit observed. Production roads claim the observed
+    /// generation and keep the stored title when the user left it unchanged.
+    /// A road without that support refuses rather than settling unclaimed.
+    fn settle_work_edit(
+        &self,
+        request: IdentityRoadRequest,
+        claim: WorkEditClaim,
+    ) -> impl std::future::Future<Output = Result<IdentityRoadOutcome, IdentityRoadError>> + Send
+    {
+        let _ = (request, claim);
+        async move {
+            Err(IdentityRoadError::Database(
+                "this identity road cannot settle a Work edit".to_string(),
+            ))
+        }
+    }
+
     async fn resolve_review(
         &self,
         actor: ReviewActor,
@@ -624,12 +647,9 @@ pub trait IdentityCutoverService: Send + Sync {
 // Free deterministic functions.
 // ---------------------------------------------------------------------------
 
-/// Exhaustive continuation availability. PendingRoute stays available;
-/// temporary merge containment also refuses GroupIdentity without mutation.
+/// Exhaustive continuation availability: PendingRoute and GroupIdentity have
+/// continuations; the other kinds are refused by name.
 pub fn require_continuation(kind: ReviewKind) -> Result<(), IdentityRoadError> {
-    if kind == ReviewKind::GroupIdentity && !WORK_MERGING_AVAILABLE {
-        return Err(IdentityRoadError::MergingUnavailable);
-    }
     match kind {
         ReviewKind::PendingRoute | ReviewKind::GroupIdentity => Ok(()),
         ReviewKind::IdentityConflict
@@ -640,6 +660,25 @@ pub fn require_continuation(kind: ReviewKind) -> Result<(), IdentityRoadError> {
         | ReviewKind::MigrationRepair
         | ReviewKind::InvariantRepair => Err(IdentityRoadError::ContinuationUnavailable { kind }),
     }
+}
+
+/// The merge answer on a GroupIdentity card combines existing books, which is
+/// not offered while `WORK_MERGING_AVAILABLE` is false. Every other answer
+/// proceeds to its continuation. Checked before any generation or write.
+pub fn require_resolution_offered(
+    command: &ReviewResolutionCommand,
+) -> Result<(), IdentityRoadError> {
+    let merge_answer = matches!(
+        command,
+        ReviewResolutionCommand::GroupIdentity {
+            action: super::review::GroupIdentityAction::AttachOrMerge { .. },
+            ..
+        }
+    );
+    if merge_answer && !WORK_MERGING_AVAILABLE {
+        return Err(IdentityRoadError::MergingUnavailable);
+    }
+    Ok(())
 }
 
 /// Split provider display text into the immutable identity tuple.

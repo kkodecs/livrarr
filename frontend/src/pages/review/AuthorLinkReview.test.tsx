@@ -251,7 +251,7 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     }
   });
 
-  it("retains an unresolved GroupIdentity card while merging is unavailable", async () => {
+  it("retains an unresolved GroupIdentity card with no merge control", async () => {
     let resolved = false;
     const { calls } = stub((call) => {
       if (call.path === "/identity-review") {
@@ -299,11 +299,12 @@ describe("listAuthorLinkReview — the Review page's Authors section", () => {
     const review = mountWith(client, <ReviewPage />);
     try {
       await vi.waitFor(
-        () => expect(review.container.textContent).toContain("Merging is currently unavailable"),
+        () => expect(review.container.textContent).toContain("Different book"),
         { timeout: 5000 },
       );
       expect(review.container.textContent).toContain("Merge Survivor");
       expect(review.container.textContent).not.toContain("Confirm Merge");
+      expect(review.container.textContent).not.toContain("Merging is currently unavailable");
       expect(calls.some((call) => call.method === "POST")).toBe(false);
     } finally {
       review.cleanup();

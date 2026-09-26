@@ -1100,6 +1100,7 @@ impl identity_layer::IdentityRoadService for SqlitePendingRouteRoad {
             .await
             .map_err(map_pending_route_repo_error)?;
         identity_layer::require_continuation(pending.kind)?;
+        identity_layer::require_resolution_offered(&command)?;
         if pending.kind != command.kind() {
             return Err(identity_layer::IdentityRoadError::ReviewKindMismatch);
         }

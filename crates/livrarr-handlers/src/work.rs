@@ -880,6 +880,7 @@ fn map_identity_road_error(error: livrarr_domain::identity_layer::IdentityRoadEr
         IdentityRoadError::ProviderBoundary => ApiError::BadGateway(error.to_string()),
         IdentityRoadError::Cancelled => ApiError::ServiceUnavailable,
         IdentityRoadError::MergingUnavailable
+        | IdentityRoadError::DuplicateIdentity
         | IdentityRoadError::ContinuationUnavailable { .. } => ApiError::Conflict {
             reason: error.to_string(),
         },
@@ -1090,85 +1091,115 @@ pub async fn update<
         return Err(ApiError::Validation { errors });
     }
 
-    if !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
-        && (req.title.is_some() || req.author_name.is_some())
-    {
+    // Forms submit unchanged identity fields with ordinary metadata edits;
+    // only a field that differs from the stored Work is an identity edit.
+    let submitted_title = req.title.take().flatten();
+    let submitted_author = req.author_name.take().flatten();
+    let mut identity_edit = None;
+    if submitted_title.is_some() || submitted_author.is_some() {
         let current = state.work_service().get(ctx.user.id, id).await?;
-        let identity_changed = req
-            .title
-            .as_ref()
-            .and_then(Option::as_ref)
-            .is_some_and(|title| title != &current.title)
-            || req
-                .author_name
-                .as_ref()
-                .and_then(Option::as_ref)
-                .is_some_and(|author| author != &current.author_name);
-        if identity_changed {
-            return Err(map_identity_road_error(
-                livrarr_domain::identity_layer::IdentityRoadError::MergingUnavailable,
-            ));
+        if changed_identity_fields(&current, &submitted_title, &submitted_author).is_some() {
+            // The generation is read before the Work is compared again, so
+            // every value the edit keeps was read at or after it. The edit
+            // claims that generation: an identity write committed since then
+            // refuses the edit instead of being overwritten by it.
+            let observed = state
+                .identity_layer_repository()
+                .read_captured_identity(ctx.user.id, id)
+                .await
+                .map_err(map_identity_repository_error)?;
+            let current = state.work_service().get(ctx.user.id, id).await?;
+            identity_edit = changed_identity_fields(&current, &submitted_title, &submitted_author)
+                .map(|changed| (observed, changed));
         }
-        // Forms submit unchanged identity fields with ordinary metadata edits.
-        // Do not route them through re-identification or write them back stale.
-        req.title = None;
-        req.author_name = None;
     }
 
-    if req.title.is_some() || req.author_name.is_some() {
-        let current = state.work_service().get(ctx.user.id, id).await?;
-        let requested_title = req.title.flatten().unwrap_or_else(|| current.title.clone());
-        let requested_author = req
-            .author_name
-            .flatten()
-            .unwrap_or_else(|| current.author_name.clone());
-        let author = state
-            .author_service()
-            .add(
-                ctx.user.id,
-                livrarr_domain::services::AddAuthorRequest {
-                    name: requested_author,
-                    sort_name: None,
-                    ol_key: None,
-                    monitored: true,
-                },
-            )
-            .await?
-            .into_author();
+    if let Some((observed, (changed_title, changed_author))) = identity_edit.as_ref() {
+        let claim = livrarr_domain::identity_layer::WorkEditClaim {
+            observed_generation: observed.identity_generation,
+            title_changed: changed_title.is_some(),
+        };
+        let requested_title = changed_title
+            .clone()
+            .unwrap_or_else(|| observed.identity_title.main.clone());
+        // An unchanged author keeps the Work's own primary Author. An existing
+        // Author is found without writing, so a refused edit leaves Authors
+        // untouched; only a new name creates an Author. The book shows the
+        // spelling the user typed: an Author found under another spelling is
+        // renamed to it once the edit has settled.
+        let (author_id, typed_spelling) = match changed_author {
+            None => (observed.primary_author_id, None),
+            Some(name) => match state
+                .author_service()
+                .find_existing(ctx.user.id, name)
+                .await?
+            {
+                Some(author) => {
+                    let typed = name.trim();
+                    (author.id, (author.name != typed).then(|| typed.to_string()))
+                }
+                None => {
+                    let created = state
+                        .author_service()
+                        .add(
+                            ctx.user.id,
+                            livrarr_domain::services::AddAuthorRequest {
+                                name: name.clone(),
+                                sort_name: None,
+                                ol_key: None,
+                                monitored: true,
+                            },
+                        )
+                        .await?
+                        .into_author();
+                    (created.id, None)
+                }
+            },
+        };
         let outcome = state
             .identity_road_service()
-            .settle(livrarr_domain::identity_layer::IdentityRoadRequest {
-                user_id: ctx.user.id,
-                origin: livrarr_domain::identity_layer::IdentityRoadOrigin::WorkUpdateRekey,
-                evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
-                    user_choice: None,
-                    owned_files: Vec::new(),
-                    provider_identity: Vec::new(),
-                    minimum: Some(livrarr_domain::identity_layer::MinimumWorkEvidence {
-                        title: requested_title,
-                        authors: vec![author.id],
-                    }),
-                },
-                interaction: livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
-                existing_work_id: Some(id),
-            })
-            .await
-            .map_err(map_identity_road_error)?;
-        let (card_id, expected_generation) = pending_review_claim(outcome)?;
-        state
-            .identity_road_service()
-            .resolve_review(
-                livrarr_domain::identity_layer::ReviewActor::AuthenticatedUser {
+            .settle_work_edit(
+                livrarr_domain::identity_layer::IdentityRoadRequest {
                     user_id: ctx.user.id,
+                    origin: livrarr_domain::identity_layer::IdentityRoadOrigin::WorkUpdateRekey,
+                    evidence: livrarr_domain::identity_layer::IdentityEvidenceBundle {
+                        user_choice: None,
+                        owned_files: Vec::new(),
+                        provider_identity: Vec::new(),
+                        minimum: Some(livrarr_domain::identity_layer::MinimumWorkEvidence {
+                            title: requested_title,
+                            authors: vec![author_id],
+                        }),
+                    },
+                    interaction:
+                        livrarr_domain::identity_layer::IdentityRoadInteraction::HumanWatching,
+                    existing_work_id: Some(id),
                 },
-                livrarr_domain::identity_layer::ReviewResolutionCommand::GroupIdentity {
-                    card_id,
-                    expected_generation,
-                    action: livrarr_domain::identity_layer::GroupIdentityAction::DifferentFromAll,
-                },
+                claim,
             )
             .await
             .map_err(map_identity_road_error)?;
+        if !matches!(
+            outcome,
+            livrarr_domain::identity_layer::IdentityRoadOutcome::Settled { .. }
+        ) {
+            return Err(ApiError::Internal(format!(
+                "identity edit did not settle: {outcome:?}"
+            )));
+        }
+        if let Some(typed) = typed_spelling {
+            state
+                .author_service()
+                .rename(ctx.user.id, author_id, typed)
+                .await?;
+        }
+    }
+
+    let other_fields = req.series_name.is_some()
+        || req.series_position.is_some()
+        || req.monitor_ebook.is_some()
+        || req.monitor_audiobook.is_some();
+    if identity_edit.is_some() && !other_fields {
         let work = state.work_service().get(ctx.user.id, id).await?;
         let mut detail = work_to_detail(&work);
         project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
@@ -1182,8 +1213,8 @@ pub async fn update<
             ctx.user.id,
             id,
             DomainUpdateWorkRequest {
-                title: req.title.flatten(),
-                author_name: req.author_name.flatten(),
+                title: None,
+                author_name: None,
                 series_name: req.series_name,
                 series_position: req.series_position,
                 monitor_ebook: req.monitor_ebook.flatten(),
@@ -1196,6 +1227,20 @@ pub async fn update<
     project_work_identity_presentations(&state, ctx.user.id, std::slice::from_mut(&mut detail))
         .await?;
     Ok(Json(detail).into_response())
+}
+
+/// The submitted title and author that differ from the stored Work, or `None`
+/// when neither does.
+fn changed_identity_fields(
+    current: &livrarr_domain::Work,
+    title: &Option<String>,
+    author: &Option<String>,
+) -> Option<(Option<String>, Option<String>)> {
+    let title = title.clone().filter(|title| title != &current.title);
+    let author = author
+        .clone()
+        .filter(|author| author != &current.author_name);
+    (title.is_some() || author.is_some()).then_some((title, author))
 }
 
 #[derive(serde::Serialize)]
@@ -1254,7 +1299,8 @@ fn map_identity_repository_error(
 ) -> ApiError {
     use livrarr_domain::identity_layer::IdentityRepositoryError;
     match error {
-        IdentityRepositoryError::MergingUnavailable => ApiError::Conflict {
+        IdentityRepositoryError::MergingUnavailable
+        | IdentityRepositoryError::DuplicateIdentity => ApiError::Conflict {
             reason: error.to_string(),
         },
         IdentityRepositoryError::NotFound => ApiError::NotFound,

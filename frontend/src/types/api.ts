@@ -465,6 +465,12 @@ export type MergeWorksOutcome =
   | MergeWorksResponse
   | PendingIdentityReviewResponse;
 
+/** What a GroupIdentity card compares its book with. The author is an id. */
+export interface IdentityReviewProposal {
+  title: { main: string; subtitle: string | null; volume: string | null };
+  primary_author_id: number;
+}
+
 export interface IdentityReviewCard {
   id: number;
   userId: number;
@@ -476,7 +482,7 @@ export interface IdentityReviewCard {
   payload: {
     GroupIdentity?: {
       work_ids: number[];
-      proposed_identity: unknown | null;
+      proposed_identity: IdentityReviewProposal | null;
       merge_choices: MergeChoiceEntry[];
     };
     PendingRoute?: {

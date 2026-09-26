@@ -4150,7 +4150,7 @@ async fn pending_key_excludes_owner_but_includes_user_work_and_trimmed_route_tup
 
 // RED-UNTIL-U5: today there is no standing ledger to challenge the three inline origins; update, merge-with-choices, and affirm mint then resolve only because SuppressedByDismissal is unreachable.
 #[tokio::test]
-#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
+#[ignore = "card-edits-lift: mixes the manual-merge door (still refused) with the edit door, which no longer mints a card; edit coverage is test_irf_u1_refusal card_edits_lift_*"]
 async fn registered_update_merge_and_affirm_bypass_exact_tombstones_byte_identically() {
     let _serial = TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;
@@ -4970,7 +4970,7 @@ async fn registered_affirm_revokes_all_member_keys_in_its_continuation_transacti
 
 // RED-UNTIL-U5: today title/author update, merge, DirectAdd, ListImport choice, and refused EditionEvidence resolution have no ledger to preserve; the negative revocation policy is unobservable.
 #[tokio::test]
-#[ignore = "PO stopped work merging: successful merge/re-identification/heal contract suspended; active refusal coverage in test_irf_u1_refusal"]
+#[ignore = "card-edits-lift: mixes the manual-merge door (still refused) with the edit door, which no longer mints a card; edit coverage is test_irf_u1_refusal card_edits_lift_*"]
 async fn all_non_revoking_user_actions_preserve_tombstones_and_reopen_no_card() {
     let _serial = TRACE_LOCK.lock().await;
     let harness = build_route_harness().await;

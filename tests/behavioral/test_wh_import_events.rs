@@ -246,6 +246,13 @@ impl AuthorService for ScriptedAuthorService {
             AddAuthorResult::Updated(author)
         })
     }
+    async fn find_existing(
+        &self,
+        _user_id: UserId,
+        _name: &str,
+    ) -> Result<Option<livrarr_db::Author>, AuthorServiceError> {
+        Ok(None)
+    }
     async fn merge(
         &self,
         _user_id: UserId,

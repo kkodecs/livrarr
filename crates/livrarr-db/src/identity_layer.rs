@@ -718,6 +718,33 @@ async fn commit_settlement_in_tx(
         if current != command.expected_generation {
             return Err(IdentityRepositoryError::StaleGeneration);
         }
+        // A user's edit may not give a Work the exact identity of another of
+        // the user's Works; it is refused before the Work is written.
+        if matches!(
+            origin,
+            ReviewCardMintOrigin::Road(IdentityRoadOrigin::WorkUpdateRekey)
+        ) {
+            let duplicate: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM works \
+                  WHERE user_id = ?1 AND id != ?2 \
+                    AND normalized_identity_main = ?3 \
+                    AND normalized_identity_subtitle = ?4 \
+                    AND normalized_identity_volume = ?5 \
+                    AND primary_author_id = ?6)",
+            )
+            .bind(command.user_id)
+            .bind(work_id)
+            .bind(&command.identity_title.normalized_main)
+            .bind(&command.identity_title.normalized_subtitle)
+            .bind(&command.identity_title.normalized_volume)
+            .bind(primary_author_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+            if duplicate {
+                return Err(IdentityRepositoryError::DuplicateIdentity);
+            }
+        }
         let generation = current + 1;
         let result = sqlx::query(
             "UPDATE works \
@@ -839,7 +866,14 @@ async fn commit_settlement_in_tx(
     {
         absorb_work_into(tx, command.user_id, work_id, loser_work_id).await?;
     }
-    merge_contributors(tx, command.user_id, work_id, &command.contributors).await?;
+    if matches!(
+        origin,
+        ReviewCardMintOrigin::Road(IdentityRoadOrigin::WorkUpdateRekey)
+    ) {
+        set_primary_contributor(tx, command.user_id, work_id, primary_author_id).await?;
+    } else {
+        merge_contributors(tx, command.user_id, work_id, &command.contributors).await?;
+    }
     commit_settlement_failpoint("contributors")?;
 
     for route in &command.routes {
@@ -981,6 +1015,9 @@ async fn persist_settlement(
     origin: ReviewCardMintOrigin,
     validated_explicit_choice: bool,
 ) -> Result<SettlementCommitOutcome, IdentityRepositoryError> {
+    #[cfg(any(test, feature = "test-helpers"))]
+    settlement_pause::pause_before_settlement_begins(command.user_id, command.existing_work_id)
+        .await;
     let mut tx = crate::pool::begin_write(db.pool()).await.map_err(repo_db)?;
     let written =
         commit_settlement_in_tx(&mut tx, &command, origin, validated_explicit_choice).await?;
@@ -1189,6 +1226,8 @@ impl WorkIdentityRepository for SqliteDb {
         user_id: UserId,
         work_id: WorkId,
     ) -> Result<CapturedIdentity, IdentityRepositoryError> {
+        #[cfg(any(test, feature = "test-helpers"))]
+        settlement_pause::pause_before_captured_read(user_id, work_id).await;
         let mut conn = self.pool().acquire().await.map_err(repo_db)?;
         captured_identity_on(&mut conn, user_id, work_id).await
     }
@@ -1919,9 +1958,7 @@ impl WorkIdentityRepository for SqliteDb {
         if command.kind() != pending.kind {
             return Err(IdentityRepositoryError::ReviewKindMismatch);
         }
-        if pending.kind == ReviewKind::GroupIdentity
-            && !livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
-        {
+        if livrarr_domain::identity_layer::require_resolution_offered(&command).is_err() {
             return Err(IdentityRepositoryError::MergingUnavailable);
         }
         let is_pending_route = pending.kind == ReviewKind::PendingRoute;
@@ -1994,122 +2031,27 @@ impl WorkIdentityRepository for SqliteDb {
             Some(work_id),
             SettlementReviewCard::GroupIdentity {
                 work_ids,
-                proposed_identity,
                 merge_choices,
+                ..
             },
             ReviewResolutionCommand::GroupIdentity { action, .. },
         ) = (pending.work_id, &pending.payload, &command)
         {
             match action {
+                // "Different book" keeps the Works apart: it records the
+                // distinction on the card's own Work and never applies the
+                // card's proposal to any existing Work.
                 livrarr_domain::identity_layer::GroupIdentityAction::DifferentFromAll => {
-                    if let Some(proposed) = proposed_identity.as_ref() {
-                        let author_name: String = sqlx::query_scalar(
-                            "SELECT name FROM authors WHERE user_id = ?1 AND id = ?2",
-                        )
-                        .bind(pending.user_id)
-                        .bind(proposed.primary_author_id)
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .map_err(repo_db)?
-                        .ok_or(IdentityRepositoryError::NotFound)?;
-                        let provenance =
-                            serde_json::to_string(&EvidenceProvenance::User).map_err(repo_json)?;
-                        sqlx::query(
-                        "UPDATE works SET title = ?1, subtitle = ?2, identity_volume = ?3, \
-                                normalized_title = ?4, normalized_identity_main = ?4, \
-                                normalized_identity_subtitle = ?5, normalized_identity_volume = ?6, \
-                                author_name = ?7, author_id = ?8, primary_author_id = ?8, \
-                                normalized_author = ?9, identity_title_provenance = ?10, \
-                                text_distinction = ?11 \
-                          WHERE user_id = ?12 AND id = ?13",
+                    sqlx::query(
+                        "UPDATE works SET text_distinction = ?1 \
+                              WHERE user_id = ?2 AND id = ?3",
                     )
-                    .bind(&proposed.title.main)
-                    .bind(&proposed.title.subtitle)
-                    .bind(&proposed.title.volume)
-                    .bind(&proposed.title.normalized_main)
-                    .bind(&proposed.title.normalized_subtitle)
-                    .bind(&proposed.title.normalized_volume)
-                    .bind(&author_name)
-                    .bind(proposed.primary_author_id)
-                    .bind(author_name.to_lowercase())
-                    .bind(provenance)
                     .bind(format!("different:review:{}", pending.id))
                     .bind(pending.user_id)
                     .bind(work_id)
                     .execute(&mut *tx)
                     .await
-                        .map_err(map_settlement_sql)?;
-                        merge_contributors(
-                            &mut tx,
-                            pending.user_id,
-                            work_id,
-                            &[WorkContributor {
-                                user_id: pending.user_id,
-                                work_id,
-                                author_id: proposed.primary_author_id,
-                                ordinal: 0,
-                                roles: Vec::new(),
-                            }],
-                        )
-                        .await?;
-                        for route in &proposed.routes {
-                            let mut route = route.clone();
-                            materialize_edition_route_owner(
-                                &mut tx,
-                                pending.user_id,
-                                work_id,
-                                &mut route,
-                            )
-                            .await?;
-                            insert_route(&mut tx, pending.user_id, work_id, &route).await?;
-                        }
-                        let confirmed: bool = sqlx::query_scalar(
-                            "SELECT EXISTS(SELECT 1 FROM identity_routes \
-                              WHERE user_id=?1 AND resolved_work_id=?2 \
-                                AND state='active' AND user_confirmed=1)",
-                        )
-                        .bind(pending.user_id)
-                        .bind(work_id)
-                        .fetch_one(&mut *tx)
-                        .await
-                        .map_err(repo_db)?;
-                        let connected: bool = sqlx::query_scalar(
-                            "SELECT EXISTS(SELECT 1 FROM identity_routes \
-                              WHERE user_id=?1 AND resolved_work_id=?2 AND state='active')",
-                        )
-                        .bind(pending.user_id)
-                        .bind(work_id)
-                        .fetch_one(&mut *tx)
-                        .await
-                        .map_err(repo_db)?;
-                        let status = if confirmed {
-                            "user_confirmed"
-                        } else if connected {
-                            "connected"
-                        } else {
-                            "not_connected"
-                        };
-                        sqlx::query(
-                            "UPDATE works SET identity_status_v2=?1 WHERE user_id=?2 AND id=?3",
-                        )
-                        .bind(status)
-                        .bind(pending.user_id)
-                        .bind(work_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(repo_db)?;
-                    } else {
-                        sqlx::query(
-                            "UPDATE works SET text_distinction = ?1 \
-                              WHERE user_id = ?2 AND id = ?3",
-                        )
-                        .bind(format!("different:review:{}", pending.id))
-                        .bind(pending.user_id)
-                        .bind(work_id)
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(map_settlement_sql)?;
-                    }
+                    .map_err(map_settlement_sql)?;
                 }
                 livrarr_domain::identity_layer::GroupIdentityAction::AttachOrMerge { anchor } => {
                     if !work_ids.contains(anchor) || *anchor != work_id {
@@ -3862,6 +3804,57 @@ async fn absorb_work_into(
         .await
         .map_err(repo_db)?;
     Ok(moved)
+}
+
+/// A user's edit names the Work's primary Author. The first-credited
+/// contributor becomes that Author; every other contributor keeps its ordinal
+/// and roles. The replaced primary leaves the Work with its roles, and an
+/// Author already credited elsewhere on the Work moves to the primary slot.
+async fn set_primary_contributor(
+    tx: &mut Transaction<'_, Sqlite>,
+    user_id: UserId,
+    work_id: WorkId,
+    author_id: AuthorId,
+) -> Result<(), IdentityRepositoryError> {
+    let primary: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT author_id, ordinal FROM work_contributors \
+          WHERE user_id = ?1 AND work_id = ?2 ORDER BY ordinal LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    let ordinal = match primary {
+        Some((current, _)) if current == author_id => return Ok(()),
+        Some((current, ordinal)) => {
+            sqlx::query(
+                "DELETE FROM work_contributors \
+                  WHERE user_id = ?1 AND work_id = ?2 AND author_id = ?3",
+            )
+            .bind(user_id)
+            .bind(work_id)
+            .bind(current)
+            .execute(&mut **tx)
+            .await
+            .map_err(repo_db)?;
+            ordinal
+        }
+        None => 0,
+    };
+    sqlx::query(
+        "INSERT INTO work_contributors (user_id, work_id, author_id, ordinal) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(user_id, work_id, author_id) DO UPDATE SET ordinal = excluded.ordinal",
+    )
+    .bind(user_id)
+    .bind(work_id)
+    .bind(author_id)
+    .bind(ordinal)
+    .execute(&mut **tx)
+    .await
+    .map_err(repo_db)?;
+    Ok(())
 }
 
 async fn merge_contributors(
@@ -6757,3 +6750,152 @@ mod manual_import_minimum_interleaving {
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub use manual_import_minimum_interleaving::install_manual_import_minimum_interleaving_for_tests;
+
+/// One-shot pauses for one Work, so a test can commit a rival write inside a
+/// settlement's window. A settlement pause parks the first settlement to arrive
+/// before its write transaction begins, between the settlement's read of the
+/// Work and its generation-checked write. A captured-read pause parks the
+/// captured-identity read of the Work that arrives after a given number of
+/// earlier reads have passed. Only calls for the armed (user, Work) on the
+/// arming test's thread park; later calls pass.
+#[cfg(any(test, feature = "test-helpers"))]
+mod settlement_pause {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    enum PausePoint {
+        SettlementBegins,
+        CapturedIdentityRead,
+    }
+
+    type PauseKey = (PausePoint, UserId, WorkId);
+
+    struct PauseSlot {
+        paused: AtomicBool,
+        paused_signal: Notify,
+        released: AtomicBool,
+        release_signal: Notify,
+    }
+
+    thread_local! {
+        // Behavioral tests each run on a current-thread Tokio runtime, and
+        // fixtures reuse low user and Work ids. Keeping the armed pause local
+        // to that runtime thread stops a parallel test's settlement from
+        // consuming it. Each entry holds the arrivals still to pass.
+        static REGISTRY: RefCell<HashMap<PauseKey, (usize, Arc<PauseSlot>)>> =
+            RefCell::new(HashMap::new());
+    }
+
+    async fn wait_for(flag: &AtomicBool, signal: &Notify) {
+        loop {
+            let notified = signal.notified();
+            if flag.load(Ordering::SeqCst) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub struct SettlementPauseGuard {
+        key: PauseKey,
+        slot: Arc<PauseSlot>,
+    }
+
+    impl SettlementPauseGuard {
+        pub async fn wait_until_paused(&self) {
+            wait_for(&self.slot.paused, &self.slot.paused_signal).await;
+        }
+
+        pub fn release(&self) {
+            self.slot.released.store(true, Ordering::SeqCst);
+            self.slot.release_signal.notify_waiters();
+        }
+    }
+
+    impl Drop for SettlementPauseGuard {
+        fn drop(&mut self) {
+            REGISTRY.with(|registry| registry.borrow_mut().remove(&self.key));
+            self.release();
+        }
+    }
+
+    fn install(
+        point: PausePoint,
+        user_id: UserId,
+        work_id: WorkId,
+        passes: usize,
+    ) -> SettlementPauseGuard {
+        let slot = Arc::new(PauseSlot {
+            paused: AtomicBool::new(false),
+            paused_signal: Notify::new(),
+            released: AtomicBool::new(false),
+            release_signal: Notify::new(),
+        });
+        let key = (point, user_id, work_id);
+        REGISTRY.with(|registry| registry.borrow_mut().insert(key, (passes, slot.clone())));
+        SettlementPauseGuard { key, slot }
+    }
+
+    pub fn install_settlement_pause_for_tests(
+        user_id: UserId,
+        work_id: WorkId,
+    ) -> SettlementPauseGuard {
+        install(PausePoint::SettlementBegins, user_id, work_id, 0)
+    }
+
+    /// Parks the captured-identity read of the Work that arrives after
+    /// `reads_to_pass` earlier reads of it have gone through.
+    pub fn install_captured_read_pause_for_tests(
+        user_id: UserId,
+        work_id: WorkId,
+        reads_to_pass: usize,
+    ) -> SettlementPauseGuard {
+        install(
+            PausePoint::CapturedIdentityRead,
+            user_id,
+            work_id,
+            reads_to_pass,
+        )
+    }
+
+    async fn pause_at(point: PausePoint, user_id: UserId, work_id: WorkId) {
+        let key = (point, user_id, work_id);
+        let armed = REGISTRY.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            match registry.get_mut(&key) {
+                Some((passes, _)) if *passes > 0 => {
+                    *passes -= 1;
+                    None
+                }
+                Some(_) => registry.remove(&key).map(|(_, slot)| slot),
+                None => None,
+            }
+        });
+        let Some(slot) = armed else {
+            return;
+        };
+        slot.paused.store(true, Ordering::SeqCst);
+        slot.paused_signal.notify_waiters();
+        wait_for(&slot.released, &slot.release_signal).await;
+    }
+
+    pub(super) async fn pause_before_settlement_begins(user_id: UserId, work_id: Option<WorkId>) {
+        if let Some(work_id) = work_id {
+            pause_at(PausePoint::SettlementBegins, user_id, work_id).await;
+        }
+    }
+
+    pub(super) async fn pause_before_captured_read(user_id: UserId, work_id: WorkId) {
+        pause_at(PausePoint::CapturedIdentityRead, user_id, work_id).await;
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+pub use settlement_pause::{
+    install_captured_read_pause_for_tests, install_settlement_pause_for_tests, SettlementPauseGuard,
+};

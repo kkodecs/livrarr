@@ -83,6 +83,23 @@ Series monitoring sets these flags on member works. Unmonitoring a series clears
 A direct add that matches an established broad identity group does not create a provisional second
 Work merely because the incoming volume or route needs human review. The identity settlement claims
 the established Work, leaves its current tuple/routes intact, and parks one `GroupIdentity` proposal
-against it. Accepting that single-Work proposal applies the proposed tuple and routes to the existing
-Work. Repeating the same capture reuses the equivalent pending card; it does not grow the review
-queue or create another Work.
+against it. Repeating the same capture reuses the equivalent pending card; it does not grow the
+review queue or create another Work.
+
+**Since card-edits-lift (2026-09-25), no review answer applies a proposal to an existing Work.**
+The card offers "Different book" and Dismiss only; "Different book" records the distinction on
+the anchor Work, advances its generation, resolves the card and writes one audit row, and changes
+nothing else (defect D1, which overwrote the Work's title, author and provider ids from the
+proposal, is deleted). The "same book / merge" answer is gone; manual merging is dropped for good
+(PO 2026-09-24; duplicates are resolved by deleting the extra Work). The card shows what the
+book is compared with (proposed title, subtitle, volume and author). A book added again after a
+"different book" answer is not created from the proposal; the user adds it again.
+
+**Title/author edits** (`PUT /api/v1/work/{id}`) no longer go through a card. They are one
+identity settlement carrying the edit's observed generation, then the ordinary field update, so a
+Save persists every submitted field or refuses before any write. An edit that would give the Work
+another Work's exact identity (title, subtitle, volume, author) is refused with 409 "Another book
+already has this title and author." An author edit applies the typed spelling: when the name
+resolves to an existing Author under another spelling (for example a dropped "Jr."), that Author is
+renamed to the typed text after the edit settles (PO decision after the live check). Contract:
+`spec-card-edits-lift.md` (v5).

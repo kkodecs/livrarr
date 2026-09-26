@@ -96,7 +96,16 @@ struct RouteResponse {
 async fn build_route_harness() -> RouteHarness {
     // Packet law: this is the real, migrated, single-connection SQLite
     // `:memory:` helper. U1 does not need the activated-index-only variant.
-    let db = create_test_db().await;
+    build_route_harness_on(create_test_db().await).await
+}
+
+/// Production-shaped schema: the activated identity index without the legacy
+/// test-only Work index, so identity uniqueness behaves as it does live.
+async fn build_activated_route_harness() -> RouteHarness {
+    build_route_harness_on(livrarr_db::test_helpers::create_activated_test_db().await).await
+}
+
+async fn build_route_harness_on(db: SqliteDb) -> RouteHarness {
     let tmp = tempfile::tempdir().expect("U1 route harness tempdir");
     let data_dir = tmp.path().to_path_buf();
     let data_dir_arc = Arc::new(data_dir.clone());
@@ -467,10 +476,20 @@ async fn call_router_json(
     path: impl Into<String>,
     body: Option<Value>,
 ) -> RouteResponse {
+    call_app_json(harness.app.clone(), &harness.api_key, method, path, body).await
+}
+
+async fn call_app_json(
+    app: Router,
+    api_key: &str,
+    method: Method,
+    path: impl Into<String>,
+    body: Option<Value>,
+) -> RouteResponse {
     let mut request = Request::builder()
         .method(method)
         .uri(path.into())
-        .header("x-api-key", &harness.api_key);
+        .header("x-api-key", api_key);
     let request_body = match body {
         Some(value) => {
             request = request.header(header::CONTENT_TYPE, "application/json");
@@ -483,9 +502,7 @@ async fn call_router_json(
         IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)),
         31_001,
     )));
-    let response = harness
-        .app
-        .clone()
+    let response = app
         .oneshot(request)
         .await
         .expect("production router response");
@@ -1026,12 +1043,12 @@ fn irf_u1_guard_refuses_all_seven_unavailable_kinds() {
     }
 }
 
-// PIN: containment refuses GroupIdentity while PendingRoute remains available.
+// PIN: GroupIdentity and PendingRoute continue; only the merge answer is refused.
 #[test]
-fn irf_u1_guard_contains_group_and_keeps_pending_available() {
+fn irf_u1_guard_keeps_group_and_pending_available() {
     assert_eq!(
         ilr::require_continuation(ilr::ReviewKind::GroupIdentity),
-        Err(ilr::IdentityRoadError::MergingUnavailable)
+        Ok(())
     );
     assert_eq!(
         ilr::require_continuation(ilr::ReviewKind::PendingRoute),
@@ -1581,18 +1598,16 @@ async fn mint_pending_route_card(
     (work_id, minted, route)
 }
 
-async fn assert_group_contained_through(ingress: ReviewHttpIngress) {
+async fn assert_merge_answer_refused_through(ingress: ReviewHttpIngress) {
     let harness = build_route_harness().await;
     let (survivor, _, card_id, generation) = mint_existing_group(&harness, "contained-group").await;
     let before = user_state_snapshot(&harness.db, harness.user_id).await;
-    for action in [
-        ilr::GroupIdentityAction::DifferentFromAll,
-        ilr::GroupIdentityAction::AttachOrMerge { anchor: survivor },
-    ] {
+    // A stale generation is refused as merging, before any generation check.
+    for expected_generation in [generation, generation - 1] {
         let command = ReviewResolutionCommand::GroupIdentity {
             card_id,
-            expected_generation: generation,
-            action,
+            expected_generation,
+            action: ilr::GroupIdentityAction::AttachOrMerge { anchor: survivor },
         };
         let response = call_router_json(
             &harness,
@@ -1627,6 +1642,7 @@ async fn assert_group_contained_through(ingress: ReviewHttpIngress) {
             before
         );
     }
+    assert!(listed_card(&harness, card_id).await.is_some());
 }
 
 async fn assert_pending_available_through(ingress: ReviewHttpIngress) {
@@ -1662,11 +1678,11 @@ async fn assert_pending_available_through(ingress: ReviewHttpIngress) {
     assert_eq!(confirmed, 1);
 }
 
-// PO containment: both aliases refuse existing GroupIdentity cards without writes.
+// AC-012: both aliases and the repository refuse the merge answer without writes.
 #[tokio::test]
-async fn group_identity_is_contained_through_both_review_routes() {
-    assert_group_contained_through(ReviewHttpIngress::Typed).await;
-    assert_group_contained_through(ReviewHttpIngress::LegacyAlias).await;
+async fn group_identity_merge_answer_is_refused_through_both_review_routes() {
+    assert_merge_answer_refused_through(ReviewHttpIngress::Typed).await;
+    assert_merge_answer_refused_through(ReviewHttpIngress::LegacyAlias).await;
 }
 
 // PIN: the typed and legacy-alias doors retain the current PendingRoute continuation.
@@ -1674,57 +1690,6 @@ async fn group_identity_is_contained_through_both_review_routes() {
 async fn pending_route_remains_available_through_both_review_routes() {
     assert_pending_available_through(ReviewHttpIngress::Typed).await;
     assert_pending_available_through(ReviewHttpIngress::LegacyAlias).await;
-}
-
-// PO containment: identity edits refuse early; non-identity edits remain available.
-#[tokio::test]
-async fn inline_identity_edits_are_refused_before_writes_but_metadata_edits_work() {
-    let harness = build_route_harness().await;
-    let (work_id, _) = seed_work(&harness.db, harness.user_id, "contained-update").await;
-    let before = user_state_snapshot(&harness.db, harness.user_id).await;
-    let authors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authors")
-        .fetch_one(harness.db.pool())
-        .await
-        .unwrap();
-    for body in [
-        json!({"title": "New title"}),
-        json!({"authorName": "New author"}),
-    ] {
-        let response = call_router_json(
-            &harness,
-            Method::PUT,
-            format!("/api/v1/work/{work_id}"),
-            Some(body),
-        )
-        .await;
-        assert_eq!(response.status, StatusCode::CONFLICT, "{}", response.json);
-        assert_eq!(
-            response.json["message"],
-            "Merging is currently unavailable."
-        );
-        assert_eq!(
-            user_state_snapshot(&harness.db, harness.user_id).await,
-            before
-        );
-        assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM authors")
-                .fetch_one(harness.db.pool())
-                .await
-                .unwrap(),
-            authors
-        );
-    }
-    let work = call_router_json(
-        &harness,
-        Method::GET,
-        format!("/api/v1/work/{work_id}"),
-        None,
-    )
-    .await;
-    let edited = call_router_json(&harness, Method::PUT, format!("/api/v1/work/{work_id}"), Some(json!({"title": work.json["title"], "authorName": work.json["authorName"], "monitorEbook": false}))).await;
-    assert_eq!(edited.status, StatusCode::OK, "{}", edited.json);
-    assert_eq!(edited.json["monitorEbook"], false);
-    assert_eq!(edited.json["title"], work.json["title"]);
 }
 
 // PO containment: merge choices cannot bypass the refusal or mint a new card.
@@ -1958,4 +1923,1763 @@ async fn containment_direct_settlement_and_startup_heals_cannot_absorb() {
         user_state_snapshot(&harness.db, harness.user_id).await,
         before
     );
+}
+
+// ---------------------------------------------------------------------------
+// card-edits-lift (spec-card-edits-lift.md v4): title/author edits and the
+// "different book" answer work through their real doors; the merge answer,
+// manual merge and automatic absorption stay refused.
+// ---------------------------------------------------------------------------
+
+/// Letters only, so no fixture title grows a trailing number that the title
+/// parser would read as a volume.
+fn lift_label(stem: &str) -> String {
+    let mut n = CASE_ID.fetch_add(1, Ordering::Relaxed);
+    let mut suffix = String::new();
+    loop {
+        suffix.push((b'a' + (n % 26) as u8) as char);
+        n /= 26;
+        if n == 0 {
+            break;
+        }
+    }
+    format!("{stem} Lift {suffix}")
+}
+
+fn lift_ol_value() -> String {
+    format!("OL{}W", 880_000 + CASE_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+async fn lift_author(db: &SqliteDb, user_id: i64, name: &str) -> i64 {
+    db.create_author(CreateAuthorDbRequest {
+        user_id,
+        name: name.to_string(),
+        sort_name: None,
+        ol_key: None,
+        gr_key: None,
+        hc_key: None,
+        import_id: None,
+    })
+    .await
+    .expect("seed Author")
+    .0
+    .id
+}
+
+fn lift_tuple(main: &str, subtitle: Option<&str>, volume: Option<&str>) -> ilr::IdentityTitleTuple {
+    ilr::IdentityTitleTuple {
+        main: main.to_string(),
+        subtitle: subtitle.map(str::to_string),
+        volume: volume.map(str::to_string),
+        normalized_main: main.to_lowercase(),
+        normalized_subtitle: subtitle.unwrap_or_default().to_lowercase(),
+        normalized_volume: volume.unwrap_or_default().to_string(),
+        provenance: ilr::EvidenceProvenance::User,
+    }
+}
+
+fn lift_route(user_id: i64, value: &str) -> ilr::WorkRoute {
+    ilr::WorkRoute {
+        id: 0,
+        user_id,
+        owner: ilr::RouteOwner::Work(0),
+        resolved_work_id: 0,
+        provider: ilr::IdentityProvider::OpenLibrary,
+        kind: ilr::RouteKind::OpenLibraryWork,
+        provider_scoped_id: value.to_string(),
+        state: ilr::WorkRouteState::Active,
+        provenance: ilr::RouteProvenance::Provider(ilr::IdentityProvider::OpenLibrary),
+        user_confirmed: false,
+        observed_at: Utc::now(),
+    }
+}
+
+/// A Work created through the sole settlement writer.
+async fn lift_work(
+    db: &SqliteDb,
+    user_id: i64,
+    title: ilr::IdentityTitleTuple,
+    author_id: i64,
+    routes: Vec<ilr::WorkRoute>,
+) -> i64 {
+    WorkIdentityRepository::commit_settlement(
+        db,
+        ilr::SettlementCommit {
+            creation_facts: None,
+            user_id,
+            existing_work_id: None,
+            add_source: None,
+            identity_title: title,
+            text_distinction: None,
+            contributors: vec![ilr::WorkContributor {
+                user_id,
+                work_id: 0,
+                author_id,
+                ordinal: 0,
+                roles: vec![],
+            }],
+            routes,
+            absorbed_work_ids: vec![],
+            expected_generation: 0,
+            review_cards: vec![],
+        },
+    )
+    .await
+    .expect("seed Work through the settlement writer")
+    .identity
+    .own_work_id
+}
+
+/// Re-settles the anchor's own identity: a legitimate identity write that
+/// advances its generation, as enrichment would.
+async fn lift_settle_again(
+    db: &SqliteDb,
+    user_id: i64,
+    work_id: i64,
+    review_cards: Vec<ilr::SettlementReviewCard>,
+) -> ilr::SettlementCommitOutcome {
+    let captured = WorkIdentityRepository::read_captured_identity(db, user_id, work_id)
+        .await
+        .expect("read anchor identity");
+    WorkIdentityRepository::commit_settlement(
+        db,
+        ilr::SettlementCommit {
+            creation_facts: None,
+            user_id,
+            existing_work_id: Some(work_id),
+            add_source: None,
+            identity_title: captured.identity_title.clone(),
+            text_distinction: None,
+            contributors: vec![ilr::WorkContributor {
+                user_id,
+                work_id,
+                author_id: captured.primary_author_id,
+                ordinal: 0,
+                roles: vec![],
+            }],
+            routes: captured.active_routes.clone(),
+            absorbed_work_ids: vec![],
+            expected_generation: captured.identity_generation,
+            review_cards,
+        },
+    )
+    .await
+    .expect("settle anchor through the settlement writer")
+}
+
+/// A pending GroupIdentity card minted through the settlement writer, as
+/// settlement parks one for a group.
+async fn lift_group_card(
+    db: &SqliteDb,
+    user_id: i64,
+    anchor: i64,
+    work_ids: Vec<i64>,
+    proposed_identity: Option<ilr::WorkIdentityEvidence>,
+    merge_choices: Value,
+) -> i64 {
+    let committed = lift_settle_again(
+        db,
+        user_id,
+        anchor,
+        vec![ilr::SettlementReviewCard::GroupIdentity {
+            work_ids,
+            proposed_identity,
+            merge_choices: serde_json::from_value(merge_choices).expect("merge choices"),
+        }],
+    )
+    .await;
+    committed.review_cards[0].id
+}
+
+fn lift_proposal(user_id: i64, author_id: i64, stem: &str) -> ilr::WorkIdentityEvidence {
+    ilr::WorkIdentityEvidence {
+        title: lift_tuple(&lift_label(stem), Some("Proposed"), Some("7")),
+        primary_author_id: author_id,
+        routes: vec![lift_route(user_id, &lift_ol_value())],
+    }
+}
+
+async fn lift_work_row(db: &SqliteDb, work_id: i64) -> Value {
+    let raw: Option<String> = sqlx::query_scalar(
+        "SELECT json_object('title',title,'subtitle',subtitle,'volume',identity_volume,\
+            'author',author_name,'author_id',author_id,'primary_author_id',primary_author_id,\
+            'main',normalized_identity_main,'nsub',normalized_identity_subtitle,\
+            'nvol',normalized_identity_volume,'distinction',text_distinction,\
+            'generation',identity_generation,'series',series_name,\
+            'monitor_ebook',monitor_ebook,'monitor_audiobook',monitor_audiobook) \
+         FROM works WHERE id=?1",
+    )
+    .bind(work_id)
+    .fetch_optional(db.pool())
+    .await
+    .expect("read Work row");
+    raw.map(|raw| serde_json::from_str(&raw).expect("Work row JSON"))
+        .unwrap_or(Value::Null)
+}
+
+async fn lift_text(db: &SqliteDb, sql: &str, bind: i64) -> String {
+    sqlx::query_scalar(sql)
+        .bind(bind)
+        .fetch_one(db.pool())
+        .await
+        .expect("read snapshot text")
+}
+
+async fn lift_routes(db: &SqliteDb, work_id: i64) -> String {
+    lift_text(
+        db,
+        "SELECT COALESCE(json_group_array(json_object('provider',provider,'kind',kind,\
+            'value',provider_scoped_id,'owner',owner_type,'confirmed',user_confirmed)),'[]') \
+         FROM (SELECT * FROM identity_routes WHERE resolved_work_id=?1 AND state='active' ORDER BY id)",
+        work_id,
+    )
+    .await
+}
+
+async fn lift_contributors(db: &SqliteDb, work_id: i64) -> String {
+    lift_text(
+        db,
+        "SELECT COALESCE(json_group_array(json_object('author_id',c.author_id,'ordinal',c.ordinal,\
+            'roles',json((SELECT json_group_array(r.role || '|' || r.provenance) \
+                FROM work_contributor_roles r \
+                WHERE r.work_id=c.work_id AND r.author_id=c.author_id)))),'[]') \
+         FROM (SELECT * FROM work_contributors WHERE work_id=?1 ORDER BY ordinal, author_id) c",
+        work_id,
+    )
+    .await
+}
+
+async fn lift_count(db: &SqliteDb, sql: &str, bind: i64) -> i64 {
+    sqlx::query_scalar(sql)
+        .bind(bind)
+        .fetch_one(db.pool())
+        .await
+        .expect("read count")
+}
+
+async fn lift_pending_cards(db: &SqliteDb, user_id: i64) -> i64 {
+    lift_count(
+        db,
+        "SELECT COUNT(*) FROM identity_review_cards WHERE user_id=?1 AND status='pending'",
+        user_id,
+    )
+    .await
+}
+
+async fn lift_works(db: &SqliteDb, user_id: i64) -> i64 {
+    lift_count(db, "SELECT COUNT(*) FROM works WHERE user_id=?1", user_id).await
+}
+
+async fn lift_resolution_audits(db: &SqliteDb, user_id: i64) -> i64 {
+    lift_count(
+        db,
+        "SELECT COUNT(*) FROM identity_audit_events WHERE user_id=?1 AND event_kind='review-resolution'",
+        user_id,
+    )
+    .await
+}
+
+async fn lift_card_status(db: &SqliteDb, card_id: i64) -> Option<String> {
+    sqlx::query_scalar("SELECT status FROM identity_review_cards WHERE id=?1")
+        .bind(card_id)
+        .fetch_optional(db.pool())
+        .await
+        .expect("read card status")
+}
+
+async fn listed_card(harness: &RouteHarness, card_id: i64) -> Option<Value> {
+    let listed = call_router_json(harness, Method::GET, "/api/v1/identity-review-card", None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.json);
+    listed
+        .json
+        .as_array()
+        .and_then(|cards| cards.iter().find(|card| card["id"] == card_id).cloned())
+}
+
+async fn listed_generation(harness: &RouteHarness, card_id: i64) -> i64 {
+    listed_card(harness, card_id).await.expect("card is listed")["generation"]
+        .as_i64()
+        .expect("listed generation")
+}
+
+async fn resolve_group(
+    harness: &RouteHarness,
+    ingress: ReviewHttpIngress,
+    card_id: i64,
+    generation: i64,
+    action: Value,
+) -> RouteResponse {
+    call_router_json(
+        harness,
+        Method::POST,
+        ingress.path(card_id),
+        Some(json!({"command": {"GroupIdentity": {
+            "card_id": card_id,
+            "expected_generation": generation,
+            "action": action,
+        }}})),
+    )
+    .await
+}
+
+fn with_permitted_answer_changes(before: &Value, card_id: i64, generation: i64) -> Value {
+    let mut expected = before.clone();
+    expected["distinction"] = json!(format!("different:review:{card_id}"));
+    expected["generation"] = json!(generation + 1);
+    expected
+}
+
+async fn assert_different_book_keeps_proposal_off_the_work(ingress: ReviewHttpIngress) {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let bob = lift_author(db, user, &lift_label("Bob")).await;
+    let work = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let card = lift_group_card(
+        db,
+        user,
+        work,
+        vec![work],
+        Some(lift_proposal(user, bob, "Beta")),
+        json!([]),
+    )
+    .await;
+    let generation = listed_generation(&harness, card).await;
+    let before = lift_work_row(db, work).await;
+    let routes = lift_routes(db, work).await;
+    let contributors = lift_contributors(db, work).await;
+    let works = lift_works(db, user).await;
+    let audits = lift_resolution_audits(db, user).await;
+
+    let response = resolve_group(
+        &harness,
+        ingress,
+        card,
+        generation,
+        json!("DifferentFromAll"),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(
+        lift_work_row(db, work).await,
+        with_permitted_answer_changes(&before, card, generation),
+        "only the distinction and one generation step may change"
+    );
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_contributors(db, work).await, contributors);
+    assert_eq!(lift_works(db, user).await, works, "no Work is created");
+    assert_eq!(lift_resolution_audits(db, user).await, audits + 1);
+    assert_eq!(
+        lift_card_status(db, card).await.as_deref(),
+        Some("resolved")
+    );
+    assert!(listed_card(&harness, card).await.is_none());
+}
+
+// AC-001: "different book" never writes the proposal onto the existing Work.
+#[tokio::test]
+async fn card_edits_lift_ac001_different_book_via_typed_route() {
+    assert_different_book_keeps_proposal_off_the_work(ReviewHttpIngress::Typed).await;
+}
+
+// AC-001, legacy alias door.
+#[tokio::test]
+async fn card_edits_lift_ac001_different_book_via_legacy_alias() {
+    assert_different_book_keeps_proposal_off_the_work(ReviewHttpIngress::LegacyAlias).await;
+}
+
+async fn assert_group_answer_touches_only_anchor_bookkeeping(with_proposal: bool) {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let bob = lift_author(db, user, &lift_label("Bob")).await;
+    let first = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let second = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let proposal = with_proposal.then(|| lift_proposal(user, bob, "Beta"));
+    let card = lift_group_card(db, user, first, vec![first, second], proposal, json!([])).await;
+    let generation = listed_generation(&harness, card).await;
+    let (first_before, second_before) = (
+        lift_work_row(db, first).await,
+        lift_work_row(db, second).await,
+    );
+    let (first_routes, second_routes) =
+        (lift_routes(db, first).await, lift_routes(db, second).await);
+    let audits = lift_resolution_audits(db, user).await;
+    let works = lift_works(db, user).await;
+
+    let response = resolve_group(
+        &harness,
+        ReviewHttpIngress::Typed,
+        card,
+        generation,
+        json!("DifferentFromAll"),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(
+        lift_work_row(db, first).await,
+        with_permitted_answer_changes(&first_before, card, generation)
+    );
+    assert_eq!(lift_work_row(db, second).await, second_before);
+    assert_eq!(lift_routes(db, first).await, first_routes);
+    assert_eq!(lift_routes(db, second).await, second_routes);
+    assert_eq!(lift_resolution_audits(db, user).await, audits + 1);
+    assert_eq!(lift_works(db, user).await, works);
+    assert_eq!(
+        lift_card_status(db, card).await.as_deref(),
+        Some("resolved")
+    );
+}
+
+// AC-002: a many-book card with a proposal changes no member's identity.
+#[tokio::test]
+async fn card_edits_lift_ac002_many_book_card_with_proposal() {
+    assert_group_answer_touches_only_anchor_bookkeeping(true).await;
+}
+
+// AC-003: a card without a proposal gets exactly the permitted changes.
+#[tokio::test]
+async fn card_edits_lift_ac003_card_without_proposal() {
+    assert_group_answer_touches_only_anchor_bookkeeping(false).await;
+}
+
+// AC-004: the actionable generation is the one listed when the user decides.
+#[tokio::test]
+async fn card_edits_lift_ac004_stale_answer_refused_older_mint_actionable() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let bob = lift_author(db, user, &lift_label("Bob")).await;
+    let work = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let stale = lift_group_card(
+        db,
+        user,
+        work,
+        vec![work],
+        Some(lift_proposal(user, bob, "Beta")),
+        json!([]),
+    )
+    .await;
+    let seen = listed_generation(&harness, stale).await;
+    lift_settle_again(db, user, work, vec![]).await;
+    let row = lift_work_row(db, work).await;
+    let routes = lift_routes(db, work).await;
+    let contributors = lift_contributors(db, work).await;
+    let (works, cards, audits) = (
+        lift_works(db, user).await,
+        lift_pending_cards(db, user).await,
+        lift_resolution_audits(db, user).await,
+    );
+
+    let refused = resolve_group(
+        &harness,
+        ReviewHttpIngress::Typed,
+        stale,
+        seen,
+        json!("DifferentFromAll"),
+    )
+    .await;
+
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.json);
+    assert_eq!(refused.json["message"], "stale identity generation");
+    assert_eq!(lift_work_row(db, work).await, row);
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_contributors(db, work).await, contributors);
+    assert_eq!(lift_works(db, user).await, works);
+    assert_eq!(lift_pending_cards(db, user).await, cards);
+    assert_eq!(lift_resolution_audits(db, user).await, audits);
+    assert_eq!(
+        lift_card_status(db, stale).await.as_deref(),
+        Some("pending")
+    );
+    assert_eq!(listed_generation(&harness, stale).await, seen + 1);
+    let dismissed = call_router_json(
+        &harness,
+        Method::POST,
+        format!("/api/v1/identity-review-card/{stale}/dismiss"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        dismissed.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        dismissed.json
+    );
+
+    let older = lift_group_card(
+        db,
+        user,
+        work,
+        vec![work],
+        Some(lift_proposal(user, bob, "Gamma")),
+        json!([]),
+    )
+    .await;
+    let minted: i64 = lift_count(
+        db,
+        "SELECT generation FROM identity_review_cards WHERE id=?1",
+        older,
+    )
+    .await;
+    lift_settle_again(db, user, work, vec![]).await;
+    let current = listed_generation(&harness, older).await;
+    assert!(
+        current > minted,
+        "fixture: the card predates the anchor's generation"
+    );
+    let title = lift_work_row(db, work).await["title"].clone();
+
+    let accepted = resolve_group(
+        &harness,
+        ReviewHttpIngress::Typed,
+        older,
+        current,
+        json!("DifferentFromAll"),
+    )
+    .await;
+
+    assert_eq!(accepted.status, StatusCode::OK, "{}", accepted.json);
+    assert_eq!(lift_work_row(db, work).await["title"], title);
+}
+
+// AC-005: a deleted non-anchor member leaves an actionable card; a deleted
+// anchor takes its card with it.
+#[tokio::test]
+async fn card_edits_lift_ac005_deleted_member_and_deleted_anchor() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let bob = lift_author(db, user, &lift_label("Bob")).await;
+    let mut works = Vec::new();
+    for _ in 0..4 {
+        works.push(
+            lift_work(
+                db,
+                user,
+                lift_tuple(&lift_label("Alpha"), None, None),
+                ann,
+                vec![lift_route(user, &lift_ol_value())],
+            )
+            .await,
+        );
+    }
+    let card = lift_group_card(
+        db,
+        user,
+        works[0],
+        vec![works[0], works[1]],
+        Some(lift_proposal(user, bob, "Beta")),
+        json!([]),
+    )
+    .await;
+    let deleted = call_router_json(
+        &harness,
+        Method::DELETE,
+        format!("/api/v1/work/{}", works[1]),
+        None,
+    )
+    .await;
+    assert!(deleted.status.is_success(), "{}", deleted.json);
+    let generation = listed_generation(&harness, card).await;
+    let before = lift_work_row(db, works[0]).await;
+    let routes = lift_routes(db, works[0]).await;
+
+    let response = resolve_group(
+        &harness,
+        ReviewHttpIngress::Typed,
+        card,
+        generation,
+        json!("DifferentFromAll"),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(
+        lift_work_row(db, works[0]).await,
+        with_permitted_answer_changes(&before, card, generation)
+    );
+    assert_eq!(lift_routes(db, works[0]).await, routes);
+
+    let orphaned = lift_group_card(
+        db,
+        user,
+        works[2],
+        vec![works[2], works[3]],
+        Some(lift_proposal(user, bob, "Gamma")),
+        json!([]),
+    )
+    .await;
+    let orphaned_generation = listed_generation(&harness, orphaned).await;
+    let deleted_anchor = call_router_json(
+        &harness,
+        Method::DELETE,
+        format!("/api/v1/work/{}", works[2]),
+        None,
+    )
+    .await;
+    assert!(
+        deleted_anchor.status.is_success(),
+        "{}",
+        deleted_anchor.json
+    );
+    assert!(listed_card(&harness, orphaned).await.is_none());
+    let missing = resolve_group(
+        &harness,
+        ReviewHttpIngress::Typed,
+        orphaned,
+        orphaned_generation,
+        json!("DifferentFromAll"),
+    )
+    .await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND, "{}", missing.json);
+}
+
+async fn lift_cli_database(dir: &Path) -> SqliteDb {
+    let pool = livrarr_db::pool::create_sqlite_pool(dir)
+        .await
+        .expect("open CLI database");
+    livrarr_db::pool::run_migrations(&pool)
+        .await
+        .expect("migrate CLI database");
+    let db = SqliteDb::new(pool);
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_authors_identity \
+         ON authors(user_id, normalized_name) WHERE normalized_name IS NOT NULL",
+    )
+    .execute(db.pool())
+    .await
+    .expect("install production Author identity index");
+    db.ensure_identity_authority_ready()
+        .await
+        .expect("activate CLI database");
+    db
+}
+
+async fn lift_cli(
+    command: livrarr_server::identity_layer::IdentityCutoverCliCommand,
+    dir: &Path,
+) -> Result<
+    livrarr_server::identity_layer::IdentityCutoverCliOutcome,
+    livrarr_server::identity_layer::IdentityCutoverCommandError,
+> {
+    livrarr_server::identity_layer::run_identity_cutover_command(
+        command,
+        dir.to_path_buf(),
+        CancellationToken::new(),
+    )
+    .await
+}
+
+// AC-006 and the command-line half of AC-012.
+#[tokio::test]
+async fn card_edits_lift_ac006_cli_show_review_generation_is_actionable() {
+    use livrarr_server::identity_layer::{
+        IdentityCutoverCliCommand as Cli, IdentityCutoverCliOutcome as Out,
+        IdentityCutoverCommandError as CliError,
+    };
+    let dir = tempfile::tempdir().expect("CLI data dir");
+    let db = lift_cli_database(dir.path()).await;
+    let user = seed_user(&db, "lift-cli").await;
+    let ann = lift_author(&db, user, &lift_label("Ann")).await;
+    let bob = lift_author(&db, user, &lift_label("Bob")).await;
+    let work = lift_work(
+        &db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let card = lift_group_card(
+        &db,
+        user,
+        work,
+        vec![work],
+        Some(lift_proposal(user, bob, "Beta")),
+        json!([]),
+    )
+    .await;
+    let minted = lift_count(
+        &db,
+        "SELECT generation FROM identity_review_cards WHERE id=?1",
+        card,
+    )
+    .await;
+    lift_settle_again(&db, user, work, vec![]).await;
+    let before = lift_work_row(&db, work).await;
+    let routes = lift_routes(&db, work).await;
+    let audits = lift_resolution_audits(&db, user).await;
+    db.pool().close().await;
+
+    let listed = match lift_cli(Cli::ListReviews, dir.path()).await {
+        Ok(Out::ReviewList(rows)) => rows,
+        other => panic!("ListReviews: {other:?}"),
+    };
+    assert_eq!(
+        listed
+            .iter()
+            .find(|row| row.card_id == card)
+            .map(|row| row.generation),
+        Some(minted),
+        "ListReviews reports the stored mint generation"
+    );
+    let shown = match lift_cli(Cli::ShowReview { card_id: card }, dir.path()).await {
+        Ok(Out::ReviewDetail(detail)) => detail.generation,
+        other => panic!("ShowReview: {other:?}"),
+    };
+    assert_eq!(
+        shown,
+        minted + 1,
+        "ShowReview reports the anchor's current generation"
+    );
+    let action_file = dir.path().join("different-book.json");
+    std::fs::write(&action_file, br#""DifferentFromAll""#).expect("write action file");
+
+    let stale = lift_cli(
+        Cli::ResolveReview {
+            card_id: card,
+            expected_generation: minted,
+            action_file: action_file.clone(),
+        },
+        dir.path(),
+    )
+    .await;
+    assert!(matches!(stale, Err(CliError::StaleGeneration)), "{stale:?}");
+    let reopened = SqliteDb::new(
+        livrarr_db::pool::create_sqlite_pool(dir.path())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(lift_work_row(&reopened, work).await, before);
+    reopened.pool().close().await;
+
+    let accepted = lift_cli(
+        Cli::ResolveReview {
+            card_id: card,
+            expected_generation: shown,
+            action_file,
+        },
+        dir.path(),
+    )
+    .await;
+    assert!(
+        matches!(accepted, Ok(Out::ReviewResolved(_))),
+        "{accepted:?}"
+    );
+    let reopened = SqliteDb::new(
+        livrarr_db::pool::create_sqlite_pool(dir.path())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        lift_work_row(&reopened, work).await,
+        with_permitted_answer_changes(&before, card, shown)
+    );
+    assert_eq!(lift_routes(&reopened, work).await, routes);
+    assert_eq!(
+        lift_card_status(&reopened, card).await.as_deref(),
+        Some("resolved")
+    );
+    assert_eq!(lift_resolution_audits(&reopened, user).await, audits + 1);
+    assert_eq!(
+        lift_count(
+            &reopened,
+            "SELECT COUNT(*) FROM identity_audit_events WHERE event_kind='review-resolution' \
+               AND json_extract(payload, '$.GroupIdentity.card_id')=?1",
+            card,
+        )
+        .await,
+        1,
+        "exactly one resolution audit row names the card"
+    );
+
+    let merge_card = lift_group_card(
+        &reopened,
+        user,
+        work,
+        vec![work],
+        Some(lift_proposal(user, bob, "Gamma")),
+        json!([]),
+    )
+    .await;
+    let merge_generation = lift_row_generation(&reopened, work).await;
+    let merge_before = user_state_snapshot(&reopened, user).await;
+    reopened.pool().close().await;
+    let merge_file = dir.path().join("merge.json");
+    std::fs::write(
+        &merge_file,
+        serde_json::to_vec(&json!({"AttachOrMerge": {"anchor": work}})).unwrap(),
+    )
+    .expect("write merge action file");
+    let merged = lift_cli(
+        Cli::ResolveReview {
+            card_id: merge_card,
+            expected_generation: merge_generation,
+            action_file: merge_file,
+        },
+        dir.path(),
+    )
+    .await;
+    assert!(
+        merged.as_ref().err().is_some_and(|error| error
+            .to_string()
+            .contains("Merging is currently unavailable")),
+        "{merged:?}"
+    );
+    let reopened = SqliteDb::new(
+        livrarr_db::pool::create_sqlite_pool(dir.path())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(user_state_snapshot(&reopened, user).await, merge_before);
+    reopened.pool().close().await;
+}
+
+async fn lift_row_generation(db: &SqliteDb, work_id: i64) -> i64 {
+    lift_work_row(db, work_id).await["generation"]
+        .as_i64()
+        .expect("Work generation")
+}
+
+async fn lift_seed_plain(harness: &RouteHarness) -> (i64, String, String) {
+    let author_name = lift_label("Ann");
+    let title = lift_label("Alpha");
+    let ann = lift_author(&harness.db, harness.user_id, &author_name).await;
+    let work = lift_work(
+        &harness.db,
+        harness.user_id,
+        lift_tuple(&title, None, None),
+        ann,
+        vec![lift_route(harness.user_id, &lift_ol_value())],
+    )
+    .await;
+    (work, title, author_name)
+}
+
+async fn put_work(harness: &RouteHarness, work_id: i64, body: Value) -> RouteResponse {
+    call_router_json(
+        harness,
+        Method::PUT,
+        format!("/api/v1/work/{work_id}"),
+        Some(body),
+    )
+    .await
+}
+
+async fn get_work(harness: &RouteHarness, work_id: i64) -> Value {
+    let response = call_router_json(
+        harness,
+        Method::GET,
+        format!("/api/v1/work/{work_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    response.json
+}
+
+/// The body the rendered edit dialog sends: every editable field, changed or not.
+fn dialog_body(detail: &Value, changes: Value) -> Value {
+    let mut body = json!({
+        "title": detail["title"],
+        "authorName": detail["authorName"],
+        "seriesName": detail["seriesName"],
+        "seriesPosition": detail["seriesPosition"],
+        "monitorEbook": detail["monitorEbook"],
+        "monitorAudiobook": detail["monitorAudiobook"],
+    });
+    for (key, value) in changes.as_object().expect("changes object") {
+        body[key] = value.clone();
+    }
+    body
+}
+
+// AC-007: a title edit applies, keeps author, provider ids and distinction,
+// and leaves no card.
+#[tokio::test]
+async fn card_edits_lift_ac007_title_edit_applies_without_a_card() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let (work, _, author_name) = lift_seed_plain(&harness).await;
+    let before = lift_work_row(db, work).await;
+    let routes = lift_routes(db, work).await;
+    let works = lift_works(db, user).await;
+    let new_title = lift_label("Gamma");
+
+    let response = put_work(&harness, work, json!({"title": new_title})).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(response.json["title"], new_title);
+    let detail = get_work(&harness, work).await;
+    assert_eq!(detail["title"], new_title);
+    assert_eq!(detail["authorName"], author_name);
+    let after = lift_work_row(db, work).await;
+    assert_eq!(after["main"], new_title.to_lowercase());
+    for unchanged in [
+        "author",
+        "author_id",
+        "primary_author_id",
+        "distinction",
+        "subtitle",
+        "volume",
+    ] {
+        assert_eq!(after[unchanged], before[unchanged], "{unchanged}");
+    }
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+    assert_eq!(lift_works(db, user).await, works);
+}
+
+async fn assert_author_edit_keeps_title_tuple(through_dialog: bool) {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let work = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), Some("Beta"), Some("2")),
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let before = lift_work_row(db, work).await;
+    let routes = lift_routes(db, work).await;
+    let new_author = lift_label("Bob");
+    let body = if through_dialog {
+        dialog_body(
+            &get_work(&harness, work).await,
+            json!({"authorName": new_author}),
+        )
+    } else {
+        json!({"authorName": new_author})
+    };
+
+    let response = put_work(&harness, work, body).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    let after = lift_work_row(db, work).await;
+    for unchanged in [
+        "title",
+        "subtitle",
+        "volume",
+        "main",
+        "nsub",
+        "nvol",
+        "distinction",
+    ] {
+        assert_eq!(after[unchanged], before[unchanged], "{unchanged}");
+    }
+    assert_eq!(after["author"], new_author);
+    assert_eq!(after["author_id"], after["primary_author_id"]);
+    let stored_name: String = sqlx::query_scalar("SELECT name FROM authors WHERE id=?1")
+        .bind(after["author_id"].as_i64().expect("author id"))
+        .fetch_one(db.pool())
+        .await
+        .expect("read Author");
+    assert_eq!(stored_name, new_author);
+    assert_eq!(get_work(&harness, work).await["authorName"], new_author);
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+}
+
+// AC-008 (a): API request that omits the title.
+#[tokio::test]
+async fn card_edits_lift_ac008_author_only_edit_via_api_keeps_title_tuple() {
+    assert_author_edit_keeps_title_tuple(false).await;
+}
+
+// AC-008 (b): the dialog's unchanged-title submission.
+#[tokio::test]
+async fn card_edits_lift_ac008_author_only_edit_via_dialog_keeps_title_tuple() {
+    assert_author_edit_keeps_title_tuple(true).await;
+}
+
+// AC-008: a title-and-author edit applies both.
+#[tokio::test]
+async fn card_edits_lift_ac008_title_and_author_edit_applies_both() {
+    let harness = build_route_harness().await;
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    let (title, author) = (lift_label("Delta"), lift_label("Dana"));
+
+    let response = put_work(
+        &harness,
+        work,
+        json!({"title": title, "authorName": author}),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    let detail = get_work(&harness, work).await;
+    assert_eq!(
+        (detail["title"].clone(), detail["authorName"].clone()),
+        (json!(title), json!(author))
+    );
+    assert_eq!(lift_pending_cards(&harness.db, harness.user_id).await, 0);
+}
+
+// AC-009: unchanged identity plus a flag change saves the flag only.
+#[tokio::test]
+async fn card_edits_lift_ac009_unchanged_identity_with_flag_change() {
+    let harness = build_route_harness().await;
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    let detail = get_work(&harness, work).await;
+    let flipped = !detail["monitorEbook"].as_bool().expect("monitorEbook");
+    let mut expected = lift_work_row(&harness.db, work).await;
+    expected["monitor_ebook"] = json!(i64::from(flipped));
+
+    let response = put_work(
+        &harness,
+        work,
+        dialog_body(&detail, json!({"monitorEbook": flipped})),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(lift_work_row(&harness.db, work).await, expected);
+    assert_eq!(lift_pending_cards(&harness.db, harness.user_id).await, 0);
+}
+
+// AC-020: title, series and a monitor flag in one dialog Save all persist.
+#[tokio::test]
+async fn card_edits_lift_ac020_mixed_save_persists_every_field() {
+    let harness = build_route_harness().await;
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    let detail = get_work(&harness, work).await;
+    let flipped = !detail["monitorEbook"].as_bool().expect("monitorEbook");
+    let (title, series) = (lift_label("Gamma"), lift_label("Saga"));
+
+    let response = put_work(
+        &harness,
+        work,
+        dialog_body(
+            &detail,
+            json!({"title": title, "seriesName": series, "monitorEbook": flipped}),
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    let saved = get_work(&harness, work).await;
+    assert_eq!(saved["title"], title);
+    assert_eq!(saved["seriesName"], series);
+    assert_eq!(saved["monitorEbook"], flipped);
+}
+
+// AC-011: validation classes are unchanged.
+#[tokio::test]
+async fn card_edits_lift_ac011_empty_or_null_identity_fields_are_422() {
+    let harness = build_route_harness().await;
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    for body in [
+        json!({"title": ""}),
+        json!({"title": null}),
+        json!({"authorName": "  "}),
+        json!({"authorName": null}),
+    ] {
+        let response = put_work(&harness, work, body.clone()).await;
+        assert_eq!(
+            response.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body} {}",
+            response.json
+        );
+    }
+}
+
+// AC-010: an injected fault inside an edit that changes both title and author
+// leaves no trace, and the same edit without the fault is one identity write
+// carrying both values, so a title/author pair split across commits fails.
+#[tokio::test]
+async fn card_edits_lift_ac010_injected_fault_leaves_no_trace() {
+    use livrarr_db::identity_layer::{set_identity_db_failpoint_for_tests, IdentityDbFailpoint};
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    let bob_name = lift_label("Bob");
+    let bob = lift_author(db, user, &bob_name).await;
+    let before = lift_work_row(db, work).await;
+    let routes = lift_routes(db, work).await;
+    let contributors = lift_contributors(db, work).await;
+    let edit = json!({"title": lift_label("Delta"), "authorName": bob_name});
+
+    set_identity_db_failpoint_for_tests(IdentityDbFailpoint::CommitAfterContributors);
+    let response = put_work(&harness, work, edit.clone()).await;
+    set_identity_db_failpoint_for_tests(IdentityDbFailpoint::None);
+
+    assert!(
+        response.status.is_server_error(),
+        "{} {}",
+        response.status,
+        response.json
+    );
+    assert_eq!(lift_work_row(db, work).await, before);
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_contributors(db, work).await, contributors);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+
+    let applied = put_work(&harness, work, edit.clone()).await;
+    assert_eq!(applied.status, StatusCode::OK, "{}", applied.json);
+    let after = lift_work_row(db, work).await;
+    assert_eq!(
+        (after["title"].clone(), after["primary_author_id"].clone()),
+        (edit["title"].clone(), json!(bob))
+    );
+    assert_eq!(
+        after["generation"].as_i64(),
+        before["generation"]
+            .as_i64()
+            .map(|generation| generation + 1),
+        "title and author commit in one identity write"
+    );
+}
+
+// AC-022: a rival identity write between the edit's read and its write wins.
+#[tokio::test]
+async fn card_edits_lift_ac022_stale_claim_keeps_rival_values() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    let pause = livrarr_db::identity_layer::install_settlement_pause_for_tests(user, work);
+    let edit_a = lift_label("Delta");
+    let (app, key, path) = (
+        harness.app.clone(),
+        harness.api_key.clone(),
+        format!("/api/v1/work/{work}"),
+    );
+    let body_a = json!({"title": edit_a});
+    let task =
+        tokio::spawn(
+            async move { call_app_json(app, &key, Method::PUT, path, Some(body_a)).await },
+        );
+    tokio::time::timeout(Duration::from_secs(10), pause.wait_until_paused())
+        .await
+        .expect("edit A reaches its settlement write");
+    let (gamma, cara) = (lift_label("Gamma"), lift_label("Cara"));
+    let rival = put_work(&harness, work, json!({"title": gamma, "authorName": cara})).await;
+    assert_eq!(rival.status, StatusCode::OK, "{}", rival.json);
+    pause.release();
+
+    let refused = task.await.expect("edit A task");
+
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.json);
+    let after = lift_work_row(db, work).await;
+    assert_eq!(
+        (after["title"].clone(), after["author"].clone()),
+        (json!(gamma), json!(cara))
+    );
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+    assert_eq!(
+        lift_count(
+            db,
+            "SELECT COUNT(*) FROM works WHERE user_id=?1 AND title LIKE 'Delta Lift %'",
+            user
+        )
+        .await,
+        0
+    );
+    let retried = put_work(&harness, work, json!({"title": edit_a})).await;
+    assert_eq!(retried.status, StatusCode::OK, "{}", retried.json);
+}
+
+/// Parks an edit at the road's own read of the Work, after every read its
+/// handler made: each captured-identity read of the Work is parked in turn and
+/// let through until the recorder shows the edit inside the road.
+async fn park_edit_at_road_read(
+    harness: &RouteHarness,
+    work: i64,
+    first: livrarr_db::identity_layer::SettlementPauseGuard,
+) -> livrarr_db::identity_layer::SettlementPauseGuard {
+    let mut pause = first;
+    loop {
+        tokio::time::timeout(Duration::from_secs(10), pause.wait_until_paused())
+            .await
+            .expect("the edit reads the Work");
+        let in_road = harness
+            .state
+            .identity_road
+            .test_recorder()
+            .snapshot()
+            .iter()
+            .any(|call| {
+                matches!(
+                    call,
+                    livrarr_server::identity_layer::IdentityRoadCall::Settle(request)
+                        if request.existing_work_id == Some(work)
+                )
+            });
+        if in_road {
+            return pause;
+        }
+        drop(pause);
+        pause = livrarr_db::identity_layer::install_captured_read_pause_for_tests(
+            harness.user_id,
+            work,
+            0,
+        );
+    }
+}
+
+async fn assert_rival_before_the_road_read_wins(edit_a: Value) {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let (work, _, _) = lift_seed_plain(&harness).await;
+    harness.state.identity_road.test_recorder().clear();
+    let first = livrarr_db::identity_layer::install_captured_read_pause_for_tests(user, work, 0);
+    let (app, key, path, body_a) = (
+        harness.app.clone(),
+        harness.api_key.clone(),
+        format!("/api/v1/work/{work}"),
+        edit_a.clone(),
+    );
+    let task =
+        tokio::spawn(
+            async move { call_app_json(app, &key, Method::PUT, path, Some(body_a)).await },
+        );
+    let pause = park_edit_at_road_read(&harness, work, first).await;
+    let (gamma, cara) = (lift_label("Gamma"), lift_label("Cara"));
+    let rival = put_work(&harness, work, json!({"title": gamma, "authorName": cara})).await;
+    assert_eq!(rival.status, StatusCode::OK, "{}", rival.json);
+    let rival_row = lift_work_row(db, work).await;
+    let rival_routes = lift_routes(db, work).await;
+    let rival_credits = lift_contributors(db, work).await;
+    pause.release();
+
+    let refused = task.await.expect("edit A task");
+
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.json);
+    assert_eq!(
+        (rival_row["title"].clone(), rival_row["author"].clone()),
+        (json!(gamma), json!(cara))
+    );
+    assert_eq!(
+        lift_work_row(db, work).await,
+        rival_row,
+        "edit A writes nothing"
+    );
+    assert_eq!(lift_routes(db, work).await, rival_routes);
+    assert_eq!(lift_contributors(db, work).await, rival_credits);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+
+    let retried = put_work(&harness, work, edit_a).await;
+    assert_eq!(retried.status, StatusCode::OK, "{}", retried.json);
+}
+
+// AC-022: a rival write after the title-only edit's handler read and before
+// the road's read wins; the edit's kept author never claims a later generation.
+#[tokio::test]
+async fn card_edits_lift_ac022_rival_before_road_read_wins_title_only() {
+    assert_rival_before_the_road_read_wins(json!({"title": lift_label("Delta")})).await;
+}
+
+// AC-022: the same window for an author-only edit and its kept title.
+#[tokio::test]
+async fn card_edits_lift_ac022_rival_before_road_read_wins_author_only() {
+    assert_rival_before_the_road_read_wins(json!({"authorName": lift_label("Dana")})).await;
+}
+
+/// The stored title tuple of a Work, as storage and a later GET report it.
+async fn lift_title_tuple(harness: &RouteHarness, work: i64) -> Value {
+    let row = lift_work_row(&harness.db, work).await;
+    let detail = get_work(harness, work).await;
+    json!({
+        "title": row["title"],
+        "subtitle": row["subtitle"],
+        "volume": row["volume"],
+        "main": row["main"],
+        "nsub": row["nsub"],
+        "nvol": row["nvol"],
+        "get_title": detail["title"],
+        "get_subtitle": detail["subtitle"],
+    })
+}
+
+// AC-008 / ST-012: author-only edits keep a comma-volume title's whole stored
+// tuple, whether the request omits the title or the dialog sends it unchanged;
+// a changed title is still split.
+#[tokio::test]
+async fn card_edits_lift_ac008_author_only_edits_keep_comma_volume_title_tuple() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let parsed =
+        ilr::title_parts_from_provider(format!("{}, Vol. 3: Bar", lift_label("Foo")), None)
+            .expect("parse fixture title");
+    assert_eq!(
+        (parsed.subtitle.as_deref(), parsed.volume.as_deref()),
+        (Some("Bar"), Some("3")),
+        "fixture: a comma-volume title with a subtitle"
+    );
+    let work = lift_work(
+        db,
+        user,
+        parsed,
+        ann,
+        vec![lift_route(user, &lift_ol_value())],
+    )
+    .await;
+    let tuple = lift_title_tuple(&harness, work).await;
+    let routes = lift_routes(db, work).await;
+
+    let bob = lift_label("Bob");
+    let omitted = put_work(&harness, work, json!({"authorName": bob})).await;
+    assert_eq!(omitted.status, StatusCode::OK, "{}", omitted.json);
+    assert_eq!(
+        lift_title_tuple(&harness, work).await,
+        tuple,
+        "title omitted"
+    );
+    assert_eq!(lift_work_row(db, work).await["author"], bob);
+
+    let cara = lift_label("Cara");
+    let dialog = put_work(
+        &harness,
+        work,
+        dialog_body(&get_work(&harness, work).await, json!({"authorName": cara})),
+    )
+    .await;
+    assert_eq!(dialog.status, StatusCode::OK, "{}", dialog.json);
+    assert_eq!(
+        lift_title_tuple(&harness, work).await,
+        tuple,
+        "unchanged dialog title"
+    );
+    assert_eq!(lift_work_row(db, work).await["author"], cara);
+    assert_eq!(lift_routes(db, work).await, routes);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+
+    let changed = format!("{}, Vol. 4: Quux", lift_label("Qux"));
+    let expected =
+        ilr::title_parts_from_provider(changed.clone(), None).expect("parse changed title");
+    let retitled = put_work(&harness, work, json!({"title": changed})).await;
+    assert_eq!(retitled.status, StatusCode::OK, "{}", retitled.json);
+    let row = lift_work_row(db, work).await;
+    assert_eq!(
+        (
+            row["title"].clone(),
+            row["subtitle"].clone(),
+            row["volume"].clone(),
+            row["nvol"].clone(),
+        ),
+        (
+            json!(expected.main),
+            json!(expected.subtitle),
+            json!(expected.volume),
+            json!(expected.normalized_volume),
+        ),
+        "a changed title is split"
+    );
+}
+
+// REQ-002: an author edit whose typed name resolves to an existing Author under
+// another spelling shows the typed spelling: that Author is renamed, so every
+// Work by the Author shows it, and no second Author is created.
+#[tokio::test]
+async fn card_edits_lift_author_edit_applies_typed_spelling() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let walter = lift_author(db, user, "Walter Isaacson").await;
+    let einstein = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Einstein"), None, None),
+        walter,
+        vec![],
+    )
+    .await;
+    let jobs = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Jobs"), None, None),
+        walter,
+        vec![],
+    )
+    .await;
+    let typed = "Walter Isaacson, Jr.";
+
+    let response = put_work(&harness, einstein, json!({"authorName": typed})).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(response.json["authorName"], typed, "response");
+    assert_eq!(get_work(&harness, einstein).await["authorName"], typed);
+    assert_eq!(
+        get_work(&harness, jobs).await["authorName"],
+        typed,
+        "the other Work by the Author"
+    );
+    assert_eq!(
+        lift_count(db, "SELECT COUNT(*) FROM authors WHERE user_id=?1", user).await,
+        1,
+        "no new Author"
+    );
+    assert_eq!(
+        lift_work_row(db, einstein).await["primary_author_id"],
+        json!(walter)
+    );
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+}
+
+/// A Work credited to several Authors in order, each with one role.
+async fn lift_credited_work(db: &SqliteDb, user_id: i64, credits: &[(i64, &str)]) -> i64 {
+    WorkIdentityRepository::commit_settlement(
+        db,
+        ilr::SettlementCommit {
+            creation_facts: None,
+            user_id,
+            existing_work_id: None,
+            add_source: None,
+            identity_title: lift_tuple(&lift_label("Alpha"), None, None),
+            text_distinction: None,
+            contributors: credits
+                .iter()
+                .enumerate()
+                .map(|(ordinal, (author_id, role))| ilr::WorkContributor {
+                    user_id,
+                    work_id: 0,
+                    author_id: *author_id,
+                    ordinal: ordinal as u32,
+                    roles: vec![ilr::SourcedValue {
+                        value: role.to_string(),
+                        provenance: ilr::EvidenceProvenance::User,
+                        observed_at: Utc::now(),
+                    }],
+                })
+                .collect(),
+            routes: vec![lift_route(user_id, &lift_ol_value())],
+            absorbed_work_ids: vec![],
+            expected_generation: 0,
+            review_cards: vec![],
+        },
+    )
+    .await
+    .expect("seed credited Work through the settlement writer")
+    .identity
+    .own_work_id
+}
+
+// REQ-002: title-only edits leave every contributor's ordinal and role as
+// they were; an author edit replaces only the primary contributor.
+#[tokio::test]
+async fn card_edits_lift_title_edits_keep_every_contributor_and_role() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let bob = lift_author(db, user, &lift_label("Bob")).await;
+    let cara = lift_author(db, user, &lift_label("Cara")).await;
+    let work = lift_credited_work(
+        db,
+        user,
+        &[(ann, "author"), (bob, "translator"), (cara, "illustrator")],
+    )
+    .await;
+    let credits = lift_contributors(db, work).await;
+    let seeded: Value = serde_json::from_str(&credits).expect("credits JSON");
+    assert_eq!(
+        seeded
+            .as_array()
+            .map(|rows| rows.iter().map(|row| row["author_id"].clone()).collect()),
+        Some(vec![json!(ann), json!(bob), json!(cara)]),
+        "fixture: three ordered credits: {credits}"
+    );
+
+    for stem in ["Delta", "Epsilon"] {
+        let response = put_work(&harness, work, json!({"title": lift_label(stem)})).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+        assert_eq!(
+            lift_contributors(db, work).await,
+            credits,
+            "after the {stem} title edit"
+        );
+    }
+
+    let response = put_work(&harness, work, json!({"authorName": lift_label("Dan")})).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    let dan = lift_work_row(db, work).await["primary_author_id"]
+        .as_i64()
+        .expect("primary author");
+    assert_ne!(dan, ann);
+    let mut expected = seeded.clone();
+    expected[0] = json!({"author_id": dan, "ordinal": 0, "roles": []});
+    let after: Value =
+        serde_json::from_str(&lift_contributors(db, work).await).expect("credits JSON");
+    assert_eq!(after, expected, "only the primary contributor changes");
+}
+
+const REVIEW_CARD_LIST_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../frontend/src/pages/review/fixtures/groupIdentityCardList.json"
+);
+
+/// Replaces each database id in a serialized card list with its stand-in, so
+/// a checked-in fixture stays stable across runs. Ids are looked up by the
+/// table their field names: ("card", "user", "work" or "author").
+fn stand_in_ids(value: Value, ids: &[(&str, i64, i64)], key: Option<&str>) -> Value {
+    let table = match key {
+        Some("id" | "card_id") => Some("card"),
+        Some("userId") => Some("user"),
+        Some("workId" | "work_ids" | "work_id") => Some("work"),
+        Some("primary_author_id") => Some("author"),
+        _ => None,
+    };
+    match value {
+        Value::Number(number) if table.is_some() => {
+            let id = number.as_i64().expect("integer id");
+            let stand_in = ids
+                .iter()
+                .find(|(kind, actual, _)| Some(*kind) == table && *actual == id)
+                .map(|(_, _, stand_in)| *stand_in)
+                .unwrap_or_else(|| panic!("no stand-in for {key:?} {id}"));
+            json!(stand_in)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|item| stand_in_ids(item, ids, key))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(field, item)| {
+                    let item = stand_in_ids(item, ids, Some(field.as_str()));
+                    (field, item)
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+// AC-021: the review page's fixture is the card list the real route serializes
+// for a card with a proposal, a card whose proposed Author was deleted, and a
+// card without a proposal. Set LIVRARR_WRITE_REVIEW_FIXTURE=1 to rewrite it.
+#[tokio::test]
+async fn card_edits_lift_ac021_review_fixture_is_the_real_card_list() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, "Ann").await;
+    let bob = lift_author(db, user, "Bob").await;
+    let carl = lift_author(db, user, "Carl").await;
+    let alpha = lift_work(db, user, lift_tuple("Alpha", None, None), ann, vec![]).await;
+    let gamma = lift_work(db, user, lift_tuple("Gamma", None, None), ann, vec![]).await;
+    let epsilon = lift_work(db, user, lift_tuple("Epsilon", None, None), ann, vec![]).await;
+    let proposal = |title, primary_author_id| ilr::WorkIdentityEvidence {
+        title,
+        primary_author_id,
+        routes: vec![],
+    };
+    let compared = lift_group_card(
+        db,
+        user,
+        alpha,
+        vec![alpha],
+        Some(proposal(
+            lift_tuple("Beta", Some("Proposed"), Some("7")),
+            bob,
+        )),
+        json!([]),
+    )
+    .await;
+    let orphaned = lift_group_card(
+        db,
+        user,
+        gamma,
+        vec![gamma],
+        Some(proposal(lift_tuple("Delta", None, None), carl)),
+        json!([]),
+    )
+    .await;
+    let bare = lift_group_card(db, user, epsilon, vec![epsilon], None, json!([])).await;
+    let deleted = call_router_json(
+        &harness,
+        Method::DELETE,
+        format!("/api/v1/author/{carl}"),
+        None,
+    )
+    .await;
+    assert!(
+        deleted.status.is_success(),
+        "{} {}",
+        deleted.status,
+        deleted.json
+    );
+
+    let listed =
+        call_router_json(&harness, Method::GET, "/api/v1/identity-review-card", None).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.json);
+    let ids = [
+        ("user", user, 1),
+        ("author", ann, 8),
+        ("author", bob, 9),
+        ("author", carl, 10),
+        ("card", compared, 17),
+        ("card", orphaned, 18),
+        ("card", bare, 19),
+        ("work", alpha, 71),
+        ("work", gamma, 72),
+        ("work", epsilon, 73),
+    ];
+    let payload = stand_in_ids(listed.json, &ids, None);
+    let serialized = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&payload).expect("serialize fixture")
+    );
+    if std::env::var_os("LIVRARR_WRITE_REVIEW_FIXTURE").is_some() {
+        std::fs::write(REVIEW_CARD_LIST_FIXTURE, &serialized).expect("write review fixture");
+    }
+    let fixture = std::fs::read_to_string(REVIEW_CARD_LIST_FIXTURE).expect("read review fixture");
+    assert_eq!(
+        fixture, serialized,
+        "the review page fixture matches the real card list"
+    );
+}
+
+async fn lift_author_state(db: &SqliteDb, user_id: i64) -> (String, i64) {
+    let authors = lift_text(
+        db,
+        "SELECT COALESCE(json_group_array(json_object('id',id,'name',name,'sort_name',sort_name,\
+            'normalized',normalized_name,'monitored',monitored)),'[]') \
+         FROM (SELECT * FROM authors WHERE user_id=?1 ORDER BY id)",
+        user_id,
+    )
+    .await;
+    let link_rows = lift_count(
+        db,
+        "SELECT COUNT(*) FROM author_link_progress p JOIN authors a ON a.id=p.author_id WHERE a.user_id=?1",
+        user_id,
+    )
+    .await;
+    (authors, link_rows)
+}
+
+// AC-023: an edit onto another Work's exact identity is refused before any write.
+#[tokio::test]
+async fn card_edits_lift_ac023_duplicate_identity_edit_is_refused() {
+    let harness = build_activated_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let (ann_name, bob_name) = (lift_label("Ann"), lift_label("Bob"));
+    let ann = lift_author(db, user, &ann_name).await;
+    let bob = lift_author(db, user, &bob_name).await;
+    let beta = lift_label("Beta");
+    let x = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![],
+    )
+    .await;
+    let y = lift_work(db, user, lift_tuple(&beta, None, None), bob, vec![]).await;
+    let (x_row, y_row) = (lift_work_row(db, x).await, lift_work_row(db, y).await);
+    let (x_credits, y_credits) = (
+        lift_contributors(db, x).await,
+        lift_contributors(db, y).await,
+    );
+    let authors_before = lift_author_state(db, user).await;
+
+    let refused = put_work(&harness, x, json!({"title": beta, "authorName": bob_name})).await;
+
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.json);
+    assert_eq!(
+        refused.json["message"],
+        "Another book already has this title and author."
+    );
+    assert_eq!(lift_work_row(db, x).await, x_row);
+    assert_eq!(lift_work_row(db, y).await, y_row);
+    assert_eq!(lift_contributors(db, x).await, x_credits);
+    assert_eq!(lift_contributors(db, y).await, y_credits);
+    assert_eq!(lift_works(db, user).await, 2, "nothing is absorbed");
+    assert_eq!(lift_pending_cards(db, user).await, 0, "no card");
+    assert_eq!(lift_author_state(db, user).await, authors_before);
+
+    let y_before = lift_work_row(db, y).await;
+    let allowed = put_work(
+        &harness,
+        x,
+        json!({"title": beta, "authorName": lift_label("Carl")}),
+    )
+    .await;
+    assert_eq!(allowed.status, StatusCode::OK, "{}", allowed.json);
+    assert_eq!(lift_work_row(db, x).await["title"], beta);
+    assert_eq!(lift_work_row(db, y).await, y_before);
+    assert_eq!(lift_works(db, user).await, 2);
+    assert_eq!(lift_pending_cards(db, user).await, 0);
+}
+
+// AC-013: a card minted with merge choices stays listed and dismissible.
+#[tokio::test]
+async fn card_edits_lift_ac013_merge_choice_card_is_listed_and_dismissible() {
+    let harness = build_route_harness().await;
+    let (db, user) = (&harness.db, harness.user_id);
+    let ann = lift_author(db, user, &lift_label("Ann")).await;
+    let first = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![],
+    )
+    .await;
+    let second = lift_work(
+        db,
+        user,
+        lift_tuple(&lift_label("Alpha"), None, None),
+        ann,
+        vec![],
+    )
+    .await;
+    let card = lift_group_card(
+        db,
+        user,
+        first,
+        vec![first, second],
+        None,
+        json!([{"field": "series_name", "choice": "keep_survivor"}]),
+    )
+    .await;
+    assert!(listed_card(&harness, card).await.is_some());
+    let dismissed = call_router_json(
+        &harness,
+        Method::POST,
+        format!("/api/v1/identity-review-card/{card}/dismiss"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        dismissed.status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        dismissed.json
+    );
+    assert!(listed_card(&harness, card).await.is_none());
 }

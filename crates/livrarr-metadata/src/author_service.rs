@@ -90,12 +90,7 @@ where
         // is the one authority for what an author is linked to.
         let requested_route = req.ol_key.clone();
 
-        if let Some(existing) = self
-            .db
-            .find_author_by_name(user_id, &name)
-            .await
-            .map_err(AuthorServiceError::Db)?
-        {
+        if let Some(existing) = self.find_existing(user_id, &name).await? {
             let updated = self
                 .db
                 .update_author(
@@ -120,39 +115,6 @@ where
             return Ok(AddAuthorResult::Updated(updated));
         }
 
-        let authors = self
-            .db
-            .list_authors(user_id)
-            .await
-            .map_err(AuthorServiceError::Db)?;
-        let names: Vec<String> = authors.iter().map(|a| a.name.clone()).collect();
-        if let Some(i) = livrarr_domain::identity_matching::unambiguous_author_match(&name, &names)
-        {
-            let adopted = &authors[i];
-            let updated = self
-                .db
-                .update_author(
-                    user_id,
-                    adopted.id,
-                    UpdateAuthorDbRequest {
-                        name: None,
-                        sort_name: req.sort_name.map(Some),
-                        ol_key: None,
-                        gr_key: None,
-                        monitored: None,
-                        monitor_new_items: None,
-                        monitor_since: None,
-                        monitor_language: None,
-                    },
-                )
-                .await
-                .map_err(AuthorServiceError::Db)?;
-            self.arm_author_link(user_id, adopted.id).await;
-            self.attach_selected_author_route(user_id, adopted.id, requested_route.as_deref())
-                .await;
-            return Ok(AddAuthorResult::Updated(updated));
-        }
-
         // The shared create/adopt gate: the author row, its first name variant,
         // and its due author-link task commit together, so a new author can
         // never exist in a state the sweep cannot see.
@@ -173,12 +135,38 @@ where
             .await;
 
         // A creation-race loser converges on the winning row: same shape as
-        // the adopted/exact-hit arms above, never a second Created (REQ-002).
+        // the existing-author arm above, never a second Created (REQ-002).
         Ok(if created {
             AddAuthorResult::Created(author)
         } else {
             AddAuthorResult::Updated(author)
         })
+    }
+
+    async fn find_existing(
+        &self,
+        user_id: UserId,
+        name: &str,
+    ) -> Result<Option<Author>, AuthorServiceError> {
+        let name = name.trim();
+        if let Some(existing) = self
+            .db
+            .find_author_by_name(user_id, name)
+            .await
+            .map_err(AuthorServiceError::Db)?
+        {
+            return Ok(Some(existing));
+        }
+        let authors = self
+            .db
+            .list_authors(user_id)
+            .await
+            .map_err(AuthorServiceError::Db)?;
+        let names: Vec<String> = authors.iter().map(|a| a.name.clone()).collect();
+        Ok(
+            livrarr_domain::identity_matching::unambiguous_author_match(name, &names)
+                .map(|i| authors[i].clone()),
+        )
     }
 
     async fn get(
