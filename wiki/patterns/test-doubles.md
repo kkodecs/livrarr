@@ -1,34 +1,39 @@
-# Test Doubles Pattern
+# Test doubles and real entry paths
 
-## No In-Memory DB
+Persistence tests use real SQLite with migrations, not an in-memory imitation of
+the database. Fakes previously diverged on joins, foreign keys, nulls, transactions,
+ordering and collation. Stub external dependencies independently.
 
-`InMemoryDb` was deleted. All persistence tests use real SQLite `:memory:`. The 1,400+ line InMemoryDb could not faithfully reproduce SQL joins, case-insensitive matching, FK enforcement, transactions, NULL semantics, ordering, or collation (9 known divergences).
+The standard `create_test_db()` fixture is an in-memory, single-connection database.
+It cannot reproduce production WAL or multi-connection writer contention. Tests
+requiring those semantics need a suitably configured real database fixture. A read
+after taking the only connection’s writer can deadlock; fetch required facts before
+opening that transaction.
 
-## Test DB Helper
+Activate the actual boundary under test. A preinstalled identity repository hides
+installation failures, and a service call does not cover a different handler path.
+Drive the real router/middleware, repository writer, adapter or component with
+controlled external seams. Assert the acceptance criterion’s observables rather
+than unrelated whole-state snapshots. Explicitly named no-write table sets are a
+different, justified contract.
 
-`livrarr-db::test_helpers` exposes **exactly one** helper, `create_test_db()`: a single-connection
-`sqlite::memory:` pool with `foreign_keys = ON` and `busy_timeout = 5000`, all migrations applied,
-plus one extra unique index on `works(user_id, normalized_title, normalized_author)`. Each call
-returns a fresh DB.
+Register and track test files and compile-time fixtures together. Verify feature
+requirements and ignored tests: file presence, compilation and execution are three
+different facts. Process-global queues/hooks need one shared test guard; local
+fixtures can reuse numeric IDs and still interfere through global state.
 
-There is no shared-memory (`cache=shared`) helper and no temp-file helper in that module. A test
-needing WAL, lock contention or multi-connection semantics builds its own pool.
+Bound waits, clean up blocking workers and join them before assertions. Build
+asynchronous SQLite fixtures before pausing Tokio’s clock. These details and the
+recent identity fixture constraints live in [test lessons](../insights/tests-and-fixtures.md).
 
-## What Gets Stubbed
+## Source and history
 
-| Dependency | Stub? | Why |
-|-----------|-------|-----|
-| HTTP clients | Yes | External API calls are non-deterministic |
-| LLM responses | Yes | Expensive, non-deterministic |
-| Filesystem ops | Yes | Testing logic, not I/O |
-| Database | **No** | Real SQLite catches SQL bugs that stubs miss |
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/patterns/test-doubles.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-## Test DB Principle
-
-Test DB helpers must apply the same connection pragmas as production. "Real SQLite, but different
-SQLite behavior" defeats the purpose.
-
-Note the gap this principle is aimed at: `create_test_db` sets `foreign_keys` and `busy_timeout`,
-but production also sets `journal_mode = WAL`, `synchronous = NORMAL`, `journal_size_limit` and
-`wal_autocheckpoint`, and runs a 4-connection pool. A `:memory:` DB cannot use WAL, so the two
-will never match exactly.
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="test-doubles-pattern"></a>
+<a id="no-in-memory-db"></a>
+<a id="test-db-helper"></a>
+<a id="what-gets-stubbed"></a>
+<a id="test-db-principle"></a>

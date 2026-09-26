@@ -1,44 +1,36 @@
-# BIG7 Entities
+# Core entities
 
-The seven core media entities in Livrarr. These are the only media entities that matter for core workflows.
+| Entity | Meaning | Persistence |
+|---|---|---|
+| [Work](work.md) | A book across formats and editions; the primary entity | User-scoped |
+| [Author](author.md) | A credited person, associated with Works | User-scoped |
+| [Series](series.md) | An ordered grouping and its monitoring policy | User-scoped |
+| [Release](release.md) | An indexer offer for a downloadable copy | Transient; may be cached |
+| [Grab](grab.md) | The user's download action and import lifecycle | User-scoped |
+| [LibraryItem](library-item.md) | A concrete file in an organized root | User-scoped |
+| [List](list.md) | An import session with preview, confirmation and undo | User-scoped |
 
-| Entity | What it represents | Scope |
-|--------|-------------------|-------|
-| **Author** | A person who writes books | User-scoped |
-| **Series** | An ordered collection of works | User-scoped |
-| **Work** | A title — the primary entity (Principle 1) | User-scoped |
-| **Release** | A specific edition/format available for download | Not persisted |
-| **Grab** | A download action for a release | User-scoped |
-| **LibraryItem** | A file on disk in the organized library | User-scoped |
-| **List** | A user-curated collection of works | User-scoped |
+A Work can have ebook and audiobook files simultaneously. Monitoring is separate
+per format; missing a file is different from wanting a download. A Work has a
+primary Author and can carry additional contributor evidence. The documented
+series assignment uses one `series_id`; do not infer implemented many-to-many
+membership from old overview drawings.
 
-## Key Relationships
+Root folders, indexers, download clients and remote mappings are shared
+administrator-managed infrastructure. User-owned record operations must enforce
+user scope even when a scheduled job enumerates multiple users.
 
-```
-Author ──< Work ──< Release
-  │          │         │
-  │          │         └──> Grab (user-scoped)
-  │          │                │
-  │          │                └──> LibraryItem (user-scoped, file on disk)
-  │          │
-  │          └──< Series membership (many-to-many)
-  │
-  └──< Author monitoring (background)
+The seven names describe core product concepts, not every type in the system.
+Captured identity, Editions, provider routes, review/history records and playback
+state supply additional contracts. See [identity workflow](../architecture/work-creation-pipeline.md)
+and the [intended model](../../docs/canonical-model.yaml).
 
-List ──< Work (many-to-many)
-```
+## Source and history
 
-## Scoping Rules
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/big7.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-- **User-scoped — six of the seven.** Author, Series, Work, Grab, LibraryItem and List each
-  carry a `user_id` on the row: `crates/livrarr-domain/src/entities.rs:436` (Author), `:456`
-  (Series), `:378` (Work), `:577` (Grab), `:475` (LibraryItem), `:643` (Import — the list
-  session). Reads and writes are fenced by it, proven per entity in
-  `crates/livrarr-db/src/cross_user_isolation_tests.rs`: works `:388`, authors `:488`, series
-  `:607`, grabs `:513`, library items `:735`, imports `:675`. One user cannot fetch another's
-  work at all (`:376`).
-- **Not persisted:** Release — a transient indexer search result, never written to the
-  database (`crates/livrarr-domain/src/services/release.rs:67-78`), so nothing scopes it.
-- **Infrastructure (admin-only):** Root folders, download clients, indexers, remote path mappings
-
-No unscoped queries on user-scoped tables. Ever. (Principle 4)
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="big7-entities"></a>
+<a id="key-relationships"></a>
+<a id="scoping-rules"></a>

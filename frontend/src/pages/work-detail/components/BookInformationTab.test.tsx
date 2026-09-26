@@ -68,6 +68,44 @@ function mountWorkRoute() {
   });
 }
 
+describe("Work header subtitle", () => {
+  const noCovers: WorkCoverUiState = {
+    formatNeeded: null,
+    ebook: { state: "NowhereToLook" },
+    audiobook: { state: "NowhereToLook" },
+  };
+
+  it("shows a stored subtitle directly under the title", async () => {
+    const api = installWorkRoute(makeWork(noCovers, { subtitle: "A Subtitle Sentinel" }));
+    const mounted = mountWorkRoute();
+    try {
+      await vi.waitFor(() =>
+        expect(mounted.container.querySelector("h1")?.textContent).toBe("The Current Book"),
+      );
+      const subtitle = mounted.container.querySelector("[data-work-subtitle]");
+      expect(subtitle?.textContent).toBe("A Subtitle Sentinel");
+      expect(api.calls.filter((call) => call.method !== "GET")).toEqual([]);
+    } finally {
+      mounted.cleanup();
+      api.restore();
+    }
+  });
+
+  it.each([null, "", "   "])("shows no subtitle line when the subtitle is %j", async (value) => {
+    const api = installWorkRoute(makeWork(noCovers, { subtitle: value }));
+    const mounted = mountWorkRoute();
+    try {
+      await vi.waitFor(() =>
+        expect(mounted.container.querySelector("h1")?.textContent).toBe("The Current Book"),
+      );
+      expect(mounted.container.querySelector("[data-work-subtitle]")).toBeNull();
+    } finally {
+      mounted.cleanup();
+      api.restore();
+    }
+  });
+});
+
 describe("Book information identity-layer presentation", () => {
   it("renders no sibling panel and issues zero mutations", async () => {
     const work = makeWork({

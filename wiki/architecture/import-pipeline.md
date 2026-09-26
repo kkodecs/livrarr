@@ -1,85 +1,95 @@
-# Import Pipeline
+# Import and file recovery
 
-How files get from download directory to organized library. File operations live in
-`livrarr-library`; **tag writing does not**. `livrarr-library` depends only on
-`livrarr-domain` and `livrarr-db` (`crates/livrarr-library/Cargo.toml`) — it has no
-`livrarr-tagwrite` edge. The tag step runs in `livrarr-server`
-(`crates/livrarr-server/src/tag_service.rs`), which calls `livrarr-tagwrite`; the cover +
-tag projection path goes through `livrarr-materialize`
-(`crates/livrarr-materialize/src/lib.rs:15`, `:341`).
+Livrarr organizes files into separate ebook and audiobook roots:
 
-## Auto-Import Flow
+```
+{root}/{user_id}/{Author}/{Title}.epub
+{root}/{user_id}/{Author}/{Title}/{audio files}
+```
 
-1. Download poller detects completed torrent/NZB (60s interval)
-2. Grab status set to `importing` (atomic UPDATE prevents concurrent duplicate imports)
-3. Source path resolved: qBit `content_path` or SABnzbd `storage` + remote path mapping
-4. Files enumerated and classified by extension
-5. Each file routed to root folder by media type
-6. File copied to organized path (never moved — Principle 8)
-7. Tag writing on library copy (temp-file-then-rename)
-8. File size measured AFTER tag writing (tags change file size)
-9. CWA downstream copy if configured (hardlink-first)
-10. Library item record created in DB
-11. Grab status updated (imported or importFailed)
+The [root product policy](../../ARCHITECTURE.md) requires copies into the library,
+leaving downloads available for seeding. CWA uses hardlink-first with copy fallback
+for its downstream artifact. On September 18 the user confirmed that Readarr
+imports must create independent copies; there is no Readarr hardlink exception.
+The September 18 [source check](../../build/reviews/wiki-follow-ups-2026-09-18/readarr-copy/REVIEW.md)
+found hardlink-first imports and linked retry targets in the recorded deployment.
+The [correction was deployed](../../build/reviews/readarr-independent-copies/deployment-20260918T063034Z/DEPLOYMENT.md)
+on September 18: Readarr requests Copy, and the shared core separates existing
+links on Copy retries before success, preserving the library file's current
+contents and permissions. [Implementation/test evidence](../../build/reviews/readarr-independent-copies/RESULT.md)
+records the reviewed source in the separate `readarr-independent-copies` worktree.
+No existing-library inventory or repair was performed; files never revisited by an
+import remain outside this correction. [Decision record](../../build/reports/wiki-decisions-2026-09-18.md).
 
-## File Classification
+## Workflow and ownership
 
-| Extension | Media Type |
-|-----------|-----------|
-| `.epub`, `.mobi`, `.azw3`, `.pdf` | Ebook |
-| `.mp3`, `.m4a`, `.m4b`, `.flac`, `.ogg`, `.wma` | Audiobook |
-| Other | Skipped with warning |
+The documented shared file-entry authority is `ImportWorkflow::import_file` in
+`livrarr-library`. Grab imports, manual files, Readarr files and scan adoption feed
+that core with their own policy and evidence. Server composition supplies tag,
+CWA and notification services. `livrarr-library` has no direct tagwrite dependency;
+chapter extraction crosses a domain contract.
 
-## Tag Writing Detail
+An automatic import starts when the poller has an import-safe download, resolves
+its client path and remote mapping, and atomically claims the Grab. Import is
+serialized by `(user_id, work_id)`, not Grab ID. Files are enumerated, classified,
+validated against the destination and imported. Each LibraryItem records its
+relative path, owning Work, user, root and tag state.
 
-**Only `.epub` is written.** `write_tags_sync` dispatches `epub` to `write_epub` and returns
-`TagWriteStatus::Unsupported` for **`m4b` and `mp3`**, exactly as it does for any other
-extension (`crates/livrarr-tagwrite/src/lib.rs:168-179`). The reason is in the code: the
-upstream writers (`mp4ameta`, `id3`) buffer the shifted media region in RAM when metadata
-atoms grow, which OOMs on multi-GB audiobooks; audiobook players read their own metadata DBs,
-so embedded tags there are not load-bearing (`:173-176`). `write_m4b` and `write_mp3` survive
-as dead code, kept for a possible revival (`:1026-1029`, `:1095-1097`). Unsupported formats
-import without tags — not an error.
+The shared-core documentation records row creation before tag post-processing;
+older pages placing tags, CWA and row creation in a different universal order are
+historical. Trace the selected door's actual post-steps: grab/manual/Readarr/scan
+policies are not interchangeable. See [workflow guide](roads.md).
 
-**Per-file flow** (`crates/livrarr-server/src/tag_service.rs:34-83`):
-1. Copy the in-place library file → `{file}.tmp` (`:41-49`)
-2. Write tags on `.tmp` (`:51`)
-3. `Written` → fsync, then rename `.tmp` → final (`:54-71`)
-4. `Unsupported` / `NoData` → delete `.tmp`, return Ok (`:73-77`)
-5. Failure → delete `.tmp`, return the error (`:78-81`)
+## Collision and recovery rules
 
-**There is no "re-copy source → final (untagged)" step, and no window where the library file
-is missing.** Tagging works on a *copy* of the file already in place; the original is only
-ever replaced by a successful rename, so a failure needs no repair.
+- A destination already recorded for this Work can be skipped. A destination owned
+  by another Work must surface a collision.
+- A file without a row may be adopted on retry only under the core's validation,
+  including expected size. Existence alone does not establish identity or ownership.
+- For Copy imports, both a recorded-file skip and an orphan adoption
+  ensure independent storage before success. Another Work's ownership and orphan
+  size checks precede mutation; separation copies the current target, preserving edits.
+- Copy/tag changes use temporary files and atomic replacement. On tag failure,
+  deleting the temporary copy leaves the original library file intact.
+- Refresh file size after a successful tag rewrite. Metadata changes can alter it.
+- Keep filesystem/network operations outside SQLite transactions and blocking work
+  off the async executor. Cancellation must retain ownership through admitted work.
+- Path mapping must match a component boundary: `/downloads` cannot match
+  `/downloads2`. Sanitize names and preserve valid UTF-8 when limiting components.
 
-**Multi-file MP3 audiobooks (TAG-006)** (`tag_service.rs:145-214`): copy every item →
-`.tmp`, one `write_tags_batch` call over the `.tmp` set, then rename each into place with
-per-file failure handling. A copy failure deletes all `.tmp` files and marks those items
-failed (`:180-187`) — again, no re-copy, because the originals were never removed.
+Historical tag support explicitly disabled MP3/M4B writes because the upstream
+writers could buffer multi-GB media. Unfinished work changes those surfaces. Do
+not advertise audio-tag success based on an Unsupported-as-success return or old
+method inventory; check the deployed source. EPUB tags are the established path.
 
-## Manual Import
+## Manual import and scan
 
-User points at a filesystem path. Files sent to LLM for title/author extraction. OL searched for matches. User reviews and confirms. Same import pipeline for file operations.
+Manual import identifies candidate Works, lets the user review/correct them and
+imports the selected files. A title/author override deliberately drops stale
+match-derived keys. Minimum-only import uses the shared atomic identity coordinator;
+defer must leave no partial Author/Work writes and must explain recovery.
 
-Cap: 50 media files per scan, 10,000 total filesystem entries traversed.
+Do not send paths, filenames or checksums to an LLM. Cleanup/metadata assistance is
+limited by the root privacy boundary; older text saying files go to an LLM is not
+an authorization. The described scan limits are 50 media files and 10,000 traversed
+entries; check the actual entry point before changing or relying on those limits.
 
-## Manual Scan
+Library scan parses ebook title from the filename and audiobook title from the
+Work directory. Preview is read-only; adoption is a separate shared-core operation.
+Cross-format sidecars have additional identity and rescan rules in
+[cross-format resume](../domain/cross-format-resume.md).
 
-Walks `{root}/{user_id}/` directory. Matches files to works by normalized title+author from path structure. Creates library items for matches.
+## Source and history
 
-**Path parsing:**
-- Ebook (depth 2): `{author}/{file}` — title from filename stem
-- Audiobook (depth 3+): `{author}/{title}/{files}` — title from directory name
-- Normalization: strip control chars, replace illegal chars with spaces, collapse whitespace, case-insensitive match
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/architecture/import-pipeline.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-## Import Lock
-
-`(user_id, work_id)` — not per-grab. Serializes concurrent imports for the same work.
-
-## Name Sanitization
-
-- Illegal chars (`\ / : * ? " < > |`) → underscores
-- Control characters stripped
-- `.`/`..` → fallback values
-- Trailing dots/spaces trimmed
-- Path components limited to 255 bytes (truncate at UTF-8 boundary, append ellipsis)
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="import-pipeline"></a>
+<a id="auto-import-flow"></a>
+<a id="file-classification"></a>
+<a id="tag-writing-detail"></a>
+<a id="manual-import"></a>
+<a id="manual-scan"></a>
+<a id="import-lock"></a>
+<a id="name-sanitization"></a>

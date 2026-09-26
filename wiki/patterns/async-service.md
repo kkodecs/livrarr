@@ -1,77 +1,40 @@
-# Async Service Pattern
+# Service boundaries
 
-Services follow a trait + impl shape: the trait in `livrarr-domain`, the production
-implementation in the owning crate.
+Define shared use-case contracts in domain, implementations in the owning crate
+and concrete wiring in server. Handlers bind only the Has* capabilities they use.
+The dependency boundary is specified in [root architecture](../../ARCHITECTURE.md).
 
-> **The "+ stub" third leg is the exception, not the rule.**
-> `livrarr-behavioral/src/stubs.rs` provides seven doubles in total —
-> `StubHttpFetcher`, `StubLlmCaller`, `StubEnrichmentWorkflow`, `StubSeriesQueryService`,
-> `StubImportWorkflow`, `StubRssSyncWorkflow` and `TagwriteChapterExtractor`. Most service
-> traits — `WorkService`, `AuthorService`, `FileService` and the rest — have **no** stub.
+Use `trait_variant::make(Send)` for new async traits. These cannot be trait objects;
+use generic or enum dispatch. Deliberately synchronous contracts can be dyn-safe:
+chapter extraction and provider-call observation are documented examples, not an
+exhaustive forever count of dynamic traits.
 
-## Structure
+AppState shares concrete service implementations through Arc and type aliases.
+The capability accessor returns a reference to the inner implementation. Prefer
+explicit dependency injection; the old AppState/OnceLock construction workaround
+was removed and must not become the default again.
 
-```rust
-// In livrarr-domain/src/services/work.rs — trait definition
-// (there is no services.rs; services/ is a module directory)
-#[trait_variant::make(Send)]
-pub trait WorkService: Send + Sync {
-    async fn add(
-        &self,
-        user_id: UserId,
-        candidate: crate::identity::WorkCandidate,
-    ) -> Result<AddWorkResult, WorkServiceError>;
-    // ...
-}
+One struct may implement several narrow contracts when that preserves clear
+ownership—for example, settings versus credential access. A shared implementation
+does not justify giving every caller every capability. Composite handler contracts
+should name only the capabilities used by that cohesive module.
 
-// In livrarr-metadata/src/work_service.rs — production implementation
-pub struct WorkServiceImpl { /* dependencies */ }
-impl WorkService for WorkServiceImpl { /* real logic */ }
-```
+External HTTP/LLM/file seams can be doubled when appropriate. A stub is not required
+for every service. Persistence tests use [real SQLite](test-doubles.md). Errors are
+per-service/domain outcomes mapped at boundaries, not a single invented DomainError.
 
-Errors are **per-service** (`WorkServiceError`, `FileServiceError`, …) plus the shared
-`ServiceError`. There is no single `DomainError` type.
+Use existing ecosystem crates rather than hand-rolling hashing, encoding, formats,
+randomness or transport. Shared policy belongs in one authority even where several
+protocol or format adapters legitimately implement the boundary.
 
-## Rules
+## Source and history
 
-- **`trait_variant::make(Send)`** — not `async-trait`. All async traits need Send (tokio multi-threaded runtime).
-- **Non-dyn-compatible** — `trait_variant::make(Send)` produces traits that can't be used with `dyn`. Use generics/monomorphization exclusively.
-- **No `dyn` on async service traits** — which follows from the rule above rather than from
-  discipline: a `trait_variant::make(Send)` trait cannot be made into a trait object at all.
-- **"Zero `dyn` for service traits" is not true as stated.** **Exactly two** traits under
-  `livrarr-domain/src/services/` are used dynamically. Both are deliberately plain and
-  **synchronous** — which is precisely what makes them dyn-safe when the `trait_variant` ones
-  are not:
-  - **`ChapterExtractor`** (`services/chapter.rs:18`) — held as `Arc<dyn ChapterExtractor>` by
-    `ImportWorkflowImpl` and threaded through its helpers
-    (`livrarr-library/src/import_workflow.rs:61`, `:69`, `:1853`, `:2143`). The seam exists so
-    `livrarr-library` carries no `livrarr-tagwrite` edge; the composition root supplies
-    `ChapterExtractorImpl`.
-  - **`ProviderCallSink`** (`services/provider_calls.rs:55`) — `Arc<dyn ProviderCallSink>` across
-    `livrarr-enrichment`, `livrarr-external-data` and the composition root
-    (`livrarr-server/src/main.rs:746`). Its own doc states the design directly: "Deliberately sync
-    and dyn-safe (`Arc<dyn ProviderCallSink>`) so any crate can record without a db edge or a
-    generics explosion."
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/patterns/async-service.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-  Every other `dyn` under `crates/` is a std or third-party trait object — `Box<dyn Error>`,
-  `Box<dyn Future>`, `Box<dyn Iterator>`, `Arc<dyn Fn>`, `Box<dyn tracing_subscriber::Layer>`,
-  `&dyn Debug` — never a livrarr service trait. (Enumerated from a `dyn ` text sweep over
-  `crates/`, 45 hits; `tests/` and `frontend/` not swept.) **The rule to take from this:** an
-  async service trait cannot be `dyn`; when a seam genuinely needs dynamic dispatch, the trait
-  is written plain and sync on purpose.
-- **AppState uses concrete types via type aliases** — not `Arc<dyn Trait>`, not generics with 12+ type params.
-
-## Stub Policy
-
-| Dependency | Stub? |
-|-----------|-------|
-| HTTP clients (indexer, metadata, download) | Yes |
-| LLM responses | Yes |
-| Filesystem operations (testing logic) | Yes |
-| Database | **No** — use real SQLite `:memory:` |
-
-## Where Stubs Live
-
-Test stubs in `livrarr-behavioral/src/stubs.rs` — seven of them, listed at the top of this page.
-That file also carries the `create_test_user` / `create_second_test_user` fixtures. Cross-crate
-behavioral tests live in `livrarr-behavioral`.
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="async-service-pattern"></a>
+<a id="structure"></a>
+<a id="rules"></a>
+<a id="stub-policy"></a>
+<a id="where-stubs-live"></a>

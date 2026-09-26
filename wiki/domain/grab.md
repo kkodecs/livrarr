@@ -1,39 +1,30 @@
 # Grab
 
-A download action for a release. User-scoped — each grab belongs to a specific user.
+A Grab records a user's download action and its import lifecycle. The documented
+states are Sent, Confirmed, Importing, Imported, ImportFailed, Failed and Removed.
+Downloading/Completed are client queue concepts, not additional Grab states.
 
-## Lifecycle — the `GrabStatus` state machine
+Sent/Confirmed consult the actual client for progress. The poller atomically claims
+an import-safe download as Importing; only the claimant starts import. Imported
+means the import path completed. ImportFailed can be retried; Failed records a
+download failure; Removed is the user removal path.
 
-Seven states, not five (`crates/livrarr-domain/src/entities.rs:70-78`), persisted as the
-lowercase/camelCase strings in `crates/livrarr-db/src/sqlite_grab.rs:85-94`:
+Match download IDs within their owning client. Serialize file import per
+`(user_id, work_id)`, not per Grab. On restart, interrupted claims need recovery;
+on retry, destination orphan adoption needs the shared validation rather than
+blind copying. [Downloads](../architecture/grab-system.md) ·
+[import recovery](../architecture/import-pipeline.md).
 
-1. **Sent** — the row is created with this status when the release is dispatched to the
-   download client (`crates/livrarr-download/src/release_service.rs:465`), whether the user
-   clicked grab or RSS sync auto-grabbed
-2. **Confirmed** — still with the download client. The queue view treats `Sent` and
-   `Confirmed` alike and asks the client for live progress
-   (`crates/livrarr-handlers/src/queue.rs:43`)
-3. **Importing** — the poller found an import-safe download whose files exist locally and
-   claimed the grab; only the claiming tick spawns the import
-   (`crates/livrarr-server/src/jobs/download_poller.rs:288-298`)
-4. **Imported** — the import pipeline processed the files
-5. **ImportFailed** — the import errored (`download_poller.rs:831`); retryable from the queue,
-   which re-sets this status if the retry also fails (`crates/livrarr-handlers/src/queue.rs:125`)
-6. **Failed** — the download client reported failure (`download_poller.rs:538`)
-7. **Removed** — the user removed the grab (`crates/livrarr-download/src/grab_service.rs:88`)
+Queue visibility and user redaction are API policy distinct from ownership of a
+Grab. Do not infer permission to mutate another user's record from a shared queue
+view; verify the real authenticated route when changing this surface.
 
-There is no `Downloading` or `Completed` state on a grab; those are download-client queue
-states (`QueueStatus`, `crates/livrarr-domain/src/entities.rs:242-249`), a separate enum.
+## Source and history
 
-## Key Properties
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/grab.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-- Always scoped to a user_id
-- Import lock key: `(user_id, work_id)` — prevents filesystem races
-- Download poller checks status every 60 seconds
-- Orphan file adoption: if target exists but no DB record, adopt instead of re-import
-- Stale grabs reset on startup (startup recovery)
-
-## Queue Visibility
-
-- Admin: sees all queue items
-- User: sees all items (prevents duplicate grabs), but "grabbed by" is redacted for non-admin users
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="lifecycle--the-grabstatus-state-machine"></a>
+<a id="key-properties"></a>
+<a id="queue-visibility"></a>

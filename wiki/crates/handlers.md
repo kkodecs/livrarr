@@ -1,279 +1,78 @@
-# livrarr-handlers
+# HTTP handlers
 
-HTTP route handlers. Handlers bind narrow capability traits rather than the whole context: most are generic over just the `Has*` traits they call (`work::lookup` over `HasDiscoveryService`, `work::list` over `HasWorkService + HasFileService`), and two modules use their own composite trait (`ManualImportHandlerContext`, `OpdsHandlerContext`). `AppContext` is the composite supertrait, used for router composition (`system::routes`) rather than as a per-handler bound. Behind the compile wall — cannot depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or `livrarr-download` directly.
+`livrarr-handlers` owns HTTP inputs, validation, calls through service contracts and
+response mapping. Its dependency boundary excludes db, metadata, tagwrite and
+download implementation crates. That compiler boundary does not prove all business
+logic has been removed. [Root architecture](../../ARCHITECTURE.md).
 
----
+## Start here
 
-## Capability Traits (context.rs)
-
-Each `Has*` trait exposes one service to handlers via an accessor method. `AppContext` is a supertrait union of most — but **not all** — of them: `HasDiscoveryService`, `HasWorkIdentityRepository`, and `HasHttpFetcher` are deliberately outside the union; handlers that need them bind them directly (e.g. `work::lookup` binds `HasDiscoveryService`, `coverproxy::proxy_cover` binds `HasHttpFetcher`).
-
-| Trait | Exposes |
+| Concern | Navigation |
 |---|---|
-| `HasWorkService` | Work CRUD, refresh, merge, identity edit (24-method `WorkService`; discovery moved out 2026-07-11) |
-| `HasDiscoveryService` | Provider search: `lookup`, `lookup_filtered`, `eager_match_by_author` (`DiscoveryService`, work-service-split) |
-| `HasFileService` | Library file management |
-| `HasAuthorService` | Author CRUD |
-| `HasSeriesService` | Series write operations |
-| `HasSeriesQueryService` | Series read operations |
-| `HasGrabService` | Release grab orchestration |
-| `HasReleaseService` | Release search and grab |
-| `HasListService` | Import lists |
-| `HasAppConfigService` | App-level config read/write |
-| `HasDownloadClientSettingsService` | Download client settings |
-| `HasDownloadClientCredentialService` | Download client credentials |
-| `HasIndexerSettingsService` | Indexer settings |
-| `HasIndexerCredentialService` | Indexer credentials |
-| `HasRootFolderService` | Root folder management |
-| `HasRemotePathMappingService` | Remote path mappings |
-| `HasNotificationService` | Notification read/dismiss |
-| `HasQueueService` | Download queue |
-| `HasImportIoService` | Import I/O operations |
-| `HasManualImportService` | Manual import DB service |
-| `HasHistoryService` | History records |
-| `HasAuthService` | Authentication (login, session) |
-| `HasImportWorkflow` | Import orchestration workflow |
-| `HasEnrichmentWorkflow` | Metadata enrichment workflow |
-| `HasRssSyncWorkflow` | RSS sync workflow |
-| `HasTagService` | EPUB/file tag writing |
-| `HasEmailService` | Email sending (Kindle etc.) |
-| `HasAuthorMonitorWorkflow` | Author monitoring workflow |
-| `HasImportService` | High-level import service |
-| `HasMatchingService` | Extract + reconcile file metadata into `MatchCluster`s (one method, `extract_and_reconcile`; no work lookup) |
-| `HasManualImportScan` | Manual import scan state |
-| `HasReadarrImportWorkflow` | Readarr import workflow |
-| `HasHttpClient` | Outbound HTTP client |
-| `HasDataDir` | Data directory path |
-| `HasStartupTime` | Server startup timestamp |
-| `HasLiveConfig` | Live metadata config snapshot |
-| `HasRssSync` | RSS sync running/last-run state |
-| `HasSystem` | System info accessor |
-| `HasCoverCache` | Cover proxy cache |
-| `AppContext` | Composite supertrait — unions most `Has*` traits, but **not** `HasDiscoveryService`, `HasWorkIdentityRepository`, or `HasHttpFetcher` |
+| Required services | `context.rs`, narrow Has* capabilities |
+| Shared state access | `accessors.rs`, composition adapters in server |
+| Error/status mapping | `types/api_error.rs`; [error handling](../patterns/error-handling.md) |
+| Work lookup/add/refresh | `work.rs`; [creation](../architecture/work-creation-pipeline.md) |
+| Manual and list import | `manual_import.rs`, `list_import.rs`; [import](../architecture/import-pipeline.md) |
+| Review actions | `identity_layer.rs`; [review reference](../architecture/identity-review-census.md) |
+| Covers and file delivery | `cover.rs`, `mediacover.rs`, `coverproxy.rs`, `workfile.rs` |
+| Authenticated route composition | server router and middleware, plus handler admin extractors |
 
-`impl AppContext for T` is a blanket impl: any type satisfying the `Has*` traits the union names automatically implements `AppContext`.
+The former long route/method inventory is retained in history. Use Serena on the
+actual route registration, handler and service trait to establish availability.
+A declared function can be unregistered; a registered test can still be ignored.
 
----
+## Boundaries to preserve
 
-## Accessor Traits (accessors.rs)
+Bind only the capabilities a handler uses. A cohesive group can define a composite
+of those narrow capabilities; it need not inherit full AppContext. Configuration
+and credential-bearing access are separate contracts.
 
-Thin accessor interfaces consumed by handlers for shared mutable state (not services).
+Cloneable handler state can own a background continuation. Preserve the triggering
+user intent, failures, generation observations, cancellation and task lifetime.
+Different branches of the Add completion chain are not interchangeable. Trace the
+real HTTP path: a service-level Add test does not cover a handler using identity
+settlement directly.
 
-- `LiveMetadataConfigAccessor` — **replace** the live metadata config (one method, `replace`; it is a write, not a read)
-- `RssSyncAccessor` — check/set RSS sync running state and last-run timestamp
-- `SystemAccessor` — log observability only: tail the in-memory log buffer, read and set the log level
-- `ManualImportScanAccessor` — access in-progress manual import scan state map
-- `CoverProxyCacheAccessor` — `get`/`put` against the cover proxy cache (the cache is TTL + oldest-inserted eviction, not LRU)
+Authentication, tenant scope and admin checks are part of the production entry
+path. Test those with the real router rather than a toy route that omits middleware.
+Errors need stable codes, useful recovery text and request context without secrets
+or internal paths. Pagination is part of the API contract; one page is not all Works.
 
----
+## Source and history
 
-## Middleware (middleware.rs)
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/crates/handlers.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-- `RequireAdmin` — Axum extractor that rejects non-admin requests with 403
-
----
-
-## Route Handlers
-
-### work.rs
-- `lookup` — search metadata providers for a work by query string
-- `add` — add a work to the library
-- `list` — list the current user's works, paginated (page, size, sort field/direction, media-type and language filters). No monitored-only filter on this route
-- `get` — get a single work by ID
-- `update` — update work metadata or monitoring state
-- `upload_cover` — upload a custom cover image for a work
-- `delete` — delete a work and optionally its files
-- `refresh` — trigger metadata refresh for a single work
-- `refresh_all` — trigger metadata refresh across works, optionally filtered by language, monitored, enrichment status, or media type
-- `retry_all_incomplete` — bulk-recover incomplete works (Failed/Unenriched/identity-Pending) through the one road; replaces the deleted background retry job
-- `send_email` — send a library file to an email address (Kindle)
-- `download` — serve a library file for direct browser download
-- `stream` — stream a library file for in-browser reading
-- `author_search` — admin-only; spawns a full author-monitor run for the current user and returns 202 Accepted. Despite the name it searches nothing directly and is not part of the add flow
-
-### author.rs
-- `lookup` — search metadata providers for an author
-- `add` — add an author to the library
-- `list` — list all authors
-- `get` — get a single author by ID
-- `update` — update author metadata or monitoring state
-- `delete` — delete an author
-- `bibliography` — get an author's full bibliography (works from metadata provider)
-- `refresh_bibliography` — refresh an author's bibliography from metadata
-
-### series.rs
-- `list_all` — list all series
-- `get_detail` — get a single series with works
-- `resolve_gr` — resolve a Goodreads series ID and return or create the series
-- `list_series` — list series for a specific work
-- `refresh_series` — refresh series metadata from provider
-- `monitor_series` — update monitoring state for a series
-- `update_series` — update series metadata fields
-
-### release.rs
-- `search` — search indexers for releases matching a work
-- `grab` — grab a release (send to download client)
-
-### queue.rs
-- `list` — list active download queue items
-- `remove` — remove an item from the queue
-- `retry_import` — retry a failed import for a queued item
-- `summary` — return queue summary counts by status
-
-### history.rs
-- `list` — list history records with optional filters and pagination
-
-### workfile.rs
-- `list` — list library files for a work
-- `get` — get a single library file by ID
-- `delete` — delete a library file from disk and DB
-- `get_progress` — get read progress for a file
-- `update_progress` — update read progress for a file
-
-### cover.rs
-- `get_cover_alternatives` — fetch provider cover candidates for a work (`HasCoverService`)
-- `select_cover_handler` — apply a chosen cover candidate (`HasCoverService`)
-- `upload_cover_handler` — multipart user cover upload (`HasCoverService`)
-- `get_audiobook_cover` / `get_audiobook_thumb` — serve the audiobook cover/thumb with ebook fallback (`HasDataDir`)
-- Errors ride the standard `ApiError` JSON envelope (quality-waves Wave 2, 2026-07-13)
-
-### indexer.rs
-- `list` — list configured indexers
-- `get` — get a single indexer by ID
-- `create` — create a new indexer
-- `update` — update an existing indexer
-- `delete` — delete an indexer
-- `test` — test an indexer config (by payload)
-- `test_saved` — test a saved indexer by ID
-- `import_from_prowlarr` — bulk-import indexers from a Prowlarr instance
-
-### download_client.rs
-- `list` — list configured download clients
-- `get` — get a single download client by ID
-- `create` — create a new download client
-- `update` — update an existing download client
-- `delete` — delete a download client
-- `test` — test a download client config (by payload)
-- `test_saved` — test a saved download client by ID
-- `import_from_prowlarr` — bulk-import download clients from a Prowlarr instance
-
-### root_folder.rs
-- `list` — list root folders
-- `create` — create a root folder
-- `delete` — delete a root folder
-- `scan` — trigger a root folder scan
-- `scan_path` — scan a specific path within a root folder
-
-### remote_path_mapping.rs
-- `list` — list remote path mappings
-- `get` — get a single remote path mapping
-- `create` — create a remote path mapping
-- `update` — update a remote path mapping
-- `delete` — delete a remote path mapping
-
-### notification.rs
-- `list` — list notifications (with read/unread filter)
-- `mark_read` — mark a notification as read
-- `dismiss` — dismiss a single notification
-- `dismiss_all` — dismiss all notifications
-
-### config.rs
-- `get_naming` — get naming convention config
-- `get_media_management` — get media management config
-- `update_media_management` — update media management config
-- `get_metadata` — get metadata provider config
-- `validate_llm_endpoint` — validate an LLM endpoint URL/key without saving
-- `update_metadata` — update metadata provider config (and refreshes live config)
-- `test_hardcover` — test the Hardcover API connection
-- `test_audnexus` — test the Audnexus API connection
-- `test_llm` — test the configured LLM endpoint
-- `get_prowlarr` — get Prowlarr integration config
-- `update_prowlarr` — update Prowlarr integration config
-- `get_email` — get email (Kindle) config
-- `update_email` — update email config
-- `get_indexer_config` — get indexer-level config
-- `update_indexer_config` — update indexer-level config
-- `trigger_rss_sync` — manually trigger an RSS sync run
-- `test_email` — send a test email with the current config
-
-### system.rs
-- `health` — liveness probe endpoint (returns 200)
-- `status` — application status (version, startup time, DB status, etc.)
-- `log_tail` — return the most recent N log lines from the in-memory buffer
-- `set_log_level` — change the active log level at runtime
-- `routes` — list all registered routes (debug)
-
-### auth.rs
-- `login` — authenticate a user and create a session
-- `logout` — destroy the current session
-- `me` — return the currently authenticated user
-
-### user.rs
-- `list` — list all users
-- `get` — get a single user by ID
-- `create` — create a new user
-- `update` — update a user
-- `delete` — delete a user
-- `regenerate_user_api_key` — regenerate a user's API key
-
-### profile.rs
-- `update_profile` — update the current user's own profile
-- `regenerate_api_key` — regenerate the current user's own API key
-
-### setup.rs
-- `setup_status` — return whether initial setup has been completed
-- `setup` — complete initial setup (create admin user, root folder, etc.)
-
-### manual_import.rs
-
-Composite trait `ManualImportHandlerContext` — a union of nine `Has*` traits (`HasMatchingService`, `HasManualImportService`, `HasManualImportScan`, `HasAppConfigService`, `HasAuthorService`, `HasWorkService`, `HasDiscoveryService`, `HasImportService`, `HasHistoryService`). It does **not** extend `AppContext`.
-
-- `scan` — initiate a manual import scan of a filesystem path (streams OL matches)
-- `scan_progress` — poll scan progress for an in-flight scan
-- `search` — search metadata providers to match a scanned file to a work
-- `import` — import a batch of matched files into the library
-- `import_single_item` — import a single file (internal helper)
-- `find_existing_work` — find a work already in the library by metadata ID
-- `find_or_create_work` — find or create a work during import
-- `enumerate_with_limits` — enumerate files in a directory with depth/entry limits
-- `enumerate_recursive` — recursive enumeration helper
-
-### list_import.rs
-- `preview` — preview what a list import would add/change
-- `confirm` — confirm and begin a list import
-- `complete` — mark a list import as complete
-- `undo` — undo a completed list import
-- `list` — list previous list imports
-
-### readarr_import.rs
-- `connect` — verify a Readarr instance is reachable
-- `preview` — preview what a Readarr import would bring in
-- `start` — start a Readarr import job
-- `progress` — poll progress of an in-flight Readarr import
-- `history` — list past Readarr import sessions
-- `undo` — undo a Readarr import
-
-### coverproxy.rs
-- `proxy_cover` — proxy a remote cover image through the server (caches result)
-- `is_allowed_host` — check whether a host is on the cover proxy allowlist
-
-### mediacover.rs
-- `get_cover` — serve the full-size cover image for a work or author
-- `get_thumb` — serve a thumbnail cover image (generated on demand)
-
-### filesystem.rs
-- `browse` — browse the server's local filesystem (used by root folder picker)
-
-### opds.rs
-
-Composite trait `OpdsHandlerContext` — a union of six `Has*` traits (`HasAuthService`, `HasAuthorService`, `HasDataDir`, `HasFileService`, `HasManualImportService`, `HasWorkService`). It does **not** extend `AppContext`.
-
-OPDS 1.2 catalog endpoints:
-- `root` — OPDS root navigation feed
-- `recent` — recently-added works feed
-- `author_list` — paginated author listing feed
-- `author_works` — works by a specific author feed
-- `search` — OPDS search results feed
-- `opensearch` — OpenSearch description document
-- `cover` — serve a cover image for OPDS clients
-- `download` — serve a book file for OPDS clients (with basic auth)
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="livrarr-handlers"></a>
+<a id="capability-traits-contextrs"></a>
+<a id="accessor-traits-accessorsrs"></a>
+<a id="middleware-middlewarers"></a>
+<a id="route-handlers"></a>
+<a id="workrs"></a>
+<a id="authorrs"></a>
+<a id="seriesrs"></a>
+<a id="releasers"></a>
+<a id="queuers"></a>
+<a id="historyrs"></a>
+<a id="workfilers"></a>
+<a id="coverrs"></a>
+<a id="indexerrs"></a>
+<a id="download_clientrs"></a>
+<a id="root_folderrs"></a>
+<a id="remote_path_mappingrs"></a>
+<a id="notificationrs"></a>
+<a id="configrs"></a>
+<a id="systemrs"></a>
+<a id="authrs"></a>
+<a id="userrs"></a>
+<a id="profilers"></a>
+<a id="setuprs"></a>
+<a id="manual_importrs"></a>
+<a id="list_importrs"></a>
+<a id="readarr_importrs"></a>
+<a id="coverproxyrs"></a>
+<a id="mediacoverrs"></a>
+<a id="filesystemrs"></a>
+<a id="opdsrs"></a>

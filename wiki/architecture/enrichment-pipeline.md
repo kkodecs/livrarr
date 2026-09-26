@@ -1,73 +1,103 @@
-# Enrichment Pipeline
+# Enrichment, covers and tags
 
-The metadata enrichment system resolves book identity and populates work metadata from external providers. Lives in `livrarr-metadata`.
+Enrichment fills descriptive metadata for an already identified local Work.
+Identity and field completeness remain separate. The rules are
+[metadata principles M1–M10](../domain/metadata-principles.md); creation and route
+settlement are explained in [book creation](work-creation-pipeline.md).
 
-## Provider Stack
+## Responsibilities
 
-Six **network providers** dispatched through the `ProviderClient` enum by `DefaultProviderQueue` (all registered in `livrarr-server/src/main.rs`), plus one synthetic source provider.
+The work workflow coordinates refresh and completion. The enrichment service
+coordinates provider dispatch, stored outcomes and field merge. The provider queue
+owns applicability, anchor selection, freshness and retry accounting. Provider
+adapters normalize responses. The merge engine is the single field-policy owner;
+the database applies its result atomically with generation checks. Cover and file
+projection follow through their own protected write authorities.
 
-1. **Hardcover** — primary English metadata. GraphQL API. Deterministic + fuzzy queries. **Excluded for foreign-language works** (applicability rule below).
-2. **Open Library** — secondary. REST API. English only — **excluded for foreign-language works**. Emits a `cover_url` built from OL cover IDs in normalized output.
-3. **Goodreads** — supplementary. HTML scraping (no public API). Fully deterministic matching: `gr_best_match` drops junk editions, then delegates to the one shared picker `identity_matching::pick_best_candidate` — **not** a "0.75 picker"; that loose jaccard scorer is gone (`crates/livrarr-external-data/src/provider_client.rs:2623-2651`). GR passes `accept_grey = true`, the only provider that does (`:2649`); everything else passes `false`. The only LLM use anywhere on its path is HTML-parse repair. Runs for English **and** foreign.
-4. **Audnexus** — audiobook enrichment. REST API. Narration/duration, keyed on ASIN.
-5. **Google Books** — **foreign-language metadata provider**. REST API, **requires an API key** (keyless quota is zero). **Excluded for English works; included for foreign** — it is the primary foreign-language metadata source (insights #12).
-6. **Audible** — audiobook-axis provider. Catalog search + ASIN lookup (unauthenticated).
-7. **Readarr** — *synthetic* provider, not a network client: built from injected `SourceProviderData` and arbitrated by the merge engine like any other provider.
+There are Background, Manual and HardRefresh enrichment modes. Request priority
+and cache freshness are independent controls. Do not infer a provider deadline or
+cache policy solely from the mode.
 
-### Language applicability rule
+## Provider dispatch
 
-The queue applies a per-work applicability rule (`main.rs` → `with_applicability_rule`) **before** dispatch:
+Applicable providers run concurrently within canonical transport limits.
+Provider priority is a field-ranking policy, not a serial fallback chain.
+English/unresolved-language enrichment excludes Google Books; foreign-language
+enrichment excludes OpenLibrary and Hardcover. Goodreads, Google Books, Audnexus
+and Audible can participate for foreign works according to capabilities and keys.
+Discovery has separate wiring. [Provider roles](../domain/metadata-sources.md).
 
-- **English (or unresolved) language:** every registered provider runs **except Google Books**.
-- **Foreign language:** **only** Goodreads, Audnexus, Google Books, and Audible run — **OpenLibrary and Hardcover are excluded** (English-language metadata leaking into a foreign record is a known corruption; insights #12/#16).
+Descriptive fetches use typed anchors. Route-native search may discover missing
+identity through the shared workflow, but its evidence must settle through the
+identity authority. Never introduce an unguarded text-search-and-merge shortcut.
 
-> The provider set consulted during interactive **discovery** (Add Work search, the pre-add cover picker) is wired *separately* from the enrichment queue (`LivePreaddCoverService` / `LiveCoverService` client maps in `main.rs`) and is not identical to it. See [metadata-pathway](metadata-pathway.md) for the authoritative current add → enrich → merge flow.
+All HTTP uses the shared transport queue. Queue admission precedes interactive
+request budgets. Circuit-open and queue-full are pauses, not terminal absences.
+A readable absence differs from unreadable response data. Log provider and cause;
+never replace good stored data with a parser's empty failure.
 
-## Enrichment Modes
+The persistent provider-response cache is consulted at one queue seam after
+applicability, anchor derivation and terminal-state checks. Background/add paths
+prefer cache; explicit interactive/bulk refresh bypasses it. Only successful
+payloads are cached. Cache hits are processed normally but are not HTTP calls or
+spent network attempts. [Transport lessons](../insights/providers-and-transport.md).
 
-Three modes (not five — deliberate simplification):
+## Merge and provenance
 
-| Mode | Trigger | Behavior |
-|------|---------|----------|
-| Background | Automated (RSS sync, author monitor) | Queue-based, respects rate limits |
-| Manual | User clicks "Refresh" | Immediate, single work |
-| HardRefresh | User forces full re-enrichment | Clears provider state, re-queries all |
+All merge entrances, including cached reuse, apply the same language and payload
+policies. User-owned fields survive refresh. `AutoAdded` is not `User`: automated
+creation does not lock a field as a personal decision. Empty strings/lists are no
+offer, and missing values must preserve last-known-good data.
 
-## Flow (Consolidation — Single Implementation)
+Identity routes and cover columns are not generic descriptive merge outputs.
+Rejected provider fields can produce dissents without blocking unrelated good
+fields. A stored merge output may echo existing values; its presence does not
+prove a change. Compare actual content to decide whether downstream retagging is
+needed. [Merge lessons](../insights/metadata.md).
 
-After consolidation, `EnrichmentWorkflow` is the single implementation. `WorkService::add` delegates to it.
+Enrichment quality has four statuses: Unenriched, Enriched, Thin and Failed.
+Enriched does not mean every field is present; the reviewed quality check requires
+at least one meaningful descriptive field. Retry exhaustion belongs to the
+individual provider, not an invented Work-level Exhausted status.
 
-1. Work added (via search, RSS, or manual import)
-2. Identity settled at add-time by the deterministic `settle_identity` authority — **no LLM validator** (`crates/livrarr-identity/src/async_resolver.rs:125-284`; the FLM gate is title+author, `:318-353`, and the one LLM identity-verify function has no caller, `:46-97`)
-3. Provider dispatch (scatter-gather): the applicable providers (per the language rule above) queried based on mode
-4. Normalize results via `NormalizedWorkDetail`
-5. MergeEngine applies provider results with provenance tracking (pure — no DB calls)
-6. Merge output includes: field updates, provenance upserts/deletes, external ID updates, conflict detection
-7. Atomic merge apply via CAS (`merge_generation` column on works table)
-8. Cover cached to `{covers_dir}/{work_id}{suffix}.jpg` — suffix is `""` for the ebook slot and `"_audio"` for the audiobook slot (`crates/livrarr-materialize/src/lib.rs:17-23`)
+## Covers
 
-## Hardcover Matching Detail
+One rank model chooses candidates per language/media slot, and one write gate owns
+download, measured dimensions, comparison, locking and recoverable commit. The
+documented layout is `covers/{user_id}/{work_id}.jpg` and `_audio.jpg` for audio.
+No cross-user root fallback is allowed.
 
-- **Deterministic (tier 1):** normalize titles, exact case-insensitive match, highest `users_read_count` breaks ties
-- **Tier 2 is deterministic too — there is no LLM tier.** A tier-1 miss falls through to the same shared `pick_best_candidate`, and nothing clearing the bar means Hardcover abstains rather than guessing (`crates/livrarr-external-data/src/hardcover.rs:231-266`). The old `llm_disambiguate` pick is gone.
-- GraphQL endpoint: `https://api.hardcover.app/v1/graphql` (fixed, not configurable)
-- Auth: we send `Authorization: Bearer <token>` (`crates/livrarr-external-data/src/hardcover.rs:72`, `:388`). HC's *published* format is a raw lowercase `authorization` header with no prefix — the gap is a known open P1, see [hardcover](../integrations/hardcover.md).
-- Language filtering: select edition matching configured language prefs with highest `users_read_count` for primary ISBN
+User selection/upload uses the same commit mechanics but bypasses automatic ranking.
+A manual lock protects real bytes or a pending recoverable commit, not a missing
+file. A failed selected-cover download must leave the slot repairable. Ordinary
+search-card art is not an explicit manual selection. Goodreads candidates remain
+excluded by the documented containment policy; restoring them is separate work.
+[Cover rules and recovery details](../insights/covers.md).
 
-## Provenance System
+## Tags and permission
 
-Every enrichable field has provenance metadata:
-- **Who set it:** one of six setters — `Provider`, `User`, `System`, `AutoAdded`, `Imported`, `Import` (`crates/livrarr-domain/src/enrichment_types.rs:176-198`). `AutoAdded` is deliberately not a user lock anchor (`:187-192`)
-- **Which provider:** one of eight — Hardcover, OpenLibrary, Goodreads, Audnexus, Llm, Readarr, GoogleBooks, Audible (`enrichment_types.rs:13-24`)
-- User-owned fields survive manual refresh (reset_for_manual_refresh does NOT touch provenance)
+Database/file agreement is a product requirement within the originating action's
+permission. Import and its unfinished background completion may finish tag work;
+settled files require a new explicit action. Cleanup does not grant unattended
+rewrites. [Import and file recovery](import-pipeline.md).
 
-## Error Handling
+There are historical discrepancies around materialize-versus-TagService paths,
+relative paths and disabled audio writers. Keep the single-owner requirement,
+but verify the named source and actual entry path before claiming tags were
+written or that all callers converge. See [history lessons](../insights/history-and-review.md).
 
-- **Provider timeout / 5xx:** `WillRetry { ServerError }` with a **fixed** next attempt, not exponential backoff — 5 minutes for Hardcover (`crates/livrarr-external-data/src/provider_client.rs:578`, `:758-761`). A live 429 is the one that backs off hard: `WillRetry { RateLimit }` at 6h + up to 3h jitter (`:242-250`).
-- All providers fail: work created with available data (Principle 6)
-- **Identity conflict is not an `EnrichmentStatus` and no LLM is involved.** `EnrichmentStatus` has four values — `Unenriched`, `Enriched`, `Thin`, `Failed` (`crates/livrarr-domain/src/entities.rs:83-102`); the identity outcomes left it in migration 055 (`:97-101`). `IdentityStatus::Conflict` means a differing confirmed anchor, terminal until the user resolves it (`:122-124`).
-- **Retry budget is 5 attempts, per provider, and there is no `EnrichmentStatus::Exhausted`.** Reaching `max_attempts` converts that one provider to `PermanentFailure { RetryBudgetExhausted }` (`crates/livrarr-enrichment/src/provider_queue.rs:586-590`); production sets `max_attempts = 5` (`crates/livrarr-server/src/main.rs:833-836`). The work's own status is unchanged by it.
+## Source and history
 
-## Privacy Boundary
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/architecture/enrichment-pipeline.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-Public metadata (titles, authors, ISBNs) sent to providers. Never send: filenames, paths, checksums, user preferences, API keys, user IDs.
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="enrichment-pipeline"></a>
+<a id="provider-stack"></a>
+<a id="language-applicability-rule"></a>
+<a id="enrichment-modes"></a>
+<a id="flow-consolidation--single-implementation"></a>
+<a id="hardcover-matching-detail"></a>
+<a id="provenance-system"></a>
+<a id="error-handling"></a>
+<a id="privacy-boundary"></a>

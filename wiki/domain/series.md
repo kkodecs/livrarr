@@ -1,5 +1,7 @@
 # Series
 
+> **Source scope:** This detailed reference retains the July 2026 roster/assignment checks. It describes the documented one-series assignment and its exceptions; provider schema and exact callers must be rechecked before changes.
+
 An ordered collection of related works. User-scoped: every series row carries a `user_id`
 (`crates/livrarr-domain/src/entities.rs:456`) and is fenced by it
 (`crates/livrarr-db/src/cross_user_isolation_tests.rs:607`). GR-backed rows are
@@ -105,3 +107,8 @@ are appended, never dropped.
 - Foreign language series; cross-name series dedup (#112 — e.g. Enderverse variants)
 - Hardcover series data; series-level indexer search
 - Overlapping/meta-series; auto-merge of duplicate works
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/series.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.

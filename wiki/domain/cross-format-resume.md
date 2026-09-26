@@ -1,5 +1,7 @@
 # Cross-Format Resume (kash links)
 
+> **Source scope:** This reference preserves the delivered June feature and its recorded gaps. Timings, test counts and open-gap labels retain their original dates; they are not a new release or runtime acceptance.
+
 Whispersync-model position sync between an ebook and its audiobook. Delivered 2026-06-09 (commit d6b869d). Spec/IR at repo root (`spec-cross-format-resume.md`, `ir-v{1,2}-cross-format-resume.yaml`).
 
 ## Model
@@ -29,3 +31,8 @@ Whispersync-model position sync between an ebook and its audiobook. Delivered 20
 ## Sleep-timer bookmark (2B, frontend-only)
 
 Both activation paths (timed + end-of-chapter) drop a bookmark `Sleep Timer / <local date> @ <time>` at the activation position, deduped within 60s (bookmark list + in-flight ref), sonner toast, never blocks playback. Ordinary bookmark — renamable/deletable, no auto-cleanup.
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/cross-format-resume.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.

@@ -1,5 +1,7 @@
 # Container Permissions (PUID / PGID)
 
+> **Source scope:** This page preserves the packaging model and recorded validation. Recheck the selected image/entrypoint for operational changes; its historical checks are not a new deployment validation.
+
 How Livrarr's Docker image handles the user it runs as. Implemented for #158 (+ #105 Unraid, #106 Proxmox). Pure packaging — no Rust code involved.
 
 ## Model — root-start, drop-privileges (LinuxServer.io convention)
@@ -43,3 +45,8 @@ README Quick-Start users (no `cap_drop`) are unaffected. Users of the hardened `
 ## Verification
 
 Entrypoint logic: 16/16 in `alpine:3.21` (0/00/000/01000 reject, argv passthrough, subtree repair, S1/S2/S3). Real image: 6/6 end-to-end (health 200 as uid 99, `/config` auto-owned, hardened mode works, misconfig fails loud).
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/deployment/container-permissions.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.

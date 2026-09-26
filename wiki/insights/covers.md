@@ -1,11 +1,41 @@
-# Cover Handling Insights
+# Covers lessons
 
-Cover ranking, the cover write gate, and cover-source rules.
+## Executive summary
 
-### 44. **OL covers**
+Cover selection can keep a small image even when other providers offer URLs: the
+save gate compares the selected candidate with the saved image, not every provider.
+See [selection and saving](#lesson-63) and [Open Library identifiers](#lesson-44).
+Read implementation claims against the named source revision; accepted design is
+not proof of runtime behavior.
 
-44. **OL covers: lookup by ISBN/OCLC/LCCN is rate-limited 100/IP/5min; lookup by Cover ID or OLID is unlimited.** Always resolve any ISBN/OCLC/LCCN cover request to a Cover ID exactly once, persist that Cover ID on the work, and fetch by Cover ID forever after. Cover IDs are immutable. The ISBN/etc. cover endpoint is documented as crawling-prohibited (OL's words: "Please, do not crawl our cover API"). See [`wiki/integrations/openlibrary.md`](integrations/openlibrary.md).
+<a id="44-ol-covers"></a>
+<a id="lesson-44"></a>
+## 44. OpenLibrary cover identifiers
 
-### 63. **Covers have ONE rank, ONE save gate, ONE layout (N2…**
+The recorded OL policy distinguishes identifier lookups (ISBN/OCLC/LCCN: 100 per IP per five minutes) from Cover ID/OLID fetches. Resolve a cover identifier once, preserve the stable Cover ID and cache the bytes. These are dated external-policy observations; verify policy before changing traffic. See [OpenLibrary](../integrations/openlibrary.md).
 
-63. **Covers have ONE rank, ONE save gate, ONE layout (N2, 2026-07-04).** All cover decisions consume the single rank table in `livrarr-enrichment/src/cover_rank.rs` (ebook EN: GR→HC→GB→Readarr→OL→Audnexus→Audible; ebook foreign: GB first; audiobook: Audible→Audnexus→HC→GR→OL→GB) — the live picker, the size comparator's tiebreak, and import-time host preference all derive from it. Every non-User cover write flows through the cover write gate (`livrarr-metadata/src/cover_write_gate.rs`): download → measure real pixels → comparator (400×600 floor; good-beats-bad; both-good→rank; both-bad→area) → crash-safe commit (candidate bytes + meta sidecar → DB commit → atomic rename → sidecar cleanup), serialized per (user, work, slot) by a keyed mutex that startup recovery also takes. **The generic enrichment merge writes NO cover columns** — `works.cover_*` always describes the file on disk; startup recovery (`cover_write_gate_recovery.rs`) converges any crash state including provenance (only `DbError::NotFound` discards a candidate; transient errors leave it for the next pass). Cover sources are real provider names (host-derived backfill stamped legacy rows; amazon-family = goodreads for ebook, audible for the audiobook slot). ONE layout: `covers/{user_id}/{work_id}{suffix}.jpg`, suffix `_audio` (never `_audiobook`); startup adopts legacy root files; orphan root files are logged, kept, and NEVER served (no root fallback anywhere — serving, tag embedding, and import all read per-user only). Accepted swap bytes ride `prefetched_bytes` into the retag so file art follows the swap even with no other field change. Startup passes run strictly sequenced in one task: layout migration → gate recovery → provenance backfill (`cover_startup.rs`). **AC-4 sovereignty AMENDED (2026-07-16, PO-approved): a User lock is honored only while its cover exists on disk** — final `.jpg` OR the crash-safe protocol's pending candidate meta sidecar (committed-but-unrenamed, recovery's territory); a User row with NOTHING on disk is a damaged slot and IS replaceable (`trust_blocks_candidate`, cover_write_gate.rs). The damage source: fast-add stamped User trust even when the 3s phase-1 download FAILED (cover_url set, 0x0 dims, no file — permanently locked, live-hit on bazaar work 851); `addtime_cover_trust` (work_service.rs) now stamps Unvalidated on a failed user-pick download so the slot heals on the next enrichment pass. Successful user picks/uploads keep absolute protection, including the crash window (Codex-caught P1: the existence check must count pending tmp+meta as protected or a provider candidate bulldozes a just-picked cover whose rename failed). **GR-cover containment (spec v9 REQ-014, 2026-08-18, still active):** Goodreads is excluded as a cover-candidate source at the ONE seam — `GOODREADS_COVER_CANDIDATES_ENABLED=false` in `livrarr-enrichment/src/cover_resolution.rs` (the rank tables above are unchanged and still list GR). Cause: the GR id-namespace conflation (insight 96) fetched real-but-unrelated Book pages — the dissent machinery protected text fields, the cover gate did not (GR ranks first for ebook-EN) → 51 ebook + 44 audiobook wrong covers, re-selected by a marker-gated one-shot heal (manual covers untouched). Re-enable is owned by the GR feature: anti-bot body detection first (see `integrations/goodreads.md` § soft-block response classes), not a parser fix — the original "layout drift" diagnosis was reversed.
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/covers.md#44-ol-covers).
+
+<a id="63-covers-have-one-rank-one-save-gate-one-layout-n2"></a>
+<a id="lesson-63"></a>
+## 63. Cover ownership and recovery
+
+Use one per-slot rank/comparison policy and one recoverable write protocol. The documented automatic comparator uses measured pixels: a 400×600 floor, good over bad, rank among good candidates, and area among undersized candidates. User choices bypass automatic ranking.
+
+Candidate selection and image comparison are separate. At deployed revision `98d35a37`, selection offers the first eligible nonempty URL in provider order. The save gate compares that image with the current file; an existing file with the same URL returns `AlreadyCurrent`. The size floor is therefore not a minimum accepted size and does not trigger a search through other providers. A live Add on 2026-09-19 saved a 128×205 Hardcover ebook image and retained it on the next pass; the separate audiobook image was 2400×2400. Another provider supplied a URL, but its image was not fetched or measured during the review. See the [read-only review](../../build/reviews/catalog-work-lookup/live-add-107-20260919/REVIEW.md#cover-quality).
+
+Serialize by user, Work and slot. The protocol writes candidate bytes and a metadata sidecar, commits database metadata, renames atomically, then cleans the sidecar. Recovery must preserve candidates across transient database errors; only a proved missing Work permits discard. A user-owned slot remains protected while final bytes or the pending recoverable commit exist. A user flag with neither is damaged, not permanently locked.
+
+Generic field merge must not make cover columns describe a file never saved. Persist measured dimensions for both slots and carry accepted bytes into any authorized retag. Layout is covers/{user_id}/{work_id}.jpg and _audio.jpg; orphan legacy root files are retained/logged and never served across users. Startup layout adoption, recovery and provenance repair are sequenced.
+
+Goodreads cover candidates remain excluded under the documented containment policy, even though historical rank tables list them. Wrong covers were caused by Work/Book ID confusion, not the earlier claimed parser drift. Re-enabling requires the separate provider work; see [Goodreads](../integrations/goodreads.md).
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/covers.md#63-covers-have-one-rank-one-save-gate-one-layout-n2).
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/covers.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
+
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="cover-handling-insights"></a>

@@ -1,71 +1,175 @@
-# Coding Pattern Insights
+# Coding patterns lessons
 
-Rust trait/service patterns, compile-wall mechanics, and idioms used across the workspace.
+Current guidance with links to the full dated evidence. Read implementation claims
+against the named source revision; accepted design is not proof of runtime behavior.
 
-### 7. **trait + impl + stub**
+<a id="7-trait--impl--stub"></a>
+<a id="7-trait-impl-stub"></a>
+<a id="lesson-7"></a>
+## 7. Service contracts and doubles
 
-7. **trait + impl + stub.** Trait in domain, impl in crate, stub in behavioral. See [async-service](patterns/async-service.md).
+Define service contracts in domain and implementations in the owning crate. Use external I/O doubles where appropriate, but real SQLite for persistence. A stub is not required for every service; see [service boundaries](../patterns/async-service.md).
 
-### 8. **`trait_variant::make(Send)`**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#7-trait--impl--stub).
 
-8. **`trait_variant::make(Send)`** — not `async-trait`. Non-dyn-compatible — use generics/enum dispatch exclusively.
+<a id="8-trait_variantmakesend"></a>
+<a id="lesson-8"></a>
+## 8. Async traits
 
-### 9. **No SQL outside livrarr-db**
+New async service traits use trait_variant::make(Send). They are not dyn-compatible: use generics or enum dispatch. Deliberately synchronous seams such as chapter extraction and provider-call observation can use trait objects; do not generalize the async restriction to every trait.
 
-9. **No SQL outside livrarr-db.** No business logic in handlers. Handlers: validate → call trait → map result.
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#8-trait_variantmakesend).
 
-### 9b. **Compile wall**
+<a id="9-no-sql-outside-livrarr-db"></a>
+<a id="lesson-9"></a>
+## 9. SQL and business decisions
 
-9b. **Compile wall.** `livrarr-handlers` must NOT depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or `livrarr-download`. Handlers are generic over `S: AppContext`. Verify with `cargo tree -p livrarr-handlers`.
+SQL belongs in livrarr-db. Handlers validate, call service contracts and map responses; shared business decisions belong behind those contracts.
 
-### 9c. **Arc<ServiceImpl> pattern**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9-no-sql-outside-livrarr-db).
 
-9c. **Arc<ServiceImpl> pattern.** All service fields in AppState are `Arc<T>`. AppContext type is the inner `T`. Accessor returns `&self.field` — deref coercion handles `&Arc<T>` → `&T`. Service impls don't need Clone.
+<a id="lesson-9b"></a>
+## 9b. Compile wall
 
-### 9d. **Circular dep: OnceLock<Box<AppState>>**
+Handlers must not depend on db, metadata, tagwrite or download implementation crates. Check the dependency tree. Compilation enforces import boundaries, not the absence of locally reimplemented business rules.
 
-9d. **Circular dep: OnceLock<Box<AppState>>.** Services that call functions taking `&AppState` (ImportService, ReadarrImportWorkflow) can't hold `AppState` directly — infinite-size type. Use `OnceLock<Box<AppState>>`: Box is pointer-sized (breaks the compile-time layout cycle), OnceLock allows post-construction init. Call `service.init(state.clone())` after AppState construction. `Arc<OnceLock<...>>` and `OnceLock<AppState>` (without Box) both fail — the compiler still needs AppState's size. **Prefer eliminating OnceLock via explicit constructor injection** (pass `Arc<ServiceImpl>` at construction time) whenever a refactor makes the deps explicit. OnceLock is the escape hatch when full refactoring is impractical. **As of the architecture-excellent sprint, zero OnceLocks remain in the codebase** — `LiveImportService` and `LiveReadarrImportWorkflow` were both refactored to explicit fields. Do not reintroduce.
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9b-compile-wall).
 
-### 9e. **Trait signature type safety**
+<a id="9c-arc-pattern"></a>
+<a id="9c-arcserviceimpl-pattern"></a>
+<a id="lesson-9c"></a>
+## 9c. Shared service instances
 
-9e. **Trait signature type safety.** Service traits in `livrarr-domain/src/services.rs` must not reference types from walled-off crates — `TaggableItem` (livrarr-tagwrite), `Create*DbRequest` (livrarr-db), `TagMetadata` (livrarr-tagwrite) are banned from signatures. Use domain equivalents: `LibraryItem` for `TaggableItem`, domain request structs for DB request types. Note: `WorkId`/`UserId` are safe — they're defined in livrarr-domain, not livrarr-db. Server impls convert at the boundary.
+AppState stores shared services as Arc<Implementation>. A Has* associated type names the inner implementation, and its accessor borrows it via deref coercion. The implementation itself need not be Clone.
 
-### 9f. **Accessor newtype wrappers for orphan rule**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9c-arc-pattern).
 
-9f. **Accessor newtype wrappers for orphan rule.** When handlers need server-owned infrastructure (logs, caches, atomics), define a minimal accessor trait in `livrarr-handlers/src/accessors.rs` and a newtype wrapper in server's `state.rs` that delegates to the real type. Required because: compile wall blocks putting the trait in server, orphan rule blocks impl'ing a handler trait on a server type, and `trait_variant::make(Send)` blocks `dyn Trait` (insight 8). Wire the wrapper as the AppContext associated type.
+<a id="9d-circular-dep-oncelock"></a>
+<a id="9d-circular-dep-oncelockboxappstate"></a>
+<a id="9d-circular-dep-oncelockbox"></a>
+<a id="lesson-9d"></a>
+## 9d. Explicit construction
 
-### 9g. **Handler-level spawning for background work**
+Prefer explicit constructor injection. The old OnceLock<Box<AppState>> arrangement solved a layout cycle but was subsequently removed; do not recreate late initialization from that historical workaround. Process-global infrastructure has separate ownership rules.
 
-9g. **Handler-level spawning for background work.** Services receive `&self` and can't clone `AppContext` or move it into `tokio::spawn`. Handlers own `State<S>` and can `state.clone()` + `tokio::spawn`. Use this for fire-and-forget side effects (bibliography refresh, author monitor) and long-running background jobs (bulk refresh). OnceLock<Box<AppState>> (9d) is the escape hatch for when a service *must* access full state; handler spawning is the default. **`AuthorMonitorWorkflow::trigger_monitor()` no longer exists** — the no-op stub and its trait method were deleted in the Phase-1 dead-code cleanup (commit `af709f01`, audit M-006); the trait now has only `run_monitor` (`livrarr-domain/src/services/monitor.rs:31-37`, verified 2026-07-10). The on-demand trigger from handlers uses `tokio::spawn + run_monitor` directly (this pattern).
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9d-circular-dep-oncelockbox).
 
-### 9h. **Handlers bind narrow `Has*` capability traits, not…**
+<a id="9e-trait-signature-type-safety"></a>
+<a id="lesson-9e"></a>
+## 9e. Boundary types
 
-9h. **Handlers bind narrow `Has*` capability traits, not full `AppContext`.** Each handler function uses bounds like `S: HasWorkService + HasAuthorService` — only the capabilities it actually calls. `AppContext` is a blanket supertrait union kept for route composition (where the router needs all capabilities). All capability traits are named `Has*` and live in `livrarr-handlers/src/context.rs`. Adding a new service = add a `Has*` trait in context.rs, impl it on `AppState` in state.rs, and import the narrow bound in the handler.
+Domain service signatures must not name types from implementation crates. Put appropriate contracts and request types at the shared boundary and convert inside the implementation. A type alias documents intent but does not provide newtype safety.
 
-### 9i. **Credential traits are isolated from settings traits**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9e-trait-signature-type-safety).
 
-9i. **Credential traits are isolated from settings traits.** `DownloadClientCredentialService` (provides `get_with_credentials`) is a separate trait from `DownloadClientSettingsService` (CRUD without secrets). Same split for `IndexerCredentialService` / `IndexerSettingsService`. Jobs/handlers that need plaintext credentials bind the credential trait; read-only or config-only handlers bind only the settings trait. This is compile-time RBAC groundwork — when user-tier handling arrives, credential services won't be injected into user-tier handlers.
+<a id="9f-accessor-newtype-wrappers-for-orphan-rule"></a>
+<a id="lesson-9f"></a>
+## 9f. Accessor adapters
 
-### 10. **All blocking I/O in `spawn_blocking`**
+When handlers need server-owned state, define a narrow accessor contract and an appropriate adapter/newtype at composition. Keep orphan-rule and ownership constraints explicit. Do not pass all of AppState just to expose one operation.
 
-10. **All blocking I/O in `spawn_blocking`.** Never block the async executor.
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9f-accessor-newtype-wrappers-for-orphan-rule).
 
-### 11. **`chrono` for datetime**
+<a id="9g-handler-level-spawning-for-background-work"></a>
+<a id="lesson-9g"></a>
+## 9g. Background task ownership
 
-11. **`chrono` for datetime.** Never `time` crate. Project-wide.
+Handlers owning cloneable state can spawn background work through service contracts. A borrowed service cannot simply move its caller context into a task. Keep task lifetime, cancellation and errors visible. The removed trigger_monitor no-op is not a usable job entrance.
 
-### 36. **AtomicBool execution guard + CancellationToken…**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9g-handler-level-spawning-for-background-work).
 
-36. **AtomicBool execution guard + CancellationToken cooperation for background workflows.** Workflows that can be triggered by both a scheduled tick and a user-facing handler (e.g., author monitor) hold an `AtomicBool running`. `swap(true, AcqRel)` returns the prior value — if `true`, return `Err(AlreadyRunning)` immediately. The AtomicBool is **global** (not per-user): `AlreadyRunning` causes the **entire tick** to `return Ok(())` — not skip-and-continue — because the workflow is already executing for some user and attempting others would block on the same lock. All other per-user errors use warn-and-continue (never let one user's failure stop others). User-scoping pattern for scheduled jobs: iterate all users at the job layer, call the workflow per user. **CancellationToken: all sleeps must use `tokio::select!`.** Background workflows receive a `CancellationToken` threaded from scheduler → job tick → per-user workflow. ALL sleeps (inter-item delays, 429 backoffs) must use `tokio::select! { _ = sleep(dur) => {}, _ = cancel.cancelled() => return Ok(partial_report) }` — not just `cancel.is_cancelled()` at iteration boundaries. A bare `tokio::time::sleep()` blocks graceful shutdown for the full duration (a 60s 429 backoff blocks shutdown for a full minute).
+<a id="9h-handlers-bind-narrow-has-capability-traits-not"></a>
+<a id="lesson-9h"></a>
+## 9h. Narrow handler capabilities
 
-### 39. **SettingsService split into 7 narrow traits**
+Bind each handler to the Has* traits it actually uses. AppContext is a broader route-composition aggregate; its existence does not require every handler to depend on all capabilities.
 
-39. **SettingsService split into 7 narrow traits.** The former 34-method god trait is now: `AppConfigService` (user/tenant preferences: naming, media mgmt, metadata config, email, language validation), `DownloadClientSettingsService` (CRUD, no secrets), `DownloadClientCredentialService` (plaintext credential access), `IndexerSettingsService` (CRUD + Prowlarr config + indexer config, no secrets), `IndexerCredentialService` (plaintext credential access), `RootFolderService` (CRUD), `RemotePathMappingService` (CRUD). Prowlarr config lives in `IndexerSettingsService` — NOT `AppConfigService` — because it is indexer infrastructure (admin), not a user preference. Handlers/jobs bind only the trait(s) they need. **Server impl stays one struct:** `LiveSettingsService<DB>` implements all 7 traits; AppState holds a single `Arc<LiveSettingsService>`. Don't split the impl into 7 structs — that complicates DB wiring unnecessarily. Adding a new settings area: new trait in `livrarr-domain/src/services/`, new `impl` block in `settings_service.rs`, new `Has*` in `context.rs`, new `Has*` impl on `AppState`.
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9h-handlers-bind-narrow-has-capability-traits-not).
 
-### 40. **`infra/import_pipeline.rs` is pure utilities**
+<a id="9i-credential-traits-are-isolated-from-settings-traits"></a>
+<a id="lesson-9i"></a>
+## 9i. Credentials are separate capabilities
 
-40. **`infra/import_pipeline.rs` is pure utilities — never add orchestration here.** After Phase 3 migration, this file contains only free functions that take all dependencies as explicit parameters — no AppState access, no service trait calls, no DB. Some functions do make network calls (`fetch_qbit_content_path`, `fetch_sabnzbd_storage_path`) via an explicitly-passed `HttpClient`, not through the service layer. All import orchestration (coordinating services, mutating state) lives in `LiveImportService`. When adding new import functionality: pure computation/explicit-I/O → free function here; service coordination → method on `LiveImportService`. The file name "pipeline" is misleading — it's a utility module.
+Credential-bearing reads are separate from configuration CRUD for indexers and download clients. Inject the credential capability only where an outbound operation needs it; ordinary settings reads should not gain secret access by convenience.
 
-### 41. **Module-level composite context traits for cohesive…**
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#9i-credential-traits-are-isolated-from-settings-traits).
 
-41. **Module-level composite context traits for cohesive handler groups.** Handler modules with many tightly-coupled handlers (`opds.rs`, `manual_import.rs`) define a named composite trait (`OpdsHandlerContext`, `ManualImportHandlerContext`) built directly from `Has*` traits — narrower than `AppContext` but shared across all handlers in the module. Avoids repeating long bound lists per-function and makes the module's capability contract explicit. Pattern: `pub trait XHandlerContext: HasA + HasB + ... + Clone + Send + Sync + 'static {}` with a blanket `impl<T: HasA + HasB + ...> XHandlerContext for T {}`. These traits do NOT extend `AppContext` — they select only the `Has*` traits the module actually uses. Use this pattern when a module has 5+ handlers sharing the same set of services.
+<a id="10-all-blocking-io-in-spawn_blocking"></a>
+<a id="lesson-10"></a>
+## 10. Blocking I/O
+
+Run blocking filesystem and media work through spawn_blocking rather than blocking the async executor. The outer task still owns cancellation and must account for already-admitted blocking work.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#10-all-blocking-io-in-spawn_blocking).
+
+<a id="11-chrono-for-datetime"></a>
+<a id="lesson-11"></a>
+## 11. Datetime convention
+
+Use chrono throughout the project. Do not introduce the time crate as an alternative datetime convention.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#11-chrono-for-datetime).
+
+<a id="36-atomicbool-execution-guard--cancellationtoken"></a>
+<a id="36-atomicbool-execution-guard-cancellationtoken"></a>
+<a id="lesson-36"></a>
+## 36. Run guards and shutdown
+
+A workflow-wide AtomicBool guard prevents overlapping runs of the same shared workflow. If another run owns that global guard, the scheduler returns from the whole tick; ordinary per-user errors warn and continue.
+
+Thread cancellation from the job to the workflow. Backoffs and inter-item sleeps use select with cancellation; checking only between iterations can delay shutdown for the entire sleep. The per-user iteration layer and shared guard scope must agree.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#36-atomicbool-execution-guard--cancellationtoken).
+
+<a id="39-settingsservice-split-into-7-narrow-traits"></a>
+<a id="lesson-39"></a>
+## 39. Settings contracts
+
+The former settings service was split into narrow app-config, client settings/credentials, indexer settings/credentials, root-folder and remote-mapping contracts. One implementation and shared instance can implement them all. Prowlarr configuration belongs with indexer infrastructure, not user metadata preferences.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#39-settingsservice-split-into-7-narrow-traits).
+
+<a id="40-infraimport_pipeliners-is-pure-utilities"></a>
+<a id="lesson-40"></a>
+## 40. Import utilities versus orchestration
+
+Server infra/import_pipeline.rs contains utilities taking explicit dependencies, including some explicitly supplied HTTP operations. Service coordination belongs in the import service. The word pipeline in a filename is not permission to accumulate AppState access or business orchestration.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#40-infraimport_pipeliners-is-pure-utilities).
+
+<a id="41-module-level-composite-context-traits-for-cohesive"></a>
+<a id="lesson-41"></a>
+## 41. Composite handler contracts
+
+A cohesive handler module may name a composite of its actual Has* requirements instead of repeating long bounds. Compose the narrow traits directly, not the entire AppContext; use this where the handlers truly share the same capabilities.
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#41-module-level-composite-context-traits-for-cohesive).
+
+<a id="lesson-103"></a>
+## 103. Checked invocation facade
+
+A raw keyed-mutex guard does not prove which composition or user it protects.
+The accepted F4 design requires a checked cross-crate facade borrowing an
+unforgeable invocation capability, created only by the runner after acquisition.
+Binding checks the receiving adapter's own mutex Arc identity and user before
+protected reads or inner locks; another composition is refused even for the same
+numeric user. The capability and facade cannot escape the invocation.
+
+Actual worker bodies stay crate-private. Existing public service entries acquire;
+the checked facade forwards to the same workers without implementing the acquiring
+public trait. The invocation owns cancellation and retains the same guard: queued
+cancellation starts no protected work; after acquisition, stop admitting work,
+drain admitted work and settle actual outcomes/evidence before releasing it.
+
+Source: [PM's accepted F4 scope clarification](../../build/design/DECISION-F4-SCOPE-FACADE-PM.md).
+**This is accepted design clarification; runtime implementation and review are still pending.**
+
+[Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#103-checked-invocation-facade).
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
+
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="coding-pattern-insights"></a>

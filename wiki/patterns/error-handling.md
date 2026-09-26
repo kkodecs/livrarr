@@ -1,51 +1,50 @@
-# Error Handling Pattern
+# Errors and recovery
 
-Governing principle: strict for authoritative state, tolerant for rebuildable state, visible for operators, version-gated for compatibility.
+Be strict for authoritative state, tolerant for rebuildable data, visible to
+operators and explicit about version compatibility. Map domain errors at the HTTP
+boundary; do not leak credentials, paths, stack traces or raw provider bodies.
 
-## Error Categories and HTTP Mapping
+## Read policy
 
-The concrete type is `ApiError` in `livrarr-handlers/src/types/api_error.rs` — 23 variants. The
-rows below are the ones this page has always covered, with the variant that actually produces
-each status:
+| Data | Handling |
+|---|---|
+| One authoritative record | Reject corrupt/unknown values |
+| User-facing bulk list | Skip corrupt rows only under the documented partial-result contract; log and expose counts |
+| Internal authoritative enumeration | Strict read; quarantine explicitly rather than silently omit |
+| Cache/rebuildable data | Invalidate an unreadable entry and rebuild |
 
-| Category | `ApiError` variant | HTTP | When |
-|----------|--------------------|------|------|
-| Bad user input | `BadRequest` | 400 | Malformed request |
-| Validation failure | `Validation`, `Unprocessable` | **422** | Field-level validation — **not** 400 |
-| AuthenticationError | `Unauthorized` | 401 | Missing/expired token |
-| AuthorizationError | `Forbidden` | 403 | Insufficient permissions |
-| NotFound | `NotFound` | 404 | Entity doesn't exist |
-| Conflict | `Conflict`, `ConflictDetailed` | 409 | Duplicate, stale update, state transition rejected |
-| DataCorruption | `Db(DbError::DataCorruption)` | 500 | Unknown enum (version gate passed) |
-| Service at capacity | `ServiceUnavailable`, `ServiceUnavailableRetry` | 503 | Backpressure; the retry variant carries `Retry-After` |
-| ExternalDependencyError | `BadGateway`, `StructuredBadGateway` | 502 | Provider failure |
+Missing related data can permit a specific presentation fallback without weakening
+identity decisions. See [Work](../domain/work.md). A malformed provider response is
+not an authoritative empty result or a healthy transport success.
 
-Two rows this page used to carry have **no** corresponding variant and no such mapping:
+## HTTP mapping
 
-- **Timeout → 504.** `ApiError` has no `Timeout` variant and nothing returns `504`.
-- **StorageError → 503 (disk full, SQLITE_IOERR).** `DbError::Io` maps to **500**, not 503.
-  Likewise `SQLITE_BUSY` produces no 503 — it is absorbed by the connection's `busy_timeout`.
+The documented ApiError surface maps malformed input to 400, validation to 422,
+unauthenticated/forbidden to 401/403, missing to 404, conflicts to 409, provider
+failure to 502 and explicit service-capacity refusal to 503. Database corruption
+or I/O maps to 500 in the inspected reference. Verify the real enum/mapping when
+changing a route; there was no generic Timeout→504 or storage-error→503 mapping.
 
-## Data Read Policies
+SQLite busy timeout and shared immediate write admission handle contention; do not
+invent a second handler retry policy from historical tables. External pause/retry
+classification belongs to the canonical transport and provider boundary. Queue-full
+and circuit-open must not be mistaken for permanent absence or spent retry budget.
 
-- **Single record:** Strict parse. Return `Err(DataCorruption)` for unknown enums.
-- **Bulk list (user-facing):** Skip bad rows, log error, return partial results with `totalRows`/`returnedRows`/`skippedRows`.
-- **Internal enumeration:** Strict parse. Quarantine bad rows via raw SQL on primitive columns. Don't skip silently.
-- **Cache/rebuildable:** Parse with fallback, invalidate, trigger rebuild.
+Cross-resource changes need an explicit recoverable state machine: persistent
+intent, temporary bytes, required fsync/rename, and final state. The exact ordering
+belongs to its authority; do not reuse an illustrative sequence without checking
+the cover/import/undo contract. Keep original good data on failure, expose recovery
+and retain ownership through admitted work during cancellation.
 
-## Retry Semantics
+## Source and history
 
-| Context | Retries | Backoff |
-|---------|---------|---------|
-| HTTP handlers (SQLITE_BUSY) | 0 (busy_timeout handles it) | — |
-| Background jobs (SQLITE_BUSY) | 0 (next tick) | — |
-| External APIs (background) | 2 | 1s/3s |
-| External APIs (handler) | 1 | 2s |
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/patterns/error-handling.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-## Handler Error Response Shape
-
-JSON body must include: stable error code + request ID + short human-readable hint. Never leak: internal paths, stack traces, secrets, raw upstream bodies.
-
-## Cross-Resource Operations (DB + Filesystem)
-
-State machine pattern: persist intent -> temp file -> fsync -> atomic rename -> fsync parent dir -> finalize DB. On failure, leave state machine in current phase for recovery.
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="error-handling-pattern"></a>
+<a id="error-categories-and-http-mapping"></a>
+<a id="data-read-policies"></a>
+<a id="retry-semantics"></a>
+<a id="handler-error-response-shape"></a>
+<a id="cross-resource-operations-db--filesystem"></a>

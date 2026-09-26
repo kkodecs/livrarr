@@ -1,5 +1,7 @@
 # RSS Sync
 
+> **Source scope:** This reference retains the July 2026 source checks. Its scoring and feed mechanics are useful design context, not a new runtime check of the parked rewrite or deployed containment. Verify the named implementation when changing this path.
+
 Automated release discovery and grabbing for monitored works. Runs as a background job.
 
 ## How It Works
@@ -55,3 +57,8 @@ If download client rejects as duplicate (torrent already added): create Grab rec
 ## Configuration
 
 `indexer_config` singleton: `rss_sync_interval_minutes` (default 15), `rss_match_threshold` (default 0.80). Admin-only via `GET/PUT /api/v1/config/indexer`. Job reads from DB each tick — no restart needed.
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/architecture/rss-sync.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.

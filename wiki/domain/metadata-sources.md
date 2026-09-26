@@ -1,144 +1,104 @@
-# Metadata Sources
+# Metadata provider roles
 
-Which providers supply metadata, their priority, fallback behavior, and the foreign language problem.
+## Executive summary
 
-## English Pipeline
+Text search keeps up to three results from each of four providers, for a maximum
+of 12 before duplicate removal and filtering. There is no additional-results link.
+See [search limits](#search-limits). Discovery, enrichment and cover selection have
+separate provider rules; see [provider roles](#provider-roles) and [shared rules](#shared-rules).
+The metadata branch adds [database-backed enrichment priorities](enrichment-priorities.md),
+including Google Books for English enrichment. This change is deployed.
 
-| Provider | Role | API | Auth | Rate Limit |
-|----------|------|-----|------|------------|
-| **Hardcover** | Primary metadata | GraphQL | Token, sent as `Authorization: Bearer <token>` | 1 req/s |
-| **OpenLibrary** | Fallback metadata | REST | None | 1 req/s |
-| **Audnexus** | Audiobook enrichment | REST | None | 0.5 req/s |
-| **Goodreads** | Cover quality, series data, bibliography | HTML scraping (LLM repair fallback) | None | 1 per 1.5s |
-| **LLM** | HTML-parse repair on foreign GR pages; cleanup tasks | OpenAI-compatible | API key | Provider-dependent |
+## Provider roles
 
-Rate limits are the outbound queue's per-bucket pace
-(`crates/livrarr-http/src/outbound_queue.rs:239-249`) — HC/OL/GB 1s, Goodreads 1.5s, Audnexus
-2s. On Hardcover auth: HC's published format is a raw lowercase `authorization` header, but
-what we send is `Authorization: Bearer <token>` — see `wiki/integrations/hardcover.md`, where
-that gap is an open P1.
+Providers supply different evidence. Discovery, identity capture, descriptive
+enrichment and cover selection have separate policies; a provider’s place in one
+does not establish its place in another.
 
-> **Goodreads does NOT require an LLM.** The GR pick is deterministic: `gr_best_match` — a
-> junk-edition filter plus the shared title+author picker — and the adapter's own doc states
-> "no LLM is involved in the pick"
-> (`crates/livrarr-external-data/src/provider_client.rs:1967-1976`). Nothing clearing the bar
-> means GR **abstains**, which is where `NotFound` comes from — not from a missing LLM. The
-> only LLM on the GR path is `llm_repair`, an extraction fallback for foreign-language detail
-> pages whose parse failed (`crates/livrarr-external-data/src/goodreads/mod.rs:4-5`); when no
-> live-config handle is present that fallback is simply disabled, and the rest of the provider
-> works normally (`provider_client.rs:1998-2002`). GR is still a hostile scraping target —
-> anti-bot, HTML drift, noisy hits — which is why the bar is set to abstain rather than guess.
+| Provider | Documented role | Key constraint |
+|---|---|---|
+| [Hardcover](../integrations/hardcover.md) | English descriptive metadata; book/author/edition discovery | Token required; GraphQL request limits |
+| [OpenLibrary](../integrations/openlibrary.md) | Discovery, bibliography and English enrichment | Foreign discovery is allowed; foreign descriptive contribution is excluded |
+| [Google Books](../integrations/google-books.md) | English and foreign descriptive metadata | Administrator-supplied key and restrictive daily quota |
+| [Goodreads](../integrations/goodreads.md) | Deterministic discovery/capture, series and supplemental metadata | Book/Work namespace split; hostile detail-page responses; cover containment |
+| [Audnexus](../integrations/audnexus.md) | ASIN-based audiobook metadata | Community API, revalidation and region limitations |
+| Audible | Audiobook catalog/ASIN evidence | Distinct adapter and transport bucket; do not treat its outcomes as Audnexus outcomes |
+| Readarr source payload | Imported metadata offered to the merge engine | Synthetic source, not another network enrichment client |
 
-### Provider Priority
+## Search limits
 
-**This is a merge rank, not a fallback chain.** Every applicable provider is dispatched in
-parallel into one `JoinSet` (`crates/livrarr-enrichment/src/provider_queue.rs:1-4`,
-`:348-352`); the merge engine then resolves each field by rank. Nothing waits for Hardcover to
-"fail" first.
+Ordinary text search retains at most three matches per provider: Hardcover,
+OpenLibrary, Google Books and Goodreads. Duplicate removal, AI cleanup and hiding
+existing library entries can reduce the visible list below twelve. Identifier
+searches follow a separate resolution path.
 
-English content/description rank (`crates/livrarr-enrichment/src/merge_engine.rs:38-54`):
+The cap limits retained results, not upstream request sizes. Google Books still
+requests 20, OpenLibrary 50 and Hardcover 15; Goodreads controls its autocomplete
+batch size. The page has no additional-results link. The existing Raw/Filtered
+switch changes views of the same retained batch.
 
-1. Hardcover → deterministic match by title+author, highest `users_read_count`
-2. Goodreads
-3. Readarr
-4. OpenLibrary → description + ISBN from editions
-5. Audible
+[September 18 change and verification](../../build/reviews/search-result-cap-2026-09-18/RESULT.md).
 
-Covers do not use this order — they have their own rank table
-(`cover_rank::CoverRankModel::EbookEnglish`, `merge_engine.rs:55-58`). Audnexus contributes
-narrator, duration and ASIN independently of the content rank.
+## Selected-result field mapping
 
-### Timeouts
+[Provider field mapping](search-result-metadata.md) records what each text-search
+provider supplies, where Add currently loses details, and the proposed save scope.
+It distinguishes source-reported values from guessed language and separates a
+cover address from a downloaded image. The preservation fix is not implemented.
 
-The HTTP timeout is fixed per call site, not per enrichment mode — there is no
-synchronous-vs-background switch:
+## Shared rules
 
-- **10s:** Hardcover (`crates/livrarr-external-data/src/hardcover.rs:79`, `:394`), Google Books
-  (`google_books.rs:102`, `:150`), OpenLibrary `search.json` (`openlibrary.rs:313`)
-- **30s:** OpenLibrary work-detail / editions / ISBN (`openlibrary.rs:55`, `:141`, `:234`) and
-  its title+author search (`provider_client.rs:1051`), Goodreads
-  (`goodreads/client.rs:173`, `:231`), Audnexus (`audnexus.rs:160`), Audible
-  (`audible.rs:252`)
+Applicable providers are dispatched concurrently within the shared HTTP limits.
+Priority ranks field offers after capture; it is not an instruction to wait for
+one provider to fail before querying the next. Covers have their own ranking and
+write gate. Historical tables listing Goodreads first do not override its later
+candidate exclusion.
 
-## Foreign Language Pipeline
+The [deployed priority change](enrichment-priorities.md) includes Google Books for
+English and unknown language, while keeping OpenLibrary/Hardcover excluded for
+foreign language.
+The merge boundary also rejects their foreign descriptive payloads. Discovery
+wiring is separate; an OpenLibrary foreign search does not violate that rule.
+Language selection was unlocked by Google Books or an LLM configuration, not by an
+LLM requirement on deterministic identity.
 
-Foreign works go through the same enrichment pipeline as English works but with different provider priority and an additional provider (Google Books).
+No LLM chooses or confirms a match. It can repair/clean permitted public metadata
+without increasing its trust. Missing LLM configuration must leave ordinary
+deterministic workflows useful. ISBN is edition evidence; conflicting editions
+are not automatically conflicting Works.
 
-### Search/Discovery
+Provider success requires a readable response of the promised shape. Unreadable,
+empty, unavailable, unconfigured and rate-limited are different outcomes. Preserve
+good stored metadata and expose failures. User-owned fields remain protected.
 
-Foreign lookup routes through **OpenLibrary first** (with `language=` filter using ISO 639-3 codes), falling back to **Goodreads** (HTML parsing). OL is used for discovery (finding the work, getting OLID + ISBN), not for metadata enrichment.
+## Dates and external policy
 
-### Enrichment Providers
+The integration pages retain measured constraints and known gaps from the original
+May–August records. The cleanup did not call providers, verify their current terms
+or change traffic. Recheck the relevant external contract before implementing a
+provider change. Proposals for a primary provider, contribution or a new proxy
+are product decisions, not implemented capabilities.
 
-| Provider | Role | API | Auth | Rate Limit |
-|----------|------|-----|------|------------|
-| **Google Books** | Primary foreign metadata | REST JSON | API key (X-Goog-Api-Key header) | 1 req/s |
-| **Goodreads** | Fallback metadata (LLM repairs a failed parse) | HTML scraping | None | 1 per 1.5s |
-| **Audnexus** | Audiobook enrichment | REST | None | 0.5 req/s |
+[Enrichment and covers](../architecture/enrichment-pipeline.md) ·
+[transport lessons](../insights/providers-and-transport.md) ·
+[metadata principles](metadata-principles.md).
 
-### Foreign Priority Order
+## Source and history
 
-Content and description: GoogleBooks → Goodreads → Hardcover → Readarr → OpenLibrary →
-**Audible** (`crates/livrarr-enrichment/src/merge_engine.rs:65-83`). Covers are ranked
-separately (`cover_rank::CoverRankModel::EbookForeign`, `:84-87`), so this is not a
-cover order.
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/metadata-sources.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-**Hardcover and OpenLibrary never actually contribute to a foreign work**, despite sitting in
-that list. Their payloads are removed from the merge inputs at the chokepoint
-(`drop_language_incompatible_providers`, `merge_engine.rs:263-282`) — the function's own note
-explains why reordering was insufficient. Their *anchors* are still captured upstream at the
-identity resolver, which is language-agnostic (`:267-269`); only metadata contribution is
-dropped.
-
-### Language Gate
-
-Non-English languages are selectable when EITHER `llm_configured` OR `google_books_configured` is true — a non-`en` code is stripped only when both are false (`crates/livrarr-external-data/src/language.rs:115-117`). The `requires_llm` field in SUPPORTED_LANGUAGES is display metadata only — not used for gating; every one of the nine supported languages currently carries `requires_llm: false` (`language.rs:11-75`).
-
-### Google Books Details
-
-- ISBN lookup preferred (direct match, no scoring needed)
-- Title+author fallback: `intitle:`/`inauthor:` with `langRestrict` and `maxResults=5`
-  (`crates/livrarr-external-data/src/google_books.rs:398`), then the **shared deterministic
-  picker** `identity_matching::pick_best_candidate` with `accept_grey = false` (`:455-460`) —
-  the same authority every other provider uses. The old Jaccard ≥ 0.75 / author-overlap ≥ 1
-  scoring is gone; nothing clearing the bar means GB abstains
-- All data is `reference_only` — display/cache, never contributed upstream
-- Cover URLs normalized: HTTPS, zoom=0, SSRF validated, embedded credentials rejected
-- Descriptions HTML-stripped before storage
-- CJK titles (Japanese, Korean) currently return NotFound due to Latin-centric tokenization (#54)
-
-### Cover Resolution (foreign)
-
-The foreign-ebook cover rank is seven providers, not two: GB → Goodreads → Hardcover → Readarr
-→ OpenLibrary → Audnexus → Audible (`crates/livrarr-enrichment/src/cover_rank.rs:55-64`). That
-one table is the single authority for all three cover call sites (`:1-8`). Two caveats worth
-holding together: Hardcover and OpenLibrary *provider payloads* are dropped for foreign works
-(see the drop rule above), and a cover can also arrive from a non-provider source — EPUB,
-ISBN→OL, ISBN→Amazon (`crates/livrarr-domain/src/enrichment_types.rs:84-90`), which is the
-"OL covers API by ISBN" step.
-
-## Key Rules
-
-- **Never use OpenLibrary for foreign language.** OL's foreign language coverage is unreliable.
-  Enforced in code, not just by convention — see the drop rule above.
-- **There is no `metadata_source` column.** It was dropped by migration 061 as a dead column —
-  "zero readers and zero writers anywhere in the workspace" — superseded by `works.language`
-  plus `works.enrichment_source` (`crates/livrarr-db/migrations/061_drop_metadata_source.sql:1-5`).
-  Nothing is stored at creation on it and no refresh is skipped because of it.
-- **A Google Books key alone unlocks non-English languages** — an LLM is not required. The
-  strip runs only when neither is configured (`crates/livrarr-external-data/src/language.rs:115-117`),
-  and no supported language is marked LLM-dependent today (`:11-75`).
-
-## Provider Gotchas
-
-> **The four library-catalogue entries below are historical.** No SRU client, and no DNB, KB,
-> NDL or OPAC SBN provider, exists anywhere in `crates/*/src/` or the frontend — the foreign
-> path is Google Books plus Goodreads, and OL's language filter replaced the catalogue
-> approach. Keep these as a record of why that route was abandoned; do not read them as live
-> behaviour.
-
-- **DNB** needs SRU v1.1 (not 1.2), uses `rdau:P60327` for author (not Dublin Core `creator`), `bibo:isbn13` for ISBN
-- **KB** needs bare CQL queries, not `title="{query}"`
-- **NDL** returns entity-escaped DC XML in recordData
-- **OPAC SBN** is client-side rendered — doesn't work for scraping, replaced by OL language filter
-- **Goodreads CDN thumbnails** are often 50-75px — can upsize via URL rewrite (`_SY75_` → `_SX200_`)
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="metadata-sources"></a>
+<a id="english-pipeline"></a>
+<a id="provider-priority"></a>
+<a id="timeouts"></a>
+<a id="foreign-language-pipeline"></a>
+<a id="searchdiscovery"></a>
+<a id="enrichment-providers"></a>
+<a id="foreign-priority-order"></a>
+<a id="language-gate"></a>
+<a id="google-books-details"></a>
+<a id="cover-resolution-foreign"></a>
+<a id="key-rules"></a>
+<a id="provider-gotchas"></a>

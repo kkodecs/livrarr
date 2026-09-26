@@ -1,43 +1,46 @@
-# Grab System
+# Downloads and grabs
 
-The grab system handles release discovery, download initiation, and download tracking. Spans `livrarr-download` (client APIs) and `livrarr-server` (orchestration).
+Indexers accept direct Torznab/Newznab URLs; Prowlarr is optional. Release search
+and RSS feed fetching are distinct paths that converge at the grab service.
+[Release semantics](../domain/release.md) · [RSS matching](rss-sync.md).
 
-## Components
+Interactive search queries enabled indexers in parallel, parses releases, drops
+items missing required identifiers/URLs, deduplicates by `(guid, indexer)` and sorts
+results. The documented query is `t=search` with title plus author surname; there
+is no second `t=book` tier. Search itself does not apply RSS matching scores.
+The process-local release cache has a 24-hour TTL; cache-only opens spend no HTTP,
+and explicit Search requests fresh results.
 
-### Indexer System
+A selected release goes through `ReleaseService::grab`: URL trust checks, client
+selection, protocol dispatch, then the shared Grab persistence and history path.
+Torrent clients include qBittorrent and Transmission; Usenet uses SABnzbd. The
+selected client's protocol must match; a default is chosen per protocol.
 
-Accepts any Torznab/Newznab URL directly (url + api_path + api_key). Prowlarr is optional — the system works with direct indexer configuration. Resolved from DEFERRED-001.
+Indexer requests share origin pacing. Rate-limit breakers are per configured
+indexer so one Prowlarr backend's 429 does not silence its siblings. Transport
+failure protection is per origin. Rate-limited torrent downloads must not fall
+back to handing the URL to qBittorrent, which would bypass the queue.
 
-### Release Search
+The poller scopes downloads to the actual client and Grab. qBittorrent UI status
+and import safety come from one classifier: resume checking, checking completed
+data and moving are not stable import states. A completed remote download can
+still be in transit to the local mount. Failed imports use bounded retry/recovery;
+they are not a second release-grab operation.
 
-1. A user triggers the search. **RSS sync does not use this path** — it has its own feed
-   fetch with no query (`crates/livrarr-metadata/src/rss_sync_workflow.rs:786-807`), and only
-   the two paths' *grab* step converges. See [rss-sync](rss-sync.md).
-2. Query sent to indexers with interactive search enabled, in parallel
-   (`crates/livrarr-download/src/release_service.rs:73-77`, `:132-141`)
-3. Torznab XML parsed; items missing a `guid` or download URL are dropped with a warning
-   (`:213-230`); results deduped by `(guid, indexer)` (`:295-297`) and sorted — torrents
-   before usenet, torrents by seeders then size, usenet by date then size (`:299-319`).
-   **Nothing is scored here**; scoring belongs to the RSS match step, not to search.
-4. Presented to the user
+[Grab states](../domain/grab.md) · [Import and recovery](import-pipeline.md) ·
+[SABnzbd details](usenet-pipeline.md) · [Transport lessons](../insights/providers-and-transport.md).
 
-### Download Clients
+## Source and history
 
-- **qBittorrent** — primary. API v2 client with session management (cookie cache, 403 re-auth retry, config-update invalidation).
-- **SABnzbd** — Usenet. Caution: `search=<nzo_id>` searches by name, not ID.
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/architecture/grab-system.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
 
-### Grab Flow
-
-1. User or automation selects a release
-2. Torrent/NZB sent to download client
-3. Grab record created (user-scoped, tracks status)
-4. Download poller (60s interval) monitors progress
-5. On completion: triggers import pipeline
-
-## Import Lock
-
-Key: `(user_id, work_id)` — not per-grab. Prevents filesystem races when multiple grabs complete for the same work simultaneously.
-
-## Orphan File Adoption
-
-On retry: if target file exists but no DB record, adopt the file instead of re-importing. Handles crash recovery gracefully.
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="grab-system"></a>
+<a id="components"></a>
+<a id="indexer-system"></a>
+<a id="release-search"></a>
+<a id="download-clients"></a>
+<a id="grab-flow"></a>
+<a id="import-lock"></a>
+<a id="orphan-file-adoption"></a>

@@ -1,5 +1,7 @@
 # Key Architectural Decisions
 
+> **Source scope:** Root PRINCIPLES.md and ARCHITECTURE.md take precedence. These decisions are preserved as practical context; exact source and current acceptance come from project state. In particular, the old Readarr hardlink path is not a new exception to the root import policy.
+
 ## Hardlink Policy
 - **Import:** Copy (tag writing breaks hardlinks)
 - **CWA downstream:** Hardlink-first, copy fallback (CWA copy is never modified)
@@ -38,6 +40,9 @@ Split handlers into `livrarr-handlers` crate depending on `livrarr-domain` but N
 Project-wide datetime handling uses `chrono`. No mixing.
 
 ## Security
+
+> **September 18 factual clarification:** The hashes below apply to Livrarr login passwords, session tokens and Livrarr-issued API keys. Reusable provider, LLM, indexer/Prowlarr, download-client and SMTP credentials are stored as plaintext in the current database. The earlier summary below did not enumerate all such categories. See [current root wording](../../ARCHITECTURE.md#secure-by-default) and [verified source evidence](../../build/reviews/wiki-follow-ups-2026-09-18/post-deploy/credentials/REPORT.md).
+
 - Passwords: argon2id
 - Session tokens / API keys: stored as SHA-256 hashes, plaintext shown once
 - Download client passwords: stored plaintext (Servarr convention), redacted in API responses
@@ -59,3 +64,8 @@ Plus `TrustedOrigins` (built from configured indexers + download clients at star
 **Reviewer trap (do not repeat).** Audit reviewers (and CC) that see "user-provided URL flows into HTTP request" will instinctively suggest `http_client_safe`. That instinct is **wrong** when the URL is admin-configured infrastructure. Admin = trusted by definition. The threat model is not "admin attacks the server" — admin already controls the server. The threat model is *external* input (untrusted runtime data) being used to pivot inside the network. Hence the runtime-derived bucket gets SSRF protection; the admin-configured bucket does not.
 
 **Practical rule.** Before flagging a `http_client` call as a SSRF gap: where does the URL come from? If it's from `settings`, `download_clients`, `indexers`, `metadata_config`, or any admin-configured field → that's intentional. If it's from a network response body, a scraped page, or any per-request external input → that's the case `http_client_safe` exists for.
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/decisions/key-decisions.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.

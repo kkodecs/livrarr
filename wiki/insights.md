@@ -1,131 +1,165 @@
-# Active Insights
+# Lessons to consult
 
-Top learnings a fresh CC session needs to know. Each line below is a compact
-index entry; the full original text (verbatim, with every correction/amendment
-note) lives in the linked page under `insights/`.
+## Executive summary
 
-> **This wiki is new (April 2026).** It was bulk-ingested from build artifacts and may contain inaccuracies — especially where specs evolved faster than the ingest could track. If you find something wrong, **fix it**. Update the wiki page, update this file if affected, and append to wiki/log.md. The wiki only gets better if you correct it when you spot errors. Code is always authoritative over wiki content.
+Use this index to find the rules relevant to your next change. Start with [identity lessons](#identity) for Work lookup and [tests and fixtures](#tests-and-fixtures) for verification; the dated sources preserve earlier decisions and corrections.
+
+Scan this index, then open the lessons relevant to the next decision. Read the
+current rule first; each entry links its full earlier account and corrections.
+Historical test counts, old source locations and superseded mechanisms are evidence,
+not live task instructions. Root principles and later accepted decisions take precedence.
+
+The original lesson numbers and incoming section links are preserved. New lessons
+need both a theme entry and a short index link. Feature progress belongs in build/state.
 
 ## Architecture
 
-1. **17-crate workspace.** All deps point toward `livrarr-domain`. → [insights/architecture.md#1-17-crate-workspace](insights/architecture.md#1-17-crate-workspace)
-2. **BIG7 entities.** Author, Series, Work, Release, Grab, LibraryItem, List. → [insights/architecture.md#2-big7-entities](insights/architecture.md#2-big7-entities)
-3. **Work-first, not author-first.** The Work is the primary entity everywhere. → [insights/architecture.md#3-work-first-not-author-first](insights/architecture.md#3-work-first-not-author-first)
-4. **One app, both formats.** Ebooks and audiobooks. → [insights/architecture.md#4-one-app-both-formats](insights/architecture.md#4-one-app-both-formats)
-5. **SQLite WAL mode and one write-begin authority.** Every connection: `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`. → [insights/data-and-state.md#5-sqlite-wal-mode-and-one-write-begin-authority](insights/data-and-state.md#5-sqlite-wal-mode-and-one-write-begin-authority)
-6. **Collections = root folders.** 1:1 mapping. → [insights/architecture.md#6-collections-root-folders](insights/architecture.md#6-collections-root-folders)
+- [1. Workspace boundaries](insights/architecture.md#lesson-1)
+- [2. Core entities](insights/architecture.md#lesson-2)
+- [3. Work is primary](insights/architecture.md#lesson-3)
+- [4. One Work spans both formats](insights/architecture.md#lesson-4)
+- [6. Collections and roots](insights/architecture.md#lesson-6)
+- [38. Crate navigation](insights/architecture.md#lesson-38)
+- [48. Canonical architecture model](insights/architecture.md#lesson-48)
+- [64. Discovery has separate ownership](insights/architecture.md#lesson-64)
+- [66. Add returns before background completion](insights/architecture.md#lesson-66)
 
-## Coding Patterns
+## Coding patterns
 
-7. **trait + impl + stub.** Trait in domain, impl in crate, stub in behavioral. → [insights/coding-patterns.md#7-trait-impl-stub](insights/coding-patterns.md#7-trait-impl-stub)
-8. **`trait_variant::make(Send)`.** — not `async-trait`. → [insights/coding-patterns.md#8-trait_variantmakesend](insights/coding-patterns.md#8-trait_variantmakesend)
-9. **No SQL outside livrarr-db.** No business logic in handlers. → [insights/coding-patterns.md#9-no-sql-outside-livrarr-db](insights/coding-patterns.md#9-no-sql-outside-livrarr-db)
-9b. **Compile wall.** `livrarr-handlers` must NOT depend on `livrarr-db`, `livrarr-metadata`, `livrarr-tagwrite`, or… → [insights/coding-patterns.md#9b-compile-wall](insights/coding-patterns.md#9b-compile-wall)
-9c. **Arc<ServiceImpl> pattern.** All service fields in AppState are `Arc<T>`. → [insights/coding-patterns.md#9c-arcserviceimpl-pattern](insights/coding-patterns.md#9c-arcserviceimpl-pattern)
-9d. **Circular dep: OnceLock<Box<AppState>>.** Services that call functions taking `&AppState` (ImportService, ReadarrImportWorkflow) can't hold `AppState`… → [insights/coding-patterns.md#9d-circular-dep-oncelockboxappstate](insights/coding-patterns.md#9d-circular-dep-oncelockboxappstate)
-9e. **Trait signature type safety.** Service traits in `livrarr-domain/src/services.rs` must not reference types from walled-off crates —… → [insights/coding-patterns.md#9e-trait-signature-type-safety](insights/coding-patterns.md#9e-trait-signature-type-safety)
-9f. **Accessor newtype wrappers for orphan rule.** When handlers need server-owned infrastructure (logs, caches, atomics), define a minimal accessor trait in… → [insights/coding-patterns.md#9f-accessor-newtype-wrappers-for-orphan-rule](insights/coding-patterns.md#9f-accessor-newtype-wrappers-for-orphan-rule)
-9h. **Handlers bind narrow `Has*` capability traits, not….** full `AppContext`. → [insights/coding-patterns.md#9h-handlers-bind-narrow-has-capability-traits-not](insights/coding-patterns.md#9h-handlers-bind-narrow-has-capability-traits-not)
-9i. **Credential traits are isolated from settings traits.** `DownloadClientCredentialService` (provides `get_with_credentials`) is a separate trait from… → [insights/coding-patterns.md#9i-credential-traits-are-isolated-from-settings-traits](insights/coding-patterns.md#9i-credential-traits-are-isolated-from-settings-traits)
-9g. **Handler-level spawning for background work.** Services receive `&self` and can't clone `AppContext` or move it into `tokio::spawn`. → [insights/coding-patterns.md#9g-handler-level-spawning-for-background-work](insights/coding-patterns.md#9g-handler-level-spawning-for-background-work)
-10. **All blocking I/O in `spawn_blocking`.** Never block the async executor. → [insights/coding-patterns.md#10-all-blocking-io-in-spawn_blocking](insights/coding-patterns.md#10-all-blocking-io-in-spawn_blocking)
-11. **`chrono` for datetime.** Never `time` crate. → [insights/coding-patterns.md#11-chrono-for-datetime](insights/coding-patterns.md#11-chrono-for-datetime)
+- [7. Service contracts and doubles](insights/coding-patterns.md#lesson-7)
+- [8. Async traits](insights/coding-patterns.md#lesson-8)
+- [9. SQL and business decisions](insights/coding-patterns.md#lesson-9)
+- [9b. Compile wall](insights/coding-patterns.md#lesson-9b)
+- [9c. Shared service instances](insights/coding-patterns.md#lesson-9c)
+- [9d. Explicit construction](insights/coding-patterns.md#lesson-9d)
+- [9e. Boundary types](insights/coding-patterns.md#lesson-9e)
+- [9f. Accessor adapters](insights/coding-patterns.md#lesson-9f)
+- [9g. Background task ownership](insights/coding-patterns.md#lesson-9g)
+- [9h. Narrow handler capabilities](insights/coding-patterns.md#lesson-9h)
+- [9i. Credentials are separate capabilities](insights/coding-patterns.md#lesson-9i)
+- [10. Blocking I/O](insights/coding-patterns.md#lesson-10)
+- [11. Datetime convention](insights/coding-patterns.md#lesson-11)
+- [36. Run guards and shutdown](insights/coding-patterns.md#lesson-36)
+- [39. Settings contracts](insights/coding-patterns.md#lesson-39)
+- [40. Import utilities versus orchestration](insights/coding-patterns.md#lesson-40)
+- [41. Composite handler contracts](insights/coding-patterns.md#lesson-41)
+- [103. Checked invocation facade](insights/coding-patterns.md#lesson-103)
+
+## Covers
+
+- [44. OpenLibrary cover identifiers](insights/covers.md#lesson-44)
+- [63. Cover ownership and recovery](insights/covers.md#lesson-63)
+
+## Data and state
+
+- [5. SQLite writer admission](insights/data-and-state.md#lesson-5)
+- [17. Missing versus wanted](insights/data-and-state.md#lesson-17)
+- [18. Persistent state after reload](insights/data-and-state.md#lesson-18)
+- [19. Immutable migrations](insights/data-and-state.md#lesson-19)
+- [20. SQLite upserts](insights/data-and-state.md#lesson-20)
+- [21. Independent monitoring](insights/data-and-state.md#lesson-21)
+- [81. Pagination is not the whole library](insights/data-and-state.md#lesson-81)
+
+## History and review
+
+- [77. History records moments of truth](insights/history-and-review.md#lesson-77)
+- [86. Separate source and approval storage](insights/history-and-review.md#lesson-86)
+- [87. Migration reports are contracts](insights/history-and-review.md#lesson-87)
+- [88. Nonempty databases can be ready](insights/history-and-review.md#lesson-88)
+- [89. Migration compatibility is one contract](insights/history-and-review.md#lesson-89)
+- [91. Review generation is observed at decision time](insights/history-and-review.md#lesson-91)
+- [100. Identity audit findings need their baseline](insights/history-and-review.md#lesson-100)
+- [101. Review questions and dismissal have shared owners](insights/history-and-review.md#lesson-101)
+
+## Identity
+
+- [13. LLMs never choose identity](insights/identity.md#lesson-13)
+- [15. User choice survives identity completion](insights/identity.md#lesson-15)
+- [53. One seed policy across creation paths](insights/identity.md#lesson-53)
+- [54. Background creation must converge](insights/identity.md#lesson-54)
+- [57. Completion must agree with retry selection](insights/identity.md#lesson-57)
+- [59. Shared identity comparison](insights/identity.md#lesson-59)
+- [60. Historical review surface](insights/identity.md#lesson-60)
+- [67. Author adoption and merge](insights/identity.md#lesson-67)
+- [72. Subtitle trust needs its cause](insights/identity.md#lesson-72)
+- [73. Provider editions and parsing can mislead matching](insights/identity.md#lesson-73)
+- [78. Reconstruct the full migration history](insights/identity.md#lesson-78)
+- [80. Observe generation before making the decision](insights/identity.md#lesson-80)
+- [82. Author routes and contributor evidence](insights/identity.md#lesson-82)
+- [85. Presentation can degrade without weakening identity](insights/identity.md#lesson-85)
+- [90. Captured identity replaces frozen badges](insights/identity.md#lesson-90)
+- [92. Review must not leave a hidden duplicate](insights/identity.md#lesson-92)
+- [93. No-op, selection and attempt accounting](insights/identity.md#lesson-93)
+- [94. Project identifiers from active routes](insights/identity.md#lesson-94)
+- [95. Bounded search fallback](insights/identity.md#lesson-95)
+- [96. Goodreads Book and Work IDs are disjoint](insights/identity.md#lesson-96)
+- [97. Search eligibility is per provider](insights/identity.md#lesson-97)
+- [98. Compare complete identities across stored key versions](insights/identity.md#lesson-98)
+- [99. A correctly called seam can still be unwired](insights/identity.md#lesson-99)
 
 ## Metadata
 
-12. **Never use OpenLibrary for foreign language metadata….** enrichment. → [insights/metadata.md#12-never-use-openlibrary-for-foreign-language-metadata](insights/metadata.md#12-never-use-openlibrary-for-foreign-language-metadata)
-13. **No LLM chooses a match anywhere (Phase 5, 2026-07-03).** Goodreads matching is fully deterministic (junk-edition filter + the shared `pick_best_candidate` authority… → [insights/identity.md#13-no-llm-chooses-a-match-anywhere-phase-5-2026-07-03](insights/identity.md#13-no-llm-chooses-a-match-anywhere-phase-5-2026-07-03) *(amended 2026-08-31 — see note)*
-14. **LLM privacy boundary.** public metadata OK. → [insights/process.md#14-llm-privacy-boundary](insights/process.md#14-llm-privacy-boundary)
-15. **Identity locked at add-time.** The add flow settles identity deterministically (`settle_identity` → quorum → anchors; user selection final). → [insights/identity.md#15-identity-locked-at-add-time](insights/identity.md#15-identity-locked-at-add-time) *(RETIRED 2026-08-31 — see note)*
-16. **Foreign works skip English-centric providers via….** `works.language`. → [insights/metadata.md#16-foreign-works-skip-english-centric-providers-via](insights/metadata.md#16-foreign-works-skip-english-centric-providers-via)
-
-## Data & State
-
-17. **"Missing" (no file) ≠ "wanted" (monitored).** Don't conflate. → [insights/data-and-state.md#17-missing-no-file-wanted-monitored](insights/data-and-state.md#17-missing-no-file-wanted-monitored)
-18. **Browser refresh wipes in-memory state.** Restore from persistent source on mount. → [insights/data-and-state.md#18-browser-refresh-wipes-in-memory-state](insights/data-and-state.md#18-browser-refresh-wipes-in-memory-state)
-19. **Never edit applied migrations.** sqlx checksum validation fails. → [insights/data-and-state.md#19-never-edit-applied-migrations](insights/data-and-state.md#19-never-edit-applied-migrations)
-20. **INSERT OR REPLACE is banned.** Use `INSERT ... ON CONFLICT (...) DO UPDATE SET ...`. → [insights/data-and-state.md#20-insert-or-replace-is-banned](insights/data-and-state.md#20-insert-or-replace-is-banned)
-21. **Per-media-type monitoring.** `monitor_ebook` and `monitor_audiobook` are independent booleans, not a single `monitored`. → [insights/data-and-state.md#21-per-media-type-monitoring](insights/data-and-state.md#21-per-media-type-monitoring)
-22. **Enrichment timeout is 10s per provider.** (amended from 3s). → [insights/providers-and-transport.md#22-enrichment-timeout-is-10s-per-provider](insights/providers-and-transport.md#22-enrichment-timeout-is-10s-per-provider)
+- [12. Foreign discovery differs from enrichment](insights/metadata.md#lesson-12)
+- [16. Language policy has one merge guard](insights/metadata.md#lesson-16)
+- [32. Configuration failures can recover](insights/metadata.md#lesson-32)
+- [42. Author monitoring controls](insights/metadata.md#lesson-42)
+- [50. Verify the actual failure source](insights/metadata.md#lesson-50)
+- [51. Identity, descriptive merge and observation are separate](insights/metadata.md#lesson-51)
+- [52. Coherent fixtures and tolerant provider fields](insights/metadata.md#lesson-52)
+- [55. Measure refresh bottlenecks](insights/metadata.md#lesson-55)
+- [56. One payload-policy choke point](insights/metadata.md#lesson-56)
+- [76. Merge output can echo old values](insights/metadata.md#lesson-76)
 
 ## Process
 
-23. **Build infra first.** Don't start with in-memory fakes unless infra is genuinely complex. → [insights/process.md#23-build-infra-first](insights/process.md#23-build-infra-first)
-24. **No band-aids.** Fix where data is created wrong, never add downstream workarounds. → [insights/process.md#24-no-band-aids](insights/process.md#24-no-band-aids)
-25. **Prototype external endpoints before writing parsers.** curl the URL first. → [insights/process.md#25-prototype-external-endpoints-before-writing-parsers](insights/process.md#25-prototype-external-endpoints-before-writing-parsers)
-26. **Add duplication check after implementation.** AI will reimplement existing logic. → [insights/process.md#26-add-duplication-check-after-implementation](insights/process.md#26-add-duplication-check-after-implementation)
-27. **No build commentary in code comments.** Comments describe what code IS, not how it got there. → [insights/process.md#27-no-build-commentary-in-code-comments](insights/process.md#27-no-build-commentary-in-code-comments)
-28. **SABnzbd `search` parameter searches by name, not….** nzo_id. → [insights/providers-and-transport.md#28-sabnzbd-search-parameter-searches-by-name-not](insights/providers-and-transport.md#28-sabnzbd-search-parameter-searches-by-name-not)
-29. **URL-encode all API keys in query strings.** String concatenation without encoding breaks keys containing `&`, `=`, or spaces. → [insights/providers-and-transport.md#29-url-encode-all-api-keys-in-query-strings](insights/providers-and-transport.md#29-url-encode-all-api-keys-in-query-strings)
-30. **All outbound provider HTTP flows through ONE….** process-global queue (`livrarr-http/src/outbound_queue.rs`, Phase 3 metadata-remediation, commits… → [insights/providers-and-transport.md#30-all-outbound-provider-http-flows-through-one](insights/providers-and-transport.md#30-all-outbound-provider-http-flows-through-one)
-31. **Filter grabs by download_client_id before matching.** The download poller must scope grab matching to the specific client being polled. → [insights/providers-and-transport.md#31-filter-grabs-by-download_client_id-before-matching](insights/providers-and-transport.md#31-filter-grabs-by-download_client_id-before-matching)
-32. **NotConfigured is terminal but resettable.** `OutcomeClass::NotConfigured` is in `is_phase2_terminal()` (won't auto-retry), but… → [insights/metadata.md#32-notconfigured-is-terminal-but-resettable](insights/metadata.md#32-notconfigured-is-terminal-but-resettable)
-33. **Per-provider error enums, not shared ProviderError.** Each provider (Hardcover, etc.) has its own error type mapped to `ProviderOutcome` at the call site. → [insights/providers-and-transport.md#33-per-provider-error-enums-not-shared-providererror](insights/providers-and-transport.md#33-per-provider-error-enums-not-shared-providererror)
-34. **RSS sync tests were masked.** `cargo test` stops at the first failing binary. → [insights/tests-and-fixtures.md#34-rss-sync-tests-were-masked](insights/tests-and-fixtures.md#34-rss-sync-tests-were-masked)
-35. **Path mapping needs boundary check.** `starts_with` on strings matches `/data/downloads2` against prefix `/data/downloads`. → [insights/process.md#35-path-mapping-needs-boundary-check](insights/process.md#35-path-mapping-needs-boundary-check)
-36. **AtomicBool execution guard + CancellationToken….** cooperation for background workflows. → [insights/coding-patterns.md#36-atomicbool-execution-guard-cancellationtoken](insights/coding-patterns.md#36-atomicbool-execution-guard-cancellationtoken)
-37. **SSRF.** trusted-infrastructure pattern (alpha4 lesson, do not repeat). → [insights/process.md#37-ssrf](insights/process.md#37-ssrf)
-38. **Per-crate reference docs in `wiki/crates/`.** `handlers.md` has the full `Has*` trait table and route handler inventory. → [insights/architecture.md#38-per-crate-reference-docs-in-wikicrates](insights/architecture.md#38-per-crate-reference-docs-in-wikicrates)
-39. **SettingsService split into 7 narrow traits.** The former 34-method god trait is now: `AppConfigService` (user/tenant preferences: naming, media mgmt… → [insights/coding-patterns.md#39-settingsservice-split-into-7-narrow-traits](insights/coding-patterns.md#39-settingsservice-split-into-7-narrow-traits)
-40. **`infra/import_pipeline.rs` is pure utilities.** never add orchestration here. → [insights/coding-patterns.md#40-infraimport_pipeliners-is-pure-utilities](insights/coding-patterns.md#40-infraimport_pipeliners-is-pure-utilities)
-41. **Module-level composite context traits for cohesive….** handler groups. → [insights/coding-patterns.md#41-module-level-composite-context-traits-for-cohesive](insights/coding-patterns.md#41-module-level-composite-context-traits-for-cohesive)
-42. **Author monitor has three independent controls.** `monitored`, `monitor_new_items`, `monitor_since`. → [insights/metadata.md#42-author-monitor-has-three-independent-controls](insights/metadata.md#42-author-monitor-has-three-independent-controls)
-43. **OpenLibrary author works endpoint structure.** The author monitor hits `https://openlibrary.org/authors/{ol_key}/works.json?limit=100`. → [insights/providers-and-transport.md#43-openlibrary-author-works-endpoint-structure](insights/providers-and-transport.md#43-openlibrary-author-works-endpoint-structure)
-44. **OL covers.** lookup by ISBN/OCLC/LCCN is rate-limited 100/IP/5min; lookup by Cover ID or OLID is unlimited. → [insights/covers.md#44-ol-covers](insights/covers.md#44-ol-covers)
-45. **OL anti-pattern.** hundreds of `/works/{key}.json` round-trips. → [insights/providers-and-transport.md#45-ol-anti-pattern](insights/providers-and-transport.md#45-ol-anti-pattern)
-46. **Door→road wiring is untested — trace it at design.** Behavioral tests cover the *pipeline* (`run_unified`/materialize), not the *door→pipeline wiring*. → [insights/process.md#46-doorroad-wiring-is-untested-trace-it-at-design](insights/process.md#46-doorroad-wiring-is-untested-trace-it-at-design)
-47. **Explicit System Truths pay off.** keep the section content-rich. → [insights/process.md#47-explicit-system-truths-pay-off](insights/process.md#47-explicit-system-truths-pay-off)
-48. **The canonical architecture model is live at….** `docs/canonical-model.yaml` (authored 2026-06-10; moved from `architecture/` in the 2026-06-29 cleanup). → [insights/architecture.md#48-the-canonical-architecture-model-is-live-at](insights/architecture.md#48-the-canonical-architecture-model-is-live-at)
-49. **Speed baseline (2026-06-10, `d1b8768`) + the a6….** release gate. → [insights/process.md#49-speed-baseline-2026-06-10-d1b8768-the-a6](insights/process.md#49-speed-baseline-2026-06-10-d1b8768-the-a6)
-51. **Sprint B (metadata-correctness).** CODE GATE PASSED 2026-06-11; Test stage in progress — a PO bug-fix wave (#147–#153) landed on top, ALL… → [insights/metadata.md#51-sprint-b-metadata-correctness](insights/metadata.md#51-sprint-b-metadata-correctness)
-52. **Test-stage fix wave (2026-06-11 night).** durable mechanics a future session must know. → [insights/metadata.md#52-test-stage-fix-wave-2026-06-11-night](insights/metadata.md#52-test-stage-fix-wave-2026-06-11-night)
-50. **Sprint B evidence round (2026-06-10) corrected four….** standing claims — full evidence with file:line + SQL in `spec-metadata-correctness.md` §0b. → [insights/metadata.md#50-sprint-b-evidence-round-2026-06-10-corrected-four](insights/metadata.md#50-sprint-b-evidence-round-2026-06-10-corrected-four)
-53. **Sprint D (seeds & doors).** one seed builder + a backend monitor-language guarantee (committed `5a8e3b9`, 2026-06-13). → [insights/identity.md#53-sprint-d-seeds-doors](insights/identity.md#53-sprint-d-seeds-doors)
-54. **Series-monitor + Readarr seed `identity-pending` BY….** DESIGN (M9) — the bug is the missing auto-convergence, a binding-principle regression (as-of 2026-06-14). → [insights/identity.md#54-series-monitor-readarr-seed-identity-pending-by](insights/identity.md#54-series-monitor-readarr-seed-identity-pending-by) *(amended 2026-08-31 — see note)*
-55. **Refresh's long pole is the enrichment SCATTER, not the….** identity re-chase — the gate shipped, the win was modest (analysis 2026-06-14; shipped + re-measured… → [insights/metadata.md#55-refreshs-long-pole-is-the-enrichment-scatter-not-the](insights/metadata.md#55-refreshs-long-pole-is-the-enrichment-scatter-not-the) *(RETIRED 2026-08-31 — see note)*
-56. **`MergeEngine::merge` is the payload-policy chokepoint.** add policies THERE, never at one call site. → [insights/metadata.md#56-mergeenginemerge-is-the-payload-policy-chokepoint](insights/metadata.md#56-mergeenginemerge-is-the-payload-policy-chokepoint)
-57. **`ConvergeOutcome::Completed` ⟺ the work is not….** re-selectable. → [insights/identity.md#57-convergeoutcomecompleted-the-work-is-not](insights/identity.md#57-convergeoutcomecompleted-the-work-is-not) *(RETIRED 2026-08-31 — see note)*
-59. **ONE matching authority (Phase 5, 2026-07-03).** `livrarr-domain/src/identity_matching.rs`. → [insights/identity.md#59-one-matching-authority-phase-5-2026-07-03](insights/identity.md#59-one-matching-authority-phase-5-2026-07-03)
-60. **Grey-park review surface (Phase 5 J2).** Parked works (identity_status NeedsReview) persist their candidate sets with REAL computed scores in… → [insights/identity.md#60-grey-park-review-surface-phase-5-j2](insights/identity.md#60-grey-park-review-surface-phase-5-j2)
-61. **The Phase-5 decision-diff harness carries FROZEN….** old-side copies by design (`tests/behavioral/test_p5_matching_diff.rs`): 15 line-for-line pre-Phase-5… → [insights/tests-and-fixtures.md#61-the-phase-5-decision-diff-harness-carries-frozen](insights/tests-and-fixtures.md#61-the-phase-5-decision-diff-harness-carries-frozen)
-62. **Provider parsers must distinguish "unreadable" from….** "empty" and WARN — never degrade silently; an empty parse is DRIFT, not truth (N1, 2026-07-03). → [insights/providers-and-transport.md#62-provider-parsers-must-distinguish-unreadable-from](insights/providers-and-transport.md#62-provider-parsers-must-distinguish-unreadable-from)
-63. **Covers have ONE rank, ONE save gate, ONE layout (N2….** 2026-07-04). → [insights/covers.md#63-covers-have-one-rank-one-save-gate-one-layout-n2](insights/covers.md#63-covers-have-one-rank-one-save-gate-one-layout-n2)
-64. **Discovery/search is its own service….** (work-service-split, 2026-07-11, commits `2734fd02..0094e805`). → [insights/architecture.md#64-discoverysearch-is-its-own-service](insights/architecture.md#64-discoverysearch-is-its-own-service)
-65. **The behavioral suite compiles only what….** `crates/livrarr-behavioral/Cargo.toml` registers — 30 of 129 files in `tests/behavioral/` are NOT `[[test]]`… → [insights/tests-and-fixtures.md#65-the-behavioral-suite-compiles-only-what](insights/tests-and-fixtures.md#65-the-behavioral-suite-compiles-only-what)
-58. **Process-global breaker state wedges parallel tests.** mechanism proven, fixed in `livrarr-external-data`, still open in `livrarr-enrichment` (2026-07-26). → [insights/providers-and-transport.md#58-process-global-breaker-state-wedges-parallel-tests](insights/providers-and-transport.md#58-process-global-breaker-state-wedges-parallel-tests)
-67. **Author identity has ONE adoption gate + a real merge….** (author-dedup, 2026-07-12). → [insights/identity.md#67-author-identity-has-one-adoption-gate-a-real-merge](insights/identity.md#67-author-identity-has-one-adoption-gate-a-real-merge)
-68. **Persistent provider-response cache.** ONE table, ONE seam, policy at the seam (U-B1, 2026-07-12). → [insights/providers-and-transport.md#68-persistent-provider-response-cache](insights/providers-and-transport.md#68-persistent-provider-response-cache)
-69. **HTTP clients are consolidated shared instances.** bulk refresh is bounded-concurrent (U-B4/U-B5, 2026-07-12). → [insights/providers-and-transport.md#69-http-clients-are-consolidated-shared-instances](insights/providers-and-transport.md#69-http-clients-are-consolidated-shared-instances)
-71. **Indexer citizenship.** origin-keyed buckets, breaker cooldown, live search cache (indexer-citizenship unit, 2026-07-14; contract =… → [insights/providers-and-transport.md#71-indexer-citizenship](insights/providers-and-transport.md#71-indexer-citizenship)
-70. **ONE qBittorrent state classifier (quality-waves 2a….** 2026-07-13). → [insights/providers-and-transport.md#70-one-qbittorrent-state-classifier-quality-waves-2a](insights/providers-and-transport.md#70-one-qbittorrent-state-classifier-quality-waves-2a)
-72. **Settle-road title trust is cause-aware and….** single-sourced (identity-fix unit, 2026-07-14; contract = `design-settle-road-matching.md`, 3-round design… → [insights/identity.md#72-settle-road-title-trust-is-cause-aware-and](insights/identity.md#72-settle-road-title-trust-is-cause-aware-and) *(amended 2026-08-31 — see note)*
-73. **Three subtitle-variance bugs in one night exposed that….** `title_id_trust`'s corroboration bar (insight 72) is too strict for a book with mismatched editions — and… → [insights/identity.md#73-three-subtitle-variance-bugs-in-one-night-exposed-that](insights/identity.md#73-three-subtitle-variance-bugs-in-one-night-exposed-that)
-74. **Frontend session-fixes trio (2026-07-17, all….** live-validated). → [insights/process.md#74-frontend-session-fixes-trio-2026-07-17-all](insights/process.md#74-frontend-session-fixes-trio-2026-07-17-all)
-75. **`dev-restart.sh` green ≠ CI green for the frontend.** the dev script never typechecks (2026-07-18, broke the first alpha6 release build). → [insights/process.md#75-dev-restartsh-green-ci-green-for-the-frontend](insights/process.md#75-dev-restartsh-green-ci-green-for-the-frontend)
-66. **Interactive add is fast-path + background completion….** (responsiveness Lane A, 2026-07-11). → [insights/architecture.md#66-interactive-add-is-fast-path-background-completion](insights/architecture.md#66-interactive-add-is-fast-path-background-completion)
-76. **`MergeOutput.work_update` is a last-known-good ECHO.** presence is NOT a change signal — and `ApplyMergeOutcome::NoChange`/`Deferred` have ZERO producers… → [insights/metadata.md#76-mergeoutputwork_update-is-a-last-known-good-echo](insights/metadata.md#76-mergeoutputwork_update-is-a-last-known-good-echo)
-77. **Work history is complete and single-authority….** (work-history feature, 2026-07-20, `aa7f6985`). → [insights/history-and-review.md#77-work-history-is-complete-and-single-authority](insights/history-and-review.md#77-work-history-is-complete-and-single-authority)
-78. **Anchor uniqueness is per-user over ALL anchor types.** live since migration 044; there is NO cross-user contention (verified empirically 2026-07-24). → [insights/identity.md#78-anchor-uniqueness-is-per-user-over-all-anchor-types](insights/identity.md#78-anchor-uniqueness-is-per-user-over-all-anchor-types)
-79. **The process-global outbound queue can wedge.** a dispatcher dies with the runtime that spawned it, and every caller already parked in `acquire` waits… → [insights/providers-and-transport.md#79-the-process-global-outbound-queue-can-wedge](insights/providers-and-transport.md#79-the-process-global-outbound-queue-can-wedge)
-80. **Identity edits are protected by a generation stamp….** and the guard is only as good as the writer that honours it (identity-edit merged 2026-07-25, `a7f03540`). → [insights/identity.md#80-identity-edits-are-protected-by-a-generation-stamp](insights/identity.md#80-identity-edits-are-protected-by-a-generation-stamp) *(amended 2026-08-31 — see note)*
-82. **Author-provider linking is live (feature #176, branch….** `feat/author-provider-linking`, U1–U8, 2026-07-30). → [insights/identity.md#82-author-provider-linking-is-live-feature-176-branch](insights/identity.md#82-author-provider-linking-is-live-feature-176-branch)
-81. **One `listWorks()` response is never "the library"….** (#177, fixed 75f1d24f). → [insights/data-and-state.md#81-one-listworks-response-is-never-the-library](insights/data-and-state.md#81-one-listworks-response-is-never-the-library)
-83. **Never hand-roll tracing capture in a test.** A thread-scoped `set_default` subscriber races the tracing callsite interest cache against parallel sibling… → [insights/tests-and-fixtures.md#83-never-hand-roll-tracing-capture-in-a-test](insights/tests-and-fixtures.md#83-never-hand-roll-tracing-capture-in-a-test)
-84. **`StubHttpFetcher` has a sticky tail.** It pops the queue head only while more than one response remains, then serves the LAST response verbatim to… → [insights/tests-and-fixtures.md#84-stubhttpfetcher-has-a-sticky-tail](insights/tests-and-fixtures.md#84-stubhttpfetcher-has-a-sticky-tail)
-85. **Work presentation degrades.** identity authority does not (identity-layer rewrite C-r3-01, 2026-08-10). → [insights/identity.md#85-work-presentation-degrades](insights/identity.md#85-work-presentation-degrades)
-86. **When one workflow reads resource A and records….** approval state in resource B, shared-handle tests cannot prove ownership (identity cutover ceremony… → [insights/history-and-review.md#86-when-one-workflow-reads-resource-a-and-records](insights/history-and-review.md#86-when-one-workflow-reads-resource-a-and-records)
-87. **A migration report is an executable approval contract….** and persisted discriminators need one explicit codec (identity cutover ceremony, 2026-08-10). → [insights/history-and-review.md#87-a-migration-report-is-an-executable-approval-contract](insights/history-and-review.md#87-a-migration-report-is-an-executable-approval-contract)
-88. **Nonempty is not a cutover blocker.** only failed staged invariants are (identity cutover ceremony bug #4, 2026-08-10). → [insights/history-and-review.md#88-nonempty-is-not-a-cutover-blocker](insights/history-and-review.md#88-nonempty-is-not-a-cutover-blocker)
-89. **A migration writer, migration report, and startup….** version guard are one compatibility contract (identity cutover ceremony bug #5, 2026-08-10). → [insights/history-and-review.md#89-a-migration-writer-migration-report-and-startup](insights/history-and-review.md#89-a-migration-writer-migration-report-and-startup)
-90. **Post-cutover live add is one F2 capture settlement….** and legacy identity status is frozen (PACKET-FIX-LIVEADD, 2026-08-11). → [insights/identity.md#90-post-cutover-live-add-is-one-f2-capture-settlement](insights/identity.md#90-post-cutover-live-add-is-one-f2-capture-settlement)
-91. **A review card's mint generation is history.** the actionable CAS generation is the one shown when the user decides (PACKET-FIX-STALECARD, 2026-08-11). → [insights/history-and-review.md#91-a-review-cards-mint-generation-is-history](insights/history-and-review.md#91-a-review-cards-mint-generation-is-history)
-92. **Review is a settlement outcome, not permission to….** create half of a dedup result (PACKET-FIX-DEDUPRESIDUE, 2026-08-11). → [insights/identity.md#92-review-is-a-settlement-outcome-not-permission-to](insights/identity.md#92-review-is-a-settlement-outcome-not-permission-to)
-93. **An authoritative convergence loop must make selector….** and outcome the same temporal contract (PACKET-FIX-CIDERHOUSE, 2026-08-14). → [insights/identity.md#93-an-authoritative-convergence-loop-must-make-selector](insights/identity.md#93-an-authoritative-convergence-loop-must-make-selector)
-94. **Compatibility DTO identifiers are route projections….** and interactive request budgets start after queue admission (PACKET-FIX-IDLOOKUP, 2026-08-14). → [insights/identity.md#94-compatibility-dto-identifiers-are-route-projections](insights/identity.md#94-compatibility-dto-identifiers-are-route-projections)
-95. **REQ-027's machine search fallback is route-native….** outcome-aware, bounded, and visibly reviewable (rounds 13-18, spec v10, 2026-08-18). → [insights/identity.md#95-req-027s-machine-search-fallback-is-route-native](insights/identity.md#95-req-027s-machine-search-fallback-is-route-native)
-96. **Goodreads Work ids and Book ids are disjoint….** authorities; preserve raw failure evidence (PACKET-FIX-ROUND19/20, 2026-08-20). → [insights/identity.md#96-goodreads-work-ids-and-book-ids-are-disjoint](insights/identity.md#96-goodreads-work-ids-and-book-ids-are-disjoint)
-97. **Search eligibility is provider-local, accounting is….** Work-local, and identifier taxonomy must be enforced at both ends (REQ-027 v11 / PACKET-FIX-ROUND21… → [insights/identity.md#97-search-eligibility-is-provider-local-accounting-is](insights/identity.md#97-search-eligibility-is-provider-local-accounting-is)
-98. **Leading articles are identity-irrelevant (PO ruling….** 2026-08-16), and matching + stored normalization share ONE article authority (round 7 ARTICLECOVER). → [insights/identity.md#98-leading-articles-are-identity-irrelevant-po-ruling](insights/identity.md#98-leading-articles-are-identity-irrelevant-po-ruling)
-99. **A correct settlement no-op guard starved the identity….** road — every machine caller fed it its own persisted routes (rounds 10-12, 2026-08-18). → [insights/identity.md#99-a-correct-settlement-no-op-guard-starved-the-identity](insights/identity.md#99-a-correct-settlement-no-op-guard-starved-the-identity)
-100. **The identity lifecycle audit (2026-08-20/22).** what the rebuilt identity layer is actually like, and the three rings of damage around its sound core. → [insights/history-and-review.md#100-the-identity-lifecycle-audit-2026-08-2022](insights/history-and-review.md#100-the-identity-lifecycle-audit-2026-08-2022)
-101. **Review is a surface with ONE mint authority, ONE….** canonical dismissal key, and a refusal that names the kind (fix-wave 1a, U1 `c71af24a` / U2 `44895d7b` / U7… → [insights/history-and-review.md#101-review-is-a-surface-with-one-mint-authority-one](insights/history-and-review.md#101-review-is-a-surface-with-one-mint-authority-one) *(amended 2026-08-31 — see note)*
+- [14. Public metadata assistance has limits](insights/process.md#lesson-14)
+- [23. Build persistence realistically](insights/process.md#lesson-23)
+- [24. Fix the originating fault](insights/process.md#lesson-24)
+- [25. Prototype external contracts](insights/process.md#lesson-25)
+- [26. Review structural duplication](insights/process.md#lesson-26)
+- [27. Comments describe the code](insights/process.md#lesson-27)
+- [35. Path prefix boundaries](insights/process.md#lesson-35)
+- [37. HTTP trust follows URL provenance](insights/process.md#lesson-37)
+- [46. Trace every entry into the workflow](insights/process.md#lesson-46)
+- [47. State real system facts](insights/process.md#lesson-47)
+- [49. Performance evidence and live data](insights/process.md#lesson-49)
+- [74. Reader, notification and transfer edge cases](insights/process.md#lesson-74)
+- [75. Dev build is not frontend typechecking](insights/process.md#lesson-75)
+
+## Providers and transport
+
+- [22. Provider deadlines differ](insights/providers-and-transport.md#lesson-22)
+- [28. SABnzbd history search](insights/providers-and-transport.md#lesson-28)
+- [29. Encode query credentials](insights/providers-and-transport.md#lesson-29)
+- [30. One outbound queue](insights/providers-and-transport.md#lesson-30)
+- [31. Download matching is client-scoped](insights/providers-and-transport.md#lesson-31)
+- [33. Map provider errors at the adapter](insights/providers-and-transport.md#lesson-33)
+- [43. OpenLibrary bibliography shape](insights/providers-and-transport.md#lesson-43)
+- [45. Avoid per-record bulk API harvest](insights/providers-and-transport.md#lesson-45)
+- [58. Shared breaker state needs one test guard](insights/providers-and-transport.md#lesson-58)
+- [62. Unreadable is not empty](insights/providers-and-transport.md#lesson-62)
+- [68. Provider cache policy belongs at its seam](insights/providers-and-transport.md#lesson-68)
+- [69. Share clients; measure concurrency](insights/providers-and-transport.md#lesson-69)
+- [70. One qBittorrent state classifier](insights/providers-and-transport.md#lesson-70)
+- [71. Indexer pacing and breaker scopes](insights/providers-and-transport.md#lesson-71)
+- [79. Queue dispatcher lifetime](insights/providers-and-transport.md#lesson-79)
+
+## Tests and fixtures
+
+- [34. See failures beyond the first binary](insights/tests-and-fixtures.md#lesson-34)
+- [61. Frozen comparison fixtures are intentional](insights/tests-and-fixtures.md#lesson-61)
+- [65. Registered, tracked and executed are different](insights/tests-and-fixtures.md#lesson-65)
+- [83. Use reliable tracing capture](insights/tests-and-fixtures.md#lesson-83)
+- [84. Stub HTTP response queues have a sticky tail](insights/tests-and-fixtures.md#lesson-84)
+- [102. B0 red-test facts](insights/tests-and-fixtures.md#lesson-102)
+- [104. Cancellation test diagnostics](insights/tests-and-fixtures.md#lesson-104)
+- [105. Finish SQLite fixture setup before pausing Tokio time](insights/tests-and-fixtures.md#lesson-105)
+
+## Source and history
+
+[Exact revision before cleanup](../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
+
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="active-insights"></a>
+<a id="data--state"></a>

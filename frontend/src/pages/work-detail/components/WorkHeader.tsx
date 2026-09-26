@@ -142,6 +142,12 @@ export function WorkHeader({
           />
         </div>
 
+        {work.subtitle?.trim() ? (
+          <p data-work-subtitle className="mt-1 text-lg text-zinc-400">
+            {work.subtitle}
+          </p>
+        ) : null}
+
         <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
           {work.authorId ? (
             <Link
