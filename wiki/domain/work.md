@@ -1,8 +1,22 @@
 # Work
 
-The primary entity in Livrarr (Principle 1: work-first, not author-first). A Work represents a title — independent of format, edition, or packaging.
+## Executive summary
+
+A Work is a title independent of edition, packaging or media format. It is the
+primary entity in search, the library and monitoring (Principle 1: work-first, not
+author-first); ebook and audiobook LibraryItems can belong to the same user-scoped
+Work. This page gives the current rules: [lifecycle and terminal states](#lifecycle),
+[fields and provenance](#key-fields), [presentation when the Author is gone](#presentation-when-a-related-author-is-gone),
+[monitoring](#monitoring), [scoping semantics](#semantics) and the
+[dedup review and edit behaviour since card-edits-lift (2026-09-25)](#dedup-review).
+Manual merging of Works is dropped for good; duplicates are resolved by deleting the
+extra Work. Dated source citations name the checkout they were verified against.
 
 ## Lifecycle
+
+The [creation workflow](../architecture/work-creation-pipeline.md) explains current
+capture/settlement and the asynchronous Add continuation. Creation minimum, evidence of
+identity and descriptive metadata are separate concerns.
 
 1. **Created** — via search+add, RSS sync auto-add, or author monitor detection
 2. **Identity settled** — deterministically. `settle_identity` is the one identity authority
@@ -13,7 +27,8 @@ The primary entity in Livrarr (Principle 1: work-first, not author-first). A Wor
    (`async_resolver.rs:46-97`) is background-only, returns immediately whenever a work anchor
    is already present (`:52-58`), and Serena reference-tracking finds no caller for it.
 3. **Enriching** — metadata enrichment runs (Background/Manual/HardRefresh)
-4. **Enriched** — all available metadata populated
+4. **Enriched** — all available metadata populated. Enriched is not a guarantee that every
+   field exists; see [Enrichment](../architecture/enrichment-pipeline.md).
 5. **Monitored** (optional) — RSS sync watches for matching releases
 
 ### Terminal states — and which enum they live on
@@ -45,6 +60,9 @@ outcomes that used to sit alongside them were dropped in migration 055 and now l
 - Enrichment status, identity status, enriched_at (`entities.rs:406-411`)
 - merge_generation (CAS guard for atomic enrichment merge)
 
+Identity changes and enrichment changes have their own generation guards; observe the
+relevant generation before the work informing the decision begins.
+
 ## Provenance
 
 Every enrichable field has per-field provenance tracking:
@@ -70,6 +88,7 @@ Per-media-type monitoring (not a single boolean):
 These are independent. A work can be monitored for ebook only, audiobook only, or both. RSS filter checks release categories (7020 = ebook, 3030 = audiobook) against the corresponding flag.
 
 Series monitoring sets these flags on member works. Unmonitoring a series clears them.
+Series assignments and monitoring propagation are described in [Series](series.md).
 
 ## Semantics
 
@@ -103,3 +122,14 @@ already has this title and author." An author edit applies the typed spelling: w
 resolves to an existing Author under another spelling (for example a dropped "Jr."), that Author is
 renamed to the typed text after the edit settles (PO decision after the live check). Contract:
 `spec-card-edits-lift.md` (v5).
+
+Decision record: [temporary merge containment (2026-09-07)](../decisions/merge-containment.md) ·
+[merge/undo rewrite dropped (2026-09-23)](../decisions/merge-undo-rewrite-dropped.md) ·
+[review reference](../architecture/identity-review-census.md).
+
+## Source and history
+
+[Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/work.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
+The predecessor of this merged page (main at `cf0f7235`) is preserved under
+`build/reviews/steward-upkeep-2026-09-26/hand-merge/predecessors/`.

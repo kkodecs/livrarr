@@ -13,9 +13,7 @@ edition’s publication date is not necessarily the Work’s original publicatio
 date. Hardcover subtitles are intentionally excluded because they can be wrong.
 See [concrete examples](#concrete-examples).
 
-This completes mapping research on `fix/add-metadata-preservation`. No metadata
-mapping or save behavior has been changed. The next step is to agree the bounded
-save implementation described in [the suggested scope](#suggested-scope).
+The [current scope](../../spec-add-metadata-preservation.md) was restored to the original metadata-save request on 20 September 2026: preserve the mapped values at Add time and apply the agreed date and provider-overwrite rules. Saving the cover address remains separate from downloading its image. That fix is done — live since 2026-09-21 (current build 2026-09-23), merged to main and pushed on 2026-09-23; see the [status record](../../build/state/STATUS-add-metadata-preservation.md). The research below is the mapping that fed it; its "what is lost" columns describe the code before the fix. The expanded recovery/history work and broader cleanup are [separate to-do items](../../build/plans/TODO.md#to-do). Earlier PM design decisions are historical evidence, not authorization to expand this scope.
 
 ## Provider comparison
 
@@ -37,7 +35,7 @@ visible in search is not proof that its URL was saved on the new Work.
 
 ## Proposed field mapping
 
-These are recommendations for the implementation, not adopted overwrite policy.
+This is the original mapping recommendation. The [current specification](../../spec-add-metadata-preservation.md) governs implementation and the agreed overwrite rules.
 The input column names fields in the provider response; it does not imply the
 current parser or Add request already carries them. Google rating/count and
 Goodreads description/pages/count require extending the parsers. Goodreads Work
@@ -113,5 +111,27 @@ for this mapping pass.
   `livrarr-metadata/src/discovery_service.rs` (four lookup mappings);
   `livrarr-handlers/src/types/work.rs` (`AddWorkRequest`, `WorkSearchResult`).
 
-This is source-and-response mapping research. It does not claim that the proposed
-normalization or persistence fix has been implemented or tested.
+This is source-and-response mapping research, written before the fix. For what was
+implemented and tested, use the [status record](../../build/state/STATUS-add-metadata-preservation.md)
+and the [specification](../../spec-add-metadata-preservation.md), not this page.
+
+## Enrichment details found during tests
+
+Old Goodreads normalized cache entries do not record whether their date was read
+from an original-publication field or extracted through the AI repair fallback.
+Both can contain the same year and date fields. The fix must not treat that
+ambiguous date as a proved original year; other usable cached facts should survive.
+The compatibility implementation was checked before the fix merged, and no existing
+library date cleanup is authorized. See the [date ambiguity evidence](../../build/reviews/add-metadata-preservation/tests/J3A/BLOCKED-GOODREADS-REPAIR-AND-CACHE.md#date-ambiguity).
+
+Tests through the actual merge engine and SQLite writer also reproduce mixed
+field pairs: one provider's rating can receive another provider's count, and a
+series name can retain an unrelated position. The initial Add mapping must keep its selected pairs coherent. Broader repairs to competing later-enrichment pairs are now a [separate to-do item](../../build/plans/TODO.md#to-do), requiring explicit approval. The current source failed
+12 group-behavior tests and passed the concurrent-edit protection control; this is
+pre-fix evidence, not a deployed correction. See the [host test observation](../../build/reviews/add-metadata-preservation/tests/J6A/PM-RED-OBSERVATION.json).
+
+## Source and history
+
+The version of this page main carried until 2026-09-26 (research wording only, without
+the scope-restoration note or the test findings) is preserved under
+`build/reviews/steward-upkeep-2026-09-26/hand-merge/predecessors/`.

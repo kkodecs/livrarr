@@ -1,5 +1,13 @@
 # Wiki before cleanup — 9 September 2026
 
+## Executive summary
+
+Exact copies of all 58 wiki files as they stood before the 9 September 2026 cleanup, for
+evidence and history; navigate from the current wiki instead. One preserved page,
+`wiki/domain/retained-merge-history.md`, has no current counterpart because its design
+belonged to the merge/undo rewrite that was dropped on 2026-09-23. See
+[the preserved pages](#preserved-pages).
+
 This directory preserves all 58 wiki files exactly as they existed before the
 authorized cleanup, including uncommitted edits. Their old claims, decisions,
 corrections and source limits are unchanged. Use the current wiki for navigation;
@@ -51,7 +59,7 @@ record and current canonical topics. Old section bookmarks remain supported.
 | [wiki/domain/metadata-principles.md](../../../wiki/domain/metadata-principles.md) | [Read original](wiki/domain/metadata-principles.md) |
 | [wiki/domain/metadata-sources.md](../../../wiki/domain/metadata-sources.md) | [Read original](wiki/domain/metadata-sources.md) |
 | [wiki/domain/release.md](../../../wiki/domain/release.md) | [Read original](wiki/domain/release.md) |
-| [wiki/domain/retained-merge-history.md](../../../wiki/domain/retained-merge-history.md) | [Read original](wiki/domain/retained-merge-history.md) |
+| wiki/domain/retained-merge-history.md — no current page; the design belonged to the [dropped merge/undo rewrite](../../../wiki/decisions/merge-undo-rewrite-dropped.md) | [Read original](wiki/domain/retained-merge-history.md) |
 | [wiki/domain/series.md](../../../wiki/domain/series.md) | [Read original](wiki/domain/series.md) |
 | [wiki/domain/work.md](../../../wiki/domain/work.md) | [Read original](wiki/domain/work.md) |
 | [wiki/index.md](../../../wiki/index.md) | [Read original](wiki/index.md) |

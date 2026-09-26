@@ -1,80 +1,106 @@
-# Wiki Index
+# Livrarr wiki
 
-Domain knowledge for the Livrarr project. Grows with each build cycle. Start here, then drill into sections.
+## Executive summary
 
-> **Wiki is new — verify and correct.** Bulk-ingested April 2026. If wiki content conflicts with code, code wins. Fix the wiki when you spot errors.
+Start with [engineering principles](../PRINCIPLES.md) and
+[product principles and architecture](../ARCHITECTURE.md). Then read the
+[lesson index](insights.md) and the topics relevant to your work. A normal startup
+does not require reading this entire wiki. Use [Find a topic](#find-a-topic) to reach
+the one current page per subject, [Decisions](#decisions) for the September 2026 merge
+containment and the dropped merge/undo rewrite, and the [complete page list](#all-pages)
+when a page is not in the table.
 
-## Architecture
+The root documents set requirements. Wiki pages explain workflows and practical
+constraints; source evidence establishes what is implemented. Read dated findings
+against their named checkout: the September 2026 reviewed containment source and
+today's main are different baselines. Current work and acceptance belong in
+[project state](../build/state/), reached through [the handoff](../HANDOFF.md).
 
-- [Overview](architecture/overview.md) — crate dependency graph, key invariants, composition root
-- [Enrichment Pipeline](architecture/enrichment-pipeline.md) — provider stack, enrichment modes, provenance, privacy
-- [Metadata Pathway](architecture/metadata-pathway.md) — current add/enrich/merge/cover/tag flow, entry points, and improvement opportunities
-- [Work-Creation Pipeline](architecture/work-creation-pipeline.md) — the five phases (identify → seed → create → enrich → materialize), the per-door identify matrix, and the M9 convergence gap (series-monitor + Readarr Pending limbo)
-- [Grab System](architecture/grab-system.md) — indexers, download clients, import lock, orphan adoption
-- [Library Management](architecture/library-management.md) — filesystem layout, import pipeline, tag writing, CWA
-- [Import Pipeline](architecture/import-pipeline.md) — scan → classify → copy → tag → CWA → track (detailed)
-- [Series Matching](architecture/series-matching.md) — series discovery, author monitoring
-- [RSS Sync](architecture/rss-sync.md) — automated release discovery, fuzzy matching, gap detection
-- [Usenet Pipeline](architecture/usenet-pipeline.md) — SABnzbd integration, protocol routing
-- [UI Architecture](architecture/ui-architecture.md) — React stack, auth flow, Readarr mimicry
-- [Identity Review Census](architecture/identity-review-census.md) — the one mint authority and its seven callers, the 6 doors into the one continuation (the two legacy conflict doors were deleted 2026-08-31), why GroupIdentity is unsafe until wave B, what manual import really feeds the matcher
+## Find a topic
 
-## Domain Entities
+| Question | Start here |
+|---|---|
+| Where does a responsibility belong? | [Architecture overview](architecture/overview.md), [workflow entry-point guide](architecture/roads.md), [crate guide](crates/server.md) |
+| How is a book found, created and identified? | [Book creation and identity](architecture/work-creation-pipeline.md), [identity review reference](architecture/identity-review-census.md), [search-results rendering](architecture/search-results-view.md) |
+| How does metadata or a cover change? | [Enrichment, covers and tags](architecture/enrichment-pipeline.md), [metadata pathway](architecture/metadata-pathway.md), [database provider priorities](domain/enrichment-priorities.md), [search-result metadata mapping](domain/search-result-metadata.md) |
+| How do files enter the library? | [Import and recovery](architecture/import-pipeline.md), [library management](architecture/library-management.md) |
+| How do releases get downloaded automatically? | [Downloads](architecture/grab-system.md), [RSS sync](architecture/rss-sync.md), [Usenet pipeline](architecture/usenet-pipeline.md), [series matching](architecture/series-matching.md) |
+| What do the records mean? | [Entity guide](domain/big7.md), [Work](domain/work.md), [Author](domain/author.md), [Series](domain/series.md) |
+| How do readers and progress work? | [UI](architecture/ui-architecture.md), [cross-format resume](domain/cross-format-resume.md) |
+| What must a change preserve? | [Metadata principles](domain/metadata-principles.md), [engineering patterns](#patterns), [lessons](insights.md) |
+| What makes external providers difficult? | [Provider roles](domain/metadata-sources.md), [OpenLibrary](integrations/openlibrary.md), [Hardcover](integrations/hardcover.md), [Google Books](integrations/google-books.md), [Audnexus](integrations/audnexus.md), [Goodreads](integrations/goodreads.md) |
+| How should a review be conducted? | [Review method](architecture/codebase-review-method.md), [known Add seed finding](architecture/direct-add-seed-review.md), [September review baseline](architecture/architecture-review-baseline.md), [simplification and evidence limits](architecture/architecture-review-simplification.md) |
+| How is deployment configured? | [Container permissions](deployment/container-permissions.md), [key decisions](decisions/key-decisions.md) |
+| What was decided about merging duplicate Works? | [Decisions](#decisions) below |
 
-- [Metadata Principles](domain/metadata-principles.md) — M1-M10: the governing principles for all metadata handling
-- [BIG7 Overview](domain/big7.md) — the seven core entities and their relationships
-- [Work](domain/work.md) — primary entity, lifecycle, provenance, semantics, and presentation fallback when a related Author is gone
-- [Author](domain/author.md) — lifecycle, monitoring, relationship to works
-- [Series](domain/series.md) — GR-backed rows + metadata stubs (sprint-c), reconcile arbitration, persisted rosters, promotion/silent resolution, ST-012 zero-/search
-- [Release](domain/release.md) — transient search results, protocol routing, RSS sync matching
-- [Grab](domain/grab.md) — download lifecycle, import lock, queue visibility
-- [LibraryItem](domain/library-item.md) — file lifecycle, import path, CWA
-- [List](domain/list.md) — bulk import from CSV/URL, preview → confirm → undo
-- [Cross-Format Resume](domain/cross-format-resume.md) — kash links, audio-ts coordinate, furthest-mark semantics, gotchas
-- [Metadata Sources](domain/metadata-sources.md) — providers, priority, fallback, foreign language gotchas
+Further record references: [Release](domain/release.md), [Grab](domain/grab.md),
+[LibraryItem](domain/library-item.md), [List](domain/list.md).
+Implementation navigation: [domain](crates/domain.md), [database](crates/db.md),
+[handlers](crates/handlers.md), [server](crates/server.md).
 
-## Patterns
-
-- [Async Service Pattern](patterns/async-service.md) — trait + impl + stub, trait_variant, stub policy
-- [Error Handling](patterns/error-handling.md) — error taxonomy, data read policies, retry semantics
-- [Test Doubles](patterns/test-doubles.md) — no InMemoryDb, test DB helpers, what gets stubbed
-- [Migration Pattern](patterns/migration-pattern.md) — SQLite migration rules, naming, enum serialization
-
-## Integrations
-
-- [OpenLibrary](integrations/openlibrary.md) — rate limits, anti-patterns, bulk dumps, contribution paths, current operational status
-- [Google Books](integrations/google-books.md) — API key, 1000/day quota, fields= and gzip, no contribution path
-- [Hardcover](integrations/hardcover.md) — 60/min, GraphQL depth ≤ 3, per-user token, beta API may break
-- [Audnexus](integrations/audnexus.md) — 300/min rate limit, 24h cache + 304 revalidation, self-hostable as fallback
-- [Goodreads](integrations/goodreads.md) — public-page scraping, disjoint Book/Work id namespaces, bounded unreadable-detail captures, and DataDome constraints
-
-## Deployment
-
-- [Container Permissions (PUID/PGID)](deployment/container-permissions.md) — root-start/drop model, cap set, hardened & rootless modes, Unraid/Proxmox gotchas, upgrade impact
+For browser access to these documents and the current build records, use the
+[project document site](deployment/document-site.md).
 
 ## Decisions
 
-- [Temporary work merge containment](decisions/merge-containment.md) — the September 2026 pause, disabled paths, preserved workflows, and title/author edit limitation
-- [Key Decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security
-
-## Insights (full text)
-
-`insights.md` is a compact index; the full verbatim text of every insight (including every
-"CORRECTED"/amendment note) lives in these theme pages under `insights/`.
-
-- [Architecture](insights/architecture.md) — crate layout, entity model, and system-level structure
-- [Coding Patterns](insights/coding-patterns.md) — Rust trait/service patterns, compile-wall mechanics, and idioms used across the workspace
-- [Metadata](insights/metadata.md) — metadata source policy, enrichment merge/status rules, and provider-agnostic metadata behavior
-- [Data & State](insights/data-and-state.md) — database, migration, and application-state rules
-- [Process](insights/process.md) — build-process, prototyping, and operational lessons that aren't specific to one subsystem
-- [Identity](insights/identity.md) — the identity matching authority, anchors, generation protocol, and identity-pipeline behavior
-- [History & Review](insights/history-and-review.md) — the work-history event log, the identity-review card surface, and the F2 identity-layer cutover ceremony
-- [Covers](insights/covers.md) — cover ranking, the cover write gate, and cover-source rules
-- [Providers & Transport](insights/providers-and-transport.md) — outbound HTTP queue, rate limiting/breakers, and per-provider API quirks
-- [Tests & Fixtures](insights/tests-and-fixtures.md) — test-suite mechanics, shared test-only state, and fixture gotchas
-
-## Quick Reference
-
-- [Insights](insights.md) — index of 101 active learnings; each line links to its full text under `insights/`
-- [Log](log.md) — wiki change log
+- [Temporary work merge containment (2026-09-07)](decisions/merge-containment.md) — the September 2026 pause, disabled paths, preserved workflows, and the title/author edit limitation; superseded in part by card-edits-lift (2026-09-25)
 - [Merge/undo rewrite dropped (2026-09-23)](decisions/merge-undo-rewrite-dropped.md) — why the identity-conflict-authority rewrite was dropped, what replaces it, where the parked tree lives
+- [Key decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security
+
+## Patterns
+
+- [Async service pattern](patterns/async-service.md) — trait + impl + stub, trait_variant, stub policy
+- [Error handling](patterns/error-handling.md) — error taxonomy, data read policies, retry semantics
+- [Test doubles](patterns/test-doubles.md) — no InMemoryDb, test DB helpers, what gets stubbed
+- [Migration pattern](patterns/migration-pattern.md) — SQLite migration rules, naming, enum serialization
+
+## Lessons (full text)
+
+[insights.md](insights.md) is the compact index; the full text of every lesson, including
+every correction and amendment, lives in these theme pages.
+
+- [Architecture](insights/architecture.md) · [Coding patterns](insights/coding-patterns.md) ·
+  [Metadata](insights/metadata.md) · [Data and state](insights/data-and-state.md) ·
+  [Process](insights/process.md) · [Identity](insights/identity.md) ·
+  [History and review](insights/history-and-review.md) · [Covers](insights/covers.md) ·
+  [Providers and transport](insights/providers-and-transport.md) ·
+  [Tests and fixtures](insights/tests-and-fixtures.md)
+
+## All pages
+
+- Architecture: [overview](architecture/overview.md), [roads](architecture/roads.md), [work-creation pipeline](architecture/work-creation-pipeline.md), [enrichment pipeline](architecture/enrichment-pipeline.md), [metadata pathway](architecture/metadata-pathway.md), [import pipeline](architecture/import-pipeline.md), [library management](architecture/library-management.md), [grab system](architecture/grab-system.md), [RSS sync](architecture/rss-sync.md), [usenet pipeline](architecture/usenet-pipeline.md), [series matching](architecture/series-matching.md), [UI architecture](architecture/ui-architecture.md), [identity review census](architecture/identity-review-census.md), [search-results view](architecture/search-results-view.md), [codebase review method](architecture/codebase-review-method.md), [direct-add seed review](architecture/direct-add-seed-review.md), [architecture review baseline](architecture/architecture-review-baseline.md), [architecture review simplification](architecture/architecture-review-simplification.md)
+- Domain: [BIG7](domain/big7.md), [metadata principles](domain/metadata-principles.md), [Work](domain/work.md), [Author](domain/author.md), [Series](domain/series.md), [Release](domain/release.md), [Grab](domain/grab.md), [LibraryItem](domain/library-item.md), [List](domain/list.md), [cross-format resume](domain/cross-format-resume.md), [metadata sources](domain/metadata-sources.md), [enrichment priorities](domain/enrichment-priorities.md), [search-result metadata](domain/search-result-metadata.md)
+- Crates: [domain](crates/domain.md), [db](crates/db.md), [handlers](crates/handlers.md), [server](crates/server.md)
+- Integrations: [OpenLibrary](integrations/openlibrary.md), [Google Books](integrations/google-books.md), [Hardcover](integrations/hardcover.md), [Audnexus](integrations/audnexus.md), [Goodreads](integrations/goodreads.md)
+- Deployment: [container permissions](deployment/container-permissions.md), [document site](deployment/document-site.md)
+- Quick reference: [lesson index](insights.md), [change log](log.md)
+
+## Maintaining this wiki
+
+- Keep one current explanation per topic; link to it from related pages.
+- Put a new lesson in its theme page and add one short discovery link to the index.
+  State the rule, why it matters, and the evidence needed to apply it.
+- Update the current explanation when a fact changes. Preserve the old account and
+  link it as history; do not append contradictory present-tense accounts.
+- Keep feature progress, reviews and acceptance in `build/`, not in reference pages.
+- Preserve predecessors before revising design or architecture prose. Keep historical
+  evidence intact, including corrections and their original sources.
+- Check local links and the exact source baseline before claiming behavior.
+
+[Change log](log.md) · [Preserved wiki history](../docs/design-history/wiki-before-cleanup-2026-09-09/README.md)
+
+## Source and history
+
+[Exact revision before cleanup](../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/index.md). Historical implementation claims retain
+their original dates and source limits; the root principles and newer corrections take precedence.
+The list-form index that main carried until 2026-09-26 is preserved under
+`build/reviews/steward-upkeep-2026-09-26/hand-merge/predecessors/`.
+
+<!-- Preserved section IDs for existing bookmarks and historical references. -->
+<a id="wiki-index"></a>
+<a id="architecture"></a>
+<a id="domain-entities"></a>
+<a id="integrations"></a>
+<a id="deployment"></a>
+<a id="insights-full-text"></a>
+<a id="quick-reference"></a>

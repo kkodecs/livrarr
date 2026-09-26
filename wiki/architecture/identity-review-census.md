@@ -1,5 +1,14 @@
 # Identity review: authority and census limits
 
+## Executive summary
+
+The rules below are what survives from the August 2026 identity-review census; the
+counts and door inventories in the preserved original are dated evidence, not a current
+inventory. Since 2026-09-25 the review card offers "Different book" and Dismiss only, and
+manual merging is dropped for good ([Work](../domain/work.md), "Dedup review"). See
+[the surviving rules](#rules-that-survive-the-census) and
+[what to check before changing review behavior](#before-changing-review-behavior).
+
 The detailed census previously at this path enumerated August source after a
 specific fix wave and deletion pass. It is preserved in full in the linked source
 record. It is not a current inventory of the parked rewrite or deployed containment.
@@ -29,7 +38,10 @@ are separate evidence; neither implies a working current merge UI.
 
 [Creation](work-creation-pipeline.md) · [identity lessons](../insights/identity.md) ·
 [history and review lessons](../insights/history-and-review.md) ·
-[retained merge history](../domain/retained-merge-history.md).
+[merge/undo rewrite dropped (2026-09-23)](../decisions/merge-undo-rewrite-dropped.md).
+The retained-merge-history design page belonged to that dropped rewrite and was not carried
+to the current wiki; its last text is preserved in the
+[pre-cleanup snapshot](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/domain/retained-merge-history.md).
 
 ## Source and history
 
