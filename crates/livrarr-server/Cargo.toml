@@ -69,3 +69,7 @@ livrarr-http = { workspace = true, features = ["test-helpers"] }
 [[test]]
 name = "test_fresh_author_index"
 path = "tests/test_fresh_author_index.rs"
+
+[[test]]
+name = "test_identity_upgrade"
+path = "tests/test_identity_upgrade.rs"
