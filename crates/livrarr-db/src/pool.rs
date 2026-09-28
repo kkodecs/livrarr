@@ -49,7 +49,41 @@ pub(crate) async fn begin_write(
 ///
 /// Satisfies: RUNTIME-SQLITE-003
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
+    save_audiobook_cover_choices(pool).await?;
     sqlx::migrate!("./migrations").run(pool).await
+}
+
+/// Save the audiobook cover choices migration 084 would drop.
+///
+/// Alpha6 recorded "the user chose this audiobook cover" only as
+/// `works.audiobook_cover_trust = 'user'`. Migration 084 drops that column and
+/// 085 adds `audiobook_cover_manual` defaulting to 0. While the column exists,
+/// the (user, work) pairs are written to `_livrarr_meta` under
+/// `upgrade_audiobook_cover_user_choices`, replacing any earlier list;
+/// migration 091 restores the flag and deletes the key. Once the column is
+/// gone a saved list is left alone, so it survives a start that stopped after
+/// 084 committed.
+async fn save_audiobook_cover_choices(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let has_trust_column: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pragma_table_info('works') \
+                         WHERE name = 'audiobook_cover_trust')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_trust_column {
+        return Ok(());
+    }
+    let mut tx = begin_write(pool).await?;
+    sqlx::query(
+        "INSERT INTO _livrarr_meta (key, value) \
+         SELECT 'upgrade_audiobook_cover_user_choices', \
+                json_group_array(json_object('u', user_id, 'w', id)) \
+           FROM works WHERE audiobook_cover_trust = 'user' \
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await
 }
 
 // ── Startup checks ──────────────────────────────────────────────────────────
