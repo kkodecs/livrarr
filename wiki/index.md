@@ -7,7 +7,7 @@ Start with [engineering principles](../PRINCIPLES.md) and
 [lesson index](insights.md) and the topics relevant to your work. A normal startup
 does not require reading this entire wiki. Use [Find a topic](#find-a-topic) to reach
 the one current page per subject, [Decisions](#decisions) for the September 2026 merge
-containment and the dropped merge/undo rewrite, and the [complete page list](#all-pages)
+containment, the dropped merge/undo rewrite and the automatic identity upgrade, and the [complete page list](#all-pages)
 when a page is not in the table.
 
 The root documents set requirements. Wiki pages explain workflows and practical
@@ -31,6 +31,7 @@ today's main are different baselines. Current work and acceptance belong in
 | What makes external providers difficult? | [Provider roles](domain/metadata-sources.md), [OpenLibrary](integrations/openlibrary.md), [Hardcover](integrations/hardcover.md), [Google Books](integrations/google-books.md), [Audnexus](integrations/audnexus.md), [Goodreads](integrations/goodreads.md) |
 | How should a review be conducted? | [Review method](architecture/codebase-review-method.md), [known Add seed finding](architecture/direct-add-seed-review.md), [September review baseline](architecture/architecture-review-baseline.md), [simplification and evidence limits](architecture/architecture-review-simplification.md) |
 | How is deployment configured? | [Container permissions](deployment/container-permissions.md), [key decisions](decisions/key-decisions.md) |
+| What happens when an alpha6 library is upgraded, and how do I roll back? | [Upgrading from alpha6](deployment/upgrading.md) |
 | What was decided about merging duplicate Works? | [Decisions](#decisions) below |
 
 Further record references: [Release](domain/release.md), [Grab](domain/grab.md),
@@ -45,6 +46,7 @@ For browser access to these documents and the current build records, use the
 
 - [Temporary work merge containment (2026-09-07)](decisions/merge-containment.md) — the September 2026 pause, disabled paths, preserved workflows, and the title/author edit limitation; superseded in part by card-edits-lift (2026-09-25)
 - [Merge/undo rewrite dropped (2026-09-23)](decisions/merge-undo-rewrite-dropped.md) — why the identity-conflict-authority rewrite was dropped, what replaces it, where the parked tree lives
+- [Automatic identity upgrade (2026-09-27)](decisions/automatic-identity-upgrade.md) — existing libraries convert on first start via migration 091; replaces the manual rehearse-and-approve cutover; odd-case rules; contract/IR amendment pending
 - [Key decisions](decisions/key-decisions.md) — hardlink policy, config, indexers, AppState, security
 
 ## Patterns
@@ -72,7 +74,7 @@ every correction and amendment, lives in these theme pages.
 - Domain: [BIG7](domain/big7.md), [metadata principles](domain/metadata-principles.md), [Work](domain/work.md), [Author](domain/author.md), [Series](domain/series.md), [Release](domain/release.md), [Grab](domain/grab.md), [LibraryItem](domain/library-item.md), [List](domain/list.md), [cross-format resume](domain/cross-format-resume.md), [metadata sources](domain/metadata-sources.md), [enrichment priorities](domain/enrichment-priorities.md), [search-result metadata](domain/search-result-metadata.md)
 - Crates: [domain](crates/domain.md), [db](crates/db.md), [handlers](crates/handlers.md), [server](crates/server.md)
 - Integrations: [OpenLibrary](integrations/openlibrary.md), [Google Books](integrations/google-books.md), [Hardcover](integrations/hardcover.md), [Audnexus](integrations/audnexus.md), [Goodreads](integrations/goodreads.md)
-- Deployment: [container permissions](deployment/container-permissions.md), [document site](deployment/document-site.md)
+- Deployment: [container permissions](deployment/container-permissions.md), [upgrading from alpha6](deployment/upgrading.md), [document site](deployment/document-site.md)
 - Quick reference: [lesson index](insights.md), [change log](log.md)
 
 ## Maintaining this wiki

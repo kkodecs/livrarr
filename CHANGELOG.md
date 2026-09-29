@@ -1,3 +1,16 @@
+## [Unreleased]
+
+### 🚀 Features
+
+- *(upgrade)* An alpha6 library upgrades automatically on the first start; no manual commands. Identifiers, the matches you confirmed (shown as "Confirmed"), book status and your audiobook cover choices are kept
+- *(upgrade)* One protected pre-upgrade backup per upgrade instead of one on every start; it is kept until the next upgrade finishes
+- *(upgrade)* One summary line in the log after the upgrade: books, identifiers, confirmed matches, look-alike books kept separate, shared identifiers and old questions closed
+- *(work-detail)* Show the subtitle under the title on the book page
+
+### 🐛 Bug Fixes
+
+- *(add)* New books default to monitoring both ebook and audiobook
+
 ## [0.1.0-alpha6] - 2026-07-18
 
 ### 🚀 Features

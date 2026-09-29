@@ -67,6 +67,25 @@ Go to **Settings** and add:
 - A download client (qBittorrent or SABnzbd)
 - At least one indexer (any Torznab/Newznab source: Prowlarr, NZBHydra2, Jackett, or direct indexer URL + API key)
 
+### Upgrading from alpha6
+
+Pull the new image and start it. There are no commands to run. On the first start Livrarr:
+
+1. Saves one copy of your database in `/config`, and logs `pre-upgrade backup: livrarr.db.pre-migrate-v073-<date>-<time>`.
+2. Converts your library in place. Books, identifiers, your confirmed matches, monitoring, covers and edits carry over.
+3. Logs one summary line, for example: `Identity upgrade complete: 139 books, 604 identifiers (299 you had confirmed); 0 look-alike books kept separate; 0 shared identifiers; 0 old questions closed`.
+
+Restarts do not add more copies. The copy is kept until the next upgrade finishes.
+
+**Rolling back.** alpha6 cannot open a database that has been upgraded, so going back needs the saved copy:
+
+1. Stop the container.
+2. In `./config`, move `livrarr.db` aside, then copy the `livrarr.db.pre-migrate-v073-…` file to `livrarr.db`.
+3. Delete `livrarr.db-wal` and `livrarr.db-shm` if they exist.
+4. Set the image back to `0.1.0-alpha6` and start it.
+
+Changes made after the upgrade are not in the copy. Details: [wiki/deployment/upgrading.md](wiki/deployment/upgrading.md).
+
 ---
 
 ## Configuration
