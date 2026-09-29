@@ -1083,3 +1083,52 @@ pub async fn ensure_identity_authority_ready_before_serve(
         IdentityAuthorityReadiness::CutoverRequired => Err(StartupError::CutoverRequired),
     }
 }
+
+/// Log the summary of the automatic identity upgrade (migration 091). Called
+/// only when the startup readiness check has just activated identity
+/// authority; logs nothing unless the run it activated is the automatic one,
+/// so a fresh install or a manually applied cutover stays silent.
+pub async fn log_identity_upgrade_summary(pool: &sqlx::SqlitePool) {
+    let latest: Option<(String, String, String)> = match sqlx::query_as(
+        "SELECT branch, status, report_json FROM identity_cutover_runs \
+          WHERE mode = 'apply' ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(latest) => latest,
+        Err(error) => {
+            tracing::warn!("could not read the upgrade summary: {error}");
+            return;
+        }
+    };
+    let Some((branch, status, report)) = latest else {
+        return;
+    };
+    if branch != "automatic" || status != "activated" {
+        return;
+    }
+    let summary: serde_json::Value = match serde_json::from_str(&report) {
+        Ok(summary) => summary,
+        Err(error) => {
+            tracing::warn!("could not read the upgrade summary: {error}");
+            return;
+        }
+    };
+    let count = |key: &str| {
+        summary
+            .get(key)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
+    tracing::info!(
+        "Identity upgrade complete: {} books, {} identifiers ({} you had confirmed); \
+         {} look-alike books kept separate; {} shared identifiers; {} old questions closed",
+        count("books"),
+        count("identifiers"),
+        count("confirmed_identifiers"),
+        count("lookalike_books_kept_separate"),
+        count("shared_identifiers"),
+        count("old_questions_closed"),
+    );
+}

@@ -11,15 +11,22 @@
 //!
 //! Setups that run production code in process use its real entry points: SQLx's
 //! migrator over the real historical files, the manual cutover ceremony, the
-//! startup repair functions and `run_migrations`. Five setups write state
+//! startup repair functions and `run_migrations`. Six setups write state
 //! directly, each standing in for an actor the harness cannot run: SQL edits and
 //! deletions at migration 073 are what an alpha6 user's edit or delete writes; a
-//! leftover `.partial` file is what a crash during the copy leaves behind; extra
+//! leftover `.partial` file is what a crash during the copy leaves behind; a
+//! pending file naming a recorded copy is what a crash between recording that
+//! copy and removing the pending file leaves behind (nothing observable lies
+//! between the two to freeze the child on); extra
 //! `pre-migrate` files are copies a user or an earlier release left in the data
 //! directory; a foreign `startup_generation` value is what an older release of
 //! this code leaves behind (one binary cannot be two releases); and a cleared
 //! Goodreads cover-repair marker beside a machine Goodreads cover is the library
 //! as a release before that repair left it.
+//!
+//! The title-policy and dedup-residue repairs are off while work merging is
+//! unavailable and never stamp their markers, so "the repair ran" is asserted
+//! only for enabled repairs.
 //!
 //! Process interruptions are real: the child is SIGKILLed, so no error handler
 //! runs. Two barriers expose the boundaries without supplying any outcome: the
@@ -71,6 +78,8 @@ const ALPHA6_LAST_MIGRATION: i64 = 73;
 const LAST_PUBLISHED_MIGRATION: i64 = 90;
 const UPGRADE_MIGRATION: i64 = 91;
 const COPY_PREFIX: &str = "livrarr.db.pre-migrate-";
+/// Names the copy an upgrade attempt is publishing until its record commits.
+const PENDING_COPY_FILE: &str = "livrarr.db.upgrade-copy-pending";
 const UPGRADE_ACTOR: &str = "identity-upgrade";
 const AUTHORITY_MARKER: &str = "identity_authority_v2";
 const COVER_REPAIR_MARKER: &str = "identity_round15_gr_cover_reselect";
@@ -85,6 +94,20 @@ const SYNC_REPAIR_MARKERS: [&str; 7] = [
     "identity_round15_search_ledger_reset",
     LAST_SYNC_REPAIR_MARKER,
 ];
+/// Repairs that return before reading or stamping their markers while work
+/// merging is unavailable (`heal_identity_title_policy`,
+/// `heal_identity_dedup_residue`).
+const MERGE_GATED_REPAIR_MARKERS: [&str; 2] = [
+    TITLE_REPAIR_MARKER,
+    "identity_dedup_residue_heal_generation",
+];
+
+/// True when production runs the repair that stamps `marker`.
+fn repair_enabled(marker: &str) -> bool {
+    livrarr_domain::identity_layer::WORK_MERGING_AVAILABLE
+        || !MERGE_GATED_REPAIR_MARKERS.contains(&marker)
+}
+
 /// The three ways the background Goodreads cover pass ends (jobs/cover_startup.rs).
 const COVER_PASS_ENDS: [&str; 3] = [
     "identity round-15 Goodreads cover reselect complete",
@@ -534,51 +557,85 @@ impl Library {
         observed
     }
 
-    /// Boundary: the copy is written, before publication. The library must be
-    /// large enough that copying takes a few hundred milliseconds. The child is
-    /// frozen (SIGSTOP) as soon as its work file appears; the frozen state must
-    /// show that work file and no newly published copy (the acknowledgement),
-    /// and then it is killed. Returns false when the freeze landed after
-    /// publication, so the caller can retry on a fresh library.
+    /// Boundary: the copy is complete in its `.partial` work file and not yet
+    /// published. The library must be large enough that copying and syncing
+    /// take a few hundred milliseconds. While the attempt's pending file and
+    /// one work file exist and no new copy is published, the child is frozen
+    /// (SIGSTOP) and the freeze is acknowledged (stopped state in
+    /// `/proc/<pid>/stat`) before anything is inspected. The frozen state must
+    /// then show that phase afresh, a work file that is a complete copy of this
+    /// library, and no `upgrade_snapshot` record; only then is the child
+    /// killed. A work file still being written is resumed (SIGCONT) and frozen
+    /// again. Returns false (a miss the caller retries on a fresh library) when
+    /// a copy is published first or the phase is never caught.
     async fn kill_before_publication(&self) -> bool {
+        let pool = self.pool().await;
+        let expected = (
+            seeded_library_signature(&pool).await,
+            count(&pool, "SELECT COUNT(*) FROM provider_response_cache").await,
+        );
+        pool.close().await;
         let before: BTreeSet<PathBuf> = self.files_with_prefix().into_iter().collect();
+        let pending = self.dir().join(PENDING_COPY_FILE);
         let mut server = self.start().await;
+        let pid = server.child.id() as libc::pid_t;
         let deadline = Instant::now() + Duration::from_secs(30);
-        let new = loop {
-            let new: Vec<PathBuf> = self
-                .files_with_prefix()
-                .into_iter()
-                .filter(|path| !before.contains(path))
-                .collect();
-            if !new.is_empty() {
-                // SAFETY: signals the child this test spawned and still owns.
-                unsafe { libc::kill(server.child.id() as libc::pid_t, libc::SIGSTOP) };
-                break new;
-            }
+        let mut freezes = 0;
+        loop {
             if let Some(status) = server.child.try_wait().unwrap() {
                 panic!(
-                    "setup: the child exited ({status}) before starting a copy:\n{}",
+                    "setup: the child exited ({status}) before publishing a copy:\n{}",
                     server.logs()
                 );
             }
-            assert!(
-                Instant::now() < deadline,
-                "setup: no copy was started:\n{}",
-                server.logs()
+            let published = self
+                .copies()
+                .into_iter()
+                .any(|path| !before.contains(&path));
+            if published || Instant::now() >= deadline {
+                eprintln!(
+                    "before-publication barrier missed after {freezes} freezes (published={published})"
+                );
+                server.stop();
+                return false;
+            }
+            if !(pending.exists() && self.partials().len() == 1) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                continue;
+            }
+            // SAFETY: signals the child this test spawned and still owns.
+            unsafe { libc::kill(pid, libc::SIGSTOP) };
+            freezes += 1;
+            wait_until_stopped(&mut server).await;
+            let partials = self.partials();
+            let published = self
+                .copies()
+                .into_iter()
+                .any(|path| !before.contains(&path));
+            let complete = !published
+                && pending.exists()
+                && partials.len() == 1
+                && is_complete_copy(&partials[0], &expected).await;
+            if !complete {
+                // SAFETY: as above.
+                unsafe { libc::kill(pid, libc::SIGCONT) };
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                continue;
+            }
+            let pool = self.pool().await;
+            let record = meta(&pool, "upgrade_snapshot").await;
+            pool.close().await;
+            assert_eq!(record, None, "the frozen attempt has recorded no copy");
+            let partial = name_of(&partials[0]);
+            assert_eq!(
+                std::fs::read_to_string(&pending).unwrap(),
+                partial.trim_end_matches(".partial"),
+                "the pending file names the copy being published"
             );
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        };
-        assert!(
-            new.iter().all(|path| name_of(path).ends_with(".partial")),
-            "the copy is written to a .partial work file and published only by rename: {new:?}"
-        );
-        let published = self
-            .copies()
-            .into_iter()
-            .any(|path| !before.contains(&path));
-        let _ = server.child.kill();
-        server.stop();
-        !published
+            eprintln!("before-publication barrier held after {freezes} freezes");
+            server.stop();
+            return true;
+        }
     }
 
     fn files_with_prefix(&self) -> Vec<PathBuf> {
@@ -638,6 +695,69 @@ fn name_of(path: &Path) -> String {
 
 fn sha256_file(path: &Path) -> String {
     format!("{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+/// The child's scheduler state from `/proc/<pid>/stat` ('T' when stopped).
+fn process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+/// Acknowledge a SIGSTOP: wait until the child is reported stopped.
+async fn wait_until_stopped(server: &mut Server) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !matches!(process_state(server.child.id()), Some('T' | 't')) {
+        if let Some(status) = server.child.try_wait().unwrap() {
+            panic!(
+                "setup: the child exited ({status}) instead of stopping:\n{}",
+                server.logs()
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "setup: the child never acknowledged SIGSTOP"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// Whether a frozen work file is a complete copy of the library: its header
+/// declares exactly the file's length, it passes quick_check, and it holds
+/// the seeded ledger and works and every provider-cache row. Read in place
+/// with `immutable=1`, which writes nothing beside it.
+async fn is_complete_copy(path: &Path, expected: &(Vec<String>, i64)) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    if bytes.len() < 100 || !bytes.starts_with(b"SQLite format 3\0") {
+        return false;
+    }
+    let word = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+    let page_size = match u16::from_be_bytes([bytes[16], bytes[17]]) {
+        1 => 65_536,
+        size => u64::from(size),
+    };
+    if word(92) != word(24) || u64::from(word(28)) * page_size != bytes.len() as u64 {
+        return false;
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .immutable(true);
+    let Ok(copy) = SqlitePool::connect_with(options).await else {
+        return false;
+    };
+    let quick: Result<String, _> = sqlx::query_scalar("PRAGMA quick_check")
+        .fetch_one(&copy)
+        .await;
+    let cache: Result<i64, _> = sqlx::query_scalar("SELECT COUNT(*) FROM provider_response_cache")
+        .fetch_one(&copy)
+        .await;
+    let complete = quick.is_ok_and(|result| result == "ok")
+        && cache.is_ok_and(|rows| rows == expected.1)
+        && seeded_library_signature(&copy).await == expected.0;
+    copy.close().await;
+    complete
 }
 
 /// Open a pre-upgrade copy without writing beside it in the data directory.
@@ -2366,11 +2486,18 @@ async fn original_copy_survives_partial_progress_prune_and_restore() {
     let original_path = library.dir().join(&original_name);
     library.restore(&original_path);
     clear_faults(&library).await;
+    // The restored copy's attempt crashed after recording it and before
+    // removing its pending file: recovery must keep the copy the restored
+    // database names as its source, not reclaim it as that file's orphan.
+    library.plant(PENDING_COPY_FILE, original_name.as_bytes());
     library
         .execute(
             "UPDATE works SET title = 'A Wizard of Earthsea (edited after restore)' WHERE id = 1",
         )
         .await;
+    // Also at 073: no machine Goodreads cover is left, so the restored
+    // upgrade's cover repair can complete once its marker may be stamped.
+    without_machine_goodreads_cover(&library).await;
     fail_migration(&library, UPGRADE_MIGRATION).await;
     library
         .refuse(&client, "the second upgrade stops at the 091 fault")
@@ -2390,6 +2517,17 @@ async fn original_copy_survives_partial_progress_prune_and_restore() {
         1,
         "the second upgrade takes one new copy: {during:?}"
     );
+    assert!(
+        !library.dir().join(PENDING_COPY_FILE).exists(),
+        "recovery clears the stale pending file"
+    );
+    let pool = library.pool().await;
+    let record = meta(&pool, "upgrade_snapshot").await.unwrap_or_default();
+    pool.close().await;
+    assert!(
+        record.contains(new_copies[0].as_str()) && record.contains(&original_name),
+        "the new attempt is recorded with the restored copy as its previous: {record:?}"
+    );
     let (_copy_dir, copy) = open_copy(&library.dir().join(new_copies[0])).await;
     let title: String = sqlx::query_scalar("SELECT title FROM works WHERE id = 1")
         .fetch_one(&copy)
@@ -2400,6 +2538,74 @@ async fn original_copy_survives_partial_progress_prune_and_restore() {
         "the new copy contains the edit"
     );
     copy.close().await;
+    let edited = new_copies[0].clone();
+
+    // The restored upgrade continues with its cover repair held incomplete,
+    // under prune pressure from three newer eligible copies: the earlier
+    // original stays protected beside the edited attempt's copy.
+    clear_faults(&library).await;
+    fail_meta_write(&library, COVER_REPAIR_MARKER).await;
+    for name in [
+        "livrarr.db.pre-migrate-v999-20990201-000001",
+        "livrarr.db.pre-migrate-v999-20990201-000002",
+        "livrarr.db.pre-migrate-v999-20990201-000003",
+    ] {
+        library.plant(name, name.as_bytes());
+    }
+    for start in 1..=2 {
+        library
+            .serve_through_cover_pass(
+                &client,
+                "the restored upgrade must serve with its cover repair pending",
+            )
+            .await;
+        let now = library.copy_checksums();
+        assert_eq!(
+            now.get(&original_name),
+            original.get(&original_name),
+            "start {start}: the earlier original survives until the restored upgrade finishes: {now:?}"
+        );
+        assert_eq!(
+            now.get(&edited),
+            during.get(&edited),
+            "start {start}: the edited attempt's copy is kept unchanged: {now:?}"
+        );
+        let pool = library.pool().await;
+        let record = meta(&pool, "upgrade_snapshot").await.unwrap_or_default();
+        pool.close().await;
+        assert!(
+            record.contains(&edited) && record.contains("in_progress"),
+            "start {start}: the restored upgrade is still in progress: {record:?}"
+        );
+    }
+
+    // The upgrade finishes once the cover marker can be stamped; only then is
+    // the earlier original released to the ordinary prune.
+    clear_faults(&library).await;
+    library
+        .serve_through_cover_pass(&client, "the restored upgrade completes its cover repair")
+        .await;
+    let mut settle = library
+        .serve(&client, "the restored upgrade finishes")
+        .await;
+    settle.stop();
+    let pool = library.pool().await;
+    let record = meta(&pool, "upgrade_snapshot").await.unwrap_or_default();
+    pool.close().await;
+    assert!(
+        is_complete(&record) && record.contains(&edited),
+        "the restored upgrade finishes: {record:?}"
+    );
+    let finished = library.copy_checksums();
+    assert_eq!(
+        finished.get(&edited),
+        during.get(&edited),
+        "the edited attempt's copy is the rollback copy: {finished:?}"
+    );
+    assert!(
+        !finished.contains_key(&original_name),
+        "once the restored upgrade finished, the earlier original is released and pruned: {finished:?}"
+    );
 }
 
 // ── AC-013 ──────────────────────────────────────────────────────────────────
@@ -2460,7 +2666,10 @@ async fn startup_repair_gets_one_copy() {
         .await;
     server.stop();
     let pool = library.pool().await;
-    for marker in SYNC_REPAIR_MARKERS {
+    for marker in SYNC_REPAIR_MARKERS
+        .into_iter()
+        .filter(|marker| repair_enabled(marker))
+    {
         assert!(meta(&pool, marker).await.is_some(), "repair {marker} ran");
     }
     pool.close().await;
@@ -2562,8 +2771,9 @@ fn assert_recovered_or_reclaimed(library: &Library, observed: &[String], recorde
 async fn copy_killed_before_publication_is_reclaimed(client: &Client) {
     for _ in 0..3 {
         let library = Library::alpha6().await;
-        // A large provider-response cache (legal alpha6 data) makes the copy
-        // take a few hundred milliseconds, long enough to freeze it.
+        // A large provider-response cache (legal alpha6 data) makes copying and
+        // syncing take a few hundred milliseconds, long enough to freeze the
+        // child between a complete copy and its publication.
         library
             .execute(
                 "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 4096) \
@@ -2577,7 +2787,7 @@ async fn copy_killed_before_publication_is_reclaimed(client: &Client) {
             return copy_killed_before_publication_restarts(&library, client).await;
         }
     }
-    panic!("setup: three fresh libraries could not freeze the copy before its publication");
+    panic!("setup: three fresh libraries could not freeze a complete copy before its publication");
 }
 
 async fn copy_killed_before_publication_restarts(library: &Library, client: &Client) {
@@ -2592,6 +2802,10 @@ async fn copy_killed_before_publication_restarts(library: &Library, client: &Cli
         library.partials().is_empty(),
         "the interrupted work file is reclaimed: {:?}",
         library.partials()
+    );
+    assert!(
+        !library.dir().join(PENDING_COPY_FILE).exists(),
+        "no copy is left pending once the restarted attempt is recorded"
     );
     let copies = library.copies();
     assert_eq!(copies.len(), 1, "one completed copy: {copies:?}");

@@ -45,12 +45,15 @@ pub(crate) async fn begin_write(
     pool.begin_with("BEGIN IMMEDIATE").await
 }
 
+/// The migrations embedded in this binary.
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 /// Run embedded migrations.
 ///
 /// Satisfies: RUNTIME-SQLITE-003
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::migrate::MigrateError> {
     save_audiobook_cover_choices(pool).await?;
-    sqlx::migrate!("./migrations").run(pool).await
+    MIGRATOR.run(pool).await
 }
 
 /// Save the audiobook cover choices migration 084 would drop.
@@ -247,42 +250,6 @@ pub fn acquire_pid_lock(data_dir: &Path) -> Result<(), String> {
 pub fn release_pid_lock(data_dir: &Path) {
     let lock_path = data_dir.join("livrarr.pid");
     let _ = std::fs::remove_file(lock_path);
-}
-
-/// Create a pre-migration backup using VACUUM INTO.
-/// Returns the backup path on success.
-pub async fn create_backup(
-    pool: &SqlitePool,
-    data_dir: &Path,
-) -> Result<std::path::PathBuf, String> {
-    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-    let backup_name = format!("livrarr.db.pre-migrate-{timestamp}");
-    let backup_path = data_dir.join(&backup_name);
-
-    let canonical_parent = backup_path
-        .parent()
-        .ok_or("backup path has no parent")?
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve backup parent dir: {e}"))?;
-    let canonical_data = data_dir
-        .canonicalize()
-        .map_err(|e| format!("cannot resolve data dir: {e}"))?;
-    if !canonical_parent.starts_with(&canonical_data) {
-        return Err("backup path escapes data directory".into());
-    }
-
-    let backup_str = backup_path.display().to_string();
-    if backup_str.contains('\'') {
-        return Err("backup path contains invalid characters".into());
-    }
-
-    sqlx::query(&format!("VACUUM INTO '{backup_str}'"))
-        .execute(pool)
-        .await
-        .map_err(|e| format!("VACUUM INTO backup failed: {e}"))?;
-
-    tracing::info!("pre-migration backup: {backup_name}");
-    Ok(backup_path)
 }
 
 /// Backfill `authors.normalized_name`, merge duplicate author rows per
@@ -527,7 +494,7 @@ pub async fn backfill_identity_key_recompute(pool: &SqlitePool) -> Result<(), St
 
 /// Compiled-in generation for the provider-title policy. This is a runtime
 /// data heal, deliberately separate from immutable schema migrations 082-084.
-const IDENTITY_TITLE_POLICY_GENERATION: i64 = 2;
+pub(crate) const IDENTITY_TITLE_POLICY_GENERATION: i64 = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdentityTitlePolicyHealReport {
@@ -1307,7 +1274,7 @@ pub async fn heal_identity_title_policy(
 
 /// Compiled-in generation for the PM seam-sweep route-taxonomy/data-debris
 /// repair. This is runtime data healing, not an immutable schema migration.
-const IDENTITY_SWEEP_HEAL_GENERATION: i64 = 1;
+pub(crate) const IDENTITY_SWEEP_HEAL_GENERATION: i64 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdentitySweepHealReport {
@@ -1597,8 +1564,10 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
     matches!(err, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
 }
 
-/// Delete old backups, keeping the most recent `keep` versions.
-pub fn cleanup_old_backups(data_dir: &Path, keep: usize) {
+/// Delete old pre-upgrade copies, keeping the most recent `keep` by name.
+/// Copies in `protected` are never deleted or counted, and neither are
+/// `.partial` work files or SQLite sidecar files.
+pub fn cleanup_old_backups(data_dir: &Path, keep: usize, protected: &BTreeSet<String>) {
     let dir_entries = match std::fs::read_dir(data_dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -1616,9 +1585,13 @@ pub fn cleanup_old_backups(data_dir: &Path, keep: usize) {
             }
         })
         .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("livrarr.db.pre-migrate-")
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with(crate::upgrade_backup::COPY_PREFIX)
+                && !name.ends_with(crate::upgrade_backup::PARTIAL_SUFFIX)
+                && !["-wal", "-shm", "-journal"]
+                    .iter()
+                    .any(|sidecar| name.ends_with(sidecar))
+                && !protected.contains(&name)
         })
         .collect();
 

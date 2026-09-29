@@ -762,18 +762,12 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
         }
     };
 
-    // Step 7: Pre-migration backup (only if DB file already exists).
-    let db_path = data_dir.join("livrarr.db");
-    let db_exists = tokio::fs::try_exists(&db_path).await.unwrap_or(false);
-    if db_exists {
-        match livrarr_db::pool::create_backup(&pool, data_dir).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Pre-migration backup failed: {e}");
-                livrarr_db::pool::release_pid_lock(data_dir);
-                std::process::exit(1);
-            }
-        }
+    // Step 7: Pre-upgrade copy, once per upgrade, before any database write.
+    // Nothing below runs until a new copy is recorded.
+    if let Err(e) = livrarr_db::upgrade_backup::prepare_pre_upgrade_copy(&pool, data_dir).await {
+        error!("Pre-upgrade copy failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
     }
 
     // Step 8: Run migrations.
@@ -801,6 +795,9 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     )
     .await
     {
+        Ok(livrarr_domain::identity_layer::IdentityAuthorityReadiness::ActivatedFresh) => {
+            livrarr_server::identity_layer::log_identity_upgrade_summary(&pool).await;
+        }
         Ok(_) => {}
         Err(error) => {
             error!("identity authority startup gate failed: {error}");
@@ -926,14 +923,25 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     // through 9e are intentionally unreachable after activation; exclusive
     // cutover owns any legacy preparation needed by a non-empty old library.
 
-    // Step 10: Clean up old backups (keep 3).
-    {
-        let data_dir_clone = data_dir.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            livrarr_db::pool::cleanup_old_backups(&data_dir_clone, 3);
-        })
-        .await
-        .ok();
+    // Synchronous startup work is done: record this binary's startup
+    // generation and the upgrade attempt's progress before anything serves.
+    if let Err(e) = livrarr_db::upgrade_backup::record_startup_completion(&pool).await {
+        error!("Recording startup completion failed: {e}");
+        livrarr_db::pool::release_pid_lock(data_dir);
+        std::process::exit(1);
+    }
+
+    // Step 10: Clean up old pre-upgrade copies (keep 3 besides protected ones).
+    match livrarr_db::upgrade_backup::protected_copies(&pool).await {
+        Ok(protected) => {
+            let data_dir_clone = data_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                livrarr_db::pool::cleanup_old_backups(&data_dir_clone, 3, &protected);
+            })
+            .await
+            .ok();
+        }
+        Err(e) => warn!("skipping pre-upgrade copy cleanup: {e}"),
     }
 
     pool

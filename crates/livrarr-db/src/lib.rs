@@ -68,6 +68,7 @@ mod sqlite_user;
 mod sqlite_work;
 mod sqlite_work_identity;
 pub use sqlite_work_identity::backfill_work_identity_ledger;
+pub mod upgrade_backup;
 
 #[cfg(test)]
 mod cross_user_isolation_tests;
