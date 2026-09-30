@@ -40,6 +40,10 @@ For build startup, accepted milestones and handoff, follow the
 Read [the continuation](build/ops/document-steward/CONTINUE.md) and only relevant
 [map entries](build/ops/document-steward/DOCUMENTS.yaml); resolve the existing seat
 from live PM state and Herdr. Routine upkeep is packet-driven within a free write window.
+**The steward pass is mandatory at every feature close (PO direction, 2026-09-30: "make
+sure it runs in the future"):** one packet folds the delivered state into `CONTINUE.md`
+and root `HANDOFF.md` before the feature is marked done; the PM commits the result. It was
+skipped at the 2026-09-26 and 2026-09-29 closes.
 
 ### Executive summaries (PO direction, 2026-09-18)
 

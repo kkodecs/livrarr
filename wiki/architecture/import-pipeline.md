@@ -56,6 +56,14 @@ policies are not interchangeable. See [workflow guide](roads.md).
   off the async executor. Cancellation must retain ownership through admitted work.
 - Path mapping must match a component boundary: `/downloads` cannot match
   `/downloads2`. Sanitize names and preserve valid UTF-8 when limiting components.
+- The "files not fully synced" size pre-check (on-disk total under 90% of the
+  indexer's advertised `grab.size`) exists for one setup: downloads on a remote
+  machine copied over by an outside tool. Since 2026-09-30 (`c48f9b02`) it runs
+  only when the grab's download client is a torrent client; usenet grabs skip it,
+  because the advertised usenet size counts repair files that unpacking removes
+  (GitHub #178). The protocol comes from the client row, never from a URL or
+  title; if the client cannot be read, the check runs. Error text and the retry
+  schedule are unchanged.
 
 Historical tag support explicitly disabled MP3/M4B writes because the upstream
 writers could buffer multi-GB media. Unfinished work changes those surfaces. Do

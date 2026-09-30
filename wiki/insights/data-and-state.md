@@ -60,6 +60,8 @@ One listWorks response is one page. The historical default request capped at 1,0
 
 Use a distinct query key under the existing works prefix so invalidation still reaches it without changing the cached single-page response shape. Inserts can move offset boundaries during the walk; the recorded policy accepts that drift rather than pretending a client loop is a database snapshot.
 
+Since 2026-09-30 (`c48f9b02`, GitHub #180) the walk has one home: `listAllWorks` in `frontend/src/hooks/useLibraryWorks.ts`. Search, Queue and History share `useLibraryWorks` (key `["works", "library"]`, app-default freshness); Missing and the Works collapsed view call `listAllWorks` with their own keys. The bare single-page `["works"]` entry is retired; a test that seeds it by hand is testing a shape production no longer produces.
+
 [Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/data-and-state.md#81-one-listworks-response-is-never-the-library).
 
 ## Source and history

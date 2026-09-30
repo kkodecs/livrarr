@@ -2,20 +2,22 @@
 
 ## Executive summary
 
-**No feature is in progress. Both recent features are delivered and pushed.** The metadata-save fix (add-metadata-preservation) was merged on 2026-09-23. The card and edit fix (card-edits-lift) closed on 2026-09-26 at main `185ae019`. Nothing is approved beyond what is merged; scope additions need the PO's explicit word. See [what is delivered](#what-is-delivered), [open items](#open-items) and [where to read next](#read-next).
+**No feature is in progress once the small-bugs-pass close gate finishes.** Two features were delivered since 2026-09-26. The upgrade fix (identity-upgrade-inplace) is pushed. The five-bug fix (small-bugs-pass) is committed on local main (`c48f9b02`, `132bf314`) and **not pushed**: the PO said "hold" on 2026-09-30, so main is two commits ahead of origin (`43b369c2`). GitHub issues #178, #180, #182 and #183 wait on that push. Nothing new is approved; scope additions need the PO's explicit word. See [what is delivered](#what-is-delivered), [open items](#open-items) and [where to read next](#read-next).
 
 ## What is delivered
 
-- **add-metadata-preservation** — merged and pushed 2026-09-23. Add now saves the metadata it already fetched; new Works monitor both ebook and audiobook; the empty "Other books by this author" panel is gone. Existing Works keep their current flags. Source: [status](build/state/STATUS-add-metadata-preservation.md).
-- **card-edits-lift** — closed 2026-09-26, main = origin/main = `185ae019`, spec v5 (`spec-card-edits-lift.md`). Title and author edits and the "different book" answer are back on. The defect that overwrote books from a review answer is deleted. The merge answer is removed; the PO dropped manual merging for good (2026-09-24): a duplicate is deleted by hand. Source: [status](build/state/STATUS-card-edits-lift.md), [handoff](build/state/handoff-card-edits-lift.md).
-- Standing PO directions: Gemini and Grok are benched, Astra is the sole reviewer (2026-09-24); let the user edit what they want, no further guardrails (2026-09-25).
+- **identity-upgrade-inplace** — closed 2026-09-29, pushed (`43b369c2`). An alpha6 library converts itself on first start, keeping confirmed matches, book status and audiobook covers, with one protected backup per upgrade. Source: [status](build/state/STATUS-identity-upgrade-inplace.md), [handoff](build/state/handoff-identity-upgrade-inplace.md), [upgrade page](wiki/deployment/upgrading.md).
+- **small-bugs-pass** — reviewed, live on port 8789, committed locally, not pushed. Fixes: duplicate pop-ups (#183), the 1,000-book cap on Search, Queue and History (#180), small usenet ebooks not importing (#178), list-undo leaving authors (#182), two unfinished code paths. Accepted limit (PO, 2026-09-29): if the author clean-up fails after books are removed, undo still finishes and some empty authors may remain; delete them by hand ([record](build/reviews/small-bugs-pass/packet-2-code/DECISION.md)). Source: [status](build/state/STATUS-small-bugs-pass.md), [retro](build/state/retro-small-bugs-pass.md), [handoff](build/state/handoff-small-bugs-pass.md), [spec](spec-small-bugs-pass.md).
+- Earlier: add-metadata-preservation (2026-09-23) and card-edits-lift (2026-09-26, `185ae019`) remain delivered; see the [previous continuation entries](build/ops/document-steward/CONTINUE.md#previous-update-2026-09-26-superseded-by-the-delivered-state-above).
+- Standing PO directions: Gemini and Grok benched, Astra sole reviewer (2026-09-24); let the user edit what they want (2026-09-25); no push without the PO's word.
+- Wiki pages updated for this pass: `wiki/domain/list.md` (undo author rule), `wiki/architecture/import-pipeline.md` (usenet size-check rule), `wiki/insights/data-and-state.md` lesson 81 (shared library loader).
 
 ## Open items
 
-Nothing is owed. Candidates awaiting a PO word, all unapproved, are in [TODO](build/plans/TODO.md): show the subtitle on the book page; generic contributor merge reverses secondary credits; delete-Work also deletes files; re-add after "different book". Also open: sorting the files parked on local branch `wip/identity-conflict-authority-stopped` (see the [proposal](build/reviews/steward-upkeep-2026-09-26/WIP-BRANCH-PROPOSAL.md)) and the `/mnt/opt` disk cleanup.
+PO decisions: push local main (held); which GitHub issues to close and when. The PM recommended the silent-failures pass as the next batch; the PO has not chosen. Other candidates, all unapproved, are in [TODO](build/plans/TODO.md). Also open: files on the parked branch `wip/identity-conflict-authority-stopped` ([proposal](build/reviews/steward-upkeep-2026-09-26/WIP-BRANCH-PROPOSAL.md)) and the housekeeping list in the identity-upgrade [status](build/state/STATUS-identity-upgrade-inplace.md#next). Small-bugs-pass live check: [LIVE-CHECK](build/reviews/small-bugs-pass/LIVE-CHECK.md).
 
 ## Read next
 
-PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), the two status files above and [TODO](build/plans/TODO.md); then ask the PO what is next. Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md).
+PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), the two status files above and [TODO](build/plans/TODO.md); confirm the close gate result for small-bugs-pass (`build/state/small-bugs-pass.yaml`, `closed_at`); then ask the PO what is next. Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md), [receipt](build/reviews/steward-upkeep-2026-09-30/RECEIPT.md).
 
-The previous root handoff (the "stopped" state of 2026-09-21) is preserved unchanged at `build/reviews/steward-upkeep-2026-09-26/predecessors/HANDOFF.md.from-wip-branch-57189130`; it was not present on main when this file was written.
+The previous root handoff is preserved unchanged at `build/reviews/steward-upkeep-2026-09-30/predecessors/HANDOFF.md`.
