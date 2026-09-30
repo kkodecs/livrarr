@@ -36,6 +36,26 @@ belongs to its authority; do not reuse an illustrative sequence without checking
 the cover/import/undo contract. Keep original good data on failure, expose recovery
 and retain ownership through admitted work during cancellation.
 
+## Showing failures in the UI
+
+As of 2026-09-30 (errors-and-delete-pass):
+
+- **Failed load:** show `ErrorState` with Retry where the content would have been.
+  Never show an empty state such as "No results" or "No notifications" for a failed
+  request.
+- **Failed action:** show `toast.error` from that mutation's own `onError`. There is
+  no global query or mutation error handler.
+- **Repeated background failures:** reading and listening position saves go through
+  one helper, `frontend/src/pages/reader/savePosition.ts`. It shows one persistent
+  warning per failure run under a fixed toast id. The next success clears the
+  warning, and nothing retries. Sonner keeps a dismissed toast mounted for about
+  200 ms. A toast re-issued under the same id during that time is merged into the
+  leaving one and lost, so the helper waits for `onDismiss` plus a margin before
+  showing a new run's warning.
+- **Book search:** when every source that was tried fails, the search answers 502
+  (`WorkServiceError::AllProvidersFailed`) and the result is never cached. Skipped
+  sources are told apart from failed ones.
+
 ## Source and history
 
 [Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/patterns/error-handling.md). Historical implementation claims retain

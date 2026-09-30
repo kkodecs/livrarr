@@ -6,6 +6,8 @@
 - *(upgrade)* One protected pre-upgrade backup per upgrade instead of one on every start; it is kept until the next upgrade finishes
 - *(upgrade)* One summary line in the log after the upgrade: books, identifiers, confirmed matches, look-alike books kept separate, shared identifiers and old questions closed
 - *(work-detail)* Show the subtitle under the title on the book page
+- *(library)* Deleting a book from its page, or several from the Books page, offers "Also delete files from disk"; it starts unticked, so files stay unless you tick it; ticked, only the book's own files inside the library folder are removed, and any that cannot be are named in a warning
+- *(library)* "Delete File" on a book's files tab now deletes the file from disk, not just Livrarr's record; if the file cannot be removed, the record stays and the error says why
 
 ### 🐛 Bug Fixes
 
@@ -15,6 +17,14 @@
 - *(import)* Small usenet ebooks import automatically; the download-size check now applies to torrents only (#178)
 - *(lists)* Undoing a list import also removes the authors it left with no books, including for imports made before this fix; authors you had before, still have books, or monitor or edited are kept (#182)
 - *(metadata)* Two unfinished error branches in the OpenLibrary and Audnexus lookups are filled in instead of crashing
+- *(search)* Book and author search show an error with Retry when the search request fails, instead of a blank page
+- *(search)* When every book source fails, book search says "Every book source failed. Try again in a moment." with Retry, instead of "No results"
+- *(reader)* An EPUB or PDF that fails to download shows "Could not load this book." with Retry, instead of loading forever or an error with no way to retry
+- *(reader)* A failed save of your place in a book or audiobook shows one "Could not save your place." warning until a save succeeds; failed EPUB bookmark changes show an error
+- *(notifications)* The bell shows an error with Retry when notifications fail to load, and reports a failed mark-read or dismiss
+- *(history)* History shows an error with Retry instead of an endless spinner when the library cannot be read
+- *(import)* Readarr import progress shows "Lost contact with Livrarr" while the server is not answering, instead of freezing
+- *(ui)* The sidebar health summary shows "Health check failed" when the check fails, instead of vanishing or going stale; it is shown to admins only
 
 ## [0.1.0-alpha6] - 2026-07-18
 
