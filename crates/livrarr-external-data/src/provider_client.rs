@@ -879,9 +879,17 @@ fn audnexus_error_outcome(
 ) -> ProviderOutcome<NormalizedWorkDetail> {
     match err {
         crate::types::ProviderFetchError::NotConfigured
-        | crate::types::ProviderFetchError::Retryable { .. }
         | crate::types::ProviderFetchError::Permanent(_)
-        | crate::types::ProviderFetchError::LayoutDrift(_) => todo!(),
+        | crate::types::ProviderFetchError::LayoutDrift(_) => ProviderOutcome::PermanentFailure {
+            reason: PermanentFailureReason::Unsupported,
+        },
+        crate::types::ProviderFetchError::Retryable {
+            retry_not_before, ..
+        } => ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: retry_not_before
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(retry_backoff_secs)),
+        },
         crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
             circuit_open_outcome(*retry_after)
         }
@@ -1263,9 +1271,17 @@ fn ol_error_outcome(
 ) -> ProviderOutcome<NormalizedWorkDetail> {
     match err {
         crate::types::ProviderFetchError::NotConfigured
-        | crate::types::ProviderFetchError::Retryable { .. }
         | crate::types::ProviderFetchError::Permanent(_)
-        | crate::types::ProviderFetchError::LayoutDrift(_) => todo!(),
+        | crate::types::ProviderFetchError::LayoutDrift(_) => ProviderOutcome::PermanentFailure {
+            reason: PermanentFailureReason::Unsupported,
+        },
+        crate::types::ProviderFetchError::Retryable {
+            retry_not_before, ..
+        } => ProviderOutcome::WillRetry {
+            reason: WillRetryReason::ServerError,
+            next_attempt_at: retry_not_before
+                .unwrap_or_else(|| Utc::now() + chrono::Duration::seconds(retry_backoff_secs)),
+        },
         crate::types::ProviderFetchError::CircuitOpen(retry_after) => {
             circuit_open_outcome(*retry_after)
         }
@@ -2616,6 +2632,81 @@ mod unit_a_retry_classification {
     // without requiring `AudnexusClient` itself to become HTTP-mockable.
     // -----------------------------------------------------------------
 
+    /// The four `ProviderFetchError` kinds that only `author_link.rs`
+    /// produces today: each maps to an explicit outcome, and `Retryable`
+    /// keeps the provider's `retry_not_before` when it gives one.
+    fn assert_author_link_only_variants(
+        map: fn(&ProviderFetchError, i64) -> ProviderOutcome<NormalizedWorkDetail>,
+        ctx: &str,
+    ) {
+        for (err, label) in [
+            (ProviderFetchError::NotConfigured, "NotConfigured"),
+            (
+                ProviderFetchError::Permanent("gone".to_string()),
+                "Permanent",
+            ),
+            (
+                ProviderFetchError::LayoutDrift("shape".to_string()),
+                "LayoutDrift",
+            ),
+        ] {
+            let outcome = map(&err, 300);
+            assert!(
+                matches!(
+                    outcome,
+                    ProviderOutcome::PermanentFailure {
+                        reason: PermanentFailureReason::Unsupported
+                    }
+                ),
+                "{ctx} {label}: expected PermanentFailure(Unsupported), got {outcome:?}"
+            );
+        }
+
+        let not_before = Utc::now() + chrono::Duration::seconds(4242);
+        let outcome = map(
+            &ProviderFetchError::Retryable {
+                error: "busy".to_string(),
+                retry_not_before: Some(not_before),
+            },
+            300,
+        );
+        match outcome {
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::ServerError,
+                next_attempt_at,
+            } => assert_eq!(
+                next_attempt_at, not_before,
+                "{ctx} Retryable: retry_not_before must be honoured"
+            ),
+            other => {
+                panic!("{ctx} Retryable(Some): expected WillRetry(ServerError), got {other:?}")
+            }
+        }
+
+        let before = Utc::now();
+        let outcome = map(
+            &ProviderFetchError::Retryable {
+                error: "busy".to_string(),
+                retry_not_before: None,
+            },
+            300,
+        );
+        let after = Utc::now();
+        match outcome {
+            ProviderOutcome::WillRetry {
+                reason: WillRetryReason::ServerError,
+                next_attempt_at,
+            } => assert!(
+                next_attempt_at >= before + chrono::Duration::seconds(300)
+                    && next_attempt_at <= after + chrono::Duration::seconds(300),
+                "{ctx} Retryable(None): expected now + 300s, got {next_attempt_at}"
+            ),
+            other => {
+                panic!("{ctx} Retryable(None): expected WillRetry(ServerError), got {other:?}")
+            }
+        }
+    }
+
     #[test]
     fn audnexus_error_outcome_classifies_every_variant() {
         assert_rate_limit(
@@ -2655,6 +2746,7 @@ mod unit_a_retry_classification {
                 ..
             }
         ));
+        assert_author_link_only_variants(audnexus_error_outcome, "Audnexus");
     }
 
     #[test]
@@ -2696,6 +2788,7 @@ mod unit_a_retry_classification {
                 ..
             }
         ));
+        assert_author_link_only_variants(ol_error_outcome, "OL");
     }
 
     /// Consumes exactly one retry-budget attempt (Unit A / budget-exempt

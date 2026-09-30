@@ -1,6 +1,6 @@
 //! Import tracking data access (Readarr library import): `ImportDb` trait + request type.
 
-use crate::{DbError, Import, LibraryItem, LibraryItemId, UserId};
+use crate::{AuthorId, DbError, Import, LibraryItem, LibraryItemId, UserId};
 
 /// Import tracking data access.
 #[trait_variant::make(Send)]
@@ -47,6 +47,24 @@ pub trait ImportDb: Send + Sync {
 
     /// Delete authors by import_id that have zero works.
     async fn delete_orphan_authors_by_import(&self, import_id: &str) -> Result<i64, DbError>;
+
+    /// Authors named on this user's works carrying `import_id`: each work's
+    /// `author_id`, `primary_author_id` and every contributor.
+    async fn list_authors_of_import_works(
+        &self,
+        import_id: &str,
+        user_id: UserId,
+    ) -> Result<Vec<AuthorId>, DbError>;
+
+    /// Delete those of `author_ids` that belong to `user_id`, were added at
+    /// or after import `import_id` began, and pass the same keep-checks as
+    /// `delete_orphan_authors_by_import`.
+    async fn delete_empty_authors_added_since_import(
+        &self,
+        import_id: &str,
+        user_id: UserId,
+        author_ids: &[AuthorId],
+    ) -> Result<i64, DbError>;
 }
 
 pub struct CreateImportDbRequest {

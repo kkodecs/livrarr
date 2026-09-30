@@ -7205,6 +7205,378 @@ async fn refresh_real_route_upgrades_below_floor_cover_through_gate() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// List-import undo and the authors of the removed works. Preview runs through
+// the production list service; confirm and undo run through the real router.
+// ---------------------------------------------------------------------------
+
+/// Previews a Goodreads-shaped CSV of `(book_id, title, author)` rows,
+/// confirms every row through `POST /api/v1/listimport/confirm`, and returns
+/// the import id.
+async fn confirm_list_import(harness: &RouteHarness, rows: &[(&str, &str, &str)]) -> String {
+    let mut csv = String::from("Book Id,Title,Author,ISBN,ISBN13,My Rating,Exclusive Shelf\n");
+    for (book_id, title, author) in rows {
+        csv.push_str(&format!("{book_id},{title},{author},=\"\",=\"\",5,read\n"));
+    }
+    let preview = harness
+        .state
+        .list_service
+        .preview(harness.user_id, csv.into_bytes())
+        .await
+        .expect("production ListImport preview");
+    let row_indices: Vec<usize> = (0..rows.len()).collect();
+    let confirm = call_router_json(
+        harness,
+        Method::POST,
+        "/api/v1/listimport/confirm".to_string(),
+        Some(json!({
+            "previewId": preview.preview_id,
+            "rowIndices": row_indices,
+            "importId": null,
+            "language": "en"
+        })),
+    )
+    .await;
+    assert!(
+        confirm.status.is_success(),
+        "list confirm: {}",
+        confirm.json
+    );
+    assert!(
+        confirm.json["results"]
+            .as_array()
+            .expect("confirm results")
+            .iter()
+            .all(|row| row["status"] == "added"),
+        "every list row must add a work: {}",
+        confirm.json
+    );
+    confirm.json["importId"]
+        .as_str()
+        .expect("confirm importId")
+        .to_string()
+}
+
+async fn undo_list_import(harness: &RouteHarness, import_id: &str) {
+    let undo = call_router_json(
+        harness,
+        Method::DELETE,
+        format!("/api/v1/listimport/{import_id}"),
+        None,
+    )
+    .await;
+    assert!(undo.status.is_success(), "list undo: {}", undo.json);
+}
+
+async fn author_id_named(harness: &RouteHarness, name: &str) -> Option<i64> {
+    sqlx::query_scalar("SELECT id FROM authors WHERE user_id=?1 AND name=?2")
+        .bind(harness.user_id)
+        .bind(name)
+        .fetch_optional(harness.db.pool())
+        .await
+        .expect("read author by name")
+}
+
+async fn author_exists(harness: &RouteHarness, author_id: i64) -> bool {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM authors WHERE user_id=?1 AND id=?2")
+        .bind(harness.user_id)
+        .bind(author_id)
+        .fetch_one(harness.db.pool())
+        .await
+        .expect("count author row");
+    n == 1
+}
+
+async fn works_credited_to(harness: &RouteHarness, author_id: i64) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM works WHERE user_id=?1 AND (author_id=?2 OR primary_author_id=?2)",
+    )
+    .bind(harness.user_id)
+    .bind(author_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("count works credited to author")
+}
+
+#[tokio::test]
+async fn list_undo_keeps_author_that_existed_before_the_import() {
+    let harness = build_route_harness().await;
+    let prior = call_router_json(
+        &harness,
+        Method::POST,
+        "/api/v1/author".to_string(),
+        Some(json!({
+            "name": "Undo Prior Author",
+            "sortName": null,
+            "olKey": "OL9182001A"
+        })),
+    )
+    .await;
+    assert!(prior.status.is_success(), "author add: {}", prior.json);
+    let prior_id = prior.json["id"].as_i64().expect("author id");
+
+    let import_id = confirm_list_import(
+        &harness,
+        &[("91001", "Undo Prior Book", "Undo Prior Author")],
+    )
+    .await;
+    assert_eq!(
+        works_credited_to(&harness, prior_id).await,
+        1,
+        "the import row must reuse the pre-existing author"
+    );
+
+    undo_list_import(&harness, &import_id).await;
+
+    assert!(
+        author_exists(&harness, prior_id).await,
+        "an author added before the import must survive its undo"
+    );
+}
+
+/// Whether any of the "empty and untouched" protections keeps this author: a
+/// credited work, contributor or series row, a monitoring field, a user-picked
+/// or user-removed route, a user name variant, or a picked link candidate.
+async fn author_has_keep_protection(harness: &RouteHarness, author_id: i64) -> bool {
+    let protected: i64 = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM authors a WHERE a.user_id=?1 AND a.id=?2 AND ( \
+             a.monitored<>0 OR a.monitor_new_items<>0 \
+             OR a.monitor_since IS NOT NULL OR a.monitor_language IS NOT NULL \
+             OR EXISTS (SELECT 1 FROM works w WHERE w.user_id=a.user_id \
+                          AND (w.author_id=a.id OR w.primary_author_id=a.id)) \
+             OR EXISTS (SELECT 1 FROM work_contributors wc \
+                          WHERE wc.user_id=a.user_id AND wc.author_id=a.id) \
+             OR EXISTS (SELECT 1 FROM series s WHERE s.user_id=a.user_id AND s.author_id=a.id) \
+             OR EXISTS (SELECT 1 FROM author_provider_routes r \
+                          WHERE r.user_id=a.user_id AND r.author_id=a.id \
+                            AND (r.provenance='user_picked' OR r.removed_by_user_id IS NOT NULL)) \
+             OR EXISTS (SELECT 1 FROM author_name_variants n \
+                          WHERE n.user_id=a.user_id AND n.author_id=a.id \
+                            AND (n.source='user' OR n.user_selected_at IS NOT NULL)) \
+             OR EXISTS (SELECT 1 FROM author_link_candidates c \
+                          WHERE c.user_id=a.user_id AND c.author_id=a.id AND c.status='picked')))",
+    )
+    .bind(harness.user_id)
+    .bind(author_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read author keep protections");
+    protected != 0
+}
+
+#[tokio::test]
+async fn list_undo_keeps_empty_author_added_before_the_import_began() {
+    let harness = build_route_harness().await;
+
+    // An earlier list import creates the author and is completed; its book is
+    // then deleted directly, leaving the author empty and carrying no
+    // keep-protection.
+    let earlier_import_id = confirm_list_import(
+        &harness,
+        &[("91005", "Undo Aged First Book", "Undo Aged Author")],
+    )
+    .await;
+    let complete = call_router_json(
+        &harness,
+        Method::POST,
+        format!("/api/v1/listimport/{earlier_import_id}/complete"),
+        None,
+    )
+    .await;
+    assert!(
+        complete.status.is_success(),
+        "list complete: {}",
+        complete.json
+    );
+    let author_id = author_id_named(&harness, "Undo Aged Author")
+        .await
+        .expect("the earlier import must create its author");
+    let first_work_id: i64 = sqlx::query_scalar(
+        "SELECT id FROM works WHERE user_id=?1 AND (author_id=?2 OR primary_author_id=?2)",
+    )
+    .bind(harness.user_id)
+    .bind(author_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("read the earlier import's work");
+    let delete = call_router_json(
+        &harness,
+        Method::DELETE,
+        format!("/api/v1/work/{first_work_id}"),
+        None,
+    )
+    .await;
+    assert!(delete.status.is_success(), "work delete: {}", delete.json);
+    assert!(
+        author_exists(&harness, author_id).await,
+        "deleting a work leaves its author"
+    );
+    assert!(
+        !author_has_keep_protection(&harness, author_id).await,
+        "before the target import the author must be empty and untouched"
+    );
+
+    // Keeps the author's added time and the target import's start apart at
+    // julianday() precision.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let import_id = confirm_list_import(
+        &harness,
+        &[("91006", "Undo Aged Second Book", "Undo Aged Author")],
+    )
+    .await;
+    assert_eq!(
+        author_id_named(&harness, "Undo Aged Author").await,
+        Some(author_id),
+        "the target import must reuse the older author"
+    );
+    assert_eq!(
+        works_credited_to(&harness, author_id).await,
+        1,
+        "the target import's book must be credited to the older author"
+    );
+    let added_before_start: i64 = sqlx::query_scalar(
+        "SELECT julianday(a.added_at) < julianday(i.started_at) \
+           FROM authors a JOIN imports i ON i.user_id=a.user_id \
+          WHERE a.user_id=?1 AND a.id=?2 AND i.id=?3",
+    )
+    .bind(harness.user_id)
+    .bind(author_id)
+    .bind(&import_id)
+    .fetch_one(harness.db.pool())
+    .await
+    .expect("compare author added time with import start");
+    assert_eq!(
+        added_before_start, 1,
+        "the author must be added before the target import began"
+    );
+
+    undo_list_import(&harness, &import_id).await;
+
+    assert!(
+        author_exists(&harness, author_id).await,
+        "an author added before the import began must survive its undo"
+    );
+}
+
+#[tokio::test]
+async fn list_undo_removes_author_the_import_created() {
+    let harness = build_route_harness().await;
+    let import_id =
+        confirm_list_import(&harness, &[("91002", "Undo Lone Book", "Undo Lone Author")]).await;
+    let author_id = author_id_named(&harness, "Undo Lone Author")
+        .await
+        .expect("the import must create its author");
+    let import_mark: Option<String> =
+        sqlx::query_scalar("SELECT import_id FROM authors WHERE user_id=?1 AND id=?2")
+            .bind(harness.user_id)
+            .bind(author_id)
+            .fetch_one(harness.db.pool())
+            .await
+            .expect("read author import mark");
+    assert_eq!(
+        import_mark, None,
+        "list confirm writes no import mark on the authors it creates"
+    );
+
+    undo_list_import(&harness, &import_id).await;
+    assert_eq!(
+        works_credited_to(&harness, author_id).await,
+        0,
+        "undo must remove the import's book"
+    );
+
+    assert!(
+        !author_exists(&harness, author_id).await,
+        "an author the import created and left with no books must be gone after undo"
+    );
+}
+
+#[tokio::test]
+async fn list_undo_keeps_import_author_with_a_work_added_outside_the_import() {
+    let harness = build_route_harness().await;
+    let import_id = confirm_list_import(
+        &harness,
+        &[("91003", "Undo Shared Book", "Undo Shared Author")],
+    )
+    .await;
+    let author_id = author_id_named(&harness, "Undo Shared Author")
+        .await
+        .expect("the import must create its author");
+
+    let direct = call_router_json(
+        &harness,
+        Method::POST,
+        "/api/v1/work".to_string(),
+        Some(json!({
+            "olKey": null,
+            "title": "Undo Shared Direct Book",
+            "authorName": "Undo Shared Author",
+            "authorOlKey": null,
+            "year": null,
+            "coverUrl": null,
+            "language": "en",
+            "detailUrl": null,
+            "coverManual": false,
+            "isbn13": null,
+            "candidateId": null,
+            "hcKey": null,
+            "grKey": null,
+            "asin": null
+        })),
+    )
+    .await;
+    assert!(direct.status.is_success(), "direct add: {}", direct.json);
+    assert_eq!(
+        works_credited_to(&harness, author_id).await,
+        2,
+        "the direct add must reuse the import's author"
+    );
+
+    undo_list_import(&harness, &import_id).await;
+
+    assert!(
+        author_exists(&harness, author_id).await,
+        "an author that still has a book must survive the undo"
+    );
+}
+
+#[tokio::test]
+async fn list_undo_keeps_import_author_the_user_monitors() {
+    let harness = build_route_harness().await;
+    let import_id = confirm_list_import(
+        &harness,
+        &[("91004", "Undo Monitored Book", "Undo Monitored Author")],
+    )
+    .await;
+    let author_id = author_id_named(&harness, "Undo Monitored Author")
+        .await
+        .expect("the import must create its author");
+
+    // `monitored: true` needs an Open Library route, which a list-import
+    // author without a provider match does not have; `monitorNewItems` is a
+    // monitoring field the same door sets without one.
+    let monitor = call_router_json(
+        &harness,
+        Method::PUT,
+        format!("/api/v1/author/{author_id}"),
+        Some(json!({ "monitorNewItems": true })),
+    )
+    .await;
+    assert!(
+        monitor.status.is_success(),
+        "author update: {}",
+        monitor.json
+    );
+
+    undo_list_import(&harness, &import_id).await;
+
+    assert!(
+        author_exists(&harness, author_id).await,
+        "an author the user monitors must survive the undo"
+    );
+}
+
 #[tokio::test]
 async fn readarr_source_cover_reaches_the_real_import_enrichment_gate_before_return() {
     let candidate_bytes = Arc::new(fixture_jpeg(640, 960));

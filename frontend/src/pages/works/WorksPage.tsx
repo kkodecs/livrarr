@@ -27,6 +27,7 @@ import {
 import { listWorks, refreshAllWorks, retryAllIncomplete, deleteWork, refreshWork, triggerRssSync, getQueue, updateWork } from "@/api";
 import type { UpdateWorkRequest } from "@/types/api";
 import { computeTotalPages } from "@/utils/pagination";
+import { listAllWorks } from "@/hooks/useLibraryWorks";
 import type { WorkSortField } from "@/utils/works";
 import { useUIStore } from "@/stores/ui";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -202,27 +203,16 @@ export function WorksPage() {
     // "works"-prefixed so every existing invalidateQueries({queryKey: ["works"]})
     // site refreshes this view too.
     queryKey: ["works", "all", worksSort, worksSortDir, mediaTypeFilter, languageFilter],
-    queryFn: async ({ signal }) => {
-      const pageSize = 1000;
-      const params = {
-        pageSize,
-        sortBy: SORT_FIELD_MAP[worksSort] ?? "date_added",
-        sortDir: worksSortDir,
-        mediaType: mediaTypeFilter || undefined,
-        language: languageFilter || undefined,
-      };
-      const first = await listWorks({ ...params, page: 1 });
-      const items = [...first.items];
-      const pages = computeTotalPages(first.total, pageSize);
-      for (let p = 2; p <= pages; p++) {
-        // A superseded walk (filter/sort changed) must not keep hammering the
-        // server behind the fresh one.
-        if (signal.aborted) throw new DOMException("aborted", "AbortError");
-        const next = await listWorks({ ...params, page: p });
-        items.push(...next.items);
-      }
-      return items;
-    },
+    queryFn: ({ signal }) =>
+      listAllWorks(
+        {
+          sortBy: SORT_FIELD_MAP[worksSort] ?? "date_added",
+          sortDir: worksSortDir,
+          mediaType: mediaTypeFilter || undefined,
+          language: languageFilter || undefined,
+        },
+        signal,
+      ),
     enabled: collapseSeries,
     // No interval refetch: this walks the whole library — mutations invalidate
     // the "works" prefix, which covers this key.

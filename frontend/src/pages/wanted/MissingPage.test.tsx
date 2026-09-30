@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,7 +7,7 @@ import MissingPage from "./MissingPage";
 import HistoryPage from "@/pages/activity/history/HistoryPage";
 import QueuePage from "@/pages/activity/queue/QueuePage";
 import SearchPage from "@/pages/search/SearchPage";
-import { listWorks, getQueue } from "@/api";
+import { listWorks, getQueue, getHistory, lookupWorks } from "@/api";
 import type { PaginatedResponse, WorkDetailResponse } from "@/types/api";
 
 // Only the network boundary is stubbed. The extra stubs beyond listWorks are the
@@ -141,13 +141,13 @@ function badgesFor(container: HTMLElement, workId: number): string[] {
 }
 
 /** Mount any page against a caller-supplied client, so several can share one cache. */
-function mountWith(queryClient: QueryClient, ui: ReactNode) {
+function mountWith(queryClient: QueryClient, ui: ReactNode, entry = "/") {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
       </MemoryRouter>,
     );
@@ -542,10 +542,18 @@ describe("MissingPage — complete-library answer", () => {
 });
 
 describe("MissingPage — sibling consumers of the shared works cache", () => {
-  // AC-007 (REQ-005), sibling half. The cache-mechanism test above proves the walk
-  // does not touch ["works"]; this one proves the three real consumers still work,
-  // by mounting each of them for real against the same client after the walk ran.
-  it("leaves History, Queue and Search rendering from the paginated works response", async () => {
+  afterEach(() => {
+    vi.mocked(getHistory).mockResolvedValue({ items: [] } as unknown as Awaited<
+      ReturnType<typeof getHistory>
+    >);
+    vi.mocked(lookupWorks).mockReset();
+  });
+
+  /**
+   * A 1,500-book library over two pages where book 1 ("Work 1") is only on
+   * page 2, plus one history row and one queue item on book 1.
+   */
+  function installPageTwoLibrary() {
     const target = makeWork(1200, {
       title: "Sibling Seam Target",
       monitorAudiobook: true,
@@ -553,14 +561,29 @@ describe("MissingPage — sibling consumers of the shared works cache", () => {
     });
     pagedMock(
       {
-        1: Array.from({ length: PAGE_SIZE }, (_, i) => filler(i + 1)),
+        1: Array.from({ length: PAGE_SIZE }, (_, i) => filler(i + 2)),
         2: [
+          filler(1),
           target,
-          ...Array.from({ length: 499 }, (_, i) => filler(2000 + i + 1)),
+          ...Array.from({ length: 498 }, (_, i) => filler(2000 + i + 1)),
         ],
       },
       1500,
     );
+    vi.mocked(getHistory).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          workId: 1,
+          eventType: "grabbed",
+          data: { title: "Some Release v1" },
+          date: new Date().toISOString(),
+        },
+      ],
+    } as unknown as Awaited<ReturnType<typeof getHistory>>);
+    vi.mocked(lookupWorks).mockResolvedValue({
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof lookupWorks>>);
     vi.mocked(getQueue).mockResolvedValue({
       items: [
         {
@@ -571,7 +594,6 @@ describe("MissingPage — sibling consumers of the shared works cache", () => {
           mediaType: "ebook",
           indexer: "TestIndexer",
           downloadClient: "TestClient",
-          // Resolved through the shared works data by workName().
           workId: 1,
           protocol: "torrent",
           error: null,
@@ -583,10 +605,82 @@ describe("MissingPage — sibling consumers of the shared works cache", () => {
       page: 1,
       perPage: 25,
     });
+  }
 
+  /** Titles History and Queue render for links to book 1. */
+  function bookOneLinkTexts(container: HTMLElement): (string | undefined)[] {
+    return Array.from(container.querySelectorAll('tbody a[href="/work/1"]')).map(
+      (a) => a.textContent?.trim(),
+    );
+  }
+
+  /** Work links listed under Search's "In Your Library" heading. */
+  function libraryMatchLinks(container: HTMLElement): (string | null)[] {
+    const section = Array.from(container.querySelectorAll("section")).find(
+      (s) => s.querySelector("h2")?.textContent?.trim() === "In Your Library",
+    );
+    return Array.from(section?.querySelectorAll('a[href^="/work/"]') ?? []).map(
+      (a) => a.getAttribute("href"),
+    );
+  }
+
+  const SEARCH_BOOK_ONE = "/search?q=Work%201";
+
+  function requestedPageTwo(): boolean {
+    return vi.mocked(listWorks).mock.calls.some((c) => c[0]?.page === 2);
+  }
+
+  // Each page opened first and alone, on an empty cache, must read the whole
+  // library by itself.
+  it("History opened first names a book that is only on page 2", async () => {
+    installPageTwoLibrary();
+    const history = mountWith(newClient(), <HistoryPage />);
+    try {
+      await vi.waitFor(
+        () => expect(bookOneLinkTexts(history.container)).toEqual(["Work 1"]),
+        { timeout: 5000 },
+      );
+    } finally {
+      history.cleanup();
+    }
+    expect(requestedPageTwo()).toBe(true);
+  }, 20_000);
+
+  it("Queue opened first names a book that is only on page 2", async () => {
+    installPageTwoLibrary();
+    const queue = mountWith(newClient(), <QueuePage />);
+    try {
+      await vi.waitFor(
+        () => expect(bookOneLinkTexts(queue.container)).toEqual(["Work 1"]),
+        { timeout: 5000 },
+      );
+    } finally {
+      queue.cleanup();
+    }
+    expect(requestedPageTwo()).toBe(true);
+  }, 20_000);
+
+  it("Search opened first lists a book that is only on page 2 in the library", async () => {
+    installPageTwoLibrary();
+    const search = mountWith(newClient(), <SearchPage />, SEARCH_BOOK_ONE);
+    try {
+      await vi.waitFor(
+        () => expect(libraryMatchLinks(search.container)).toContain("/work/1"),
+        { timeout: 5000 },
+      );
+    } finally {
+      search.cleanup();
+    }
+    expect(requestedPageTwo()).toBe(true);
+  }, 20_000);
+
+  // The three pages mounted in turn against one client after the Missing walk
+  // ran: each still names book 1, and none of them uses the bare ["works"]
+  // single-page entry.
+  it("History, Queue and Search share a whole-library read after Missing", async () => {
+    installPageTwoLibrary();
     const queryClient = newClient();
 
-    // 1. The Missing page walks the whole 2-page library, then goes away.
     const missing = mountWith(queryClient, <MissingPage />);
     try {
       await vi.waitFor(
@@ -597,68 +691,37 @@ describe("MissingPage — sibling consumers of the shared works cache", () => {
       missing.cleanup();
     }
     expect(queryClient.getQueryData(["works", "missing-all"])).toHaveLength(1500);
-    // From here on, every listWorks call belongs to a sibling.
-    vi.mocked(listWorks).mockClear();
 
-    // 2. History renders its list only once `works` is defined — if the walk had
-    //    replaced ["works"] with its raw array, `select: res => res.items` would
-    //    yield undefined and this page would sit on its loading spinner forever.
     const history = mountWith(queryClient, <HistoryPage />);
     try {
       await vi.waitFor(
-        () => expect(history.container.textContent).toContain("No activity yet"),
+        () => expect(bookOneLinkTexts(history.container)).toEqual(["Work 1"]),
         { timeout: 5000 },
       );
     } finally {
       history.cleanup();
     }
 
-    // 3. Queue names the grabbed work out of the same shared data: the real title
-    //    "Work 1", not workName()'s "Work #1" not-found fallback.
     const queue = mountWith(queryClient, <QueuePage />);
     try {
       await vi.waitFor(
-        () => expect(queue.container.textContent).toContain("Some Release v1"),
+        () => expect(bookOneLinkTexts(queue.container)).toEqual(["Work 1"]),
         { timeout: 5000 },
       );
-      const workCell = Array.from(
-        queue.container.querySelectorAll('tbody a[href^="/work/"]'),
-      ).map((a) => a.textContent?.trim());
-      expect(workCell).toEqual(["Work 1"]);
     } finally {
       queue.cleanup();
     }
 
-    // 4. Search renders its normal no-query view (the search form).
-    const search = mountWith(queryClient, <SearchPage />);
+    const search = mountWith(queryClient, <SearchPage />, SEARCH_BOOK_ONE);
     try {
       await vi.waitFor(
-        () =>
-          expect(
-            search.container.querySelector('input[placeholder^="Search by title"]'),
-          ).not.toBeNull(),
+        () => expect(libraryMatchLinks(search.container)).toContain("/work/1"),
         { timeout: 5000 },
       );
     } finally {
       search.cleanup();
     }
 
-    // The siblings' contract is unchanged: a bare listWorks() with no paging args.
-    // One call for all three — they share the ["works"] entry, which is the point.
-    const siblingCalls = vi.mocked(listWorks).mock.calls;
-    expect(siblingCalls).toHaveLength(1);
-    expect(siblingCalls.every((c) => c[0] === undefined)).toBe(true);
-
-    // And ["works"] holds only that single page, in the paginated response shape —
-    // never the walk's 1500-item array.
-    const shared = queryClient.getQueryData<PaginatedResponse<WorkDetailResponse>>(
-      ["works"],
-    );
-    expect(shared).toBeDefined();
-    expect(Array.isArray(shared)).toBe(false);
-    expect(shared?.items).toHaveLength(PAGE_SIZE);
-    expect(shared?.total).toBe(1500);
-    // The walk's own entry is still there, still separate.
-    expect(queryClient.getQueryData(["works", "missing-all"])).toHaveLength(1500);
-  });
+    expect(queryClient.getQueryData(["works"])).toBeUndefined();
+  }, 30_000);
 });

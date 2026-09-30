@@ -441,7 +441,17 @@ export function App() {
           </Routes>
         </AuthInitializer>
       </BrowserRouter>
-      <Toaster richColors position="bottom-center" />
+      <Toaster
+        theme="dark"
+        position="bottom-right"
+        visibleToasts={5}
+        gap={8}
+        expand
+        closeButton
+        toastOptions={{
+          className: "bg-zinc-800 border-border text-zinc-100",
+        }}
+      />
     </QueryClientProvider>
   );
 }

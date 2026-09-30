@@ -3,7 +3,8 @@ import { Link } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { RefreshCw, RotateCcw, Trash2 } from "lucide-react";
-import { getQueue, removeQueueItem, retryImport, listWorks } from "@/api";
+import { getQueue, removeQueueItem, retryImport } from "@/api";
+import { useLibraryWorks } from "@/hooks/useLibraryWorks";
 import { computeTotalPages } from "@/utils/pagination";
 import { workName } from "@/utils/works";
 import { PageContent } from "@/components/Page/PageContent";
@@ -46,11 +47,7 @@ export default function QueuePage() {
     queryFn: () => getQueue(page),
   });
 
-  const { data: works } = useQuery({
-    queryKey: ["works"],
-    queryFn: () => listWorks(),
-    select: (res) => res.items,
-  });
+  const { data: works } = useLibraryWorks();
 
   const removeMutation = useMutation({
     mutationFn: (id: number) => removeQueueItem(id),

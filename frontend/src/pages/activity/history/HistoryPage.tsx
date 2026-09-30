@@ -16,7 +16,8 @@ import {
   GitMerge,
   BadgeCheck,
 } from "lucide-react";
-import { getHistory, listWorks } from "@/api";
+import { getHistory } from "@/api";
+import { useLibraryWorks } from "@/hooks/useLibraryWorks";
 import { workName } from "@/utils/works";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -100,11 +101,7 @@ export default function HistoryPage() {
     select: (res) => res.items,
   });
 
-  const { data: works } = useQuery({
-    queryKey: ["works"],
-    queryFn: () => listWorks(),
-    select: (res) => res.items,
-  });
+  const { data: works } = useLibraryWorks();
 
   const sorting = useSort<HistorySortField>("date", "desc");
 

@@ -8,7 +8,7 @@ use futures::stream::{self, StreamExt};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use livrarr_db::{AuthorLinkDb, ConfigDb, ListImportDb};
+use livrarr_db::{AuthorLinkDb, ConfigDb, ImportDb, ListImportDb};
 use livrarr_domain::services::*;
 use livrarr_domain::UserId;
 
@@ -341,7 +341,7 @@ where
 
 impl<D, W, H, B, R> ListService for ListServiceImpl<D, W, H, B, R>
 where
-    D: ListImportDb + livrarr_db::WorkDb + ConfigDb + AuthorLinkDb + Send + Sync,
+    D: ListImportDb + ImportDb + livrarr_db::WorkDb + ConfigDb + AuthorLinkDb + Send + Sync,
     W: WorkService + Send + Sync,
     H: HttpFetcher + Send + Sync,
     B: BibliographyTrigger + Send + Sync,
@@ -791,6 +791,15 @@ where
             .await
             .map_err(ListServiceError::Db)?;
 
+        // Authors of the works about to go; checked again once they are gone.
+        // Without this list the authors cannot be found after the works are
+        // deleted, so a failure stops undo before anything is removed.
+        let author_ids = self
+            .db
+            .list_authors_of_import_works(import_id, user_id)
+            .await
+            .map_err(ListServiceError::Db)?;
+
         let mut works_removed: usize = 0;
         let mut works_skipped: usize = 0;
 
@@ -809,6 +818,20 @@ where
             }
         }
 
+        // Remove the authors left empty and untouched that arrived with or
+        // after this import.
+        let authors_removed = match self
+            .db
+            .delete_empty_authors_added_since_import(import_id, user_id, &author_ids)
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(import_id = %import_id, "undo: author clean-up failed: {e}");
+                0
+            }
+        };
+
         // Mark import as undone.
         if let Err(e) = self.db.mark_list_import_undone(import_id).await {
             warn!(import_id = %import_id, "mark_list_import_undone failed: {e}");
@@ -819,6 +842,7 @@ where
             import_id = %import_id,
             works_removed,
             works_skipped,
+            authors_removed,
             "list import undone"
         );
 

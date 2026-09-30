@@ -539,6 +539,72 @@ async fn test_import_grab_partial_sync_rejected() {
 }
 
 #[tokio::test]
+async fn test_import_grab_usenet_skips_size_precheck() {
+    // A SABnzbd grab's advertised size includes repair files that are gone
+    // after unpacking, so the files on disk are not compared with it.
+    let db = create_test_db().await;
+    let user_id = setup_user(&db).await;
+    let (_, work_id) = setup_prereqs(&db, user_id).await;
+    let sab = db
+        .create_download_client(CreateDownloadClientDbRequest {
+            name: "test-sab".into(),
+            implementation: DownloadClientImplementation::SABnzbd,
+            host: "localhost".into(),
+            port: 8081,
+            use_ssl: false,
+            skip_ssl_validation: false,
+            url_base: None,
+            username: None,
+            password: None,
+            category: "livrarr".into(),
+            download_dir: None,
+            enabled: true,
+            api_key: Some("sab-key".into()),
+        })
+        .await
+        .unwrap();
+
+    let source_dir = create_source_dir(&["book.epub"]);
+    let source_path = source_dir.path().to_str().unwrap();
+
+    let library_dir = tempdir().unwrap();
+    db.create_root_folder(library_dir.path().to_str().unwrap(), MediaType::Ebook)
+        .await
+        .unwrap();
+
+    let grab = db
+        .upsert_grab(CreateGrabDbRequest {
+            user_id,
+            work_id,
+            download_client_id: sab.id,
+            title: "Test Grab".into(),
+            indexer: "test-indexer".into(),
+            guid: format!("guid-{}", rand_suffix()),
+            size: Some(1000),
+            download_url: "https://indexer.example/getnzb/abc123.nzb".into(),
+            download_id: Some("SABnzbd_nzo_abc123".into()),
+            status: GrabStatus::Confirmed,
+            media_type: None,
+        })
+        .await
+        .unwrap();
+    db.set_grab_content_path(user_id, grab.id, source_path)
+        .await
+        .unwrap();
+
+    let wf = make_workflow(db.clone());
+    let result = wf.import_grab(user_id, grab.id).await.unwrap();
+
+    assert_eq!(
+        result.final_status,
+        GrabStatus::Imported,
+        "usenet grab must import what is on disk; warnings: {:?}",
+        result.warnings
+    );
+    assert_eq!(result.imported_files.len(), 1);
+}
+
+#[tokio::test]
 async fn test_import_grab_concurrent_prevents_duplicates() {
     // WF-IMPORT-004, test.import.concurrent_lock: Concurrent imports for same work produce no duplicates or corruption
     let db = create_test_db().await;

@@ -8,11 +8,13 @@ import type { HistoryResponse } from "@/types/api";
 
 vi.mock("@/api", () => ({
   getHistory: vi.fn().mockResolvedValue({ items: [] }),
-  listWorks: vi.fn().mockResolvedValue({ items: [] }),
+  listWorks: vi
+    .fn()
+    .mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 1000 }),
 }));
 
 describe("HistoryPage", () => {
-  it("renders a row with an unrecognized event kind generically, without throwing", () => {
+  it("renders a row with an unrecognized event kind generically, without throwing", async () => {
     const row = {
       id: 1,
       workId: null,
@@ -25,7 +27,6 @@ describe("HistoryPage", () => {
       defaultOptions: { queries: { retry: false, staleTime: Infinity } },
     });
     queryClient.setQueryData(["history", "", false], { items: [row] });
-    queryClient.setQueryData(["works"], { items: [] });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -41,7 +42,9 @@ describe("HistoryPage", () => {
       );
     });
 
-    expect(container.textContent).toContain("somethingFromTheFuture");
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain("somethingFromTheFuture"),
+    );
     expect(container.querySelector("tbody tr svg")).not.toBeNull();
 
     act(() => {

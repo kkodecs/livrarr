@@ -7,8 +7,7 @@ import {
   Search,
   AlertCircle,
 } from "lucide-react";
-import { listWorks } from "@/api";
-import { computeTotalPages } from "@/utils/pagination";
+import { listAllWorks } from "@/hooks/useLibraryWorks";
 import { sortWorks } from "@/utils/works";
 import type { WorkSortField } from "@/utils/works";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -39,28 +38,11 @@ export default function MissingPage() {
     error,
     refetch,
   } = useQuery({
-    // A single page is not the library: GET /work caps page_size at 1000, so any
-    // work outside that window would look "not missing". Walk every page.
-    // "works"-prefixed so every existing invalidateQueries({queryKey: ["works"]})
-    // site refreshes this view too; distinct from ["works"], which Search, Queue
-    // and History read as a single paginated response.
+    // The whole library, so no work outside one page's window looks "not
+    // missing". "works"-prefixed so every existing
+    // invalidateQueries({queryKey: ["works"]}) site refreshes this view too.
     queryKey: ["works", "missing-all"],
-    queryFn: async ({ signal }) => {
-      const pageSize = 1000;
-      const first = await listWorks({ pageSize, page: 1 });
-      const items = [...first.items];
-      let pages = computeTotalPages(first.total, pageSize);
-      for (let p = 2; p <= pages; p++) {
-        // A superseded walk must not keep hammering the server behind the fresh one.
-        if (signal.aborted) throw new DOMException("aborted", "AbortError");
-        const next = await listWorks({ pageSize, page: p });
-        items.push(...next.items);
-        // The library can grow mid-walk (a list import runs while the page is
-        // open), so the bound comes from the newest total, not page 1's.
-        pages = computeTotalPages(next.total, pageSize);
-      }
-      return items;
-    },
+    queryFn: ({ signal }) => listAllWorks({}, signal),
     // The walk stays inside one queryFn, so isLoading covers all of it — the
     // empty state can never render over a half-fetched library.
     staleTime: 60_000,

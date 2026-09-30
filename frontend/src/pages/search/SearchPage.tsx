@@ -3,7 +3,8 @@ import { useSearchParams, useNavigate, Link } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Search, Plus, Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
-import { lookupWorks, addWork, listWorks, getMetadataConfig } from "@/api";
+import { lookupWorks, addWork, getMetadataConfig } from "@/api";
+import { useLibraryWorks } from "@/hooks/useLibraryWorks";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -75,11 +76,7 @@ export default function SearchPage() {
     return SUPPORTED_LANGUAGES.filter((l) => codes.includes(l.code));
   }, [metaConfig]);
 
-  const { data: allWorks } = useQuery({
-    queryKey: ["works"],
-    queryFn: () => listWorks(),
-    select: (res) => res.items,
-  });
+  const { data: allWorks } = useLibraryWorks();
 
   const lowerQuery = query.toLowerCase();
   const libraryMatches = query

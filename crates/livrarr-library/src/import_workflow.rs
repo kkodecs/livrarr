@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use livrarr_db::{
     record_history, ChapterDb, ConfigDb, CreateImportIntentDbRequest, CreateLibraryItemDbRequest,
-    GrabDb, HistoryDb, ImportIntent, ImportIntentDb, ImportIntentState, KashLinkDb, LibraryItemDb,
-    NewKashLink, RemotePathMappingDb, RootFolderDb, WorkDb,
+    DownloadClientDb, GrabDb, HistoryDb, ImportIntent, ImportIntentDb, ImportIntentState,
+    KashLinkDb, LibraryItemDb, NewKashLink, RemotePathMappingDb, RootFolderDb, WorkDb,
 };
 use livrarr_domain::history_events;
 use livrarr_domain::keyed_mutex::KeyedMutex;
 use livrarr_domain::services::{
-    ChapterExtractionError, ChapterExtractor, FailedFile, ImportFileOutcome, ImportFileRequest,
-    ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile, Materialization, SkipReason,
-    SkippedFile,
+    ChapterExtractionError, ChapterExtractor, DownloadProtocol, FailedFile, ImportFileOutcome,
+    ImportFileRequest, ImportResult, ImportWorkflow, ImportWorkflowError, ImportedFile,
+    Materialization, SkipReason, SkippedFile,
 };
 use livrarr_domain::{
     classify_file, sanitize_path_component, DbError, GrabId, GrabStatus, MediaType, UserId, WorkId,
@@ -2360,6 +2360,7 @@ async fn extract_chapters_and_kash<D>(
 impl<D> ImportWorkflow for ImportWorkflowImpl<D>
 where
     D: GrabDb
+        + DownloadClientDb
         + WorkDb
         + LibraryItemDb
         + RootFolderDb
@@ -2501,8 +2502,20 @@ where
         // on-disk size (every file under the source path, not just the
         // ones Livrarr recognizes as importable) against grab.size, so a
         // bundled cover image, NFO, or sample file doesn't read as a
-        // partial download.
-        if let Some(expected_size) = grab.size {
+        // partial download. Usenet grabs skip it: their advertised size
+        // counts repair files that unpacking removes. When the grab's
+        // client cannot be read, the check runs.
+        let is_usenet = match self.db.get_download_client(grab.download_client_id).await {
+            Ok(client) => client.implementation.protocol() == DownloadProtocol::Usenet,
+            Err(e) => {
+                tracing::warn!(
+                    grab_id = grab_id,
+                    "import: could not read download client, size pre-check runs: {e}"
+                );
+                false
+            }
+        };
+        if let Some(expected_size) = grab.size.filter(|_| !is_usenet) {
             if expected_size > 0 {
                 let local_total = total_size as i64;
 
