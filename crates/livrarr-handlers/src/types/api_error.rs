@@ -226,6 +226,9 @@ impl From<livrarr_domain::services::WorkServiceError> for ApiError {
             WorkServiceError::Validation(msg) => ApiError::BadRequest(msg),
             WorkServiceError::Enrichment(msg) => ApiError::Internal(msg),
             WorkServiceError::Cover(msg) => ApiError::Internal(msg),
+            WorkServiceError::AllProvidersFailed => {
+                ApiError::BadGateway("Every book source failed. Try again in a moment.".into())
+            }
             WorkServiceError::Db(db_err) => ApiError::Db(db_err),
         }
     }
@@ -336,6 +339,7 @@ impl From<livrarr_domain::services::FileServiceError> for ApiError {
             FileServiceError::RootFolderNotFound => ApiError::NotFound,
             FileServiceError::Forbidden => ApiError::Forbidden,
             FileServiceError::BadRequest(msg) => ApiError::BadRequest(msg),
+            FileServiceError::NotRemoved(reason) => ApiError::Conflict { reason },
             FileServiceError::Io(io_err) => ApiError::Internal(format!("I/O error: {io_err}")),
             FileServiceError::Db(db_err) => ApiError::Db(db_err),
         }

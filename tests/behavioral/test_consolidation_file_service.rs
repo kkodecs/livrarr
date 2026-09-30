@@ -241,10 +241,13 @@ async fn test_file_get_nonexistent_returns_not_found() {
 async fn test_file_delete_removes_db_record() {
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("test")).unwrap();
+    std::fs::write(tmp.path().join("test/file.epub"), b"epub data").unwrap();
     let (_root_id, _work_id, item_id) = seed_library_item(
         &db,
         user_id,
-        "/tmp/root",
+        tmp.path().to_str().unwrap(),
         "test/file.epub",
         MediaType::Ebook,
     )
@@ -254,9 +257,31 @@ async fn test_file_delete_removes_db_record() {
     svc.delete(user_id, item_id).await.unwrap();
 
     // DB record gone
-    let svc2 = FileServiceImpl::new(db);
+    let svc2 = FileServiceImpl::new(db.clone());
     let result = svc2.get(user_id, item_id).await;
     assert!(matches!(result, Err(FileServiceError::NotFound)));
+
+    // One fileDeleted event for the removed item
+    let events = livrarr_db::HistoryDb::list_history(
+        &db,
+        user_id,
+        livrarr_db::HistoryFilter {
+            event_type: Some(livrarr_domain::EventType::FileDeleted),
+            work_id: None,
+            start_date: None,
+            end_date: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.data["path"].as_str() == Some("test/file.epub"))
+            .count(),
+        1,
+        "expected one fileDeleted event for the removed item"
+    );
 }
 
 // =============================================================================

@@ -285,6 +285,7 @@ export function WorksPage() {
   const [editorMode, setEditorMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteFiles, setDeleteFiles] = useState(false);
 
   const toggleEditorMode = useCallback(() => {
     setEditorMode((prev) => {
@@ -385,16 +386,34 @@ export function WorksPage() {
   const handleBulkDelete = async () => {
     const ids = Array.from(selectedIds);
     const results = await Promise.allSettled(
-      ids.map((id) => deleteWork(id)),
+      ids.map((id) => deleteWork(id, { deleteFiles })),
     );
     const succeeded = results.filter((r) => r.status === "fulfilled").length;
     const failed = results.filter((r) => r.status === "rejected").length;
-    if (failed === 0) {
-      toast.success(`Deleted ${succeeded} work${succeeded !== 1 ? "s" : ""}`);
+    const warnings = results.flatMap((r) =>
+      r.status === "fulfilled" ? r.value.warnings : [],
+    );
+    const summary =
+      failed === 0
+        ? `Deleted ${succeeded} work${succeeded !== 1 ? "s" : ""}`
+        : `Deleted ${succeeded}, failed ${failed} of ${ids.length} works`;
+    if (failed === 0 && warnings.length === 0) {
+      toast.success(summary);
+    } else if (warnings.length === 0) {
+      toast.warning(summary);
     } else {
-      toast.warning(
-        `Deleted ${succeeded}, failed ${failed} of ${ids.length} works`,
-      );
+      const shown = warnings.slice(0, 5);
+      const more = warnings.length - shown.length;
+      toast.warning(summary, {
+        description: (
+          <div>
+            {shown.map((w, i) => (
+              <div key={i}>{w}</div>
+            ))}
+            {more > 0 && <div>and {more} more</div>}
+          </div>
+        ),
+      });
     }
     setSelectedIds(new Set());
     queryClient.invalidateQueries({ queryKey: ["works"] });
@@ -574,7 +593,10 @@ export function WorksPage() {
               {selectedIds.size} selected
             </span>
             <button
-              onClick={() => setShowDeleteModal(true)}
+              onClick={() => {
+                setDeleteFiles(false);
+                setShowDeleteModal(true);
+              }}
               className="btn-danger inline-flex items-center gap-1.5 text-sm"
             >
               <Trash2 size={14} />
@@ -725,11 +747,25 @@ export function WorksPage() {
         open={showDeleteModal}
         onOpenChange={setShowDeleteModal}
         title={`Delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""}?`}
-        description={`Permanently delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""} and all associated files on disk. This cannot be undone.`}
+        description={
+          deleteFiles
+            ? `Delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""} from your library? Their files will be permanently deleted from disk. This cannot be undone.`
+            : `Delete ${selectedIds.size} work${selectedIds.size !== 1 ? "s" : ""} from your library? Their files stay on disk.`
+        }
         confirmLabel="Delete"
         variant="danger"
         onConfirm={handleBulkDelete}
-      />
+      >
+        <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={deleteFiles}
+            onChange={(e) => setDeleteFiles(e.target.checked)}
+            className="rounded border-zinc-600 bg-zinc-800"
+          />
+          Also delete files from disk
+        </label>
+      </ConfirmModal>
     </>
   );
 }

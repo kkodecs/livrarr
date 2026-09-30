@@ -34,6 +34,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + livrarr_db::RootFolderDb
         + GrabDb
         + ProvenanceDb
         + livrarr_db::SourceReferenceDb
@@ -223,6 +224,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + livrarr_db::RootFolderDb
         + GrabDb
         + ProvenanceDb
         + livrarr_db::SourceReferenceDb

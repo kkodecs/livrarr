@@ -289,8 +289,20 @@ pub enum WorkServiceError {
     Enrichment(String),
     #[error("cover download failed: {0}")]
     Cover(String),
+    /// Free-text search attempted at least one book source and every
+    /// attempted source failed.
+    #[error("every book source failed")]
+    AllProvidersFailed,
     #[error("database error: {0}")]
     Db(#[from] DbError),
+}
+
+/// Result of deleting a work: files actually removed from disk, and one
+/// `"{relative path}: {reason}"` warning per file that could not be removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkDeleteOutcome {
+    pub files_removed: usize,
+    pub warnings: Vec<String>,
 }
 
 /// Outcome of one [`WorkService::converge_work`] pass, driving the background
@@ -453,7 +465,15 @@ pub trait WorkService: Send + Sync {
         work_id: WorkId,
         req: UpdateWorkRequest,
     ) -> Result<Work, WorkServiceError>;
-    async fn delete(&self, user_id: UserId, work_id: WorkId) -> Result<(), WorkServiceError>;
+    /// Deletes the work. With `delete_files`, each library file is then
+    /// removed under [`crate::library_path::remove_library_file`]; without it,
+    /// no file is touched.
+    async fn delete(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        delete_files: bool,
+    ) -> Result<WorkDeleteOutcome, WorkServiceError>;
     async fn refresh(
         &self,
         user_id: UserId,

@@ -153,7 +153,12 @@ impl WorkService for BulkRefreshStub {
         unimplemented!("not exercised")
     }
 
-    async fn delete(&self, _user_id: UserId, _work_id: WorkId) -> Result<(), WorkServiceError> {
+    async fn delete(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _delete_files: bool,
+    ) -> Result<livrarr_domain::services::WorkDeleteOutcome, WorkServiceError> {
         unimplemented!("not exercised")
     }
 

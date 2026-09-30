@@ -661,7 +661,7 @@ async fn test_work_delete_removes_work_and_library_items() {
         .unwrap();
     assert_eq!(items_before.len(), 1);
 
-    svc.delete(user_id, added.work.id).await.unwrap();
+    svc.delete(user_id, added.work.id, false).await.unwrap();
 
     // Work is gone
     assert!(matches!(
@@ -687,7 +687,7 @@ async fn test_work_delete_nonexistent_returns_not_found() {
     let user_id = setup_user(&db).await;
     let svc = WorkServiceImpl::without_enrichment(db, stub_http(), test_data_dir());
 
-    let result = svc.delete(user_id, 99999).await;
+    let result = svc.delete(user_id, 99999, false).await;
     assert!(matches!(result, Err(WorkServiceError::NotFound)));
 }
 
@@ -704,7 +704,7 @@ async fn test_work_delete_missing_cover_still_ok() {
         .unwrap();
 
     // Delete should succeed even without a cover file
-    let result = svc.delete(user_id, added.work.id).await;
+    let result = svc.delete(user_id, added.work.id, false).await;
     assert!(result.is_ok());
 }
 

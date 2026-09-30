@@ -38,6 +38,10 @@ pub enum FileServiceError {
     Forbidden,
     #[error("bad request: {0}")]
     BadRequest(String),
+    /// The library file was not removed from disk; carries
+    /// `"{relative path}: {reason}"`. The record is kept.
+    #[error("{0}")]
+    NotRemoved(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]

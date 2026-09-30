@@ -143,15 +143,28 @@ async fn wh_file_service_delete_records_one_file_deleted() {
     let db = create_test_db().await;
     let user_id = seed_user(&db).await;
     let work_id = seed_work(&db, user_id, WORK_TITLE).await;
-    let item_id = seed_library_item(
-        &db,
-        user_id,
-        work_id,
-        "library-road/book.epub",
-        MediaType::Ebook,
-        None,
-    )
-    .await;
+    let library = tempfile::tempdir().expect("library root folder");
+    std::fs::create_dir_all(library.path().join("library-road")).unwrap();
+    std::fs::write(library.path().join("library-road/book.epub"), b"epub").unwrap();
+    let root = db
+        .create_root_folder(library.path().to_str().unwrap(), MediaType::Ebook)
+        .await
+        .unwrap();
+    let item_id = db
+        .create_library_item(CreateLibraryItemDbRequest {
+            user_id,
+            work_id,
+            root_folder_id: root.id,
+            path: "library-road/book.epub".to_string(),
+            media_type: MediaType::Ebook,
+            file_size: 1024,
+            import_id: None,
+            tag_status: TagStatus::Pending,
+            tagged_at_generation: 0,
+        })
+        .await
+        .unwrap()
+        .id;
 
     FileServiceImpl::new(db.clone())
         .delete(user_id, item_id)
@@ -160,6 +173,13 @@ async fn wh_file_service_delete_records_one_file_deleted() {
 
     let events = history(&db, user_id).await;
     assert_one_file_deleted(&events, "library-road/book.epub", "ebook");
+    assert!(
+        matches!(
+            FileServiceImpl::new(db.clone()).get(user_id, item_id).await,
+            Err(livrarr_domain::services::FileServiceError::NotFound)
+        ),
+        "the library item record is gone"
+    );
 }
 
 #[tokio::test]
@@ -229,7 +249,7 @@ async fn wh_work_delete_records_one_unattached_work_deleted_and_preserves_prior_
         livrarr_behavioral::stubs::StubHttpFetcher::new(),
         tempfile::tempdir().expect("test data dir").keep(),
     );
-    svc.delete(user_id, work_id).await.unwrap();
+    svc.delete(user_id, work_id, false).await.unwrap();
 
     let events = history(&db, user_id).await;
     assert_eq!(
@@ -244,7 +264,11 @@ async fn wh_work_delete_records_one_unattached_work_deleted_and_preserves_prior_
     assert_eq!(event.work_id, None, "workDeleted row must end unattached");
     assert_eq!(event.data["work_title"].as_str(), Some(WORK_TITLE));
     assert_eq!(event.data["work_author"].as_str(), Some(WORK_AUTHOR));
-    assert_eq!(event.data["files_removed"].as_u64(), Some(2));
+    assert_eq!(
+        event.data["files_removed"].as_u64(),
+        Some(0),
+        "files_removed counts files actually removed; neither item has a file on disk"
+    );
     assert!(event.data.get("undo").is_none());
 
     let prior = events

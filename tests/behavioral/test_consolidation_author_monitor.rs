@@ -212,8 +212,13 @@ impl WorkService for StubWorkService {
         Ok(Work::default())
     }
 
-    async fn delete(&self, _user_id: UserId, _work_id: WorkId) -> Result<(), WorkServiceError> {
-        Ok(())
+    async fn delete(
+        &self,
+        _user_id: UserId,
+        _work_id: WorkId,
+        _delete_files: bool,
+    ) -> Result<livrarr_domain::services::WorkDeleteOutcome, WorkServiceError> {
+        Ok(Default::default())
     }
 
     async fn refresh(

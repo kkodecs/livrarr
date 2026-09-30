@@ -16655,3 +16655,1096 @@ red_tests! {
     cover_ui_one_shared_panel_three_slot_states_and_source_only_labels => red_frontend_cover(),
     handler_compile_wall_identity_review_route_smoke => red_handler_identity_route_smoke(),
 }
+
+// ---------------------------------------------------------------------------
+// Deleting a work with opt-in file removal, through the production
+// `DELETE /api/v1/work/{id}` route. Root folders live in temporary folders and
+// library items are written by `SqliteDb::create_library_item`, the writer
+// import uses. Filesystem changes made after seeding stand for a user or
+// another tool changing the library after import. The removal count is read
+// back through the production history route.
+// ---------------------------------------------------------------------------
+
+async fn seed_delete_root(harness: &RouteHarness, path: &std::path::Path, media: MediaType) -> i64 {
+    std::fs::create_dir_all(path).expect("create delete-case root folder");
+    harness
+        .db
+        .create_root_folder(path.to_str().expect("UTF-8 root path"), media)
+        .await
+        .expect("seed delete-case root folder")
+        .id
+}
+
+fn write_library_file(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().expect("library file parent"))
+        .expect("create library file folder");
+    std::fs::write(path, b"library file bytes").expect("write library file");
+}
+
+async fn seed_delete_item(
+    harness: &RouteHarness,
+    work_id: i64,
+    root_id: i64,
+    relative: &str,
+    media: MediaType,
+) -> i64 {
+    harness
+        .db
+        .create_library_item(CreateLibraryItemDbRequest {
+            user_id: harness.user_id,
+            work_id,
+            root_folder_id: root_id,
+            path: relative.to_string(),
+            media_type: media,
+            file_size: 18,
+            import_id: None,
+            tag_status: TagStatus::Pending,
+            tagged_at_generation: 0,
+        })
+        .await
+        .expect("seed delete-case library item")
+        .id
+}
+
+async fn seed_delete_work(harness: &RouteHarness, suffix: &str) -> (i64, String) {
+    let work_id = seed_route_work(harness, suffix).await;
+    let title = harness
+        .db
+        .get_work(harness.user_id, work_id)
+        .await
+        .expect("read seeded work title")
+        .title;
+    (work_id, title)
+}
+
+async fn delete_work_route(harness: &RouteHarness, work_id: i64, query: &str) -> RouteResponse {
+    call_router_json(
+        harness,
+        Method::DELETE,
+        format!("/api/v1/work/{work_id}{query}"),
+        None,
+    )
+    .await
+}
+
+async fn work_status(harness: &RouteHarness, work_id: i64) -> StatusCode {
+    call_router_json(
+        harness,
+        Method::GET,
+        format!("/api/v1/work/{work_id}"),
+        None,
+    )
+    .await
+    .status
+}
+
+fn delete_warnings(response: &RouteResponse) -> Vec<String> {
+    response.json["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("delete response carries warnings: {}", response.json))
+        .iter()
+        .map(|w| w.as_str().expect("warning is a string").to_string())
+        .collect()
+}
+
+/// `files_removed` of the `workDeleted` history record for `title`.
+async fn files_removed_for(harness: &RouteHarness, title: &str) -> Option<u64> {
+    let history = call_router_json(
+        harness,
+        Method::GET,
+        "/api/v1/history?eventType=workDeleted&page_size=500".to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(history.status, StatusCode::OK, "history: {}", history.json);
+    let matching: Vec<&Value> = history.json["items"]
+        .as_array()
+        .expect("history items")
+        .iter()
+        .filter(|event| event["data"]["work_title"] == title)
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "exactly one workDeleted record for {title}: {}",
+        history.json
+    );
+    matching[0]["data"]["files_removed"].as_u64()
+}
+
+fn assert_one_warning_naming(warnings: &[String], relative: &str) {
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected exactly one warning, naming {relative}; got {warnings:?}"
+    );
+    assert!(
+        warnings[0].starts_with(&format!("{relative}: ")),
+        "the warning names {relative}: {warnings:?}"
+    );
+}
+
+/// Restores a folder's permissions when dropped, so a failing case still lets
+/// the temporary folder be cleaned up.
+struct WritableOnDrop(PathBuf);
+
+impl Drop for WritableOnDrop {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[tokio::test]
+async fn delete_work_without_delete_files_keeps_files_and_records_zero_removed() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+
+    let mut recorded = Vec::new();
+    for query in ["", "?deleteFiles=false"] {
+        let (work_id, title) = seed_delete_work(&harness, "keep-files").await;
+        let relative = format!("Keep Author/{work_id}.epub");
+        write_library_file(&root.join(&relative));
+        seed_delete_item(&harness, work_id, root_id, &relative, MediaType::Ebook).await;
+
+        let response = delete_work_route(&harness, work_id, query).await;
+        assert_eq!(
+            response.status,
+            StatusCode::OK,
+            "{query}: {}",
+            response.json
+        );
+        assert!(
+            root.join(&relative).is_file(),
+            "{query:?}: keeping files leaves the file on disk"
+        );
+        assert_eq!(
+            delete_warnings(&response),
+            Vec::<String>::new(),
+            "{query:?}"
+        );
+        assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+        recorded.push((query, files_removed_for(&harness, &title).await));
+    }
+    assert_eq!(
+        recorded,
+        vec![("", Some(0)), ("?deleteFiles=false", Some(0))],
+        "keeping files records files_removed 0"
+    );
+}
+
+#[tokio::test]
+async fn delete_files_removes_regular_files_and_warns_for_a_folder_entry() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "mixed-entries").await;
+
+    let first = "Mixed Author/one.epub";
+    let folder = "Mixed Author/two.epub";
+    let third = "Mixed Author/three.epub";
+    let absent = "Mixed Author/four.epub";
+    write_library_file(&root.join(first));
+    std::fs::create_dir_all(root.join(folder)).expect("folder at the second item's path");
+    write_library_file(&root.join(third));
+    for relative in [first, folder, third, absent] {
+        seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    }
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(!root.join(first).exists(), "the first file is removed");
+    assert!(!root.join(third).exists(), "the third file is removed");
+    assert!(root.join(folder).is_dir(), "a folder is never removed");
+    assert_one_warning_naming(&delete_warnings(&response), folder);
+    assert_eq!(files_removed_for(&harness, &title).await, Some(2));
+}
+
+#[tokio::test]
+async fn delete_files_warns_for_a_file_whose_removal_fails_and_removes_the_rest() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "read-only-folder").await;
+
+    let first = "Open Author/one.epub";
+    let locked = "Locked Author/two.epub";
+    let other_folder = "Other Author/three.epub";
+    let absent = "Open Author/four.epub";
+    for relative in [first, locked, other_folder] {
+        write_library_file(&root.join(relative));
+    }
+    for relative in [first, locked, other_folder, absent] {
+        seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    }
+
+    let locked_folder = root.join("Locked Author");
+    let _restore = WritableOnDrop(locked_folder.clone());
+    std::fs::set_permissions(&locked_folder, std::fs::Permissions::from_mode(0o555))
+        .expect("make the folder read-only after seeding");
+    let probe = locked_folder.join("permission-probe");
+    if std::fs::write(&probe, b"probe").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        eprintln!(
+            "SKIPPED delete_files_warns_for_a_file_whose_removal_fails_and_removes_the_rest: \
+             running as root, which ignores file permissions, so a read-only folder cannot \
+             make a removal fail"
+        );
+        return;
+    }
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(!root.join(first).exists(), "the first file is removed");
+    assert!(
+        !root.join(other_folder).exists(),
+        "the file in another folder is removed"
+    );
+    assert!(
+        root.join(locked).is_file(),
+        "the read-only folder's file survives"
+    );
+    assert_one_warning_naming(&delete_warnings(&response), locked);
+    assert_eq!(files_removed_for(&harness, &title).await, Some(2));
+}
+
+#[tokio::test]
+async fn delete_files_never_follows_a_link_to_another_books_file() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_a, title_a) = seed_delete_work(&harness, "link-a").await;
+    let (work_b, _) = seed_delete_work(&harness, "link-b").await;
+
+    let a = "Link Author/a.epub";
+    let b = "Link Author/b.epub";
+    write_library_file(&root.join(a));
+    write_library_file(&root.join(b));
+    seed_delete_item(&harness, work_a, root_id, a, MediaType::Ebook).await;
+    seed_delete_item(&harness, work_b, root_id, b, MediaType::Ebook).await;
+    std::fs::remove_file(root.join(a)).expect("drop A's file after seeding");
+    std::os::unix::fs::symlink(root.join(b), root.join(a)).expect("link A's path to B's file");
+
+    let response = delete_work_route(&harness, work_a, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_a).await, StatusCode::NOT_FOUND);
+    assert!(root.join(b).is_file(), "book B's file survives");
+    assert_eq!(work_status(&harness, work_b).await, StatusCode::OK);
+    assert_one_warning_naming(&delete_warnings(&response), a);
+    assert_eq!(files_removed_for(&harness, &title_a).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_files_never_follows_a_parent_folder_link_outside_the_root() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "parent-link").await;
+
+    let outside_folder = library.path().join("outside").join("Real Folder");
+    let outside_file = outside_folder.join("book.epub");
+    write_library_file(&outside_file);
+    let relative = "Linked Folder/book.epub";
+    seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    std::os::unix::fs::symlink(&outside_folder, root.join("Linked Folder"))
+        .expect("link the item's folder outside the root");
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(outside_file.is_file(), "the file outside the root survives");
+    assert_one_warning_naming(&delete_warnings(&response), relative);
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_files_never_follows_an_item_link_to_a_file_outside_the_root() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "item-link").await;
+
+    let outside_file = library.path().join("outside").join("target.epub");
+    write_library_file(&outside_file);
+    let relative = "Item Link Author/book.epub";
+    std::fs::create_dir_all(root.join("Item Link Author")).expect("item folder");
+    seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    std::os::unix::fs::symlink(&outside_file, root.join(relative))
+        .expect("link the item to a file outside the root");
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(outside_file.is_file(), "the file outside the root survives");
+    assert_one_warning_naming(&delete_warnings(&response), relative);
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_files_with_the_root_moved_away_warns_per_item() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "root-moved").await;
+
+    let first = "Moved Author/one.epub";
+    let second = "Moved Author/two.epub";
+    for relative in [first, second] {
+        write_library_file(&root.join(relative));
+        seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    }
+    std::fs::rename(&root, library.path().join("ebooks-moved")).expect("move the root away");
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    let warnings = delete_warnings(&response);
+    assert_eq!(warnings.len(), 2, "one warning per item: {warnings:?}");
+    for relative in [first, second] {
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.starts_with(&format!("{relative}: ")))
+                .count(),
+            1,
+            "one warning names {relative}: {warnings:?}"
+        );
+    }
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_files_warns_when_the_parent_folder_is_a_link_loop() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "parent-loop").await;
+
+    let relative = "Loop Folder/book.epub";
+    seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    std::os::unix::fs::symlink(root.join("Loop Folder"), root.join("Loop Folder"))
+        .expect("replace the parent folder with a link to itself");
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert_one_warning_naming(&delete_warnings(&response), relative);
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_files_is_silent_when_the_parent_folder_is_missing() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "parent-missing").await;
+
+    let relative = "Missing Folder/book.epub";
+    seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert_eq!(delete_warnings(&response), Vec::<String>::new());
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn read_and_email_results_for_moved_root_parent_loop_and_missing_parent() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let ebooks = library.path().join("ebooks");
+    let audiobooks = library.path().join("audiobooks");
+    let ebook_root = seed_delete_root(&harness, &ebooks, MediaType::Ebook).await;
+    let audio_root = seed_delete_root(&harness, &audiobooks, MediaType::Audiobook).await;
+    let work_id = seed_route_work(&harness, "read-email-guard").await;
+
+    let loop_item = seed_delete_item(
+        &harness,
+        work_id,
+        ebook_root,
+        "Loop Folder/book.epub",
+        MediaType::Ebook,
+    )
+    .await;
+    std::os::unix::fs::symlink(ebooks.join("Loop Folder"), ebooks.join("Loop Folder"))
+        .expect("parent folder link loop");
+    let missing_item = seed_delete_item(
+        &harness,
+        work_id,
+        ebook_root,
+        "Missing Folder/book.epub",
+        MediaType::Ebook,
+    )
+    .await;
+    write_library_file(&audiobooks.join("Moved Author/book.m4b"));
+    let moved_item = seed_delete_item(
+        &harness,
+        work_id,
+        audio_root,
+        "Moved Author/book.m4b",
+        MediaType::Audiobook,
+    )
+    .await;
+    std::fs::rename(&audiobooks, library.path().join("audiobooks-moved"))
+        .expect("move the audiobook root away");
+
+    for (label, item_id) in [
+        ("parent link loop", loop_item),
+        ("parent folder missing", missing_item),
+        ("root moved away", moved_item),
+    ] {
+        let download = call_router_json(
+            &harness,
+            Method::GET,
+            format!("/api/v1/workfile/{item_id}/download"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            download.status,
+            StatusCode::NOT_FOUND,
+            "{label}: download result: {}",
+            download.json
+        );
+        let email = call_router_json(
+            &harness,
+            Method::POST,
+            format!("/api/v1/workfile/{item_id}/send-email"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            email.status,
+            StatusCode::NOT_FOUND,
+            "{label}: email result: {}",
+            email.json
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_files_removes_an_ebook_and_an_audiobook_from_their_own_roots() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let ebooks = library.path().join("ebooks");
+    let audiobooks = library.path().join("audiobooks");
+    let ebook_root = seed_delete_root(&harness, &ebooks, MediaType::Ebook).await;
+    let audio_root = seed_delete_root(&harness, &audiobooks, MediaType::Audiobook).await;
+    let (work_id, title) = seed_delete_work(&harness, "two-roots").await;
+
+    let ebook = "Two Roots Author/book.epub";
+    let audiobook = "Two Roots Author/book.m4b";
+    write_library_file(&ebooks.join(ebook));
+    write_library_file(&audiobooks.join(audiobook));
+    seed_delete_item(&harness, work_id, ebook_root, ebook, MediaType::Ebook).await;
+    seed_delete_item(
+        &harness,
+        work_id,
+        audio_root,
+        audiobook,
+        MediaType::Audiobook,
+    )
+    .await;
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(!ebooks.join(ebook).exists(), "the ebook file is removed");
+    assert!(
+        !audiobooks.join(audiobook).exists(),
+        "the audiobook file is removed"
+    );
+    assert_eq!(delete_warnings(&response), Vec::<String>::new());
+    assert_eq!(files_removed_for(&harness, &title).await, Some(2));
+}
+
+#[tokio::test]
+async fn delete_files_never_removes_the_root_folder_itself() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let (work_id, title) = seed_delete_work(&harness, "root-path").await;
+
+    let content = root.join("Root Content/keep.epub");
+    write_library_file(&content);
+    seed_delete_item(&harness, work_id, root_id, ".", MediaType::Ebook).await;
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=true").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert!(root.is_dir(), "the root folder remains");
+    assert!(content.is_file(), "the root's contents remain");
+    assert_eq!(
+        delete_warnings(&response).len(),
+        1,
+        "one warning for the root path: {}",
+        response.json
+    );
+    assert_eq!(files_removed_for(&harness, &title).await, Some(0));
+}
+
+#[tokio::test]
+async fn delete_with_a_non_boolean_delete_files_is_refused() {
+    let harness = build_route_harness().await;
+    let work_id = seed_route_work(&harness, "bad-delete-files").await;
+
+    let response = delete_work_route(&harness, work_id, "?deleteFiles=maybe").await;
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        response.json
+    );
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Free-text book search when every attempted source fails, through the
+// production lookup and manual-import search routes. Providers answer through
+// the scripted transport of the shared fetcher; each request's rate bucket is
+// recorded so the attempted sources can be counted.
+// ---------------------------------------------------------------------------
+
+const ALL_SOURCES_FAILED: &str = "Every book source failed. Try again in a moment.";
+
+#[derive(Clone, Copy)]
+enum SourceReply {
+    Http500,
+    TransportError,
+    NoHits,
+    Hits,
+}
+
+#[derive(Clone)]
+struct ScriptedSources {
+    replies: Arc<Mutex<std::collections::HashMap<RateBucket, SourceReply>>>,
+    requests: Arc<Mutex<Vec<RateBucket>>>,
+}
+
+impl ScriptedSources {
+    fn new(replies: &[(RateBucket, SourceReply)]) -> Self {
+        Self {
+            replies: Arc::new(Mutex::new(replies.iter().cloned().collect())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn set(&self, replies: &[(RateBucket, SourceReply)]) {
+        *self.replies.lock().expect("scripted replies") = replies.iter().cloned().collect();
+    }
+
+    fn count(&self, bucket: RateBucket) -> usize {
+        self.requests
+            .lock()
+            .expect("scripted requests")
+            .iter()
+            .filter(|seen| **seen == bucket)
+            .count()
+    }
+
+    fn fixture(&self) -> DiscoveryTransportFixture {
+        let replies = self.replies.clone();
+        let requests = self.requests.clone();
+        let scripted_transport =
+            Arc::new(move |request: &livrarr_domain::services::FetchRequest| {
+                requests
+                    .lock()
+                    .expect("scripted requests")
+                    .push(request.rate_bucket.clone());
+                let reply = replies
+                    .lock()
+                    .expect("scripted replies")
+                    .get(&request.rate_bucket)
+                    .copied()
+                    .unwrap_or(SourceReply::TransportError);
+                let body = match (reply, &request.rate_bucket) {
+                    (SourceReply::Hits, RateBucket::Goodreads) => json!([{
+                        "title": "Answering Goodreads Book",
+                        "bookTitleBare": "Answering Goodreads Book",
+                        "bookUrl": "/book/show/88001",
+                        "author": { "name": "Answering Author" },
+                        "avgRating": "4.10"
+                    }]),
+                    (SourceReply::Hits, _) => json!({
+                        "docs": [{
+                            "key": "/works/OL-ANSWERING-W",
+                            "title": "Answering OpenLibrary Book",
+                            "author_name": ["Answering Author"]
+                        }]
+                    }),
+                    (_, RateBucket::Goodreads) => json!([]),
+                    _ => json!({ "docs": [] }),
+                };
+                match reply {
+                    SourceReply::TransportError => {
+                        livrarr_http::fetcher::ScriptedTransportOutcome::Error {
+                            delay: Duration::ZERO,
+                            error: livrarr_domain::services::FetchError::Connection(
+                                "scripted source outage".to_string(),
+                            ),
+                        }
+                    }
+                    SourceReply::Http500 => {
+                        livrarr_http::fetcher::ScriptedTransportOutcome::Response {
+                            delay: Duration::ZERO,
+                            response: livrarr_domain::services::FetchResponse {
+                                status: 500,
+                                headers: Vec::new(),
+                                body: b"{}".to_vec(),
+                            },
+                        }
+                    }
+                    SourceReply::NoHits | SourceReply::Hits => {
+                        livrarr_http::fetcher::ScriptedTransportOutcome::Response {
+                            delay: Duration::ZERO,
+                            response: livrarr_domain::services::FetchResponse {
+                                status: 200,
+                                headers: Vec::new(),
+                                body: serde_json::to_vec(&body).expect("scripted source body"),
+                            },
+                        }
+                    }
+                }
+            });
+        DiscoveryTransportFixture {
+            goodreads_base_url: "https://goodreads.test".to_string(),
+            openlibrary_base_url: "https://openlibrary.test".to_string(),
+            hardcover_search: false,
+            request_timeout: Duration::from_secs(5),
+            scripted_transport,
+        }
+    }
+}
+
+async fn lookup_harness(sources: &ScriptedSources) -> RouteHarness {
+    build_route_harness_with_provider_details(None, Vec::new(), Some(sources.fixture())).await
+}
+
+async fn lookup_route(harness: &RouteHarness, term: &str) -> RouteResponse {
+    call_router_json(
+        harness,
+        Method::GET,
+        format!("/api/v1/work/lookup?term={term}&raw=true"),
+        None,
+    )
+    .await
+}
+
+fn assert_all_sources_failed(response: &RouteResponse) {
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_GATEWAY,
+        "every attempted source failed: {}",
+        response.json
+    );
+    assert_eq!(response.json["error"], "bad_gateway", "{}", response.json);
+    assert_eq!(
+        response.json["message"], ALL_SOURCES_FAILED,
+        "{}",
+        response.json
+    );
+}
+
+fn lookup_results(response: &RouteResponse) -> Vec<Value> {
+    response.json["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("lookup results: {}", response.json))
+        .clone()
+}
+
+#[tokio::test]
+async fn lookup_answers_502_when_openlibrary_and_goodreads_both_answer_500() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::Http500),
+        (RateBucket::Goodreads, SourceReply::Http500),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let response = lookup_route(&harness, "all-sources-http-500").await;
+    assert_all_sources_failed(&response);
+}
+
+#[tokio::test]
+async fn lookup_answers_502_when_openlibrary_goodreads_and_hardcover_all_fail() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::TransportError),
+        (RateBucket::Goodreads, SourceReply::TransportError),
+        (RateBucket::Hardcover, SourceReply::TransportError),
+    ]);
+    let harness = lookup_harness(&sources).await;
+    livrarr_db::ConfigDb::update_metadata_config(
+        &harness.db,
+        livrarr_db::UpdateMetadataConfigRequest {
+            hardcover_enabled: Some(true),
+            hardcover_api_token: Some(Some("all-failed-test-token".to_string())),
+            llm_enabled: None,
+            llm_provider: None,
+            llm_endpoint: None,
+            llm_api_key: None,
+            llm_model: None,
+            audnexus_url: None,
+            languages: None,
+            google_books_api_key: None,
+        },
+    )
+    .await
+    .expect("turn Hardcover on in the metadata configuration discovery reads");
+
+    let response = lookup_route(&harness, "all-sources-transport-error").await;
+    assert_eq!(
+        sources.count(RateBucket::OpenLibrary),
+        1,
+        "one OpenLibrary request"
+    );
+    assert_eq!(
+        sources.count(RateBucket::Goodreads),
+        1,
+        "one Goodreads request"
+    );
+    assert_eq!(
+        sources.count(RateBucket::Hardcover),
+        1,
+        "one Hardcover request"
+    );
+    assert_eq!(
+        sources.count(RateBucket::GoogleBooks),
+        0,
+        "Google Books is skipped"
+    );
+    assert_all_sources_failed(&response);
+}
+
+#[tokio::test]
+async fn lookup_with_every_source_answering_no_hits_stays_200_empty() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::NoHits),
+        (RateBucket::Goodreads, SourceReply::NoHits),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let response = lookup_route(&harness, "all-sources-empty").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(lookup_results(&response), Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn lookup_with_one_source_failing_keeps_the_answering_source_results() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::Hits),
+        (RateBucket::Goodreads, SourceReply::Http500),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let response = lookup_route(&harness, "one-source-failing").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert!(
+        lookup_results(&response)
+            .iter()
+            .any(|result| result["source"] == "openlibrary"),
+        "the answering source's results survive: {}",
+        response.json
+    );
+}
+
+#[tokio::test]
+async fn lookup_all_failed_answer_is_not_cached_for_the_same_term() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::Http500),
+        (RateBucket::Goodreads, SourceReply::Http500),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let failed = lookup_route(&harness, "same-term-after-outage").await;
+    reset_breakers();
+    sources.set(&[
+        (RateBucket::OpenLibrary, SourceReply::Hits),
+        (RateBucket::Goodreads, SourceReply::Hits),
+    ]);
+    let answered = lookup_route(&harness, "same-term-after-outage").await;
+
+    assert_eq!(answered.status, StatusCode::OK, "{}", answered.json);
+    assert!(
+        !lookup_results(&answered).is_empty(),
+        "the second search returns the answering sources' results: {}",
+        answered.json
+    );
+    assert_all_sources_failed(&failed);
+}
+
+#[tokio::test]
+async fn lookup_with_openlibrary_empty_and_goodreads_failing_stays_200_empty() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::NoHits),
+        (RateBucket::Goodreads, SourceReply::TransportError),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let response = lookup_route(&harness, "openlibrary-empty-goodreads-down").await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(lookup_results(&response), Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn manual_import_search_answers_502_when_every_source_fails() {
+    let _breaker = lock_breaker().await;
+    let sources = ScriptedSources::new(&[
+        (RateBucket::OpenLibrary, SourceReply::Http500),
+        (RateBucket::Goodreads, SourceReply::TransportError),
+    ]);
+    let harness = lookup_harness(&sources).await;
+
+    let response = call_router_json(
+        &harness,
+        Method::POST,
+        "/api/v1/manualimport/search".to_string(),
+        Some(json!({ "query": "manual-import-all-failed", "author": null })),
+    )
+    .await;
+    assert_all_sources_failed(&response);
+}
+
+// ---------------------------------------------------------------------------
+// "Delete File" through the production `DELETE /api/v1/workfile/{id}` route:
+// the file is removed from disk under the remove rule, then the record. A
+// refused removal keeps the record and answers 409 naming the item.
+// ---------------------------------------------------------------------------
+
+async fn workfile_status(harness: &RouteHarness, item_id: i64) -> StatusCode {
+    call_router_json(
+        harness,
+        Method::GET,
+        format!("/api/v1/workfile/{item_id}"),
+        None,
+    )
+    .await
+    .status
+}
+
+async fn delete_workfile_route(harness: &RouteHarness, item_id: i64) -> RouteResponse {
+    call_router_json(
+        harness,
+        Method::DELETE,
+        format!("/api/v1/workfile/{item_id}"),
+        None,
+    )
+    .await
+}
+
+/// Number of `fileDeleted` history events recorded for `relative`.
+async fn file_deleted_events_for(harness: &RouteHarness, relative: &str) -> usize {
+    let history = call_router_json(
+        harness,
+        Method::GET,
+        "/api/v1/history?eventType=fileDeleted&page_size=500".to_string(),
+        None,
+    )
+    .await;
+    assert_eq!(history.status, StatusCode::OK, "history: {}", history.json);
+    history.json["items"]
+        .as_array()
+        .expect("history items")
+        .iter()
+        .filter(|event| event["data"]["path"] == relative)
+        .count()
+}
+
+fn assert_refusal_names(response: &RouteResponse, relative: &str) {
+    assert_eq!(
+        response.status,
+        StatusCode::CONFLICT,
+        "a refused removal answers 409: {}",
+        response.json
+    );
+    assert!(
+        response.json["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with(&format!("{relative}: "))),
+        "the message begins with {relative}: {}",
+        response.json
+    );
+}
+
+#[tokio::test]
+async fn delete_file_removes_the_file_and_its_record_and_keeps_the_book() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let work_id = seed_route_work(&harness, "delete-file").await;
+
+    let target = "Single Author/target.epub";
+    let sibling = "Single Author/sibling.epub";
+    write_library_file(&root.join(target));
+    write_library_file(&root.join(sibling));
+    let target_id = seed_delete_item(&harness, work_id, root_id, target, MediaType::Ebook).await;
+    let sibling_id = seed_delete_item(&harness, work_id, root_id, sibling, MediaType::Ebook).await;
+
+    let response = delete_workfile_route(&harness, target_id).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert!(!root.join(target).exists(), "the file is removed from disk");
+    assert_eq!(
+        workfile_status(&harness, target_id).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::OK);
+    assert_eq!(workfile_status(&harness, sibling_id).await, StatusCode::OK);
+    assert!(root.join(sibling).is_file(), "the book's other file stays");
+    assert_eq!(file_deleted_events_for(&harness, target).await, 1);
+}
+
+#[tokio::test]
+async fn delete_file_already_absent_removes_only_the_record() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let work_id = seed_route_work(&harness, "delete-absent-file").await;
+
+    let absent = "Absent Author/gone.epub";
+    let item_id = seed_delete_item(&harness, work_id, root_id, absent, MediaType::Ebook).await;
+
+    let response = delete_workfile_route(&harness, item_id).await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    assert_eq!(
+        workfile_status(&harness, item_id).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(file_deleted_events_for(&harness, absent).await, 1);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_file_refuses_a_link_to_another_books_file_and_keeps_the_record() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let work_a = seed_route_work(&harness, "delete-file-link-a").await;
+    let work_b = seed_route_work(&harness, "delete-file-link-b").await;
+
+    let a = "Link File Author/a.epub";
+    let b = "Link File Author/b.epub";
+    write_library_file(&root.join(b));
+    std::fs::create_dir_all(root.join("Link File Author")).expect("item folder");
+    let item_a = seed_delete_item(&harness, work_a, root_id, a, MediaType::Ebook).await;
+    seed_delete_item(&harness, work_b, root_id, b, MediaType::Ebook).await;
+    std::os::unix::fs::symlink(root.join(b), root.join(a)).expect("link A's path to B's file");
+
+    let response = delete_workfile_route(&harness, item_a).await;
+    assert_refusal_names(&response, a);
+    assert_eq!(workfile_status(&harness, item_a).await, StatusCode::OK);
+    assert_eq!(work_status(&harness, work_a).await, StatusCode::OK);
+    assert!(root.join(b).is_file(), "the other book's file is intact");
+    assert_eq!(file_deleted_events_for(&harness, a).await, 0);
+}
+
+#[tokio::test]
+async fn delete_file_refuses_when_the_root_is_moved_away_and_keeps_the_record() {
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let work_id = seed_route_work(&harness, "delete-file-root-moved").await;
+
+    let relative = "Moved File Author/book.epub";
+    write_library_file(&root.join(relative));
+    let item_id = seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+    std::fs::rename(&root, library.path().join("ebooks-moved")).expect("move the root away");
+
+    let response = delete_workfile_route(&harness, item_id).await;
+    assert_refusal_names(&response, relative);
+    assert_eq!(workfile_status(&harness, item_id).await, StatusCode::OK);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::OK);
+    assert_eq!(file_deleted_events_for(&harness, relative).await, 0);
+}
+
+#[tokio::test]
+async fn delete_file_refuses_when_removal_fails_and_keeps_file_and_record() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let harness = build_route_harness().await;
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let work_id = seed_route_work(&harness, "delete-file-read-only").await;
+
+    let relative = "Locked File Author/book.epub";
+    write_library_file(&root.join(relative));
+    let item_id = seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+
+    let locked_folder = root.join("Locked File Author");
+    let _restore = WritableOnDrop(locked_folder.clone());
+    std::fs::set_permissions(&locked_folder, std::fs::Permissions::from_mode(0o555))
+        .expect("make the folder read-only after seeding");
+    let probe = locked_folder.join("permission-probe");
+    if std::fs::write(&probe, b"probe").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        eprintln!(
+            "SKIPPED delete_file_refuses_when_removal_fails_and_keeps_file_and_record: \
+             running as root, which ignores file permissions, so a read-only folder cannot \
+             make a removal fail"
+        );
+        return;
+    }
+
+    let response = delete_workfile_route(&harness, item_id).await;
+    assert_refusal_names(&response, relative);
+    assert!(root.join(relative).is_file(), "the file stays on disk");
+    assert_eq!(workfile_status(&harness, item_id).await, StatusCode::OK);
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::OK);
+    assert_eq!(file_deleted_events_for(&harness, relative).await, 0);
+}
+
+#[tokio::test]
+async fn list_undo_removes_the_book_and_keeps_its_file_on_disk() {
+    let harness = build_route_harness().await;
+    let import_id = confirm_list_import(
+        &harness,
+        &[("91101", "Undo Keeps Files Book", "Undo Keeps Files Author")],
+    )
+    .await;
+    let work_id: i64 = sqlx::query_scalar("SELECT id FROM works WHERE user_id=?1 AND import_id=?2")
+        .bind(harness.user_id)
+        .bind(&import_id)
+        .fetch_one(harness.db.pool())
+        .await
+        .expect("the list import created one work");
+
+    let library = tempfile::tempdir().expect("library tempdir");
+    let root = library.path().join("ebooks");
+    let root_id = seed_delete_root(&harness, &root, MediaType::Ebook).await;
+    let relative = "Undo Keeps Files Author/Undo Keeps Files Book.epub";
+    write_library_file(&root.join(relative));
+    seed_delete_item(&harness, work_id, root_id, relative, MediaType::Ebook).await;
+
+    undo_list_import(&harness, &import_id).await;
+
+    assert_eq!(work_status(&harness, work_id).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        std::fs::read(root.join(relative)).expect("the book's file stays on disk"),
+        b"library file bytes",
+        "the file's contents are unchanged"
+    );
+}

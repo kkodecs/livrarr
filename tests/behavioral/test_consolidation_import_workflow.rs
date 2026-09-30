@@ -1632,7 +1632,12 @@ impl WorkService for StubWorkService {
     ) -> Result<Work, WorkServiceError> {
         unreachable!("not used by scan")
     }
-    async fn delete(&self, _: UserId, _: WorkId) -> Result<(), WorkServiceError> {
+    async fn delete(
+        &self,
+        _: UserId,
+        _: WorkId,
+        _: bool,
+    ) -> Result<livrarr_domain::services::WorkDeleteOutcome, WorkServiceError> {
         unreachable!("not used by scan")
     }
     async fn refresh(

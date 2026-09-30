@@ -9,6 +9,7 @@ pub mod identity_matching;
 mod infra_config;
 pub mod kash;
 pub mod keyed_mutex;
+pub mod library_path;
 pub mod normalization;
 pub mod perf;
 pub mod readarr;

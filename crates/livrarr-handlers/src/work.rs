@@ -1388,13 +1388,27 @@ pub async fn upload_cover<S: HasWorkService>(
     Ok(())
 }
 
+/// `?deleteFiles=true` removes the work's library files from disk; absent or
+/// `false` keeps them.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteWorkQuery {
+    pub delete_files: Option<bool>,
+}
+
 pub async fn delete<S: HasWorkService>(
     State(state): State<S>,
     ctx: AuthContext,
     Path(id): Path<i64>,
+    Query(q): Query<DeleteWorkQuery>,
 ) -> Result<Json<DeleteWorkResponse>, ApiError> {
-    state.work_service().delete(ctx.user.id, id).await?;
-    Ok(Json(DeleteWorkResponse { warnings: vec![] }))
+    let outcome = state
+        .work_service()
+        .delete(ctx.user.id, id, q.delete_files.unwrap_or(false))
+        .await?;
+    Ok(Json(DeleteWorkResponse {
+        warnings: outcome.warnings,
+    }))
 }
 
 /// Preview combining `loser_id` into `id` (the survivor) without applying

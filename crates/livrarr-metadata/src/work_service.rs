@@ -1,6 +1,6 @@
 use livrarr_db::{
     AuthorDb, ConfigDb, CreateWorkDbRequest, EnrichmentRetryDb, GrabDb, LibraryItemDb,
-    ProvenanceDb, SetFieldProvenanceRequest, UpdateWorkEnrichmentDbRequest,
+    ProvenanceDb, RootFolderDb, SetFieldProvenanceRequest, UpdateWorkEnrichmentDbRequest,
     UpdateWorkUserFieldsDbRequest, WorkDb, WorkDbCreate,
 };
 use livrarr_domain::keyed_mutex::KeyedMutex;
@@ -327,6 +327,7 @@ where
         + WorkDbCreate
         + AuthorDb
         + LibraryItemDb
+        + RootFolderDb
         + GrabDb
         + ProvenanceDb
         + livrarr_db::SourceReferenceDb
@@ -1516,7 +1517,12 @@ where
         Ok(work)
     }
 
-    async fn delete(&self, user_id: UserId, work_id: WorkId) -> Result<(), WorkServiceError> {
+    async fn delete(
+        &self,
+        user_id: UserId,
+        work_id: WorkId,
+        delete_files: bool,
+    ) -> Result<WorkDeleteOutcome, WorkServiceError> {
         let work = self
             .db
             .get_work(user_id, work_id)
@@ -1532,6 +1538,20 @@ where
             .await
             .map_err(WorkServiceError::Db)?;
 
+        // Each item's root folder path, read before the work (and with it the
+        // items) is deleted. A root that cannot be read becomes that item's
+        // warning.
+        let mut removals: Vec<(String, Result<String, String>)> = Vec::new();
+        if delete_files {
+            for item in &items {
+                let root = match self.db.get_root_folder(item.root_folder_id).await {
+                    Ok(root_folder) => Ok(root_folder.path),
+                    Err(e) => Err(format!("root folder cannot be read: {e}")),
+                };
+                removals.push((item.path.clone(), root));
+            }
+        }
+
         let deleted = self
             .db
             .delete_work(user_id, work_id)
@@ -1541,14 +1561,30 @@ where
                 other => WorkServiceError::Db(other),
             })?;
 
+        let outcome = tokio::task::spawn_blocking(move || remove_work_files(removals))
+            .await
+            .expect("spawn_blocking panicked");
+        for warning in &outcome.warnings {
+            tracing::warn!(
+                work_id,
+                "library file not removed on work delete: {warning}"
+            );
+        }
+
         // REQ-006: one composite workDeleted after successful deletion, with
         // work_id None (D-DELETE-ORDER: the work row is gone, so an attached
         // insert would violate the FK); the payload snapshot identifies the
-        // row. No per-file events on this road.
+        // row. No per-file events on this road. `files_removed` counts files
+        // actually removed from disk.
         livrarr_db::record_history(
             &self.db,
             user_id,
-            history_events::work_deleted(&work.title, Some(&work.author_name), items.len(), false),
+            history_events::work_deleted(
+                &work.title,
+                Some(&work.author_name),
+                outcome.files_removed,
+                false,
+            ),
         )
         .await;
 
@@ -1563,18 +1599,7 @@ where
 
         delete_cover_files(&self.data_dir, user_id, work_id).await;
 
-        for item in &items {
-            if let Err(e) = tokio::fs::remove_file(&item.path).await {
-                tracing::warn!(
-                    work_id = work_id,
-                    item_id = item.id,
-                    path = %item.path,
-                    "failed to delete library file on work delete: {e}"
-                );
-            }
-        }
-
-        Ok(())
+        Ok(outcome)
     }
 
     async fn refresh(
@@ -3520,6 +3545,31 @@ async fn write_addtime_provenance<D: ProvenanceDb>(
     setter: ProvenanceSetter,
 ) {
     crate::provenance::write_addtime_provenance(db, user_id, work, setter).await;
+}
+
+/// Applies the library remove rule to each `(relative path, root folder path)`
+/// of a deleted work, carrying on past failures. A removed file is counted; an
+/// absent one is silent; anything else is one `"{relative path}: {reason}"`
+/// warning.
+fn remove_work_files(removals: Vec<(String, Result<String, String>)>) -> WorkDeleteOutcome {
+    use livrarr_domain::library_path::{remove_library_file, RemoveOutcome};
+
+    let mut outcome = WorkDeleteOutcome::default();
+    for (relative, root) in removals {
+        let reason = match root {
+            Err(reason) => reason,
+            Ok(root) => match remove_library_file(std::path::Path::new(&root), &relative) {
+                Ok(RemoveOutcome::Removed) => {
+                    outcome.files_removed += 1;
+                    continue;
+                }
+                Ok(RemoveOutcome::Absent) => continue,
+                Err(e) => e.to_string(),
+            },
+        };
+        outcome.warnings.push(format!("{relative}: {reason}"));
+    }
+    outcome
 }
 
 pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_id: i64) {

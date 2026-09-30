@@ -85,6 +85,7 @@ export default function WorkDetailPage() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteFiles, setDeleteFiles] = useState(false);
 
   useEffect(() => {
     if (coverPollBaseline === undefined) return;
@@ -113,10 +114,25 @@ export default function WorkDetailPage() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteWork(Number(id)),
-    onSuccess: () => {
+    mutationFn: () => deleteWork(Number(id), { deleteFiles }),
+    onSuccess: ({ warnings }) => {
       queryClient.invalidateQueries({ queryKey: ["works"] });
-      toast.success("Work deleted");
+      if (warnings.length > 0) {
+        toast.warning(
+          `Book deleted, but ${warnings.length} file${warnings.length !== 1 ? "s" : ""} could not be removed`,
+          {
+            description: (
+              <div>
+                {warnings.map((w, i) => (
+                  <div key={i}>{w}</div>
+                ))}
+              </div>
+            ),
+          },
+        );
+      } else {
+        toast.success("Work deleted");
+      }
       navigate("/");
     },
     onError: () => toast.error("Failed to delete work"),
@@ -173,7 +189,10 @@ export default function WorkDetailPage() {
           </button>
           <span className="text-xs text-muted">Merging is currently unavailable.</span>
           <button
-            onClick={() => setDeleteOpen(true)}
+            onClick={() => {
+              setDeleteFiles(false);
+              setDeleteOpen(true);
+            }}
             className="btn-secondary inline-flex items-center gap-1.5 text-red-400 hover:text-red-300"
           >
             <Trash2 size={14} />
@@ -232,13 +251,27 @@ export default function WorkDetailPage() {
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         title="Delete Work"
-        description={`Permanently delete "${work.title}" and all associated files on disk? This cannot be undone.`}
+        description={
+          deleteFiles
+            ? `Delete "${work.title}" from your library? Its files will be permanently deleted from disk. This cannot be undone.`
+            : `Delete "${work.title}" from your library? Its files stay on disk.`
+        }
         confirmLabel="Delete"
         variant="danger"
         onConfirm={async () => {
           await deleteMutation.mutateAsync();
         }}
-      />
+      >
+        <label className="mt-4 flex items-center gap-2 text-sm text-zinc-300">
+          <input
+            type="checkbox"
+            checked={deleteFiles}
+            onChange={(e) => setDeleteFiles(e.target.checked)}
+            className="rounded border-zinc-600 bg-zinc-800"
+          />
+          Also delete files from disk
+        </label>
+      </ConfirmModal>
     </>
   );
 }

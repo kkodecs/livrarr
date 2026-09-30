@@ -209,10 +209,11 @@ export const selectCover = (
     method: "POST",
     body: JSON.stringify({ candidateId, mediaType }),
   });
-export const deleteWork = (id: number) =>
-  apiFetch<DeleteWorkResponse>(`/work/${id}`, {
-    method: "DELETE",
-  });
+export const deleteWork = (id: number, opts?: { deleteFiles?: boolean }) =>
+  apiFetch<DeleteWorkResponse>(
+    opts?.deleteFiles ? `/work/${id}?deleteFiles=true` : `/work/${id}`,
+    { method: "DELETE" },
+  );
 export const refreshWork = (id: number) =>
   apiFetch<RefreshWorkResponse>(`/work/${id}/refresh`, { method: "POST" });
 export const refreshAllWorks = (params?: {

@@ -39,7 +39,6 @@ export function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
       queryClient.invalidateQueries({ queryKey: ["work"] });
       setConfirmDelete(null);
     },
-    onError: () => toast.error("Failed to delete file"),
   });
 
   const sendEmailMutation = useMutation({
@@ -204,7 +203,7 @@ export function LibraryFilesTab({ work }: { work: WorkDetailResponse }) {
           if (!open) setConfirmDelete(null);
         }}
         title="Delete File"
-        description="Are you sure you want to delete this library file?"
+        description="Delete this file from disk? This cannot be undone."
         confirmLabel="Delete"
         variant="danger"
         onConfirm={() => {

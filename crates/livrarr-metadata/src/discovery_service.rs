@@ -157,6 +157,23 @@ where
     }
 }
 
+/// One provider leg's state: `None` skipped (no request made), `Some(true)`
+/// failed, `Some(false)` answered, with or without results.
+fn leg_failed<T>(leg: &Result<Option<T>, WorkServiceError>) -> Option<bool> {
+    match leg {
+        Ok(None) => None,
+        Ok(Some(_)) => Some(false),
+        Err(_) => Some(true),
+    }
+}
+
+/// True when at least one provider leg was attempted and every attempted leg
+/// failed. Skipped legs count neither way.
+fn every_attempted_leg_failed(legs: &[Option<bool>]) -> bool {
+    let mut attempted = legs.iter().flatten().peekable();
+    attempted.peek().is_some() && attempted.all(|failed| *failed)
+}
+
 /// Take one provider's discovery result (relevance-ordered), logging a failure or
 /// timeout rather than failing the whole search. Generic over the provider error
 /// type so every provider lookup can share one helper.
@@ -332,6 +349,20 @@ where
     // OpenLibrary), then Google Books, then Goodreads (scrape, often blocked)
     // last. Non-English leads with Google Books — the foreign-language
     // metadata provider — then OpenLibrary, Hardcover, Goodreads.
+    let (ol, gr) = (ol.map(Some), gr.map(Some));
+    let all_failed = every_attempted_leg_failed(&[
+        leg_failed(&gb),
+        leg_failed(&ol),
+        leg_failed(&hc),
+        leg_failed(&gr),
+    ]);
+    let (gb, ol, hc, gr) = (
+        gb.map(Option::unwrap_or_default),
+        ol.map(Option::unwrap_or_default),
+        hc.map(Option::unwrap_or_default),
+        gr.map(Option::unwrap_or_default),
+    );
+
     const PER_PROVIDER: usize = 3;
     let mut lists = if lang == "en" {
         vec![
@@ -348,6 +379,9 @@ where
             take_lookup("Goodreads", &term, gr),
         ]
     };
+    if all_failed {
+        return Err(WorkServiceError::AllProvidersFailed);
+    }
     for l in &mut lists {
         l.truncate(PER_PROVIDER);
     }
@@ -547,7 +581,9 @@ where
         let ol_term = format!("author:\"{author}\"");
         let gb_fut = async {
             let t = Instant::now();
-            let r = lookup_google_books(ctx, &gb_term, &lang).await;
+            let r = lookup_google_books(ctx, &gb_term, &lang)
+                .await
+                .map(Option::unwrap_or_default);
             (r, t.elapsed().as_millis() as u64)
         };
         let ol_fut = async {
@@ -944,11 +980,12 @@ where
     .map_err(WorkServiceError::Enrichment)
 }
 
+/// `Ok(None)`: skipped, no API key configured, so no request was made.
 async fn lookup_google_books<C, H, L>(
     ctx: DiscoveryCtx<'_, C, H, L>,
     term: &str,
     lang: &str,
-) -> Result<Vec<LookupResult>, WorkServiceError>
+) -> Result<Option<Vec<LookupResult>>, WorkServiceError>
 where
     C: livrarr_db::ConfigDb + Send + Sync,
     H: HttpFetcher + Send + Sync,
@@ -965,7 +1002,7 @@ where
             Some(k) => k.to_string(),
             None => {
                 tracing::debug!(term = %term, "GoogleBooks: no API key configured; skipping");
-                return Ok(vec![]);
+                return Ok(None);
             }
         },
         Err(error) => {
@@ -1041,14 +1078,15 @@ where
         })
         .collect();
 
-    Ok(results)
+    Ok(Some(results))
 }
 
+/// `Ok(None)`: skipped, disabled or without a token, so no request was made.
 async fn lookup_hardcover<C, H, L>(
     ctx: DiscoveryCtx<'_, C, H, L>,
     term: &str,
     _lang: &str,
-) -> Result<Vec<LookupResult>, WorkServiceError>
+) -> Result<Option<Vec<LookupResult>>, WorkServiceError>
 where
     C: livrarr_db::ConfigDb + Send + Sync,
     H: HttpFetcher + Send + Sync,
@@ -1064,7 +1102,7 @@ where
     };
 
     if !cfg.hardcover_enabled {
-        return Ok(vec![]);
+        return Ok(None);
     }
 
     let token = match cfg
@@ -1078,7 +1116,7 @@ where
         .filter(|t| !t.is_empty())
     {
         Some(t) => t.to_string(),
-        None => return Ok(vec![]),
+        None => return Ok(None),
     };
 
     let hits = livrarr_external_data::hardcover::fetch_hardcover_discovery_hits(
@@ -1140,7 +1178,7 @@ where
         })
         .collect();
 
-    Ok(results)
+    Ok(Some(results))
 }
 
 /// Collapse duplicate works merged from multiple discovery providers. Prefers an

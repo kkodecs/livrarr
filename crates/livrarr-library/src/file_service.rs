@@ -4,6 +4,7 @@ use livrarr_db::{
     record_history, ConfigDb, HistoryDb, LibraryItemDb, PlaybackProgressDb, RootFolderDb, WorkDb,
 };
 use livrarr_domain::history_events;
+use livrarr_domain::library_path::{remove_library_file, resolve_for_read, ReadPathError};
 use livrarr_domain::services::{
     EmailPayload, FileService, FileServiceError, ItemProgress, ProgressKind,
 };
@@ -70,6 +71,34 @@ where
     async fn delete(&self, user_id: UserId, item_id: i64) -> Result<(), FileServiceError> {
         let item = self
             .db
+            .get_library_item(user_id, item_id)
+            .await
+            .map_err(map_db_err)?;
+        let root_path = match self.db.get_root_folder(item.root_folder_id).await {
+            Ok(root_folder) => root_folder.path,
+            Err(DbError::NotFound { .. }) => {
+                return Err(FileServiceError::NotRemoved(format!(
+                    "{}: root folder not found",
+                    item.path
+                )))
+            }
+            Err(other) => return Err(FileServiceError::Db(other)),
+        };
+        let relative = item.path.clone();
+        let removal = tokio::task::spawn_blocking(move || {
+            remove_library_file(Path::new(&root_path), &relative)
+        })
+        .await
+        .expect("spawn_blocking panicked");
+        if let Err(reason) = removal {
+            return Err(FileServiceError::NotRemoved(format!(
+                "{}: {reason}",
+                item.path
+            )));
+        }
+
+        let item = self
+            .db
             .delete_library_item(user_id, item_id)
             .await
             .map_err(map_db_err)?;
@@ -113,23 +142,7 @@ where
                     other => FileServiceError::Db(other),
                 })?;
 
-        let root = Path::new(&root_folder.path);
-        let abs_path = root.join(&item.path);
-
-        // Canonicalize and verify containment (path traversal protection).
-        let canonical = abs_path
-            .canonicalize()
-            .map_err(|_| FileServiceError::NotFound)?;
-        let canonical_root = root.canonicalize().map_err(|e| {
-            FileServiceError::Io(std::io::Error::other(format!(
-                "Root folder not accessible: {e}"
-            )))
-        })?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err(FileServiceError::Forbidden);
-        }
-
-        Ok(canonical)
+        resolve_for_read(Path::new(&root_folder.path), &item.path).map_err(map_read_err)
     }
 
     async fn prepare_email(
@@ -151,9 +164,6 @@ where
                     other => FileServiceError::Db(other),
                 })?;
 
-        let root = Path::new(&root_folder.path);
-        let abs_path = root.join(&item.path);
-
         // Fast pre-check against DB-stored size (avoids filesystem round-trip for obvious rejects).
         if item.file_size > MAX_EMAIL_SIZE {
             return Err(FileServiceError::BadRequest(format!(
@@ -162,18 +172,8 @@ where
             )));
         }
 
-        // Path traversal protection — canonicalize and verify containment.
-        let abs_path = abs_path
-            .canonicalize()
-            .map_err(|_| FileServiceError::NotFound)?;
-        let canonical_root = root.canonicalize().map_err(|e| {
-            FileServiceError::Io(std::io::Error::other(format!(
-                "Root folder not accessible: {e}"
-            )))
-        })?;
-        if !abs_path.starts_with(&canonical_root) {
-            return Err(FileServiceError::Forbidden);
-        }
+        let abs_path =
+            resolve_for_read(Path::new(&root_folder.path), &item.path).map_err(map_read_err)?;
 
         // Validate extension against allowlist.
         let ext = abs_path
@@ -299,6 +299,19 @@ where
                 finished_at: pp.finished_at,
             })
             .collect())
+    }
+}
+
+/// Read-rule failures as the read callers have always seen them: an item that
+/// cannot be resolved is `NotFound`, a root that cannot be resolved is `Io`,
+/// and an item outside the root is `Forbidden`.
+fn map_read_err(e: ReadPathError) -> FileServiceError {
+    match e {
+        ReadPathError::Item(_) => FileServiceError::NotFound,
+        ReadPathError::Root(e) => FileServiceError::Io(std::io::Error::other(format!(
+            "Root folder not accessible: {e}"
+        ))),
+        ReadPathError::OutsideRoot => FileServiceError::Forbidden,
     }
 }
 

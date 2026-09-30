@@ -174,7 +174,7 @@ async fn wh_unwritable_history_does_not_block_import_enrichment_or_work_delete()
     .await
     .expect("enrichment effect lands");
 
-    svc.delete(user_id, work.id)
+    svc.delete(user_id, work.id, false)
         .await
         .expect("work deletion must still succeed when history is unwritable");
     assert!(

@@ -804,8 +804,10 @@ where
         let mut works_skipped: usize = 0;
 
         for work_id in &work_ids {
-            match self.work_service.delete(user_id, *work_id).await {
-                Ok(()) => works_removed += 1,
+            // Undo removes what the import created; an import creates no
+            // files, so they stay on disk.
+            match self.work_service.delete(user_id, *work_id, false).await {
+                Ok(_) => works_removed += 1,
                 Err(e) => {
                     warn!(
                         user_id,
