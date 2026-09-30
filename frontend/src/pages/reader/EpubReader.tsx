@@ -7,7 +7,6 @@ import { toast } from "sonner";
 import {
   getDownloadUrl,
   getPlaybackProgress,
-  updatePlaybackProgress,
   getCrossFormatAnchors,
   getCrossFormatPrompt,
   declineCrossFormat,
@@ -16,6 +15,7 @@ import {
 import { apiFetch } from "@/api/client";
 import { resolveTsForCfi } from "@/utils/kashAnchors";
 import { ResumePromptBanner } from "@/components/ResumePromptBanner";
+import { savePosition } from "./savePosition";
 import {
   ArrowLeft,
   List,
@@ -25,6 +25,8 @@ import {
   Bookmark,
   Pencil,
   X,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 import { useNavigate } from "react-router";
 import * as Popover from "@radix-ui/react-popover";
@@ -56,6 +58,8 @@ export function EpubReader({ libraryItemId }: Props) {
   const [location, setLocation] = useState<string | number>(0);
   const [initialLoaded, setInitialLoaded] = useState(false);
   const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   // Settings (persisted to localStorage)
   const [darkTheme, setDarkTheme] = useState(() =>
@@ -91,6 +95,7 @@ export function EpubReader({ libraryItemId }: Props) {
       }),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+    onError: () => toast.error("Could not add the bookmark"),
   });
 
   const deleteBookmarkMut = useMutation({
@@ -98,6 +103,7 @@ export function EpubReader({ libraryItemId }: Props) {
       apiFetch(`/bookmarks/${id}`, { method: "DELETE" }),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+    onError: () => toast.error("Could not delete the bookmark"),
   });
 
   const renameBookmarkMut = useMutation({
@@ -108,6 +114,7 @@ export function EpubReader({ libraryItemId }: Props) {
       }),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: ["bookmarks", libraryItemId] }),
+    onError: () => toast.error("Could not rename the bookmark"),
   });
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -157,9 +164,11 @@ export function EpubReader({ libraryItemId }: Props) {
         return res.arrayBuffer();
       })
       .then(setEpubData)
-      .catch(() => {});
+      .catch(() => {
+        if (!controller.signal.aborted) setLoadFailed(true);
+      });
     return () => controller.abort();
-  }, [url, token]);
+  }, [url, token, loadAttempt]);
 
   // Load saved progress on mount.
   useEffect(() => {
@@ -181,9 +190,7 @@ export function EpubReader({ libraryItemId }: Props) {
     ) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
-        updatePlaybackProgress(libraryItemId, cfi, pct, kind, crossFormatTs).catch(
-          () => {},
-        );
+        savePosition(libraryItemId, cfi, pct, kind, crossFormatTs);
       }, 2000);
     },
     [libraryItemId],
@@ -327,6 +334,17 @@ export function EpubReader({ libraryItemId }: Props) {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [toggleFullscreen, tocOpen, goNext]);
+
+  if (loadFailed) {
+    return (
+      <BookLoadError
+        onRetry={() => {
+          setLoadFailed(false);
+          setLoadAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
 
   if (!initialLoaded || !epubData) {
     return (
@@ -796,3 +814,22 @@ function TocEntry({
 }
 
 export default EpubReader;
+
+/** Full-screen notice for a book whose download failed, with Retry. */
+export function BookLoadError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex h-screen flex-col items-center justify-center bg-zinc-900 text-center">
+      <AlertTriangle className="mb-4 text-red-400" size={32} />
+      <h3 className="text-lg font-medium text-zinc-200">
+        Could not load this book.
+      </h3>
+      <button
+        onClick={onRetry}
+        className="mt-4 inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
+      >
+        <RefreshCw size={14} />
+        Retry
+      </button>
+    </div>
+  );
+}

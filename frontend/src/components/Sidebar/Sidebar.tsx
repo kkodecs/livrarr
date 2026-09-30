@@ -371,12 +371,40 @@ function useVersionCheck() {
 }
 
 function HealthIndicator({ collapsed }: { collapsed: boolean }) {
-  const { data: summary } = useQuery({
+  const isAdmin = useAuthStore((s) => s.isAdmin);
+  const { data: summary, isError } = useQuery({
     queryKey: ["health-summary"],
     queryFn: getHealthSummary,
     refetchInterval: 60_000,
     retry: false,
+    enabled: isAdmin,
   });
+
+  if (!isAdmin) return null;
+
+  if (isError) {
+    const failed = "Health check failed";
+    if (collapsed) {
+      return (
+        <Link
+          to="/system/status"
+          className="flex flex-col items-center gap-1 border-t border-border py-2 hover:bg-surface-hover transition-colors"
+          title={failed}
+        >
+          <span className="inline-block h-2.5 w-2.5 rounded-full bg-red-400" />
+        </Link>
+      );
+    }
+    return (
+      <Link
+        to="/system/status"
+        className="flex items-center gap-2 border-t border-border px-2 py-2 hover:bg-surface-hover transition-colors"
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full flex-shrink-0 bg-red-400" />
+        <span className="text-[11px] text-red-400">{failed}</span>
+      </Link>
+    );
+  }
 
   if (!summary) return null;
 

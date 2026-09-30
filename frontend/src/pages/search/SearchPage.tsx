@@ -8,6 +8,7 @@ import { useLibraryWorks } from "@/hooks/useLibraryWorks";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
+import { ErrorState } from "@/components/Page/ErrorState";
 import { BookCover } from "@/components/BookCover";
 import { cn } from "@/utils/cn";
 import type {
@@ -138,9 +139,11 @@ export default function SearchPage() {
   const hasOlResults =
     filteredOlResults !== null && filteredOlResults.length > 0;
   const isSearching = searchQuery.isFetching;
+  const searchError = !isSearching && searchQuery.isError ? searchQuery.error : null;
   const showNoResults =
     hasQuery &&
     !isSearching &&
+    !searchError &&
     !hasLibraryResults &&
     filteredOlResults !== null &&
     filteredOlResults.length === 0;
@@ -252,7 +255,7 @@ export default function SearchPage() {
             </div>
           )}
 
-          {!isSearching && hasOlResults && (
+          {!isSearching && !searchError && hasOlResults && (
             <section>
               <div className="flex items-center gap-3 mb-3">
                 <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">
@@ -293,6 +296,13 @@ export default function SearchPage() {
                 ))}
               </div>
             </section>
+          )}
+
+          {searchError && (
+            <ErrorState
+              error={searchError}
+              onRetry={() => void searchQuery.refetch()}
+            />
           )}
 
           {showNoResults && (

@@ -1,10 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
-import {
-  getDownloadUrl,
-  getPlaybackProgress,
-  updatePlaybackProgress,
-} from "@/api";
+import { getDownloadUrl, getPlaybackProgress } from "@/api";
+import { savePosition } from "./savePosition";
+import { BookLoadError } from "./EpubReader";
 import {
   ArrowLeft,
   ChevronLeft,
@@ -49,7 +47,7 @@ export function PdfReader({ libraryItemId }: Props) {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
         const pct = total > 0 ? pg / total : 0;
-        updatePlaybackProgress(libraryItemId, String(pg), pct).catch(() => {});
+        savePosition(libraryItemId, String(pg), pct);
       }, 2000);
     },
     [libraryItemId],
@@ -75,17 +73,35 @@ export function PdfReader({ libraryItemId }: Props) {
 
   // Fetch PDF as blob with auth headers.
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     })
-      .then((res) => res.arrayBuffer())
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.arrayBuffer();
+      })
       .then(setPdfData)
-      .catch(() => {});
+      .catch(() => {
+        if (!controller.signal.aborted) setLoadFailed(true);
+      });
     return () => controller.abort();
-  }, [url, token]);
+  }, [url, token, loadAttempt]);
+
+  if (loadFailed) {
+    return (
+      <BookLoadError
+        onRetry={() => {
+          setLoadFailed(false);
+          setLoadAttempt((n) => n + 1);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="flex h-screen flex-col bg-zinc-900">

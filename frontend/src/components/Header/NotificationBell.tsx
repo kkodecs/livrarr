@@ -112,7 +112,12 @@ export function NotificationBell() {
     }
   }, [unreadNotifications]);
 
-  const { data: allNotifications, isLoading } = useQuery({
+  const {
+    data: allNotifications,
+    isLoading,
+    isError: listFailed,
+    refetch: reloadList,
+  } = useQuery({
     queryKey: ["notifications", "all"],
     queryFn: () => api.listNotifications(false),
     select: (res) => res.items,
@@ -124,6 +129,9 @@ export function NotificationBell() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
     },
+    onError: () => {
+      toast.error("Could not mark the notification as read");
+    },
   });
 
   const dismiss = useMutation({
@@ -131,12 +139,18 @@ export function NotificationBell() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
     },
+    onError: () => {
+      toast.error("Could not dismiss the notification");
+    },
   });
 
   const dismissAll = useMutation({
     mutationFn: api.dismissAllNotifications,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+    onError: () => {
+      toast.error("Could not dismiss notifications");
     },
   });
 
@@ -175,6 +189,20 @@ export function NotificationBell() {
             {isLoading ? (
               <div className="flex justify-center py-8">
                 <LoadingSpinner />
+              </div>
+            ) : listFailed ? (
+              <div className="flex flex-col items-center py-8 text-center">
+                <AlertTriangle className="mb-2 text-red-400" size={20} />
+                <p className="text-sm text-zinc-200">
+                  Could not load notifications
+                </p>
+                <button
+                  onClick={() => void reloadList()}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-hover"
+                >
+                  <RefreshCw size={12} />
+                  Retry
+                </button>
               </div>
             ) : !allNotifications?.length ? (
               <div className="py-8 text-center text-sm text-muted">

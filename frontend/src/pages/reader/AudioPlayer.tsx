@@ -3,13 +3,13 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   getPlaybackProgress,
-  updatePlaybackProgress,
   getCrossFormatPrompt,
   declineCrossFormat,
   syncCrossFormatToHere,
 } from "@/api";
 import { apiFetch } from "@/api/client";
 import { useStreamUrl } from "./useStreamUrl";
+import { savePosition } from "./savePosition";
 import { ResumePromptBanner } from "@/components/ResumePromptBanner";
 import {
   ArrowLeft,
@@ -198,9 +198,7 @@ export function AudioPlayer({
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
         const pct = isFinite(dur) && dur > 0 ? time / dur : 0;
-        updatePlaybackProgress(libraryItemId, String(time), pct, kind, time).catch(
-          () => {},
-        );
+        savePosition(libraryItemId, String(time), pct, kind, time);
       }, 2000);
     },
     [libraryItemId],
@@ -215,9 +213,7 @@ export function AudioPlayer({
         const d = audioRef.current.duration;
         if (isFinite(t) && isFinite(d)) {
           const pct = d > 0 ? t / d : 0;
-          updatePlaybackProgress(libraryItemId, String(t), pct, "progress", t).catch(
-            () => {},
-          );
+          savePosition(libraryItemId, String(t), pct, "progress", t);
         }
       }
     }, 10000);
@@ -963,13 +959,13 @@ export function AudioPlayer({
               audioRef.current.currentTime = t;
             }
             setCurrentTime(t);
-            updatePlaybackProgress(
+            savePosition(
               libraryItemId,
               resumePrompt.position,
               duration > 0 ? t / duration : 0,
               "seek",
               t,
-            ).catch(() => {});
+            );
             setResumePrompt(null);
           }}
           onStay={() => {

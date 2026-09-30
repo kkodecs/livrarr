@@ -77,6 +77,7 @@ export default function ReadarrImportPage() {
 
   // Progress
   const [progress, setProgress] = useState<ImportProgressResponse | null>(null);
+  const [pollLost, setPollLost] = useState(false);
 
   // Undo modal
   const [undoTarget, setUndoTarget] = useState<ImportHistoryItem | null>(null);
@@ -131,9 +132,11 @@ export default function ReadarrImportPage() {
   // Poll progress during import
   useEffect(() => {
     if (phase !== "importing") return;
+    setPollLost(false);
     const interval = setInterval(async () => {
       try {
         const p = await api.readarrProgress();
+        setPollLost(false);
         setProgress(p);
         if (!p.running && p.phase === "done") {
           const failed = p.errors.length > 0;
@@ -146,7 +149,7 @@ export default function ReadarrImportPage() {
           refetchHistory();
         }
       } catch {
-        // Transient error, keep polling
+        setPollLost(true);
       }
     }, 2000);
     return () => clearInterval(interval);
@@ -794,70 +797,82 @@ export default function ReadarrImportPage() {
           {(phase === "importing" ||
             phase === "completed" ||
             phase === "failed") &&
-            progress && (
+            (progress || pollLost) && (
               <div className="rounded-lg border border-border bg-zinc-800/50 p-4">
                 <h2 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted">
                   Import Progress
                 </h2>
 
-                {/* Progress bar */}
-                <div className="mb-4 h-3 overflow-hidden rounded-full bg-zinc-700">
-                  <div
-                    className={cn(
-                      "h-full rounded-full transition-all duration-300",
-                      phase === "failed"
-                        ? "bg-red-500"
-                        : phase === "completed"
-                          ? "bg-green-500"
-                          : "bg-brand",
+                {phase === "importing" && pollLost && (
+                  <p className="mb-3 flex items-center gap-2 text-sm text-amber-300">
+                    <AlertTriangle size={14} className="shrink-0" />
+                    Lost contact with Livrarr. Progress may be out of date; still trying.
+                  </p>
+                )}
+
+                {progress && (
+                  <>
+
+                  {/* Progress bar */}
+                  <div className="mb-4 h-3 overflow-hidden rounded-full bg-zinc-700">
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all duration-300",
+                        phase === "failed"
+                          ? "bg-red-500"
+                          : phase === "completed"
+                            ? "bg-green-500"
+                            : "bg-brand",
+                      )}
+                      style={{ width: `${progressPct}%` }}
+                    />
+                  </div>
+
+                  {/* Status line */}
+                  <div className="mb-3 flex items-center gap-2 text-sm">
+                    {phase === "importing" && (
+                      <Loader2 size={14} className="animate-spin text-brand" />
                     )}
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
+                    {phase === "completed" && (
+                      <CheckCircle2 size={14} className="text-green-400" />
+                    )}
+                    {phase === "failed" && (
+                      <XCircle size={14} className="text-red-400" />
+                    )}
+                    <span className="text-zinc-200">
+                      {phase === "importing" && "Importing..."}
+                      {phase === "completed" && "Import completed"}
+                      {phase === "failed" &&
+                        (progress.errors[0] ?? "Import failed")}
+                    </span>
+                    <span className="ml-auto text-muted">{progressPct}%</span>
+                  </div>
 
-                {/* Status line */}
-                <div className="mb-3 flex items-center gap-2 text-sm">
-                  {phase === "importing" && (
-                    <Loader2 size={14} className="animate-spin text-brand" />
-                  )}
-                  {phase === "completed" && (
-                    <CheckCircle2 size={14} className="text-green-400" />
-                  )}
-                  {phase === "failed" && (
-                    <XCircle size={14} className="text-red-400" />
-                  )}
-                  <span className="text-zinc-200">
-                    {phase === "importing" && "Importing..."}
-                    {phase === "completed" && "Import completed"}
-                    {phase === "failed" &&
-                      (progress.errors[0] ?? "Import failed")}
-                  </span>
-                  <span className="ml-auto text-muted">{progressPct}%</span>
-                </div>
-
-                {/* Counters */}
-                <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-                  <ProgressCounter
-                    label="Authors"
-                    done={progress.authorsProcessed}
-                    total={progress.authorsTotal}
-                  />
-                  <ProgressCounter
-                    label="Works"
-                    done={progress.worksProcessed}
-                    total={progress.worksTotal}
-                  />
-                  <ProgressCounter
-                    label="Files"
-                    done={progress.filesProcessed}
-                    total={progress.filesTotal}
-                  />
-                  <ProgressCounter
-                    label="Skipped"
-                    done={progress.filesSkipped}
-                    total={null}
-                  />
-                </div>
+                  {/* Counters */}
+                  <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                    <ProgressCounter
+                      label="Authors"
+                      done={progress.authorsProcessed}
+                      total={progress.authorsTotal}
+                    />
+                    <ProgressCounter
+                      label="Works"
+                      done={progress.worksProcessed}
+                      total={progress.worksTotal}
+                    />
+                    <ProgressCounter
+                      label="Files"
+                      done={progress.filesProcessed}
+                      total={progress.filesTotal}
+                    />
+                    <ProgressCounter
+                      label="Skipped"
+                      done={progress.filesSkipped}
+                      total={null}
+                    />
+                  </div>
+                  </>
+                )}
               </div>
             )}
 

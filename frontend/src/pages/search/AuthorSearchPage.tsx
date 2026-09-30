@@ -7,6 +7,7 @@ import { lookupAuthors, addAuthor } from "@/api";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
+import { ErrorState } from "@/components/Page/ErrorState";
 import type { AuthorSearchResult } from "@/types/api";
 import { ApiError } from "@/api/client";
 
@@ -19,6 +20,8 @@ export default function AuthorSearchPage() {
   const {
     data: results,
     isFetching: isSearching,
+    error: searchError,
+    refetch: retrySearch,
   } = useQuery({
     queryKey: ["authorSearch", searchTerm],
     queryFn: () => lookupAuthors(searchTerm),
@@ -98,8 +101,16 @@ export default function AuthorSearchPage() {
             </div>
           )}
 
+          {!isSearching && hasSearched && searchError && (
+            <ErrorState
+              error={searchError}
+              onRetry={() => void retrySearch()}
+            />
+          )}
+
           {!isSearching &&
             hasSearched &&
+            !searchError &&
             results !== undefined &&
             results.length === 0 && (
               <EmptyState
@@ -109,7 +120,7 @@ export default function AuthorSearchPage() {
               />
             )}
 
-          {!isSearching && results && results.length > 0 && (
+          {!isSearching && !searchError && results && results.length > 0 && (
             <div className="space-y-2">
               {results.map((author) => (
                 <div

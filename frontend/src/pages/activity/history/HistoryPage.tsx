@@ -101,12 +101,28 @@ export default function HistoryPage() {
     select: (res) => res.items,
   });
 
-  const { data: works } = useLibraryWorks();
+  const {
+    data: works,
+    isPending: worksPending,
+    error: worksError,
+    refetch: refetchWorks,
+  } = useLibraryWorks();
 
   const sorting = useSort<HistorySortField>("date", "desc");
 
-  if (isLoading || !works) return <PageLoading />;
-  if (error) return <ErrorState error={error} onRetry={() => refetch()} />;
+  if (isLoading || worksPending) return <PageLoading />;
+  const loadError = error ?? (works ? null : worksError);
+  if (loadError) {
+    return (
+      <ErrorState
+        error={loadError}
+        onRetry={() => {
+          void refetch();
+          void refetchWorks();
+        }}
+      />
+    );
+  }
 
   const allRows = sorting.sort(data ?? [], (item, field) => {
     switch (field) {
