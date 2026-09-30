@@ -10,6 +10,11 @@
 ### 🐛 Bug Fixes
 
 - *(add)* New books default to monitoring both ebook and audiobook
+- *(ui)* Pop-ups no longer show twice (#183); messages on the setup screen, reader and player now appear bottom-right like everywhere else
+- *(library)* Search, Queue and History see the whole library, not only the newest 1,000 books (#180)
+- *(import)* Small usenet ebooks import automatically; the download-size check now applies to torrents only (#178)
+- *(lists)* Undoing a list import also removes the authors it left with no books, including for imports made before this fix; authors you had before, still have books, or monitor or edited are kept (#182)
+- *(metadata)* Two unfinished error branches in the OpenLibrary and Audnexus lookups are filled in instead of crashing
 
 ## [0.1.0-alpha6] - 2026-07-18
 
