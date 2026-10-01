@@ -229,6 +229,12 @@ to 28); that is the failure this rule prevents.
 - **Performance work: measure before designing.** A perf REQ enters design only with a measurement/probe artifact attached. This cycle's natural experiment: the two levers measured first (keepalive tuning, bulk-refresh concurrency) settled on one cheap capture each; the one designed first (Hardcover batching) consumed a probe + design draft + a full dual-family review round before the same measurement logic cancelled it.
 - **Registering a behavioral test and force-adding its file are ONE change.** `tests/` is gitignored for new files; a `[[test]]` entry in `livrarr-behavioral/Cargo.toml` whose file was never `git add -f`'d is green locally and uncompilable on every fresh clone. The manifest guard does NOT catch this direction (two files sat unshipped for a full feature cycle). Register + `git add -f` together, always.
 
+## Lessons (from errors-and-delete-pass retro, 2026-09-30; PO-approved)
+
+- **Probe a coder's own "not verified" before review.** When a hand-back names an unverified behaviour in shared code, the PM has it probed (a short script or test through the real library) before dispatching review. The stream A coder named the exact save-warning race Astra later reproduced; a 10-minute probe would have saved a code round.
+- **Enumerate signature-change callers with the compiler, at spec time.** When a spec changes a function or trait signature, the spec seat changes it in a scratch tree, runs `cargo check --workspace --all-targets`, and lists every error site in System Truths. Search missed five test callers and a trait bound this cycle (cf. the code-index false-negative trap).
+- **Fixed-id toasts: record the library's lifecycle.** Sonner keeps a dismissed toast mounted ~200 ms and merges a same-id re-issue into the leaving one. A requirement that a fixed-id toast "warns again" must say how, and its tests need one case with outcomes closer than that window (`wiki/patterns/error-handling.md`).
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation

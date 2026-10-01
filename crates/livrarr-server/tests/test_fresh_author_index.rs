@@ -67,14 +67,20 @@ impl Server {
         let stdout = std::fs::File::create(&log).unwrap();
         let stderr = stdout.try_clone().unwrap();
         drop(reservation);
-        let child = Command::new(env!("CARGO_BIN_EXE_livrarr"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_livrarr"));
+        command
             .arg("--data")
             .arg(data)
             .env_clear()
             .env("HTTP_PROXY", &proxy_url)
             .env("HTTPS_PROXY", &proxy_url)
             .env("ALL_PROXY", &proxy_url)
-            .env("NO_PROXY", "")
+            .env("NO_PROXY", "");
+        // A coverage run's profile destination is the only inherited setting.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
+        let child = command
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .spawn()
