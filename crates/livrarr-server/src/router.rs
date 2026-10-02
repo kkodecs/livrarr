@@ -756,16 +756,19 @@ mod tests {
     /// but `auth_service` — the second (rate-limited) request never reaches
     /// a handler at all. Returns the backing `TempDir` alongside the state;
     /// it must outlive the router.
-    async fn test_app_state() -> (AppState, tempfile::TempDir) {
+    async fn app_state_with_auth(
+        make_auth: impl FnOnce(
+            livrarr_db::sqlite::SqliteDb,
+        ) -> crate::auth_service::ServerAuthService<
+            crate::auth_crypto::RealAuthCrypto,
+        >,
+    ) -> (AppState, tempfile::TempDir) {
         let db = livrarr_db::test_helpers::create_test_db().await;
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().to_path_buf();
         let data_dir_arc = Arc::new(data_dir.clone());
 
-        let auth_service = Arc::new(crate::auth_service::ServerAuthService::new(
-            db.clone(),
-            crate::auth_crypto::RealAuthCrypto,
-        ));
+        let auth_service = Arc::new(make_auth(db.clone()));
 
         let ua = livrarr_http::livrarr_user_agent();
         let http_client = livrarr_http::HttpClient::builder()
@@ -1119,6 +1122,31 @@ mod tests {
         (state, tmp)
     }
 
+    /// Harness state whose auth service is built without a setup token.
+    async fn test_app_state_without_setup_token() -> (AppState, tempfile::TempDir) {
+        app_state_with_auth(|db| {
+            crate::auth_service::ServerAuthService::new(db, crate::auth_crypto::RealAuthCrypto)
+        })
+        .await
+    }
+
+    /// Harness state whose auth service holds `setup_token`, as `main` gives it
+    /// the token from `{data}/setup-token`.
+    async fn test_app_state_with_setup_token(
+        setup_token: &'static str,
+    ) -> (AppState, tempfile::TempDir) {
+        app_state_with_auth(move |db| {
+            // The token file lives under a folder that never exists, so the
+            // best-effort removal after a successful setup finds nothing.
+            let file = std::env::temp_dir()
+                .join("livrarr-router-tests-no-such-folder")
+                .join(crate::setup_token::SETUP_TOKEN_FILE_NAME);
+            crate::auth_service::ServerAuthService::new(db, crate::auth_crypto::RealAuthCrypto)
+                .with_setup_token(crate::setup_token::SetupToken::new(setup_token, file))
+        })
+        .await
+    }
+
     /// Drives the REAL production router (`build_router`, not a hand-rolled
     /// stand-in) so that deleting the `.layer(GovernorLayer::new(setup_governor))`
     /// line from the `/setup` route in `build_router` turns this test red.
@@ -1131,12 +1159,21 @@ mod tests {
     /// as a gap rather than faked.
     #[tokio::test]
     async fn setup_route_burst_of_one_blocks_a_second_immediate_request() {
-        let (state, _tmp) = test_app_state().await;
+        let (state, _tmp) = test_app_state_with_setup_token(KNOWN_SETUP_TOKEN).await;
         let ui_dir = state.data_dir.join("ui-not-present-in-test");
         let app = build_router(state, ui_dir);
 
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 12345);
-        let body = || Body::from(r#"{"username":"admin","password":"correct-horse-battery"}"#);
+        let body = || {
+            Body::from(
+                serde_json::json!({
+                    "username": "admin",
+                    "password": "correct-horse-battery",
+                    "setupToken": KNOWN_SETUP_TOKEN,
+                })
+                .to_string(),
+            )
+        };
 
         let mut first = Request::builder()
             .method("POST")
@@ -1164,6 +1201,130 @@ mod tests {
             resp.status(),
             StatusCode::TOO_MANY_REQUESTS,
             "burst_size(1) means a 2nd immediate request from the same IP must be rate-limited"
+        );
+    }
+
+    /// The setup token given to `test_app_state_with_setup_token` and sent as
+    /// the right proof.
+    const KNOWN_SETUP_TOKEN: &str = "6f1c2b9e0d4a7f3851c6e2b0a9d8f714";
+
+    const SETUP_TOKEN_MESSAGE: &str = "The setup token is missing or wrong. Find it in \
+        Livrarr's startup output, or in the file setup-token in its data folder \
+        (/config/setup-token in Docker).";
+
+    fn peer(last_octet: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, last_octet)), 40000)
+    }
+
+    /// Sends one request through the real router from `peer`, returning the
+    /// status and the serialized body.
+    async fn call(
+        app: &Router,
+        from: SocketAddr,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut request = match body {
+            Some(json) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(json.to_string()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        request.extensions_mut().insert(ConnectInfo(from));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    async fn setup_status_body(app: &Router, from: SocketAddr) -> serde_json::Value {
+        let (status, body) = call(app, from, "GET", "/api/v1/setup/status", &[], None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).unwrap()
+    }
+
+    fn assert_token_refusal(status: StatusCode, body: &str, case: &str) {
+        assert_eq!(status, StatusCode::FORBIDDEN, "{case}: {body}");
+        let parsed: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["message"], SETUP_TOKEN_MESSAGE, "{case}: {body}");
+        assert!(
+            !body.contains(KNOWN_SETUP_TOKEN),
+            "{case}: body carries the token"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_is_refused_when_the_auth_service_holds_no_token() {
+        let (state, _tmp) = test_app_state_without_setup_token().await;
+        let ui_dir = state.data_dir.join("ui-not-present-in-test");
+        let app = build_router(state, ui_dir);
+
+        let (status, text) = call(
+            &app,
+            peer(40),
+            "POST",
+            "/api/v1/setup",
+            &[],
+            Some(serde_json::json!({
+                "username": "owner",
+                "password": "owner-password-1",
+                "setupToken": KNOWN_SETUP_TOKEN,
+            })),
+        )
+        .await;
+        assert_token_refusal(status, &text, "service without a token");
+        assert_eq!(
+            setup_status_body(&app, peer(41)).await,
+            serde_json::json!({"setupRequired": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn two_simultaneous_right_token_setups_have_one_winner() {
+        let (state, _tmp) = test_app_state_with_setup_token(KNOWN_SETUP_TOKEN).await;
+        let ui_dir = state.data_dir.join("ui-not-present-in-test");
+        let app = build_router(state, ui_dir);
+
+        let body = |name: &str| {
+            serde_json::json!({
+                "username": name,
+                "password": "owner-password-1",
+                "setupToken": KNOWN_SETUP_TOKEN,
+            })
+        };
+        let (first, second) = tokio::join!(
+            call(
+                &app,
+                peer(50),
+                "POST",
+                "/api/v1/setup",
+                &[],
+                Some(body("owner-a"))
+            ),
+            call(
+                &app,
+                peer(51),
+                "POST",
+                "/api/v1/setup",
+                &[],
+                Some(body("owner-b"))
+            ),
+        );
+        let mut statuses = [first.0, second.0];
+        statuses.sort();
+        assert_eq!(
+            statuses,
+            [StatusCode::OK, StatusCode::CONFLICT],
+            "first={first:?} second={second:?}"
         );
     }
 }

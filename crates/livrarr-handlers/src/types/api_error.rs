@@ -617,6 +617,7 @@ fn auth_error_to_http(
     match e {
         AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "unauthorized", msg, None),
         AuthError::AccountLocked => (StatusCode::FORBIDDEN, "forbidden", msg, None),
+        AuthError::SetupTokenRejected => (StatusCode::FORBIDDEN, "forbidden", msg, None),
         AuthError::SetupCompleted | AuthError::SetupRequired => {
             (StatusCode::CONFLICT, "conflict", msg, None)
         }

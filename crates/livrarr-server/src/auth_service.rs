@@ -1,13 +1,15 @@
 //! Production AuthService, generic over crypto backend.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{Duration, Utc};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::auth_crypto::AuthCryptoService;
+use crate::setup_token::{remove_setup_token_file, SetupToken};
 use crate::*;
 use livrarr_db::sqlite::SqliteDb;
 use livrarr_db::{
@@ -23,6 +25,17 @@ pub struct ServerAuthService<C: AuthCryptoService> {
     db: SqliteDb,
     crypto: C,
     lockouts: Arc<RwLock<HashMap<String, LockoutState>>>,
+    setup_token: Mutex<SetupTokenState>,
+}
+
+/// The first-run setup token as the service holds it.
+enum SetupTokenState {
+    /// No token was given: every setup request is refused.
+    Absent,
+    /// Setup requests must carry this token.
+    Active(SetupToken),
+    /// A setup request carrying the token claimed the account.
+    Consumed,
 }
 
 struct LockoutState {
@@ -31,11 +44,56 @@ struct LockoutState {
 }
 
 impl<C: AuthCryptoService> ServerAuthService<C> {
+    /// A service with no setup token, which refuses every setup request.
     pub fn new(db: SqliteDb, crypto: C) -> Self {
         Self {
             db,
             crypto,
             lockouts: Arc::new(RwLock::new(HashMap::new())),
+            setup_token: Mutex::new(SetupTokenState::Absent),
+        }
+    }
+
+    /// The service that accepts a setup request only when it carries `token`.
+    pub fn with_setup_token(self, token: SetupToken) -> Self {
+        Self {
+            setup_token: Mutex::new(SetupTokenState::Active(token)),
+            ..self
+        }
+    }
+
+    /// Accepts `offered` only when, trimmed of surrounding whitespace, it
+    /// equals the active setup token, compared in constant time.
+    fn check_setup_token(&self, offered: Option<&str>) -> Result<(), AuthError> {
+        let state = self
+            .setup_token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let expected = match &*state {
+            SetupTokenState::Active(token) => token.value(),
+            SetupTokenState::Consumed => return Err(AuthError::SetupCompleted),
+            SetupTokenState::Absent => return Err(AuthError::SetupTokenRejected),
+        };
+        let offered = offered.map(str::trim).unwrap_or_default();
+        let matches: bool = offered.as_bytes().ct_eq(expected.as_bytes()).into();
+        if offered.is_empty() || !matches {
+            return Err(AuthError::SetupTokenRejected);
+        }
+        Ok(())
+    }
+
+    /// Drops the in-memory setup token once the account is claimed, then
+    /// removes its file as a best effort.
+    fn consume_setup_token(&self) {
+        let previous = std::mem::replace(
+            &mut *self
+                .setup_token
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            SetupTokenState::Consumed,
+        );
+        if let SetupTokenState::Active(token) = previous {
+            remove_setup_token_file(token.file());
         }
     }
 
@@ -221,6 +279,8 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
             return Err(AuthError::SetupCompleted);
         }
 
+        self.check_setup_token(req.setup_token.as_deref())?;
+
         let password_hash = self
             .crypto
             .hash_password(&req.password)
@@ -238,9 +298,9 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
             .await
             .map_err(|e| AuthError::Db(DbError::Io(Box::new(e))))?;
 
-        let user = self
+        let user_id = self
             .db
-            .complete_setup(CompleteSetupDbRequest {
+            .claim_setup(CompleteSetupDbRequest {
                 username: req.username,
                 password_hash,
                 api_key_hash,
@@ -250,6 +310,7 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
                 DbError::Constraint { .. } => AuthError::SetupCompleted,
                 other => AuthError::Db(other),
             })?;
+        self.consume_setup_token();
 
         // Create session
         let token = self
@@ -265,7 +326,7 @@ impl<C: AuthCryptoService> AuthService for ServerAuthService<C> {
 
         let session = Session {
             token_hash,
-            user_id: user.id,
+            user_id,
             persistent: false,
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::hours(24),
@@ -547,15 +608,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn setup_request_debug_never_shows_the_password_or_setup_token() {
+        let token = "6f1c2b9e0d4a7f3851c6e2b0a9d8f714";
+        let request: SetupRequest = serde_json::from_value(serde_json::json!({
+            "username": "owner",
+            "password": "owner-secret-1",
+            "setupToken": token,
+        }))
+        .expect("a setup body with a token deserializes");
+        let shown = format!("{request:?}");
+        assert!(shown.contains("owner"), "{shown}");
+        assert!(!shown.contains("owner-secret-1"), "{shown}");
+        assert!(!shown.contains(token), "{shown}");
+    }
+
+    const SETUP_TOKEN: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
     #[tokio::test]
     async fn complete_setup_succeeds_on_virgin_db() {
         let db = livrarr_db::test_helpers::create_test_db().await;
-        let service = ServerAuthService::new(db, TestAuthCrypto);
+        let token_dir = tempfile::tempdir().unwrap();
+        let service = ServerAuthService::new(db, TestAuthCrypto).with_setup_token(SetupToken::new(
+            SETUP_TOKEN,
+            token_dir.path().join("setup-token"),
+        ));
 
         let result = service
             .complete_setup(SetupRequest {
                 username: "admin".to_string(),
                 password: "firstpass1".to_string(),
+                setup_token: Some(SETUP_TOKEN.to_string()),
             })
             .await;
 
@@ -564,6 +647,101 @@ mod tests {
             "setup must succeed on a virgin DB: {result:?}"
         );
         assert!(service.is_setup_complete().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn setup_token_is_consumed_when_a_step_after_the_claim_fails() {
+        let db = livrarr_db::test_helpers::create_test_db().await;
+        let db_check = db.clone();
+        let pending_id: i64 =
+            sqlx::query_scalar("SELECT id FROM users WHERE setup_pending = 1 ORDER BY id LIMIT 1")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        // Constructed fault by necessity: no production writer stores an
+        // unreadable timestamp or blocks session inserts, and both are needed
+        // to make the steps after the conditional claim fail.
+        sqlx::query("UPDATE users SET created_at = 'not-a-timestamp' WHERE setup_pending = 1")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER fail_session_insert BEFORE INSERT ON sessions \
+             BEGIN SELECT RAISE(ABORT, 'injected session failure'); END",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+        let token_dir = tempfile::tempdir().unwrap();
+        let token_file = token_dir.path().join("setup-token");
+        std::fs::write(&token_file, SETUP_TOKEN).unwrap();
+        let service = ServerAuthService::new(db, TestAuthCrypto)
+            .with_setup_token(SetupToken::new(SETUP_TOKEN, token_file.clone()));
+        let request = || SetupRequest {
+            username: "owner".to_string(),
+            password: "ownerpass1".to_string(),
+            setup_token: Some(SETUP_TOKEN.to_string()),
+        };
+
+        let result = service.complete_setup(request()).await;
+        assert!(result.is_err(), "the injected fault must fail the request");
+
+        assert!(
+            service.is_setup_complete().await.unwrap(),
+            "the account must be claimed"
+        );
+        assert!(
+            matches!(
+                *service.setup_token.lock().unwrap(),
+                SetupTokenState::Consumed
+            ),
+            "the service must no longer hold the setup token"
+        );
+        let repeat = service.complete_setup(request()).await;
+        assert!(
+            matches!(repeat, Err(AuthError::SetupCompleted)),
+            "a repeat request must get SetupCompleted, got: {repeat:?}"
+        );
+        assert!(
+            !token_file.exists(),
+            "the setup token file must be removed once the account is claimed"
+        );
+
+        sqlx::query("UPDATE users SET created_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(pending_id)
+            .execute(db_check.pool())
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER fail_session_insert")
+            .execute(db_check.pool())
+            .await
+            .unwrap();
+
+        let login = service
+            .login(LoginRequest {
+                username: "owner".to_string(),
+                password: "ownerpass1".to_string(),
+                remember_me: false,
+            })
+            .await
+            .expect("the owner must sign in with the setup credentials");
+        let session_user = service
+            .verify_token(&login.token)
+            .await
+            .expect("the sign-in session must verify");
+        assert_eq!(
+            session_user, pending_id,
+            "the session must belong to the claimed account"
+        );
+        assert!(
+            service.is_setup_complete().await.unwrap(),
+            "setup must still be complete after sign-in"
+        );
+        assert!(
+            !token_file.exists(),
+            "the setup token file must still be absent after sign-in"
+        );
     }
 
     /// A repeated POST to an already-completed setup must be rejected
@@ -578,13 +756,18 @@ mod tests {
             inner: TestAuthCrypto,
             hash_calls: hash_calls.clone(),
         };
-        let service = ServerAuthService::new(db, crypto);
+        let token_dir = tempfile::tempdir().unwrap();
+        let service = ServerAuthService::new(db, crypto).with_setup_token(SetupToken::new(
+            SETUP_TOKEN,
+            token_dir.path().join("setup-token"),
+        ));
 
         // First legitimate setup — converts the placeholder user 1.
         service
             .complete_setup(SetupRequest {
                 username: "admin".to_string(),
                 password: "firstpass1".to_string(),
+                setup_token: Some(SETUP_TOKEN.to_string()),
             })
             .await
             .expect("first setup must succeed");
@@ -620,6 +803,7 @@ mod tests {
             .complete_setup(SetupRequest {
                 username: "attacker".to_string(),
                 password: "whatever12".to_string(),
+                setup_token: None,
             })
             .await;
 

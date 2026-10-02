@@ -4,7 +4,6 @@
 //!            RUNTIME-COMPOSE-004, RUNTIME-LOG-001, RUNTIME-LOG-002
 
 use serde::Deserialize;
-use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // AppConfig
@@ -17,9 +16,6 @@ use tracing::warn;
 pub struct AppConfig {
     #[serde(default)]
     pub server: ServerConfig,
-
-    #[serde(default)]
-    pub auth: AuthConfig,
 
     #[serde(default)]
     pub log: LogConfig,
@@ -77,21 +73,6 @@ fn default_bind_address() -> String {
 
 fn default_port() -> u16 {
     8789
-}
-
-// ---------------------------------------------------------------------------
-// AuthConfig
-// ---------------------------------------------------------------------------
-
-/// [auth] section.
-///
-/// Satisfies: AUTH-009 (external auth)
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct AuthConfig {
-    pub external_header: Option<String>,
-
-    #[serde(default)]
-    pub trusted_proxies: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -338,16 +319,6 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
         }
     }
 
-    // trusted_proxies must be valid CIDRs
-    for cidr in &config.auth.trusted_proxies {
-        if cidr.parse::<std::net::IpAddr>().is_err() && parse_cidr(cidr).is_err() {
-            return Err(ConfigError::InvalidValue {
-                field: "auth.trusted_proxies".to_string(),
-                message: format!("invalid CIDR: {cidr}"),
-            });
-        }
-    }
-
     // convergence values must be positive — a zero interval would busy-loop the
     // job runner; a non-positive batch or threshold is degenerate.
     if config.convergence.interval_secs == 0 {
@@ -387,91 +358,50 @@ pub fn validate_config(config: &AppConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Minimal CIDR parsing — validates {ip}/{prefix_len} format.
-fn parse_cidr(cidr: &str) -> Result<(), String> {
-    let parts: Vec<&str> = cidr.splitn(2, '/').collect();
-    if parts.len() != 2 {
-        return Err("missing prefix length".to_string());
-    }
-    parts[0]
-        .parse::<std::net::IpAddr>()
-        .map_err(|e| e.to_string())?;
-    let prefix_len: u8 = parts[1]
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
-    let is_v4 = parts[0].parse::<std::net::Ipv4Addr>().is_ok();
-    let max = if is_v4 { 32 } else { 128 };
-    if prefix_len > max {
-        return Err(format!("prefix length {prefix_len} exceeds maximum {max}"));
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Unknown key detection
 // ---------------------------------------------------------------------------
 
-/// Detect and warn about unknown config keys.
+/// Every section the loader reads, with every key it reads in that section.
+const KNOWN_KEYS: &[(&str, &[&str])] = &[
+    (
+        "server",
+        &["bind_address", "port", "url_base", "trusted_proxies"],
+    ),
+    ("log", &["level", "format"]),
+    (
+        "convergence",
+        &[
+            "enabled",
+            "interval_secs",
+            "batch_size",
+            "attempt_threshold",
+        ],
+    ),
+    ("metadata_cache", &["ttl_days", "max_rows"]),
+    ("author_link", &["enabled", "interval_secs", "batch_size"]),
+];
+
+/// The keys in a parsed `config.toml` that the loader does not read: an unknown
+/// root key as `key`, an unknown key inside a known section as `section.key`.
 ///
 /// Satisfies: RUNTIME-CONFIG-003
-pub fn warn_unknown_keys(raw: &toml::Value) {
-    const KNOWN_ROOT: &[&str] = &["server", "auth", "log", "convergence", "author_link"];
-    const KNOWN_SERVER: &[&str] = &["bind_address", "port", "url_base"];
-    const KNOWN_AUTH: &[&str] = &["external_header", "trusted_proxies"];
-    const KNOWN_LOG: &[&str] = &["level", "format"];
-    const KNOWN_CONVERGENCE: &[&str] = &[
-        "enabled",
-        "interval_secs",
-        "batch_size",
-        "attempt_threshold",
-    ];
-    const KNOWN_AUTHOR_LINK: &[&str] = &["enabled", "interval_secs", "batch_size"];
-
-    if let Some(table) = raw.as_table() {
-        for key in table.keys() {
-            if !KNOWN_ROOT.contains(&key.as_str()) {
-                warn!("Unknown config key: {key}");
-            }
-        }
-
-        if let Some(server) = table.get("server").and_then(|v| v.as_table()) {
-            for key in server.keys() {
-                if !KNOWN_SERVER.contains(&key.as_str()) {
-                    warn!("Unknown config key: server.{key}");
-                }
-            }
-        }
-
-        if let Some(auth) = table.get("auth").and_then(|v| v.as_table()) {
-            for key in auth.keys() {
-                if !KNOWN_AUTH.contains(&key.as_str()) {
-                    warn!("Unknown config key: auth.{key}");
-                }
-            }
-        }
-
-        if let Some(log) = table.get("log").and_then(|v| v.as_table()) {
-            for key in log.keys() {
-                if !KNOWN_LOG.contains(&key.as_str()) {
-                    warn!("Unknown config key: log.{key}");
-                }
-            }
-        }
-
-        if let Some(convergence) = table.get("convergence").and_then(|v| v.as_table()) {
-            for key in convergence.keys() {
-                if !KNOWN_CONVERGENCE.contains(&key.as_str()) {
-                    warn!("Unknown config key: convergence.{key}");
-                }
-            }
-        }
-
-        if let Some(author_link) = table.get("author_link").and_then(|v| v.as_table()) {
-            for key in author_link.keys() {
-                if !KNOWN_AUTHOR_LINK.contains(&key.as_str()) {
-                    warn!("Unknown config key: author_link.{key}");
+pub fn unknown_keys(table: &toml::Table) -> Vec<String> {
+    let mut unknown = Vec::new();
+    for (key, value) in table {
+        match KNOWN_KEYS.iter().find(|(section, _)| section == key) {
+            None => unknown.push(key.clone()),
+            Some((section, known)) => {
+                if let Some(children) = value.as_table() {
+                    unknown.extend(
+                        children
+                            .keys()
+                            .filter(|child| !known.contains(&child.as_str()))
+                            .map(|child| format!("{section}.{child}")),
+                    );
                 }
             }
         }
     }
+    unknown
 }

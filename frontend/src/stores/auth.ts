@@ -27,7 +27,7 @@ interface AuthState {
     password: string,
     rememberMe: boolean,
   ) => Promise<void>;
-  setupAction: (username: string, password: string) => Promise<string>;
+  setupAction: (username: string, password: string, setupToken: string) => Promise<string>;
   logoutAction: () => Promise<void>;
   clearAuth: () => void;
   refreshUser: () => Promise<void>;
@@ -104,8 +104,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   // Setup lives in the auth store because it creates the first user and
   // returns an auth token in a single atomic operation.
-  setupAction: async (username, password) => {
-    const { token, apiKey } = await api.setup({ username, password });
+  setupAction: async (username, password, setupToken) => {
+    const { token, apiKey } = await api.setup({ username, password, setupToken });
     setToken(token);
     // Clear tour-completed flag so the guided tour starts for new setups.
     localStorage.removeItem("livrarr-tour-completed");

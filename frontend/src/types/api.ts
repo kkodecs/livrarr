@@ -85,6 +85,7 @@ export interface LoginResponse {
 export interface SetupRequest {
   username: string;
   password: string;
+  setupToken: string;
 }
 
 export interface SetupResponse {

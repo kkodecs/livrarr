@@ -98,6 +98,9 @@ pub struct SetupRequest {
     pub username: String,
     #[serde(skip_serializing)]
     pub password: String,
+    /// The one-time first-run setup token.
+    #[serde(default, skip_serializing)]
+    pub setup_token: Option<String>,
 }
 
 impl std::fmt::Debug for SetupRequest {
@@ -105,6 +108,10 @@ impl std::fmt::Debug for SetupRequest {
         f.debug_struct("SetupRequest")
             .field("username", &self.username)
             .field("password", &"[REDACTED]")
+            .field(
+                "setup_token",
+                &self.setup_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -225,6 +232,11 @@ pub enum AuthError {
     AccountLocked,
     #[error("setup already completed")]
     SetupCompleted,
+    #[error(
+        "The setup token is missing or wrong. Find it in Livrarr's startup output, \
+         or in the file setup-token in its data folder (/config/setup-token in Docker)."
+    )]
+    SetupTokenRejected,
     #[error("setup required")]
     SetupRequired,
     #[error("cannot delete self")]

@@ -209,7 +209,7 @@ impl UserDb for SqliteDb {
         Ok(count > 0)
     }
 
-    async fn complete_setup(&self, req: CompleteSetupDbRequest) -> Result<User, DbError> {
+    async fn claim_setup(&self, req: CompleteSetupDbRequest) -> Result<UserId, DbError> {
         let now = Utc::now().to_rfc3339();
 
         // Find the pending setup user (not hardcoded to id=1).
@@ -247,6 +247,11 @@ impl UserDb for SqliteDb {
             });
         }
 
+        Ok(user_id)
+    }
+
+    async fn complete_setup(&self, req: CompleteSetupDbRequest) -> Result<User, DbError> {
+        let user_id = self.claim_setup(req).await?;
         self.get_user(user_id).await
     }
 

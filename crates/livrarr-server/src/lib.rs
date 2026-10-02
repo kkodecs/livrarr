@@ -184,5 +184,6 @@ pub mod readarr_import_service;
 pub mod readarr_import_workflow;
 pub mod router;
 pub mod services;
+pub mod setup_token;
 pub mod state;
 pub mod tag_service;

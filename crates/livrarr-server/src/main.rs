@@ -136,7 +136,7 @@ async fn main() {
     let pool = init_database(&data_dir).await;
 
     // Construct AppState.
-    let (db, auth_service) = build_db_and_auth(pool);
+    let (db, auth_service) = build_db_and_auth(pool, &data_dir).await;
     // The database initializer already performs this before legacy startup
     // repairs. Re-reading the marker here keeps the composition-root boundary
     // explicit immediately before HTTP/jobs are assembled.
@@ -718,8 +718,8 @@ fn init_tracing_and_config(
     Arc<livrarr_server::state::LogLevelHandle>,
     livrarr_domain::LogSurfaceStatus,
 ) {
-    let config = match load_config(data_dir) {
-        Ok(c) => c,
+    let (config, unknown_keys) = match load_config(data_dir) {
+        Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("Configuration error: {e}");
             std::process::exit(1);
@@ -730,6 +730,9 @@ fn init_tracing_and_config(
     let (log_level_handle, log_surface) = init_tracing(&config.log, log_buffer.clone(), data_dir);
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
+    for key in &unknown_keys {
+        warn!("Unknown config key: {key}");
+    }
 
     (config, log_buffer, log_level_handle, log_surface)
 }
@@ -947,9 +950,11 @@ async fn init_database(data_dir: &std::path::Path) -> sqlx::SqlitePool {
     pool
 }
 
-/// Construct the DB handle and the auth service that wraps it.
-fn build_db_and_auth(
+/// Construct the DB handle and the auth service that wraps it. While setup is
+/// pending, the auth service holds the first-run setup token.
+async fn build_db_and_auth(
     pool: sqlx::SqlitePool,
+    data_dir: &std::path::Path,
 ) -> (
     livrarr_db::sqlite::SqliteDb,
     Arc<
@@ -959,11 +964,67 @@ fn build_db_and_auth(
     >,
 ) {
     let db = livrarr_db::sqlite::SqliteDb::new(pool);
-    let auth_service = Arc::new(livrarr_server::auth_service::ServerAuthService::new(
+    let auth_service = livrarr_server::auth_service::ServerAuthService::new(
         db.clone(),
         livrarr_server::auth_crypto::RealAuthCrypto,
-    ));
-    (db, auth_service)
+    );
+    let auth_service = match prepare_setup_token(&db, data_dir).await {
+        Some(token) => auth_service.with_setup_token(token),
+        None => auth_service,
+    };
+    (db, Arc::new(auth_service))
+}
+
+/// While setup is pending, issues the first-run setup token and prints it to
+/// stdout; exits the process when its file cannot be written. Once setup is
+/// complete, removes a leftover token file as a best effort and returns `None`.
+async fn prepare_setup_token(
+    db: &livrarr_db::sqlite::SqliteDb,
+    data_dir: &std::path::Path,
+) -> Option<livrarr_server::setup_token::SetupToken> {
+    use livrarr_db::UserDb;
+    use livrarr_server::setup_token;
+
+    let pending = match db.has_pending_setup().await {
+        Ok(pending) => pending,
+        Err(e) => {
+            error!("Failed to read the setup state: {e}");
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    };
+    if !pending {
+        setup_token::remove_setup_token_file(&setup_token::setup_token_path(data_dir));
+        return None;
+    }
+
+    let token = match setup_token::issue_setup_token(data_dir) {
+        Ok(token) => token,
+        Err(e) => {
+            eprintln!(
+                "Cannot write the setup token file {}: {e}. Fix the data folder and restart.",
+                setup_token::setup_token_path(data_dir).display()
+            );
+            livrarr_db::pool::release_pid_lock(data_dir);
+            std::process::exit(1);
+        }
+    };
+    // The token goes to stdout directly, never through the log macros, so it
+    // reaches neither the log file nor the in-memory log.
+    println!(
+        "\n================================================================\n\
+         Livrarr first-run setup needs this one-time setup token:\n\n    \
+         {}\n\n\
+         It is also saved in the file {}\n\
+         ================================================================\n",
+        token.value(),
+        token.file().display()
+    );
+    info!(
+        "Setup is pending; the one-time setup token is in {}",
+        token.file().display()
+    );
+    Some(token)
 }
 
 /// Build the shared HTTP clients: unrestricted (admin-configured
@@ -1189,9 +1250,12 @@ async fn serve_until_shutdown(
     info!("Livrarr stopped");
 }
 
-fn load_config(data_dir: &std::path::Path) -> Result<AppConfig, String> {
+/// Reads and validates `config.toml`, returning the config and the keys in it
+/// that the loader does not read.
+fn load_config(data_dir: &std::path::Path) -> Result<(AppConfig, Vec<String>), String> {
     let config_path = data_dir.join("config.toml");
 
+    let mut unknown_keys = Vec::new();
     let config: AppConfig = if config_path.exists() {
         let raw = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("failed to read config.toml: {e}"))?;
@@ -1199,9 +1263,8 @@ fn load_config(data_dir: &std::path::Path) -> Result<AppConfig, String> {
         if raw.trim().is_empty() {
             AppConfig::default()
         } else {
-            // Parse for unknown key warnings.
-            if let Ok(val) = raw.parse::<toml::Value>() {
-                livrarr_server::config::warn_unknown_keys(&val);
+            if let Ok(table) = raw.parse::<toml::Table>() {
+                unknown_keys = livrarr_server::config::unknown_keys(&table);
             }
 
             toml::from_str(&raw).map_err(|e| format!("failed to parse config.toml: {e}"))?
@@ -1211,7 +1274,7 @@ fn load_config(data_dir: &std::path::Path) -> Result<AppConfig, String> {
     };
 
     livrarr_server::config::validate_config(&config).map_err(|e| e.to_string())?;
-    Ok(config)
+    Ok((config, unknown_keys))
 }
 
 fn init_tracing(

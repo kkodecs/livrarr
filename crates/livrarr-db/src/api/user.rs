@@ -43,8 +43,15 @@ pub trait UserDb: Send + Sync {
     /// deleted later while another admin remains).
     async fn has_pending_setup(&self) -> Result<bool, DbError>;
 
-    /// Complete setup: update placeholder admin with real credentials.
-    /// Atomic conditional: only succeeds if setup_pending = true.
+    /// Claim setup: write the real credentials onto the pending-setup
+    /// principal in one conditional update that only succeeds while
+    /// setup_pending = true. Returns the claimed user's id once the update
+    /// has committed; `Constraint` when setup is already completed.
+    ///
+    /// Satisfies: AUTH-010
+    async fn claim_setup(&self, req: CompleteSetupDbRequest) -> Result<UserId, DbError>;
+
+    /// Complete setup: `claim_setup`, then read back the claimed user.
     ///
     /// Satisfies: AUTH-010
     async fn complete_setup(&self, req: CompleteSetupDbRequest) -> Result<User, DbError>;

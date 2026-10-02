@@ -33,6 +33,7 @@ interface AccountForm {
   username: string;
   password: string;
   confirmPassword: string;
+  setupToken: string;
 }
 
 interface RootFolderForm {
@@ -165,7 +166,7 @@ export function SetupPage() {
             onSubmit={async (data) => {
               setError(null);
               try {
-                const key = await setupAction(data.username, data.password);
+                const key = await setupAction(data.username, data.password, data.setupToken);
                 setApiKey(key);
                 setConfig((c) => ({ ...c, username: data.username }));
                 goNext();
@@ -313,6 +314,22 @@ function AccountStep({
           type="password"
           className="input-field"
         />
+      </Field>
+      <Field label="Setup token" error={errors.setupToken?.message}>
+        <input
+          {...register("setupToken", {
+            required: "Required",
+            validate: (v) => v.trim() !== "" || "Required",
+          })}
+          autoComplete="off"
+          spellCheck={false}
+          className="input-field font-mono"
+        />
+        <span className="mt-1 block text-xs text-zinc-500">
+          Livrarr printed a one-time setup token when it started. Run{" "}
+          <code>docker logs livrarr</code>, or open the file <code>setup-token</code> in
+          your config folder.
+        </span>
       </Field>
       {error && <p className="text-sm text-red-400">{error}</p>}
       {apiKey && (
