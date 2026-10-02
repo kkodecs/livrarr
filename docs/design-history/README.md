@@ -33,6 +33,9 @@ through PM's resume entry. This notice does not reclassify their acceptance stat
 
 - [Root architecture before the September 18 provider wording decision](root-architecture-r4.md) — exact predecessor;
   [current provider rule](../../ARCHITECTURE.md#providers-are-interchangeable) contains the approved plain-language wording.
+- [Root architecture before the October 1 provider sentence and factual corrections](root-architecture-r1.md) — exact predecessor
+  (byte-identical to the committed file at `37dd4426`); [current architecture](../../ARCHITECTURE.md) holds the approved
+  provider sentence and corrected deployment, download, tag-writing, dependency and credential lines.
 - [Wiki pages before the September 18 decision updates](wiki-before-september-18-decisions/README.md) —
   exact prior import, privacy-lesson and change-log pages; current decisions are linked there.
 

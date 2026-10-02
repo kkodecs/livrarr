@@ -63,7 +63,7 @@ This hierarchy must be implemented once, in one place, not re-derived per entry 
 
 A metadata provider (Goodreads, Hardcover, OpenLibrary, Google Books, Audnexus, Audible) is an implementation of a trait. The rest of the system does not care which provider runs.
 
-Adding a new provider means implementing the trait contract — nothing else changes. Provider-specific behavior (auth, parsing, quirks) lives inside the provider and does not leak into the identity engine, the enrichment orchestrator, or the merge layer.
+Keep the details of talking to each book-information service in its own integration. Adding a service may also require telling Livrarr what it provides and when to use it. Provider-specific behavior (auth, parsing, quirks) lives inside the provider and does not leak into the identity engine, the enrichment orchestrator, or the merge layer.
 
 ### LLM as Metadata Advisor
 
@@ -114,7 +114,7 @@ No telemetry. No tracking. Livrarr does not phone home.
 
 ### Secure by Default
 
-Self-hosted doesn't mean insecure. Passwords are hashed with argon2id. Session tokens and API keys are stored as SHA-256 hashes — shown once in plaintext, never retrievable again. There is no anonymous access and no network-based auth bypass. The one exception is download-client passwords, stored plaintext per Servarr convention and redacted in API responses.
+Self-hosted doesn't mean insecure. Passwords are hashed with argon2id. Session tokens and API keys are stored as SHA-256 hashes — shown once in plaintext, never retrievable again. There is no anonymous access and no network-based auth bypass. Third-party credentials are stored in plain text: download-client passwords and API keys, indexer and Prowlarr API keys, the LLM, Hardcover and Google Books keys, and the SMTP password. Download-client credentials are not returned by the API. Encryption at rest is tracked in #118.
 
 Self-hosted users are exposed to their local network; secure defaults protect them without requiring configuration.
 
@@ -141,8 +141,9 @@ Self-hosted users are exposed to their local network; secure defaults protect th
               ┌────────────────┼────────────────────────────────┐
               │                │                │               │
        livrarr-metadata  livrarr-download  livrarr-library  livrarr-tagwrite
-       (orchestration)   (qBit, SABnzbd,   (import,         (EPUB/M4B/MP3
-                          Torznab)          file layout)      tag writing)
+       (orchestration)   (qBittorrent,     (import,         (EPUB tag writing;
+                          Transmission,     file layout)      the M4B and MP3
+                          SABnzbd, Torznab)                   writers are disabled)
               │
     ┌─────────┼──────────┐
     │         │          │
@@ -173,7 +174,7 @@ Supporting: livrarr-matching (release parsing/scoring)
 
 | Crate | May depend on |
 |---|---|
-| `livrarr-domain` | Nothing (serde, chrono, thiserror, tokio only) |
+| `livrarr-domain` | Nothing internal |
 | `livrarr-db` | domain |
 | `livrarr-http` | domain |
 | `livrarr-matching` | domain |
@@ -198,7 +199,7 @@ Nothing depends on `livrarr-server`.
 ## Crate Responsibilities
 
 ### `livrarr-domain`
-Pure type library. Entities, ID newtypes, enums, error types, service traits. Zero external deps beyond serde/chrono/thiserror. The canonical title normalizer (`text_norm`) lives here — it is the only normalizer.
+Pure type library. Entities, ID newtypes, enums, error types, service traits. No internal dependencies; its external crates are listed in its manifest. The canonical title normalizer (`text_norm`) lives here — it is the only normalizer.
 
 **Non-responsibilities:** business logic, persistence, HTTP.
 
@@ -227,13 +228,13 @@ Orchestration. `WorkService` drives the full pipeline (identity → enrichment �
 Release title parsing, candidate scoring, M1–M4 matching pipeline, embedded metadata extraction. Used by import flows.
 
 ### `livrarr-download`
-Download client integrations (qBittorrent, SABnzbd) and Torznab indexer search.
+Download client integrations (qBittorrent, Transmission, SABnzbd) and Torznab indexer search.
 
 ### `livrarr-library`
 Import workflow, file layout enforcement, CWA downstream copy. Owns where files live on disk.
 
 ### `livrarr-tagwrite`
-EPUB, M4B, and MP3 metadata tag writing. Format-specific heavy dependencies isolated here.
+EPUB tag writing; the M4B and MP3 writers are disabled. Format-specific heavy dependencies isolated here.
 
 ### `livrarr-handlers`
 All Axum route handlers and DTOs. Generic over `AppContext`. **Compile wall.** Handlers validate input, call a trait method, map the result. No business logic, no SQL, no file I/O.
@@ -267,7 +268,7 @@ These are non-negotiable. Violating them is a bug, not a judgment call.
 - Applied migrations are immutable — never edit a shipped migration file
 - The rate limiter is process-global — never create a local one
 - File paths, checksums, reading history, and preferences are never transmitted externally
-- Tag writing (EPUB/M4B/MP3) is user-initiated only — never automatic or silent
+- Tag writing happens only inside a user-authorized workflow, including import of a book the user added; only EPUB files are written
 - No telemetry, no analytics, no external reporting of any kind
 
 ## Current Conventions
@@ -352,7 +353,7 @@ SQLite with WAL mode and a four-connection pool. SQLite still admits one writer 
 
 ## Deployment
 
-Single-container Docker on Linux. Multi-stage build (rust:bookworm builder, debian:bookworm-slim runtime). PUID/PGID user creation in entrypoint. Target hardware floor: Raspberry Pi 4. Runtime data mapped to `/config` by the user at deploy time.
+Single-container Docker on Linux. Multi-stage build: `node:20-alpine` frontend, `rust:1.94-alpine` builder, `alpine:3.21` runtime. The image has a fixed `livrarr` user (1000:1000). Started as root, the entrypoint fixes `/config` ownership and drops to `PUID:PGID`. Started as a non-root user, it runs as that user. Target hardware floor: Raspberry Pi 4. Runtime data mapped to `/config` by the user at deploy time.
 
 ---
 

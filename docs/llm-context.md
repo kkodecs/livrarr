@@ -10,7 +10,7 @@ Livrarr is a self-hosted ebook and audiobook library manager, similar to Sonarr 
 - Works-first model — a "work" = a book title, independent of format or edition
 - Manages both ebooks and audiobooks in one app
 - Multi-user with per-user library isolation
-- Integrates with the *arr ecosystem: Prowlarr, qBittorrent, SABnzbd
+- Integrates with the *arr ecosystem: Prowlarr, qBittorrent, Transmission, SABnzbd
 - Integrates with downstream readers: Calibre-Web Automated (CWA), Audiobookshelf, Kavita
 - Metadata from OpenLibrary + Hardcover + Google Books (English and foreign languages); Goodreads via LLM scraping (foreign languages, when available)
 
@@ -21,7 +21,7 @@ Livrarr is a self-hosted ebook and audiobook library manager, similar to Sonarr 
 1. **Search** — User searches by title. Livrarr queries metadata providers (OpenLibrary, Hardcover for English; Google Books + Goodreads via LLM for foreign languages).
 2. **Add** — User adds the work. Livrarr enriches it with description, genres, series info, covers, ratings.
 3. **Find releases** — User searches indexers (Torznab/Newznab) for downloadable files.
-4. **Download** — Livrarr sends the grab to qBittorrent (torrents) or SABnzbd (usenet).
+4. **Download** — Livrarr sends the grab to qBittorrent or Transmission (torrents), or SABnzbd (usenet).
 5. **Import** — When download completes, poller detects it, copies files to organized library, writes metadata tags (EPUB only — see note below), creates DB records, optionally hardlinks to CWA.
 
 ## Supported File Formats
@@ -40,7 +40,7 @@ All configured through the web UI at `http://<host>:8789`:
 | Component | Where | Required? |
 |-----------|-------|-----------|
 | Root folders | Settings > Media Management | Yes — at least one ebook or audiobook root |
-| Download client | Settings > Download Clients | Yes — qBittorrent or SABnzbd |
+| Download client | Settings > Download Clients | Yes — qBittorrent, Transmission or SABnzbd |
 | Indexers | Settings > Indexers | Yes — Torznab/Newznab URLs (or import from Prowlarr) |
 | Hardcover token | Settings > Metadata | Recommended — free API token from hardcover.app |
 | Google Books API key | Settings > Metadata | Recommended — required for foreign language enrichment |
@@ -49,16 +49,16 @@ All configured through the web UI at `http://<host>:8789`:
 
 ## Detailed Setup Guide
 
-After first launch, visit `http://<host>:8789` and complete the setup wizard (create admin account). Then configure in this order:
+After first launch, visit `http://<host>:8789` and complete the setup wizard (create admin account). The wizard asks for a setup token: "Livrarr printed a one-time setup token when it started. Run `docker logs livrarr`, or open the file `setup-token` in your config folder." A missing or wrong token is refused with: "The setup token is missing or wrong. Find it in Livrarr's startup output, or in the file setup-token in its data folder (/config/setup-token in Docker)." Then configure in this order:
 
 ### Step 1: Root Folders (Settings > Media Management)
 
 Root folders tell Livrarr where to store imported files. You need at least one.
 
-- **Ebook root folder** — e.g., `/books` (inside container). Imported ebooks go to `{root}/{Author}/{Title}.epub`.
-- **Audiobook root folder** — e.g., `/audiobooks` (inside container). Imported audiobooks go to `{root}/{Author}/{Title}/{files}`.
+- **Ebook root folder** — e.g., `/books` (inside container). Imported ebooks go to `{root}/{user_id}/{Author}/{Title}.epub`.
+- **Audiobook root folder** — e.g., `/audiobooks` (inside container). Imported audiobooks go to `{root}/{user_id}/{Author}/{Title}/{files}`.
 - One root folder per media type. You cannot use the same folder for both.
-- The path must exist and be writable by the Livrarr process (UID 1000 in Docker).
+- The path must exist and be writable by the Livrarr process: the container's `PUID:PGID` user (default 1000:1000), or the `user:` you set.
 - Root folders are shared across all users — admin creates them, all users' imports go there.
 
 ### Step 2: Download Client (Settings > Download Clients)
@@ -183,24 +183,21 @@ The only file-level config is `config.toml` in the data directory:
 [server]
 bind_address = "0.0.0.0"  # default
 port = 8789                # default
-url_base = ""              # reverse proxy path prefix, e.g. "/livrarr"
+trusted_proxies = []       # default; e.g. ["10.0.0.0/8"]. Per-IP rate limits trust X-Real-IP / X-Forwarded-For only from these addresses.
+# url_base: serving Livrarr under a sub-path (e.g. "/livrarr") is not supported yet. The key is accepted and has no effect.
 
 [log]
 level = "info"   # trace | debug | info | warn | error
 format = "text"  # text | json
-
-[auth]
-# external_header = "X-Remote-User"  # optional, for reverse proxy auth
-# trusted_proxies = ["10.0.0.0/8"]   # required if external_header is set
 ```
 
 Everything else (download clients, indexers, metadata providers, root folders) is configured through the web UI and stored in the SQLite database.
 
 ## Important: Do Not Hallucinate Configuration
 
-- The ONLY file-based configuration is `/config/config.toml` with sections `[server]`, `[log]`, and `[auth]`. Nothing else is configurable via file.
+- The ONLY file-based configuration is `/config/config.toml` with sections `[server]`, `[log]`, `[convergence]`, `[metadata_cache]` and `[author_link]`. Nothing else is configurable via file.
 - ALL other settings (remote path mappings, download clients, indexers, metadata, users) are configured exclusively through the web UI and stored in the SQLite database.
-- There is no config.yaml, no docker environment variable overrides, no CLI flags beyond `--data`.
+- There is no config.yaml and no environment-variable override of `config.toml`. The container reads `PUID` and `PGID`, and `RUST_LOG` replaces the log filter. Command-line options: `--data`, `--ui-dir` and the `identity-cutover` subcommand.
 - If you are unsure whether a setting exists, say so. Do not invent configuration options, file formats, or API endpoints that are not documented here.
 
 ## Docker Deployment
@@ -208,10 +205,14 @@ Everything else (download clients, indexers, metadata providers, root folders) i
 ```yaml
 services:
   livrarr:
-    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha5
+    image: ghcr.io/kkodecs/livrarr:0.1.0-alpha6
     container_name: livrarr
+    environment:
+      - PUID=1000            # your host user id  (run `id -u`)
+      - PGID=1000            # your host group id (run `id -g`)
+      - TZ=Etc/UTC           # e.g. America/New_York
     ports:
-      - "8789:8789"
+      - 8789:8789
     volumes:
       - ./config:/config           # config.toml, livrarr.db, covers, logs
       - /path/to/books:/books      # ebook/audiobook library root
@@ -221,21 +222,33 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:                 # minimal set: fix /config ownership, then drop root → PUID:PGID
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
     mem_limit: 512m
+    cpus: 2.0
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8789/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 ```
 
 **Volume mapping notes:**
 - `/config` — persistent storage for config.toml, livrarr.db, cover images, and log files
 - Library root folders and download paths must be accessible inside the container
 - Remote path mappings (Settings > Download Clients) are needed if the download client and Livrarr see different mount paths for the same files
-- Log file is written to `{data_dir}/logs/livrarr.txt`
+- Log file is written to `{data_dir}/logs/livrarr.log.<YYYY-MM-DD>`, a new file each day
 
 ## File Organization
 
 Livrarr organizes imported files into:
 
-- **Ebooks:** `{root}/{Author Name}/{Title}.{ext}`
-- **Audiobooks:** `{root}/{Author Name}/{Title}/{original_files}`
+- **Ebooks:** `{root}/{user_id}/{Author Name}/{Title}.{ext}`
+- **Audiobooks:** `{root}/{user_id}/{Author Name}/{Title}/{original_files}`
 
 Separate root folders are required for ebooks and audiobooks. Author and title names are sanitized (dangerous characters removed, `..` blocked, truncated to 255 bytes).
 
@@ -276,7 +289,7 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 
 | Job | Interval | Function |
 |-----|----------|----------|
-| `download_poller` | 60s | Checks qBit/SABnzbd for completed downloads, triggers import |
+| `download_poller` | 60s | Checks qBittorrent, Transmission and SABnzbd for completed downloads, triggers import |
 | `rss_sync` | 60s | Polls all enabled RSS-capable indexers for new releases matching monitored works |
 | `enrichment_retry` | 5 min | Retries failed/pending enrichments |
 | `tag_convergence` | 60s | Writes missing tags to already-imported files |
@@ -330,7 +343,7 @@ When the download client (e.g., qBittorrent) reports a file at `/downloads/book.
 
 ## Log Interpretation
 
-Logs are viewable at System > Logs in the UI, or in the file `{data_dir}/logs/livrarr.txt`.
+Logs are viewable at System > Logs in the UI, or in the file `{data_dir}/logs/livrarr.log.<YYYY-MM-DD>` (a new file each day).
 
 **Key log patterns:**
 
@@ -357,7 +370,7 @@ Logs are viewable at System > Logs in the UI, or in the file `{data_dir}/logs/li
 
 ## API Reference
 
-REST API at `/api/v1/`. Authenticate with `X-Api-Key: <key>` header or session cookie.
+REST API at `/api/v1/`. Authenticate with an `X-Api-Key: <key>` header, or with `Authorization: Bearer <token>` using the session token from login.
 
 ### Key endpoints
 
@@ -396,11 +409,11 @@ List endpoints accept `page` and `page_size` query parameters:
 
 ### Login protection
 
-Login attempts are lockout-protected per username — after 5 consecutive failures, the account is locked for a period. There is no per-IP global rate limit.
+Login is rate limited per IP: a burst of 5 attempts, then one more every 12 seconds. Every API route also has a per-IP limit. A username locks for 15 minutes after 5 failed logins.
 
 ## Architecture (for advanced troubleshooting)
 
-- **13 Rust crates:** livrarr-server (composition root), livrarr-handlers (route handlers, compile-walled), livrarr-jobs (job triggering trait), livrarr-db (SQLite), livrarr-domain (types/traits), livrarr-metadata (providers), livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-matching (file matching), livrarr-library (import/layout), livrarr-tagwrite (EPUB tags), livrarr-behavioral (test harness), livrarr-cli (stub)
+- **17 Rust crates:** livrarr-server (composition root), livrarr-handlers (route handlers, compile-walled), livrarr-jobs (job triggering trait), livrarr-db (SQLite), livrarr-domain (types/traits), livrarr-metadata (orchestration), livrarr-external-data (provider clients), livrarr-identity, livrarr-enrichment, livrarr-materialize, livrarr-http (HTTP client), livrarr-download (torrent/NZB), livrarr-matching (file matching), livrarr-library (import/layout), livrarr-tagwrite (EPUB tags), livrarr-behavioral (test harness), livrarr-cli (stub)
 - **Database:** SQLite via sqlx with versioned migrations
 - **Enrichment pipeline:** Hardcover GraphQL → OpenLibrary JSON → Audnexus REST (English); Google Books → Goodreads HTML → LLM extraction (foreign)
 - **Import pipeline:** Poller detects completion → copies to .tmp → writes tags (EPUB only) → atomic rename to final path → creates DB record → optional CWA hardlink
@@ -409,7 +422,7 @@ Login attempts are lockout-protected per username — after 5 consecutive failur
 
 ## Getting Help
 
-- **Discord:** https://discord.gg/y3FnTUJM — fastest way to get help from the community and developers
+- **Discord:** https://discord.gg/PJDsgjEvCV — fastest way to get help from the community and developers
 - **GitHub Issues:** https://github.com/kkodecs/livrarr/issues — bug reports and feature requests
 - **In-app AI Help:** Help > Get AI Help — builds a prompt with your instance info and recent logs for use with any AI assistant
 - **Repository:** https://github.com/kkodecs/livrarr

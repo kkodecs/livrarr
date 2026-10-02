@@ -13,11 +13,11 @@
 ## What it does
 
 - **Search** any Torznab or Newznab indexer (Prowlarr, NZBHydra2, Jackett, or direct) for ebooks and audiobooks
-- **Grab** via qBittorrent or SABnzbd (forthcoming: support for other clients)
+- **Grab** via qBittorrent, Transmission or SABnzbd
 - **Import** to your library with automatic file organization
-- **Enrich** metadata from Hardcover, OpenLibrary, Google Books, and Audnexus
+- **Enrich** metadata from Hardcover, OpenLibrary, Google Books, Goodreads, Audible and Audnexus
 - **Read** in your browser with a built-in ebook reader and audiobook player
-- **Push** to Calibre-Web Automated (CWA) or AudioBookShelf (ABS)
+- **Hand off** ebooks to Calibre-Web Automated (hardlinked into its ingest folder, or copied across filesystems); AudioBookShelf and Kavita read Livrarr's library folders directly
 
 ---
 
@@ -58,13 +58,13 @@ docker compose up -d
 
 **3. Open the UI**
 
-Navigate to `http://your-server:8789`. You'll be prompted to create your admin account on first launch — no pre-seeding required.
+Navigate to `http://your-server:8789`. You'll be prompted to create your admin account on first launch. The setup page asks for a setup token: "Livrarr printed a one-time setup token when it started. Run `docker logs livrarr`, or open the file `setup-token` in your config folder."
 
 **4. Configure**
 
 Go to **Settings** and add:
 - A root folder (where books land after import)
-- A download client (qBittorrent or SABnzbd)
+- A download client (qBittorrent, Transmission or SABnzbd)
 - At least one indexer (any Torznab/Newznab source: Prowlarr, NZBHydra2, Jackett, or direct indexer URL + API key)
 
 ### Upgrading from alpha6
@@ -108,7 +108,7 @@ level = "info"       # trace | debug | info | warn | error
 | Component | Required | Notes |
 |---|---|---|
 | Docker | Yes | Multi-arch image — linux/amd64 and linux/arm64 |
-| qBittorrent or SABnzbd | Yes | Download client |
+| qBittorrent, Transmission or SABnzbd | Yes | Download client |
 | Torznab or Newznab indexer | Yes | Prowlarr, NZBHydra2, Jackett, or direct feed |
 | Hardcover API key | No | Better metadata — free at hardcover.app |
 | LLM integration | No | Better search and metadata |
@@ -133,7 +133,7 @@ Mounted paths must be accessible by that user:
 
 Livrarr auto-fixes `/config` only — make sure your library and downloads are already owned by (or accessible to) your `PUID:PGID`.
 
-**Hardened / rootless:** to never run as root at all, delete the `cap_add:` block and set `user: "1000:1000"` (pre-`chown` your `./config` on the host first); in this mode `PUID`/`PGID` are ignored. Rootless Docker/Podman **must** use this mode. On Kubernetes use `securityContext.runAsUser/runAsGroup/fsGroup`. With SELinux, add `:z`/`:Z` to your bind mounts.
+**Hardened / rootless:** to never run as root, add `user: "1000:1000"` (pre-`chown` `./config` first). If you copied the repository's hardened `docker-compose.yml`, also delete its `cap_add:` block. In this mode `PUID`/`PGID` are ignored. Rootless Docker/Podman **must** use this mode. On Kubernetes use `securityContext.runAsUser/runAsGroup/fsGroup`. With SELinux, add `:z`/`:Z` to your bind mounts.
 
 **Upgrading from an older build?** If you used the simple Quick Start compose, nothing changes. If you copied the hardened `docker-compose.yml` (with `cap_drop: ALL`), add the `cap_add:` block (or switch to `user: "1000:1000"`) — otherwise the container stops on start with a message telling you exactly what to do.
 
