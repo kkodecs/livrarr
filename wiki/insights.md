@@ -44,6 +44,7 @@ need both a theme entry and a short index link. Feature progress belongs in buil
 - [40. Import utilities versus orchestration](insights/coding-patterns.md#lesson-40)
 - [41. Composite handler contracts](insights/coding-patterns.md#lesson-41)
 - [103. Checked invocation facade](insights/coding-patterns.md#lesson-103)
+- [106. A TOML file is a table, not a value](insights/coding-patterns.md#lesson-106)
 
 ## Covers
 

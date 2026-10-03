@@ -166,6 +166,27 @@ Source: [PM's accepted F4 scope clarification](../../build/design/DECISION-F4-SC
 
 [Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md#103-checked-invocation-facade).
 
+<a id="lesson-106"></a>
+## 106. A TOML file is a table, not a value
+
+In toml 1.x, `str::parse::<toml::Value>()` reads a single TOML value, not a document: `Value`'s
+`FromStr` calls `ValueDeserializer::parse`, documented as "Parse a TOML value" (`toml-1.1.2`
+`src/value.rs:395-400`; `src/de/deserializer/value.rs:48-49`). A whole `config.toml` therefore
+fails to parse that way. To read a whole file, parse a `toml::Table` (its `FromStr` is
+`toml::from_str`, `src/table.rs:53-58`) or deserialize with `toml::from_str`.
+
+Why it matters: Livrarr's unknown-key check used `raw.parse::<toml::Value>()` inside `if let Ok`,
+so the parse failed on every real config and the check never ran, with no error
+(`37dd4426:crates/livrarr-server/src/main.rs:1203-1205`). The spec for the fix named only the
+logging-order cause; the coder found this one when the tests stayed red. The check now parses a
+`toml::Table` (`crates/livrarr-server/src/main.rs:1266-1268` at `d77f690a`).
+
+To apply: never discard a parse error with `if let Ok` on a path whose job is to report problems;
+a test that feeds a real multi-key file and expects the report catches both causes.
+
+Source: `build/reviews/prerelease-trust-pass/packet-3a-code/evidence-toml-value-parse.log`;
+`spec-prerelease-trust-pass.md` v6 §7.
+
 ## Source and history
 
 [Exact revision before cleanup](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/coding-patterns.md). Historical implementation claims retain

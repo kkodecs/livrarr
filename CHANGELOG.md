@@ -8,6 +8,7 @@
 - *(work-detail)* Show the subtitle under the title on the book page
 - *(library)* Deleting a book from its page, or several from the Books page, offers "Also delete files from disk"; it starts unticked, so files stay unless you tick it; ticked, only the book's own files inside the library folder are removed, and any that cannot be are named in a warning
 - *(library)* "Delete File" on a book's files tab now deletes the file from disk, not just Livrarr's record; if the file cannot be removed, the record stays and the error says why
+- *(setup)* A fresh install asks for a one-time setup token before it creates the first account, so a stranger who reaches the port first cannot take it over; the token is printed when Livrarr starts (`docker logs livrarr`) and saved as `setup-token` in the config folder, and it stops working once setup succeeds
 
 ### 🐛 Bug Fixes
 
@@ -25,6 +26,9 @@
 - *(history)* History shows an error with Retry instead of an endless spinner when the library cannot be read
 - *(import)* Readarr import progress shows "Lost contact with Livrarr" while the server is not answering, instead of freezing
 - *(ui)* The sidebar health summary shows "Health check failed" when the check fails, instead of vanishing or going stale; it is shown to admins only
+- *(config)* A misspelled or unknown key in `config.toml` now shows an "Unknown config key" warning in the log; before, these warnings never appeared
+- *(config)* The `[auth]` proxy-login settings, which never did anything, are removed; an old `[auth]` section is reported as an unknown key and Livrarr starts normally, even with a bad proxy address in it
+- *(docs)* The README, architecture notes and AI-help guide are corrected: Transmission support, import paths, EPUB-only tag writing, a Docker example that starts, the log file name, the rate limits, the setup token, and `url_base` marked as not supported yet
 
 ## [0.1.0-alpha6] - 2026-07-18
 
