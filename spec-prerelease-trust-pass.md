@@ -14,8 +14,8 @@ req_ids: [REQ-101, REQ-102, REQ-103, REQ-104, REQ-105, REQ-106, REQ-107, REQ-201
 **Delivered.** All three parts were built, passed code review on the second round, and were
 checked live by the PO on 2026-10-02 ("tested both all good", as the PM reports): the existing
 install was unchanged, and a fresh install asked for the setup token, refused a wrong one,
-accepted the right one and deleted the token file. The code and docs are committed locally as
-`d77f690a` and `c70dca4e`, not yet pushed. Every requirement is delivered. Making `url_base` work
+accepted the right one and deleted the token file. The code and docs are committed as
+`d77f690a` and `c70dca4e` and were pushed to `main` on 2026-10-03. Every requirement is delivered. Making `url_base` work
 stays deferred to the backlog (#119), as the PO decided; this spec only stopped the docs claiming
 it works. The spec now describes what was built ([as built](#7-as-built-corrections-and-limits)).
 
@@ -26,8 +26,9 @@ holds exactly the 32 characters, and setup is refused on non-Unix systems
 ([corrections](#corrections-found-during-the-build)).
 
 **Recorded limits.** The non-Unix code was never compiled on this host; Livrarr ships Linux images
-only. The check that the Help page's AI prompt reaches the corrected docs can run only after a push
-([limits](#limits)).
+only ([limits](#limits)). After the push, the PM checked that the Help page's AI prompt reaches the
+corrected docs: GitHub serves the pushed `docs/llm-context.md` byte for byte
+([acceptance](#acceptance-as-built)).
 
 Three pre-release fixes, approved by the PO on 2026-10-01, with the open choices settled the same
 day ([Revision](#revision)).
@@ -125,6 +126,12 @@ Delivered; §7 records what the spec got wrong or left out and the limits. No de
 Status `delivered`. v5 is kept at
 `build/reviews/prerelease-trust-pass/packet-0-spec/spec-prerelease-trust-pass-v5.md` (sha256
 `5053ced20f2a73a5e425f447c397acbd1fa583071ad89c7c7b1deb24b84d5cb6`).
+
+v6 update, 2026-10-03 (factual, no version bump; the committed v6 at `dff80a06` is the predecessor),
+per `packet-8-ac101/PACKET.md`: after the push `59b7e9db..dff80a06`, the PM fetched the ST-101 raw
+URL (HTTP 200, sha256 `8128fe822937337a8f0a241234d25aa5302ec07db3d9b71d4c3c9b5c592594b3`, equal to
+the local and `origin/main` `docs/llm-context.md`; copy in `post-push-llm-context.md`), so AC-101 is
+met.
 
 ## 0a. Design Principles
 
@@ -457,10 +464,10 @@ no token in the URL. No doc checker, no new user docs, no #118 or #76 work. Noth
 
 Red means the case must fail on `37dd4426` before the fix. Guard means it passes before and after.
 
-As built, every criterion except AC-101 is met; AC-101's post-push check is still open. The test
+As built, every criterion is met; the PM ran AC-101's post-push check on 2026-10-03. The test
 for each criterion, and where one moved, is in [§7](#acceptance-as-built).
 
-- [ ] **AC-101** (REQ-101–107): the reviewer checks each §2a row. Each doc line agrees with its code
+- [x] **AC-101** (REQ-101–107): the reviewer checks each §2a row. Each doc line agrees with its code
   line, D10 is unchanged, and `docs/ARCHITECTURE.md` is the redirect with working tracked links.
   The design-history index names `root-architecture-r1.md` (sha256 `1b0b596f…`, equal to
   `37dd4426:ARCHITECTURE.md`) as the predecessor. In § "Providers Are Interchangeable", only the
@@ -596,7 +603,7 @@ B is `crates/livrarr-server/tests/test_fresh_author_index.rs`, R is
 
 | AC | Tests | State |
 |----|-------|-------|
-| AC-101 | Astra checked each §2a row in code review r1 and r2; trace in `packet-3b-docs/TRACE.md` | Met, except the post-push raw-URL check, still open |
+| AC-101 | Astra checked each §2a row in code review r1 and r2; trace in `packet-3b-docs/TRACE.md`. After the 2026-10-03 push the PM fetched the ST-101 raw URL: HTTP 200, sha256 `8128fe82…` equal to the local and `origin/main` file (`post-push-llm-context.md`) | Met |
 | AC-201 | B:909 `config_warnings_name_each_unknown_key_once_and_no_valid_key`; B:980 `config_warning_shows_at_the_warn_log_level` | Met |
 | AC-202 | B:939 `config_warning_shows_at_the_default_log_level` | Met |
 | AC-203 | B:959 `removed_auth_section_warns_and_starts_while_url_base_stays_silent`; guard B:1001 `url_base_alone_starts_and_names_no_unknown_key` | Met |
@@ -615,9 +622,9 @@ Recorded and accepted; none is a known defect.
 
 - **The non-Unix branches were never compiled on this host** (only `x86_64-unknown-linux-gnu` is
   installed). Review r2 closed R3 by reading the source only.
-- **AC-101's last check needs a push.** The Help page sends the user's AI to `docs/llm-context.md`
-  on GitHub `main` (ST-101), so the corrected AI help reaches users only after the push; the PM
-  checks the raw URL then.
+- **The corrected AI help lives on GitHub `main`.** The Help page sends the user's AI to
+  `docs/llm-context.md` there (ST-101), so it reaches users only once pushed. The PM confirmed
+  after the 2026-10-03 push that the raw URL serves the corrected file (AC-101).
 - **Residual from REQ-301 stands:** a token that sat in a readable file before an earlier start
   stays valid.
 - **`url_base` still does nothing.** Its key is accepted without a warning; making it work is on
