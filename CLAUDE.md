@@ -235,6 +235,12 @@ to 28); that is the failure this rule prevents.
 - **Enumerate signature-change callers with the compiler, at spec time.** When a spec changes a function or trait signature, the spec seat changes it in a scratch tree, runs `cargo check --workspace --all-targets`, and lists every error site in System Truths. Search missed five test callers and a trait bound this cycle (cf. the code-index false-negative trap).
 - **Fixed-id toasts: record the library's lifecycle.** Sonner keeps a dismissed toast mounted ~200 ms and merges a same-id re-issue into the leaving one. A requirement that a fixed-id toast "warns again" must say how, and its tests need one case with outcomes closer than that window (`wiki/patterns/error-handling.md`).
 
+## Lessons (from prerelease-trust-pass retro, 2026-10-03; PO-approved)
+
+- **A "why it's silent" System Truth needs a probe of the fixed path.** When the spec explains why something does not happen, remove the named cause once in a scratch run and watch for the effect before the truth enters scope. ST-205 said config warnings were dropped because logging started late; true, but the check also parsed the file as a single TOML value and never ran. The coder found it on the first green attempt (`wiki/insights/coding-patterns.md`, lesson 106).
+- **List every input shape as an acceptance criterion for files and tokens the code reads.** Missing, exact, extra content, a trailing newline, a link, a directory, and other platforms. Three of the five code-review findings were shapes no criterion named: a token file with trailing data, a failure after the claim commits, and non-Unix builds.
+- **Copy the allowed test edits verbatim from the code packet into the review packet.** A paraphrase narrower than the code packet's wording produced a review finding against an allowed edit.
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation
