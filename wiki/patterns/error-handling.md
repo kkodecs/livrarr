@@ -1,5 +1,16 @@
 # Errors and recovery
 
+## Executive summary
+
+Be strict with data that is the source of truth, tolerant with data that can be rebuilt, and
+always show a failure to the user or operator ([read policy](#read-policy),
+[HTTP mapping](#http-mapping)). In the web app, a failed load shows an inline error with Retry
+and a failed action shows one pop-up from its own handler; there is no global handler
+([showing failures in the UI](#showing-failures-in-the-ui)). Sonner, the pop-up library, has
+two timing traps: a re-issue under the same id while a pop-up is leaving or just gone is lost,
+and a test with a paused clock must step it before a pop-up appears or after one is removed
+([Sonner under a paused test clock](#sonner-under-a-paused-test-clock)).
+
 Be strict for authoritative state, tolerant for rebuildable data, visible to
 operators and explicit about version compatibility. Map domain errors at the HTTP
 boundary; do not leak credentials, paths, stack traces or raw provider bodies.
@@ -52,6 +63,19 @@ As of 2026-09-30 (errors-and-delete-pass):
   200 ms. A toast re-issued under the same id during that time is merged into the
   leaving one and lost, so the helper waits for `onDismiss` plus a margin before
   showing a new run's warning.
+- <a id="sonner-under-a-paused-test-clock"></a>**Sonner under a paused test clock**
+  (2026-10-04, silent-failures-2). Sonner 2.0.7 adds a toast from a `setTimeout`, and it
+  finishes a removal over two animation frames after the element has gone: `removeToast` calls
+  `ToastState.dismiss`, which waits one frame, and the toaster waits another before it marks
+  every toast with that id as deleted. A same-id toast issued in those frames is deleted too
+  (`frontend/node_modules/.pnpm/sonner@2.0.7_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/sonner/dist/index.mjs:947-969`,
+  `:182-188`). A Playwright test that pauses the page clock must therefore step it after an
+  action that reports, before it looks for the toast (50 ms is enough), and step it again after
+  a toast has gone, before it expects a same-id toast to show (100 ms). Examples:
+  `frontend/e2e-stubbed/audio-playback-failure.spec.ts:444`, `:557`. In real time the second
+  window is about two frames, so the app's fixed-id playback-failure pop-up
+  (`frontend/src/pages/reader/playbackFailure.ts:10-14`) treats a report there as lost and
+  relies on the play button as the lasting signal (`spec-silent-failures-2.md` D2).
 - **Book search:** when every source that was tried fails, the search answers 502
   (`WorkServiceError::AllProvidersFailed`) and the result is never cached. Skipped
   sources are told apart from failed ones.

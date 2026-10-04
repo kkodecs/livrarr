@@ -1,5 +1,13 @@
 # Coding patterns lessons
 
+## Executive summary
+
+Rules for how Livrarr code is structured, with links to their evidence. They cover service
+contracts and async traits ([7](#lesson-7), [8](#lesson-8)), handler and crate boundaries
+([9b](#lesson-9b) to [9i](#lesson-9i)), and library traps that hid failures: a TOML file parsed
+as a single value ([106](#lesson-106)) and a TanStack Query error state that clears while the
+next check runs ([107](#lesson-107)).
+
 Current guidance with links to the full dated evidence. Read implementation claims
 against the named source revision; accepted design is not proof of runtime behavior.
 
@@ -186,6 +194,30 @@ a test that feeds a real multi-key file and expects the report catches both caus
 
 Source: `build/reviews/prerelease-trust-pass/packet-3a-code/evidence-toml-value-parse.log`;
 `spec-prerelease-trust-pass.md` v6 §7.
+
+<a id="lesson-107"></a>
+## 107. An errored query with no data is not in error while it refetches
+
+In TanStack Query 5, a query that failed and has no data goes back to `status: "pending"` when
+it refetches, and `isError` turns false until that fetch ends. The `fetch` action applies
+`fetchState`, which sets `status: "pending"` and clears `error` whenever `data` is undefined
+(`frontend/node_modules/.pnpm/@tanstack+query-core@5.96.0/node_modules/@tanstack/query-core/src/query.ts:639-644`,
+`:700-718`). With cached data the previous outcome stays while it fetches. `errorUpdateCount`
+is not reset by a refetch.
+
+Why it matters: the header bell showed its "check failed" mark from `isError`, so after a first
+failed check the mark vanished while the next check ran, and the bell looked like an empty inbox.
+Comparing `errorUpdatedAt` with `dataUpdatedAt` instead fails when a success and a failure finish
+in the same millisecond, since both come from `Date.now()`.
+
+To apply: to show "the last check failed", use `status === "error"`, or `status === "pending"`
+with `errorUpdateCount > 0` (no check has succeeded yet), as the bell does
+(`frontend/src/components/Header/NotificationBell.tsx:50-53`, `:175-177`). A success moves
+`status` to `"success"` and clears it. Test both a held refetch after a first failure and equal
+completion times (`frontend/src/components/Header/NotificationBell.test.tsx:404`, `:474`).
+
+Source: `build/reviews/silent-failures-2/packet-6-code-review/REVIEW-astra-code-r1.md` (F3),
+`packet-8-code-review-r2/REVIEW-astra-code-r2.md` (F3-R2); `spec-silent-failures-2.md` v6 §7.
 
 ## Source and history
 

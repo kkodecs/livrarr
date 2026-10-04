@@ -29,6 +29,12 @@
 - *(config)* A misspelled or unknown key in `config.toml` now shows an "Unknown config key" warning in the log; before, these warnings never appeared
 - *(config)* The `[auth]` proxy-login settings, which never did anything, are removed; an old `[auth]` section is reported as an unknown key and Livrarr starts normally, even with a bad proxy address in it
 - *(docs)* The README, architecture notes and AI-help guide are corrected: Transmission support, import paths, EPUB-only tag writing, a Docker example that starts, the log file name, the rate limits, the setup token, and `url_base` marked as not supported yet
+- *(library)* Deleting a book from its page and failing shows one error, the server's message, instead of two, and the dialog stays open; a successful delete is never reported as failed
+- *(player)* A failed audiobook bookmark add, rename or delete shows an error, and the sleep timer says "Bookmark saved" only when its bookmark was saved
+- *(player)* When an audiobook cannot play, one pop-up says "Could not play this audiobook. Try reloading the page." and the play button goes back to play, instead of showing pause while nothing plays
+- *(notifications)* When the bell cannot check for new notifications, a red "!" replaces the unread count and opening the bell says "Could not check for new notifications; still trying." until a check succeeds, instead of the count vanishing or freezing
+- *(reader)* When an ebook's saved place cannot be loaded, the reader shows "Could not load this book." with Retry and "Read from the beginning", which saves no progress that session, instead of opening at the start and overwriting your saved place
+- *(player)* When an audiobook's saved place cannot be loaded, the player shows the same screen with Retry and "Play from the beginning", which saves no progress that session, instead of starting at 0:00 and overwriting your saved place
 
 ## [0.1.0-alpha6] - 2026-07-18
 

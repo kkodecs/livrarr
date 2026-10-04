@@ -2,7 +2,17 @@
 
 ## Executive summary
 
-This log records wiki updates and their evidence. The [latest entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+This log records wiki updates and their evidence. The [latest entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+
+## 2026-10-04 — Saved place, Sonner timing and query error state
+
+From silent-failures-2 (`596f4f85`): a new page, [saved reading and listening place](domain/saved-place.md),
+describes how the ebook reader and the audiobook player protect a saved place they could not
+read. [Errors and recovery](patterns/error-handling.md#sonner-under-a-paused-test-clock) gains
+the Sonner paused-clock rule and an executive summary.
+[Lesson 107](insights/coding-patterns.md#lesson-107) records that TanStack Query clears an
+errored query's error state while it refetches; the coding-patterns page gains an executive
+summary. Source: `spec-silent-failures-2.md` v6 §7.
 
 ## 2026-09-26 — Branch documentation brought to main and five pages hand-merged
 
