@@ -37,15 +37,29 @@ const notificationIcons: Record<NotificationType, ReactNode> = {
   rssGrabFailed: <Rss size={16} className="text-red-400" />,
 };
 
+const CHECK_FAILED = "Could not check for new notifications";
+
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
   const toastedIds = useRef<Set<number>>(new Set());
   const setRpmHighlight = useUIStore((s) => s.setRpmHighlight);
 
-  const { data: unreadNotifications } = useQuery({
+  // The unread check. A reply without an `items` list is a failed check, so
+  // the bell never shows a count it could not read.
+  const {
+    data: unreadNotifications,
+    status: unreadStatus,
+    errorUpdateCount: unreadFailures,
+  } = useQuery({
     queryKey: ["notifications", "unread"],
-    queryFn: () => api.listNotifications(true),
+    queryFn: async () => {
+      const res = await api.listNotifications(true);
+      if (!Array.isArray(res?.items)) {
+        throw new Error("Unread notifications reply has no items list");
+      }
+      return res;
+    },
     select: (res) => res.items,
     refetchInterval: 30_000,
     refetchOnWindowFocus: true,
@@ -154,13 +168,28 @@ export function NotificationBell() {
     },
   });
 
+  // The last completed check failed. A success leaves the query in "success"
+  // and a failure in "error", whichever finished later. A query with no data
+  // returns to "pending" while its next check runs; after a failure that
+  // pending state means no check has succeeded yet, so the failure stands.
+  const unreadCheckFailed =
+    unreadStatus === "error" ||
+    (unreadStatus === "pending" && unreadFailures > 0);
   const unreadCount = unreadNotifications?.length ?? 0;
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger className="relative rounded p-1.5 text-zinc-400 hover:bg-surface-hover hover:text-zinc-100">
         <Bell size={18} />
-        {unreadCount > 0 && (
+        {unreadCheckFailed ? (
+          <span
+            role="img"
+            aria-label={CHECK_FAILED}
+            className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white"
+          >
+            !
+          </span>
+        ) : unreadCount > 0 && (
           <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold text-white">
             {unreadCount > 99 ? "99+" : unreadCount}
           </span>
@@ -185,6 +214,12 @@ export function NotificationBell() {
               </button>
             )}
           </div>
+          {unreadCheckFailed && !listFailed && (
+            <p className="flex items-center gap-2 border-b border-border px-4 py-2 text-xs text-red-300">
+              <AlertTriangle size={14} className="shrink-0 text-red-400" />
+              {CHECK_FAILED}; still trying.
+            </p>
+          )}
           <div className="max-h-80 overflow-y-auto">
             {isLoading ? (
               <div className="flex justify-center py-8">

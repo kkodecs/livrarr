@@ -12,7 +12,7 @@ import {
   declineCrossFormat,
   syncCrossFormatToHere,
 } from "@/api";
-import { apiFetch } from "@/api/client";
+import { ApiError, apiFetch } from "@/api/client";
 import { resolveTsForCfi } from "@/utils/kashAnchors";
 import { ResumePromptBanner } from "@/components/ResumePromptBanner";
 import { savePosition } from "./savePosition";
@@ -49,6 +49,47 @@ interface Props {
   libraryItemId: number;
 }
 
+/** The session note shown after the user chose to start without the saved place. */
+export const FROM_START_NOTE =
+  "Your saved place could not be loaded. Progress is not being saved this time.";
+
+/** The detail line of the saved-place error screen. */
+export const SAVED_PLACE_DETAIL = "Your saved place could not be loaded.";
+
+/** The outcome of reading a saved place. */
+export type SavedPlaceRead =
+  | { kind: "place"; position: string }
+  | { kind: "none" }
+  | { kind: "failed" };
+
+/**
+ * Reads the saved place of a library item. A 404, or an empty position,
+ * means nothing has been saved yet. Any other error, and any reply without a
+ * position string, is a failed read.
+ */
+export function readSavedPlace(libraryItemId: number): Promise<SavedPlaceRead> {
+  return getPlaybackProgress(libraryItemId).then(
+    (reply): SavedPlaceRead => {
+      const position: unknown =
+        reply && typeof reply === "object"
+          ? (reply as { position?: unknown }).position
+          : undefined;
+      if (typeof position !== "string") return { kind: "failed" };
+      return position === "" ? { kind: "none" } : { kind: "place", position };
+    },
+    (err): SavedPlaceRead =>
+      err instanceof ApiError && err.status === 404
+        ? { kind: "none" }
+        : { kind: "failed" },
+  );
+}
+
+/**
+ * Where the saved place of the item on screen stands: still loading, failed,
+ * known (applied to the location), or skipped by "Read from the beginning".
+ */
+type SavedPlaceStatus = "loading" | "failed" | "known" | "fromStart";
+
 export function EpubReader({ libraryItemId }: Props) {
   const navigate = useNavigate();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -56,10 +97,46 @@ export function EpubReader({ libraryItemId }: Props) {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [location, setLocation] = useState<string | number>(0);
-  const [initialLoaded, setInitialLoaded] = useState(false);
-  const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
+
+  // Each opening of an item in this reader has its own id, including a
+  // return to an item opened before. Results of an earlier opening never
+  // count for the current one.
+  const [opening, setOpening] = useState({ itemId: libraryItemId, id: 0 });
+  if (opening.itemId !== libraryItemId)
+    setOpening({ itemId: libraryItemId, id: opening.id + 1 });
+  const openingId = opening.itemId === libraryItemId ? opening.id : opening.id + 1;
+
   const [loadAttempt, setLoadAttempt] = useState(0);
+  // The download's outcome for one opening and attempt; `data` is null when it failed.
+  const [download, setDownload] = useState<{
+    opening: number;
+    attempt: number;
+    data: ArrayBuffer | null;
+  } | null>(null);
+  const [readAttempt, setReadAttempt] = useState(0);
+  const [savedPlace, setSavedPlace] = useState<{
+    opening: number;
+    attempt: number;
+    status: SavedPlaceStatus;
+  } | null>(null);
+  // The opening whose saved place is known, so its position may be saved.
+  // Unset while the place is loading or failed and in a from-the-beginning
+  // session; `saveProgress` sends nothing unless it is the current opening.
+  const savePermitRef = useRef<number | null>(null);
+  // Identifies the saved-place read in force; a reply for an older one is ignored.
+  const readTokenRef = useRef<object>({});
+
+  const currentDownload =
+    download?.opening === openingId && download.attempt === loadAttempt
+      ? download
+      : null;
+  const epubData = currentDownload?.data ?? null;
+  const loadFailed = currentDownload !== null && currentDownload.data === null;
+  const placeStatus: SavedPlaceStatus =
+    savedPlace?.opening === openingId && savedPlace.attempt === readAttempt
+      ? savedPlace.status
+      : "loading";
+  const placeReady = placeStatus === "known" || placeStatus === "fromStart";
 
   // Settings (persisted to localStorage)
   const [darkTheme, setDarkTheme] = useState(() =>
@@ -155,6 +232,8 @@ export function EpubReader({ libraryItemId }: Props) {
   const token = localStorage.getItem("livrarr_token") ?? "";
   useEffect(() => {
     const controller = new AbortController();
+    const opening = openingId;
+    const attempt = loadAttempt;
     fetch(url, {
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
@@ -163,24 +242,58 @@ export function EpubReader({ libraryItemId }: Props) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.arrayBuffer();
       })
-      .then(setEpubData)
+      .then((data) => {
+        if (!controller.signal.aborted) setDownload({ opening, attempt, data });
+      })
       .catch(() => {
-        if (!controller.signal.aborted) setLoadFailed(true);
+        if (!controller.signal.aborted)
+          setDownload({ opening, attempt, data: null });
       });
     return () => controller.abort();
-  }, [url, token, loadAttempt]);
+  }, [openingId, url, token, loadAttempt]);
 
-  // Load saved progress on mount.
+  // Read the saved place once per opening and once per Retry. The book
+  // opens only once it is known; a failed read shows the saved-place error.
   useEffect(() => {
-    getPlaybackProgress(libraryItemId)
-      .then((p) => {
-        if (p?.position) setLocation(p.position);
-      })
-      .catch(() => {})
-      .finally(() => setInitialLoaded(true));
-  }, [libraryItemId]);
+    const readToken = {};
+    readTokenRef.current = readToken;
+    savePermitRef.current = null;
+    promptFiredRef.current = false;
+    currentCfiRef.current = "";
+    setFirstCfiKnown(false);
+    setResumePrompt(null);
+    setCurrentPct(0);
+    const opening = openingId;
+    const attempt = readAttempt;
+    readSavedPlace(libraryItemId).then((read) => {
+      if (readTokenRef.current !== readToken) return;
+      if (read.kind === "failed") {
+        setSavedPlace({ opening, attempt, status: "failed" });
+        return;
+      }
+      setLocation(read.kind === "place" ? read.position : 0);
+      setSavedPlace({ opening, attempt, status: "known" });
+      savePermitRef.current = opening;
+    });
+    // libraryItemId changes only together with openingId.
+  }, [openingId, readAttempt]);
 
-  // Save progress with trailing debounce.
+  // Opens the book as for "no saved place" and saves no position for the rest of this session.
+  const readFromBeginning = () => {
+    savePermitRef.current = null;
+    setLocation(0);
+    setSavedPlace({
+      opening: openingId,
+      attempt: readAttempt,
+      status: "fromStart",
+    });
+  };
+
+  // Save progress with trailing debounce. This is the reader's only save
+  // door: it sends nothing unless the current opening's saved place is
+  // known, checked when the save is asked for and again when it is sent, so
+  // never while the place is loading or failed or in a from-the-beginning
+  // session.
   const saveProgress = useCallback(
     (
       cfi: string,
@@ -188,12 +301,15 @@ export function EpubReader({ libraryItemId }: Props) {
       kind?: "progress" | "seek",
       crossFormatTs?: number,
     ) => {
+      if (savePermitRef.current !== openingId) return;
+      const opening = openingId;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(() => {
+        if (savePermitRef.current !== opening) return;
         savePosition(libraryItemId, cfi, pct, kind, crossFormatTs);
       }, 2000);
     },
-    [libraryItemId],
+    [libraryItemId, openingId],
   );
 
   useEffect(() => {
@@ -202,19 +318,20 @@ export function EpubReader({ libraryItemId }: Props) {
     };
   }, []);
 
-  // Cross-format prompt: fire once per mount after loaded + anchors available + first CFI known.
+  // Cross-format prompt: fire once per opened item after loaded + anchors available + first CFI known.
   useEffect(() => {
-    if (!initialLoaded || !anchors || !firstCfiKnown || promptFiredRef.current) return;
+    if (!placeReady || !anchors || !firstCfiKnown || promptFiredRef.current) return;
     const cfi = currentCfiRef.current;
     if (!cfi) return;
     promptFiredRef.current = true;
     const currentTs = resolveTsForCfi(anchors, cfi);
+    const readToken = readTokenRef.current;
     getCrossFormatPrompt(libraryItemId, currentTs)
       .then((dto) => {
-        if (dto) setResumePrompt(dto);
+        if (dto && readTokenRef.current === readToken) setResumePrompt(dto);
       })
       .catch(() => {});
-  }, [initialLoaded, anchors, firstCfiKnown, libraryItemId]);
+  }, [placeReady, anchors, firstCfiKnown, libraryItemId]);
 
   const onLocationChanged = useCallback(
     (loc: string) => {
@@ -339,14 +456,27 @@ export function EpubReader({ libraryItemId }: Props) {
     return (
       <BookLoadError
         onRetry={() => {
-          setLoadFailed(false);
           setLoadAttempt((n) => n + 1);
+          if (placeStatus === "failed") setReadAttempt((n) => n + 1);
         }}
       />
     );
   }
 
-  if (!initialLoaded || !epubData) {
+  if (placeStatus === "failed" && epubData) {
+    return (
+      <BookLoadError
+        detail={SAVED_PLACE_DETAIL}
+        onRetry={() => setReadAttempt((n) => n + 1)}
+        secondaryAction={{
+          label: "Read from the beginning",
+          onClick: readFromBeginning,
+        }}
+      />
+    );
+  }
+
+  if (!placeReady || !epubData) {
     return (
       <div className="flex h-screen items-center justify-center bg-zinc-900 text-zinc-400">
         Loading...
@@ -397,7 +527,11 @@ export function EpubReader({ libraryItemId }: Props) {
             {Math.round(currentPct * 100)}%
           </span>
         )}
-        <div className="flex-1" />
+        <div className="flex-1 min-w-0">
+          {placeStatus === "fromStart" && (
+            <p className="text-xs text-amber-400">{FROM_START_NOTE}</p>
+          )}
+        </div>
 
         {/* Settings popover */}
         <Popover.Root>
@@ -815,21 +949,52 @@ function TocEntry({
 
 export default EpubReader;
 
-/** Full-screen notice for a book whose download failed, with Retry. */
-export function BookLoadError({ onRetry }: { onRetry: () => void }) {
+/**
+ * Full-screen notice for a book that could not be loaded, with Retry. An
+ * optional detail line says what failed, and an optional second action
+ * offers a way forward that does not depend on the failing request.
+ */
+export function BookLoadError({
+  onRetry,
+  detail,
+  secondaryAction,
+}: {
+  onRetry: () => void;
+  detail?: string;
+  secondaryAction?: { label: string; onClick: () => void };
+}) {
+  const retry = (
+    <button
+      onClick={onRetry}
+      className={cn(
+        !secondaryAction && "mt-4",
+        "inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover",
+      )}
+    >
+      <RefreshCw size={14} />
+      Retry
+    </button>
+  );
   return (
     <div className="flex h-screen flex-col items-center justify-center bg-zinc-900 text-center">
       <AlertTriangle className="mb-4 text-red-400" size={32} />
       <h3 className="text-lg font-medium text-zinc-200">
         Could not load this book.
       </h3>
-      <button
-        onClick={onRetry}
-        className="mt-4 inline-flex items-center gap-2 rounded bg-brand px-4 py-2 text-sm font-medium text-white hover:bg-brand-hover"
-      >
-        <RefreshCw size={14} />
-        Retry
-      </button>
+      {detail && <p className="mt-2 text-sm text-zinc-400">{detail}</p>}
+      {secondaryAction ? (
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+          {retry}
+          <button
+            onClick={secondaryAction.onClick}
+            className="rounded border border-zinc-600 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-800"
+          >
+            {secondaryAction.label}
+          </button>
+        </div>
+      ) : (
+        retry
+      )}
     </div>
   );
 }

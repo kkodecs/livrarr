@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 /**
  * The network boundary for browser tests of the working-tree UI. Every request
@@ -77,10 +77,31 @@ export const serverError = (message: string): Reply => ({
   json: { status: 500, error: "internal", message },
 });
 
-const notFound = (message: string): Reply => ({
+export const notFound = (message: string): Reply => ({
   status: 404,
   json: { status: 404, error: "not_found", message },
 });
+
+export const clientError = (status: number, message: string): Reply => ({
+  status,
+  json: { status, error: "bad_request", message },
+});
+
+/** A 200 whose body is empty. */
+export const emptyOk: Reply = {
+  status: 200,
+  bytes: Buffer.alloc(0),
+  contentType: "application/json",
+};
+
+/** A saved-place reply carrying `position` as given. */
+export const savedAt = (position: unknown): Reply =>
+  ok({
+    library_item_id: 1,
+    position,
+    progress_pct: 0.1,
+    updated_at: "2026-09-01T00:00:00Z",
+  });
 
 /** Replies every authenticated page needs, used when the handler has none. */
 function sessionReply(call: ApiCall): Reply | undefined {
@@ -144,26 +165,87 @@ export async function stubApi(page: Page, handler: Handler) {
         handler(call) ??
         sessionReply(call) ??
         notFound(`unstubbed ${call.method} ${call.path}`);
-      if (reply === "network-error") {
-        await route.abort("failed");
-        return;
-      }
-      if (reply.bytes) {
-        await route.fulfill({
-          status: reply.status,
-          body: reply.bytes,
-          contentType: reply.contentType ?? "application/octet-stream",
-        });
-        return;
-      }
-      await route.fulfill({
-        status: reply.status,
-        contentType: "application/json",
-        body: JSON.stringify(reply.json ?? null),
-      });
+      await answerWith(route, reply);
     },
   );
   return calls;
+}
+
+export async function answerWith(route: Route, reply: Reply) {
+  if (reply === "network-error") {
+    await route.abort("failed");
+    return;
+  }
+  if (reply.bytes) {
+    await route.fulfill({
+      status: reply.status,
+      body: reply.bytes,
+      contentType: reply.contentType ?? "application/octet-stream",
+    });
+    return;
+  }
+  await route.fulfill({
+    status: reply.status,
+    contentType: "application/json",
+    body: JSON.stringify(reply.json ?? null),
+  });
+}
+
+export interface HeldRequest {
+  path: string;
+  /** Answers the request with `reply`, or passes it on to the stubs. */
+  release: (reply?: Reply) => Promise<void>;
+}
+
+/**
+ * Holds every /api request that `match` accepts until the test releases it.
+ * Registered after the stubs, so it takes the request first; a release
+ * without a reply passes the request on to them.
+ */
+export async function holdRequests(
+  page: Page,
+  match: (url: URL, method: string) => boolean,
+): Promise<{ held: HeldRequest[] }> {
+  const held: HeldRequest[] = [];
+  await page.route(
+    (url) => url.pathname.startsWith("/api/"),
+    async (route) => {
+      const request = route.request();
+      if (!match(new URL(request.url()), request.method())) {
+        await route.fallback();
+        return;
+      }
+      let decide!: (reply: Reply | undefined) => void;
+      const decided = new Promise<Reply | undefined>((resolve) => {
+        decide = resolve;
+      });
+      let finish!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      held.push({
+        path: new URL(request.url()).pathname.replace(/^\/api\/v1/, ""),
+        release: async (reply) => {
+          decide(reply);
+          await finished;
+        },
+      });
+      const reply = await decided;
+      try {
+        if (reply === undefined) await route.fallback();
+        else await answerWith(route, reply);
+      } finally {
+        finish();
+      }
+    },
+  );
+  return { held };
+}
+
+export async function waitForHeld(held: HeldRequest[], count: number, what: string) {
+  await expect
+    .poll(() => held.length, { message: `${what} is sent`, timeout: 15_000 })
+    .toBeGreaterThanOrEqual(count);
 }
 
 /** Every toast on screen, whatever its text or type; leaving toasts excluded. */
@@ -184,7 +266,7 @@ export async function toastMark(page: Page): Promise<number> {
 }
 
 /** One look at the page: toasts on screen now, and toasts added since `since`. */
-async function toastSnapshot(
+export async function toastSnapshot(
   page: Page,
   since: number,
 ): Promise<{ live: ToastSeen[]; added: ToastSeen[] }> {
@@ -206,14 +288,15 @@ async function toastSnapshot(
 
 /**
  * Exactly one toast is on screen, it carries `text` and is of `type`
- * (Sonner's `data-type`), and no other toast was added since `since`. Waits
+ * (Sonner's `data-type`; `null` for a plain toast), and no other toast was
+ * added since `since`. Waits
  * only for a first toast to appear; the counts come from a single look, so a
  * second toast cannot be waited out.
  */
 export async function expectOnlyToast(
   page: Page,
   text: string,
-  type: "error" | "warning",
+  type: "error" | "warning" | null,
   since: number,
 ) {
   await expect

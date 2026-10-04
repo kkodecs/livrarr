@@ -44,3 +44,32 @@ export async function clearToasts() {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
+
+/**
+ * Every toast element added to the page from now on, including any that has
+ * already left, so a toast that came and went between two looks is counted.
+ */
+export function recordAddedToasts(): {
+  added: () => Element[];
+  stop: () => void;
+} {
+  const seen = new Set<Element>();
+  const collect = (node: Node) => {
+    if (!(node instanceof Element)) return;
+    if (node.matches("[data-sonner-toast]")) seen.add(node);
+    for (const el of Array.from(node.querySelectorAll("[data-sonner-toast]")))
+      seen.add(el);
+  };
+  const observer = new MutationObserver((records) => {
+    for (const record of records) record.addedNodes.forEach(collect);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  return {
+    added: () => {
+      for (const record of observer.takeRecords())
+        record.addedNodes.forEach(collect);
+      return Array.from(seen);
+    },
+    stop: () => observer.disconnect(),
+  };
+}

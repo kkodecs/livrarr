@@ -1,7 +1,8 @@
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { toast, Toaster } from "sonner";
+import { Route, Routes } from "react-router";
 import WorkDetailPage from "./WorkDetailPage";
 import {
   installApiStub,
@@ -10,6 +11,11 @@ import {
   type ApiCall,
   type StubReply,
 } from "@/test-support/apiStub";
+import {
+  AppToaster,
+  recordAddedToasts,
+  toastSummary,
+} from "@/test-support/toasts";
 import type { WorkDetailResponse } from "@/types/api";
 
 // The book page is mounted for real with the real `deleteWork` and `apiFetch`;
@@ -50,8 +56,12 @@ function makeWork(): WorkDetailResponse {
   } as unknown as WorkDetailResponse;
 }
 
-function installBookRoutes(deleteReply: StubReply = { status: 200, body: { warnings: [] } }) {
-  return installApiStub((call: ApiCall): StubReply => {
+type DeleteReply = StubReply | "network-error" | Promise<StubReply>;
+
+function installBookRoutes(
+  deleteReply: () => DeleteReply = () => ({ status: 200, body: { warnings: [] } }),
+) {
+  return installApiStub(async (call: ApiCall): Promise<StubReply> => {
     if (call.method === "GET" && call.path === "/work/7") {
       return { status: 200, body: makeWork() };
     }
@@ -62,7 +72,9 @@ function installBookRoutes(deleteReply: StubReply = { status: 200, body: { warni
       return { status: 200, body: { items: [], total: 0, page: 1, pageSize: 50 } };
     }
     if (call.method === "DELETE" && call.path.startsWith("/work/7")) {
-      return deleteReply;
+      const reply = deleteReply();
+      if (reply === "network-error") throw new TypeError("Failed to fetch");
+      return reply;
     }
     return {
       status: 404,
@@ -71,12 +83,12 @@ function installBookRoutes(deleteReply: StubReply = { status: 200, body: { warni
   });
 }
 
-function mountToaster() {
+function mountToaster(toaster: ReactNode = <Toaster />) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<Toaster />);
+    root.render(toaster);
   });
   return () => {
     act(() => root.unmount());
@@ -143,11 +155,17 @@ function isTicked(box: HTMLElement): boolean {
     : box.getAttribute("aria-checked") === "true";
 }
 
+const HOME = "home page";
+
 async function mountBookPage() {
-  const mounted = mountWith(newTestClient(), <WorkDetailPage />, {
-    path: "/work/7?tab=metadata",
-    route: "/work/:id",
-  });
+  const mounted = mountWith(
+    newTestClient(),
+    <Routes>
+      <Route path="/work/:id" element={<WorkDetailPage />} />
+      <Route path="/" element={<p data-testid="home">{HOME}</p>} />
+    </Routes>,
+    { path: "/work/7?tab=metadata", route: "*" },
+  );
   await vi.waitFor(() =>
     expect(mounted.container.querySelector("h1")?.textContent).toBe(TITLE),
   );
@@ -230,7 +248,7 @@ describe("Book page delete dialog", () => {
 
   it("a reply with one warning shows one warning toast naming the file", async () => {
     const warning = "Case Writer/The Doomed Book.epub: is a link, not a regular file";
-    const api = installBookRoutes({ status: 200, body: { warnings: [warning] } });
+    const api = installBookRoutes(() => ({ status: 200, body: { warnings: [warning] } }));
     cleanups.push(api.restore);
     cleanups.push(mountToaster());
     const mounted = await mountBookPage();
@@ -254,4 +272,122 @@ describe("Book page delete dialog", () => {
     expect(shown[0]!.getAttribute("data-type")).toBe("warning");
     expect(shown[0]!.textContent).toContain("Case Writer/The Doomed Book.epub");
   });
+});
+
+const serverError = (status: number, error: string, message: string): StubReply => ({
+  status,
+  body: { status, error, message },
+});
+
+/** A reply the stub never answers by itself; the test answers it later. */
+function heldReply() {
+  let answer: (reply: StubReply) => void = () => {};
+  const reply = new Promise<StubReply>((resolve) => {
+    answer = resolve;
+  });
+  return { reply, answer };
+}
+
+function isHome(container: HTMLElement): boolean {
+  return container.querySelector('[data-testid="home"]') !== null;
+}
+
+/**
+ * Waits for a first toast, lets a second one for the same delete render,
+ * then returns what is on screen and everything added since `recorder` began.
+ */
+async function toastsAfterDelete(recorder: ReturnType<typeof recordAddedToasts>) {
+  await vi.waitFor(() => expect(recorder.added().length).toBeGreaterThan(0));
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  return {
+    live: toastSummary(),
+    added: recorder.added().map((el) => ({
+      type: el.getAttribute("data-type"),
+      text: el.textContent ?? "",
+    })),
+  };
+}
+
+describe("Book page delete: outcome pop-ups", () => {
+  let cleanups: Array<() => void> = [];
+
+  afterEach(() => {
+    act(() => {
+      toast.dismiss();
+    });
+    for (const cleanup of cleanups.reverse()) cleanup();
+    cleanups = [];
+  });
+
+  /** Mounts the page and the app's toaster, opens the dialog and presses Delete. */
+  async function pressDelete(deleteReply: () => DeleteReply) {
+    const api = installBookRoutes(deleteReply);
+    cleanups.push(api.restore);
+    cleanups.push(mountToaster(<AppToaster />));
+    const mounted = await mountBookPage();
+    cleanups.push(mounted.cleanup);
+    const recorder = recordAddedToasts();
+    cleanups.push(recorder.stop);
+    const dialog = await openDeleteDialog(mounted.container);
+    await click(buttonWithText(dialog, "Delete"));
+    await vi.waitFor(() => expect(deleteCalls(api.calls)).toEqual(["DELETE /work/7"]));
+    return { api, mounted, recorder };
+  }
+
+  const onlyError = (text: string) => [{ type: "error", text: expect.stringContaining(text) }];
+
+  const failures: Array<[string, () => DeleteReply, string]> = [
+    ["a server error", () => serverError(500, "internal", "Something went wrong"), "Something went wrong"],
+    ["a network failure", () => "network-error", "Unable to reach Livrarr"],
+    ["a 404", () => serverError(404, "not_found", "not found"), "not found"],
+  ];
+
+  for (const [shape, reply, message] of failures) {
+    it(`${shape}: exactly one error pop-up with the server's message, and the dialog stays open`, async () => {
+      const { mounted, recorder } = await pressDelete(reply);
+      const { live, added } = await toastsAfterDelete(recorder);
+      expect(live).toEqual(onlyError(message));
+      expect(added).toEqual(onlyError(message));
+      expect(document.body.textContent).not.toContain("Failed to delete work");
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(isHome(mounted.container)).toBe(false);
+    });
+  }
+
+  it("a slow reply that fails after the user cancelled the dialog: exactly one error pop-up", async () => {
+    const held = heldReply();
+    const { recorder } = await pressDelete(() => held.reply);
+    await click(buttonWithText(openDialog(), "Cancel"));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(recorder.added()).toEqual([]);
+
+    await act(async () => {
+      held.answer(serverError(500, "internal", "Something went wrong"));
+    });
+    const { live, added } = await toastsAfterDelete(recorder);
+    expect(live).toEqual(onlyError("Something went wrong"));
+    expect(added).toEqual(onlyError("Something went wrong"));
+  });
+
+  const deleted: Array<[string, StubReply]> = [
+    ["{ warnings: [] }", { status: 200, body: { warnings: [] } }],
+    ["no body", { status: 200 }],
+    ["{}", { status: 200, body: {} }],
+    ["null", { status: 200, body: null }],
+    ['{ warnings: "x" }', { status: 200, body: { warnings: "x" } }],
+    ["a body that is not JSON", { status: 200, rawBody: "<html>deleted</html>" }],
+  ];
+
+  for (const [shape, reply] of deleted) {
+    it(`a 200 answering ${shape}: one "Work deleted", no error, and the page moves home`, async () => {
+      const { mounted, recorder } = await pressDelete(() => reply);
+      const { live, added } = await toastsAfterDelete(recorder);
+      const deletedToast = [{ type: "success", text: expect.stringContaining("Work deleted") }];
+      expect(live).toEqual(deletedToast);
+      expect(added).toEqual(deletedToast);
+      await vi.waitFor(() => expect(isHome(mounted.container)).toBe(true));
+    });
+  }
 });

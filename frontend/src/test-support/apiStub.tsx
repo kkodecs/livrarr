@@ -30,11 +30,19 @@ export interface StubReply {
   status: number;
   /** Omit for a bodiless reply (202 Accepted, 204 No Content). */
   body?: unknown;
+  /** Sent as-is instead of `body`, for a reply whose body is not JSON. */
+  rawBody?: string;
 }
 
 export type StubHandler = (call: ApiCall) => StubReply | Promise<StubReply>;
 
 function toResponse(reply: StubReply): Response {
+  if (reply.rawBody !== undefined) {
+    return new Response(reply.rawBody, {
+      status: reply.status,
+      headers: { "content-type": "text/html" },
+    });
+  }
   if (reply.body === undefined) {
     return new Response(null, { status: reply.status });
   }

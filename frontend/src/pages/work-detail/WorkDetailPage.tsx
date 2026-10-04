@@ -113,9 +113,13 @@ export default function WorkDetailPage() {
     onError: () => toast.error("Failed to refresh work"),
   });
 
+  // A failure is reported once, by the delete dialog, with the server's
+  // message. Any 200 means the work was deleted; a reply without a
+  // `warnings` list counts as no warnings.
   const deleteMutation = useMutation({
     mutationFn: () => deleteWork(Number(id), { deleteFiles }),
-    onSuccess: ({ warnings }) => {
+    onSuccess: (reply) => {
+      const warnings = Array.isArray(reply?.warnings) ? reply.warnings : [];
       queryClient.invalidateQueries({ queryKey: ["works"] });
       if (warnings.length > 0) {
         toast.warning(
@@ -135,7 +139,6 @@ export default function WorkDetailPage() {
       }
       navigate("/");
     },
-    onError: () => toast.error("Failed to delete work"),
   });
 
   const { data: queueItems } = useQuery({

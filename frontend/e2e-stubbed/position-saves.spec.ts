@@ -13,6 +13,7 @@ import {
   type ApiCall,
   type Reply,
 } from "./stubbedApi";
+import { cfiAfter, renditionStartCfi } from "./epubReader";
 
 // Each place that saves the reading or listening position runs the same
 // failure run through its real control: failure, failure, success, failure.
@@ -90,47 +91,6 @@ async function runFailureRun(
       await expectSaveToasts(page, 1, mark);
     }
   }
-}
-
-/**
- * The start CFI of the rendition's current location. react-reader keeps the
- * epub.js rendition on its viewer component; this walks from the viewer's DOM
- * node to that component and reads `rendition.location` without changing it.
- */
-async function renditionStartCfi(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    const viewer = document.querySelector(".epub-container")?.parentElement;
-    if (!viewer) return null;
-    const key = Object.keys(viewer).find((k) => k.startsWith("__reactFiber$"));
-    type Fiber = {
-      return: Fiber | null;
-      stateNode?: { rendition?: { location?: { start?: { cfi?: string } } } };
-    };
-    let fiber = key ? (viewer as unknown as Record<string, Fiber>)[key] : null;
-    while (fiber) {
-      const rendition = fiber.stateNode?.rendition;
-      if (rendition) return rendition.location?.start?.cfi ?? null;
-      fiber = fiber.return;
-    }
-    return null;
-  });
-}
-
-/** The integer steps of a point CFI, in document order. */
-function cfiSteps(cfi: string): number[] {
-  const inner = cfi.replace(/^epubcfi\(/, "").replace(/\)$/, "");
-  return (inner.replace(/\[[^\]]*\]/g, "").match(/\d+/g) ?? []).map(Number);
-}
-
-function cfiAfter(later: string, earlier: string): boolean {
-  const a = cfiSteps(later);
-  const b = cfiSteps(earlier);
-  for (let i = 0; i < Math.max(a.length, b.length); i++) {
-    const x = a[i] ?? -1;
-    const y = b[i] ?? -1;
-    if (x !== y) return x > y;
-  }
-  return false;
 }
 
 function libraryItem(id: number, file: string, mediaType: string) {
