@@ -35,6 +35,9 @@
 - *(notifications)* When the bell cannot check for new notifications, a red "!" replaces the unread count and opening the bell says "Could not check for new notifications; still trying." until a check succeeds, instead of the count vanishing or freezing
 - *(reader)* When an ebook's saved place cannot be loaded, the reader shows "Could not load this book." with Retry and "Read from the beginning", which saves no progress that session, instead of opening at the start and overwriting your saved place
 - *(player)* When an audiobook's saved place cannot be loaded, the player shows the same screen with Retry and "Play from the beginning", which saves no progress that session, instead of starting at 0:00 and overwriting your saved place
+- *(logs)* API keys, passwords, tokens and login headers are masked in every log line, plain, colour or JSON; the AI connection test no longer logs the key it sent (#76)
+- *(import)* Undoing a Readarr import deletes only files inside each book's library folder; a file that cannot be deleted safely is left on disk, and the page says how many
+- *(import)* Retry on a failed import reaches a download client on your local network (for example qBittorrent at `http://qbittorrent:8080`), as the background poller always could
 
 ## [0.1.0-alpha6] - 2026-07-18
 

@@ -1,5 +1,14 @@
 # Tests and fixtures lessons
 
+## Executive summary
+
+Rules for producing evidence a test or a check can be trusted on, with links to their sources.
+They cover failures hidden behind the first failing binary ([34](#lesson-34)), tests that are
+registered but never tracked or run ([65](#lesson-65)), tracing capture in tests
+([83](#lesson-83)), fixture timing ([105](#lesson-105)), and two traps when reading the live log:
+colour codes hide matches from a plain search ([108](#lesson-108)), and a passing connection
+test writes nothing, so a clean log proves little ([109](#lesson-109)).
+
 Current guidance with links to the full dated evidence. Read implementation claims
 against the named source revision; accepted design is not proof of runtime behavior.
 
@@ -158,6 +167,38 @@ and [checkpoint receipt](../../build/reviews/identity-conflict-authority/checkpo
 (exact test and fixture source revisions are members of its `tree.tar`).
 
 [Full dated record and corrections](../../docs/design-history/wiki-before-cleanup-2026-09-09/wiki/insights/tests-and-fixtures.md#105-finish-sqlite-fixture-setup-before-pausing-tokio-time).
+
+<a id="lesson-108"></a>
+## 108. Strip colour codes before searching the live log
+
+The dev server's console output, appended to `/tmp/livrarr.log`, is colourised: the console
+layer keeps ANSI colour codes on (`crates/livrarr-server/src/main.rs:1319-1324`), while the file
+layer under `{data}/logs/` turns them off (`:1349`). The level is written with codes around it,
+so `grep WARN` or a search for `name=value` can miss a line that is there.
+
+Why it matters: after the security-before-release deploy, the first count of WARN lines in
+`/tmp/livrarr.log` read 0 when there was one; the count was corrected after stripping the codes
+(`build/reviews/security-before-release/deploy-20261005T175224Z/DEPLOYMENT.json`, `log_check`).
+
+To apply: strip ANSI codes first (for example `sed 's/\x1b\[[0-9;]*m//g'`), or search the file
+log under the data folder, which has none.
+
+<a id="lesson-109"></a>
+## 109. A passing connection test writes no log line
+
+Pressing Test on an indexer, a download client or Hardcover in Settings writes no log event when
+the test succeeds, and most of these flows log nothing on failure either
+(`spec-security-before-release.md`, ST-112). A clean log after pressing Test therefore does not
+show that log masking ran.
+
+Why it matters: the security-before-release live check found 0 of 7 saved keys and passwords in
+the log after the PO pressed every Test button, but those presses wrote no lines, so the check
+showed only that routine running leaks nothing
+(`build/reviews/security-before-release/deploy-20261005T175224Z/secret-scan.txt`).
+
+To apply: to see masking work live, use a flow that logs the secret-bearing text (for example the
+AI connection test with a key the provider refuses), or rely on the binary tests that drive each
+flow and read every sink ([log redaction](../patterns/log-redaction.md#testing-a-change)).
 
 ## Source and history
 

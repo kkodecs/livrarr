@@ -56,6 +56,7 @@ For browser access to these documents and the current build records, use the
 - [Error handling](patterns/error-handling.md) — error taxonomy, data read policies, retry semantics
 - [Test doubles](patterns/test-doubles.md) — no InMemoryDb, test DB helpers, what gets stubbed
 - [Migration pattern](patterns/migration-pattern.md) — SQLite migration rules, naming, enum serialization
+- [Log redaction](patterns/log-redaction.md) — one cleanser at every log sink, the rules and their order, accepted limits, the deferred type-based design
 
 ## Lessons (full text)
 

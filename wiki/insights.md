@@ -156,6 +156,8 @@ need both a theme entry and a short index link. Feature progress belongs in buil
 - [102. B0 red-test facts](insights/tests-and-fixtures.md#lesson-102)
 - [104. Cancellation test diagnostics](insights/tests-and-fixtures.md#lesson-104)
 - [105. Finish SQLite fixture setup before pausing Tokio time](insights/tests-and-fixtures.md#lesson-105)
+- [108. Strip colour codes before searching the live log](insights/tests-and-fixtures.md#lesson-108)
+- [109. A passing connection test writes no log line](insights/tests-and-fixtures.md#lesson-109)
 
 ## Source and history
 

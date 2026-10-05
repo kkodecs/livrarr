@@ -247,6 +247,12 @@ to 28); that is the failure this rule prevents.
 - **A red test must reach its main assertion before the tests gate.** If it fails on today's code at an earlier line, run it once against a scratch stand-in fix, or list its unexecuted assertions for the PM to probe before the code stage. Three browser tests passed tests review but could never pass with correct code: their main assertions had never run.
 - **A criterion that depends on a UI library's behaviour needs a probe of that library.** Examples are toast timers and a query's status on refetch. The spec seat runs the library directly (a `QueryObserver`, the toast source) and records the transition as a System Truth. All three missing-system-truth items this cycle were of this kind: Sonner's add timer and two-frame removal (`wiki/patterns/error-handling.md`), and TanStack Query putting an errored query with no data back to pending (`wiki/insights/coding-patterns.md`, lesson 107).
 
+## Lessons (from security-before-release retro, 2026-10-05; PO-approved)
+
+- **Decide "never" rules at spec time.** When a requirement says something must never appear across unbounded input (secrets in logs, personal data in exports), the spec weighs a declared mechanism (the code marks the value, for example a secret type that prints `[REDACTED]`) against pattern matching. If it chooses patterns, it states the accepted limits and a stop rule for review rounds before code is written. This cycle chose patterns from Sonarr precedent without weighing the declared design; code review then found new secret shapes each round, and the choice reached the PO only after two failed rounds (`build/state/retro-security-before-release.md`).
+- **Probe any library whose output the code matches or parses**, not only UI libraries (extends the silent-failures-2 lesson above). Run it once and record its output shapes as a System Truth. The tracing text formatter quotes string and Debug field values; no criterion named that shape, and code review found it (C1).
+- **A fix that widens a matcher pins its nearest legitimate neighbour.** The same test that proves the new catch also proves the closest ordinary input stays byte-identical. The fix for a quote inside `user:pass@` let an escaped slash cross a URL path boundary and masked ordinary URLs (D4); only review caught it.
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation

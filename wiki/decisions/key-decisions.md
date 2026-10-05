@@ -1,5 +1,13 @@
 # Key Architectural Decisions
 
+## Executive summary
+
+Standing decisions that shape Livrarr: copy on import, TOML-only configuration, direct indexer
+support, and the security rules. The one most often second-guessed is the
+[two web clients](#ssrf-trusted-infrastructure-pattern): addresses the admin configured, such as
+download clients and indexers, use the trusted client, because they normally live on a private
+network; addresses that come from outside data use the safe client.
+
 > **Source scope:** Root PRINCIPLES.md and ARCHITECTURE.md take precedence. These decisions are preserved as practical context; exact source and current acceptance come from project state. In particular, the old Readarr hardlink path is not a new exception to the root import policy.
 
 ## Hardlink Policy
@@ -56,6 +64,11 @@ Two HTTP clients live on `AppState`:
 - **`http_client_safe`** — wraps `SsrfSafeResolver`; rejects any private/loopback/link-local/reserved IP at DNS resolution time. Used for **runtime-derived** URLs whose value comes from outside admin configuration: cover proxy fetching metadata-provider image URLs, anything pulled from a scraper response, etc.
 
 Readarr has a two-stage trust boundary: an unapproved public origin may connect through the SSRF-safe no-redirect client; an origin on the admin-managed `readarr_origins` allowlist connects through the trusted no-redirect client and may intentionally resolve to private infrastructure. Approval therefore accepts DNS rebinding/private-answer risk for that exact normalized origin; removal restores the public-only rule.
+
+Manual import Retry follows the same rule (as of 2026-10-05, security-before-release): when a
+grab has no saved content path, its lookup at the download client uses the trusted client, as the
+first import attempt and the background poller do
+(`crates/livrarr-server/src/import_service.rs:224`, `:232`; `crates/livrarr-server/src/main.rs:219`).
 
 Plus `TrustedOrigins` (built from configured indexers + download clients at startup, rebuilt on config change) lets the grab flow allow private-IP download URLs that match a configured origin even when the called client is normally SSRF-safe.
 

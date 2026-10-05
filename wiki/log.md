@@ -2,7 +2,18 @@
 
 ## Executive summary
 
-This log records wiki updates and their evidence. The [latest entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+This log records wiki updates and their evidence. The [latest entry](#2026-10-05--log-redaction-readarr-undo-and-retry-client) adds the log-redaction page and two live-log lessons from security-before-release. The [2026-10-04 entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+
+## 2026-10-05 — Log redaction, Readarr undo and Retry client
+
+From security-before-release (`497b391e`): a new page, [log redaction](patterns/log-redaction.md),
+describes the one cleanser at every log sink, how it differs from `redact_secrets`, its rules in
+order, the accepted limits and the deferred type-based design.
+[Lessons 108 and 109](insights/tests-and-fixtures.md#lesson-108) record two traps when reading the
+live log. [LibraryItem](domain/library-item.md#removing-files-from-disk) notes that Readarr import
+undo now removes files through the shared rule, and [key decisions](decisions/key-decisions.md#ssrf-trusted-infrastructure-pattern)
+note that manual import Retry uses the trusted client. The tests-and-fixtures, LibraryItem and
+key-decisions pages gain executive summaries. Source: `spec-security-before-release.md` v5.
 
 ## 2026-10-04 — Saved place, Sonner timing and query error state
 
