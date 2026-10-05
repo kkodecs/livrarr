@@ -216,7 +216,7 @@ async fn main() {
         import_workflow_arc.clone(),
         tag_service_arc.clone(),
         settings_service_arc.clone(),
-        http_client_safe.clone(),
+        http_client.clone(),
     ));
     // Build trusted origins from configured indexers + download clients.
     let trusted_origins = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
@@ -1310,9 +1310,18 @@ fn init_tracing(
     // Console output — text or JSON per config.
     let use_json = log.format == LogFormat::Json;
     let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> = if use_json {
-        Box::new(tracing_subscriber::fmt::layer().json().with_target(false))
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(false)
+                .with_writer(CleansingWriter(std::io::stdout)),
+        )
     } else {
-        Box::new(tracing_subscriber::fmt::layer().with_target(false))
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(CleansingWriter(std::io::stdout)),
+        )
     };
 
     // In-memory ring buffer for UI
@@ -1333,14 +1342,14 @@ fn init_tracing(
                         .json()
                         .with_target(false)
                         .with_ansi(false)
-                        .with_writer(file_appender),
+                        .with_writer(CleansingWriter(file_appender)),
                 )
             } else {
                 Box::new(
                     tracing_subscriber::fmt::layer()
                         .with_target(false)
                         .with_ansi(false)
-                        .with_writer(file_appender),
+                        .with_writer(CleansingWriter(file_appender)),
                 )
             })
         } else {
@@ -1363,6 +1372,43 @@ fn init_tracing(
     )
 }
 
+/// Wraps a console or file writer so every formatted event passes through the
+/// log cleanser before it is written. The fmt layers write each event with one
+/// `write_all`, so each write holds whole events.
+struct CleansingWriter<M>(M);
+
+impl<'a, M: tracing_subscriber::fmt::MakeWriter<'a>> tracing_subscriber::fmt::MakeWriter<'a>
+    for CleansingWriter<M>
+{
+    type Writer = CleansedWrite<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CleansedWrite(self.0.make_writer())
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        CleansedWrite(self.0.make_writer_for(meta))
+    }
+}
+
+struct CleansedWrite<W>(W);
+
+impl<W: std::io::Write> std::io::Write for CleansedWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match std::str::from_utf8(buf) {
+            Ok(text) => self
+                .0
+                .write_all(livrarr_domain::cleanse_log_line(text).as_bytes())?,
+            Err(_) => self.0.write_all(buf)?,
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 /// Tracing layer that captures formatted log lines into a shared ring buffer.
 struct LogBufferLayer(Arc<livrarr_server::state::LogBuffer>);
 
@@ -1382,7 +1428,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogBufferLayer {
             meta.level(),
             message,
         );
-        self.0.push(line);
+        self.0.push(livrarr_domain::cleanse_log_line(&line));
     }
 }
 

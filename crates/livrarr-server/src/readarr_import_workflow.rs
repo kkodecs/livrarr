@@ -1171,51 +1171,67 @@ pub async fn undo_import(
         }
     }
 
-    let root_folder_path: Option<String> = if let Some(rf_id) = imp.target_root_folder_id {
-        readarr_import_service
-            .get_root_folder(rf_id)
-            .await
-            .ok()
-            .map(|rf| rf.path)
-    } else {
-        None
-    };
-
-    let undo_items: Vec<_> = items
+    // Each item's file is removed under its own root folder, through the
+    // shared library-file removal rule.
+    let mut root_paths: HashMap<i64, Result<String, String>> = HashMap::new();
+    for item in &items {
+        if let std::collections::hash_map::Entry::Vacant(slot) =
+            root_paths.entry(item.root_folder_id)
+        {
+            let root = readarr_import_service
+                .get_root_folder(item.root_folder_id)
+                .await
+                .map(|rf| rf.path)
+                .map_err(|e| format!("root folder cannot be read: {e}"));
+            slot.insert(root);
+        }
+    }
+    let undo_items: Vec<(Result<String, String>, String)> = items
         .iter()
-        .map(|item| {
-            let full_path = if let Some(ref root) = root_folder_path {
-                PathBuf::from(root).join(&item.path)
-            } else {
-                PathBuf::from(&item.path)
-            };
-            (full_path, item.path.clone())
-        })
+        .map(|item| (root_paths[&item.root_folder_id].clone(), item.path.clone()))
         .collect();
 
-    let (files_deleted, files_skipped) = tokio::task::spawn_blocking(move || {
-        let mut deleted = 0i64;
-        let mut skipped = 0i64;
-        for (full_path, rel_path) in &undo_items {
-            match std::fs::remove_file(full_path) {
-                Ok(()) => {
-                    deleted += 1;
-                    info!(path = %rel_path, "Undo: deleted file");
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    deleted += 1;
-                    debug!(path = %rel_path, "Undo: file already absent");
-                }
-                Err(e) => {
-                    warn!(path = %rel_path, "Undo: failed to delete: {e}");
-                    skipped += 1;
+    let removals = tokio::task::spawn_blocking(move || {
+        undo_items
+            .into_iter()
+            .map(|(root, rel_path)| {
+                let outcome = root.and_then(|root| {
+                    livrarr_domain::library_path::remove_library_file(Path::new(&root), &rel_path)
+                        .map_err(|e| e.to_string())
+                });
+                (rel_path, outcome)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+
+    let (files_deleted, files_skipped) = match removals {
+        Ok(removals) => {
+            let mut deleted = 0i64;
+            let mut skipped = 0i64;
+            for (rel_path, outcome) in removals {
+                match outcome {
+                    Ok(livrarr_domain::library_path::RemoveOutcome::Removed) => {
+                        deleted += 1;
+                        info!(path = %rel_path, "Undo: deleted file");
+                    }
+                    Ok(livrarr_domain::library_path::RemoveOutcome::Absent) => {
+                        deleted += 1;
+                        debug!(path = %rel_path, "Undo: file already absent");
+                    }
+                    Err(reason) => {
+                        skipped += 1;
+                        warn!(path = %rel_path, "Undo: file left on disk: {reason}");
+                    }
                 }
             }
+            (deleted, skipped)
         }
-        (deleted, skipped)
-    })
-    .await
-    .unwrap_or((0, items.len() as i64));
+        Err(e) => {
+            warn!(import_id = %import_id, "Undo: file removal did not run: {e}");
+            (0, items.len() as i64)
+        }
+    };
 
     for item in &items {
         match readarr_import_service

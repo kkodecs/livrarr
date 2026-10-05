@@ -27,6 +27,6 @@ pub use author_link::*;
 pub use enrichment_types::*;
 pub use entities::*;
 pub use infra_config::*;
-pub use redact::redact_secrets;
+pub use redact::{cleanse_log_line, redact_secrets};
 pub use selected_facts::*;
 pub use util::*;

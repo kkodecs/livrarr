@@ -14,7 +14,7 @@ pub async fn fetch_qbit_content_path(
     let sid = crate::infra::release_helpers::qbit_login(http_client, &base_url, client).await?;
 
     let info_url = format!("{base_url}/api/v2/torrents/info");
-    // Admin-configured endpoint — use SSRF-safe client for redirect protection.
+    // Admin-configured download client: the trusted client is used, as the download poller does.
     let resp = http_client
         .get(&info_url)
         .query(&[("hashes", hash)])
@@ -55,8 +55,8 @@ pub(crate) async fn fetch_sabnzbd_storage_path(
 
     // SABnzbd search param searches by name, not nzo_id. Fetch recent history and match client-side.
     let url = format!("{base_url}/api?mode=history&apikey={api_key}&output=json&limit=200");
-    // Admin-configured endpoint — use SSRF-safe client so a redirect to an
-    // internal address is blocked.
+    // Admin-configured download client: the trusted client is used, as the
+    // download poller does.
     let resp = http_client.get(&url).send().await.map_err(|e| {
         ApiError::BadGateway(format!(
             "SABnzbd history request failed: {}",

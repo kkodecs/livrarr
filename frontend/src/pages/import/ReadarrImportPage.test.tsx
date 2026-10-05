@@ -1,4 +1,6 @@
 import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { toast, Toaster } from "sonner";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth";
 import {
@@ -322,5 +324,128 @@ describe("Readarr import progress: a poll fails", () => {
       mounted.cleanup();
       api.restore();
     }
+  });
+});
+
+describe("Readarr import undo: files left on disk", () => {
+  const finished = {
+    id: "imp-9",
+    source: "readarr",
+    status: "completed",
+    startedAt: "2026-10-01T10:00:00Z",
+    completedAt: "2026-10-01T10:05:00Z",
+    authorsCreated: 1,
+    worksCreated: 3,
+    filesImported: 5,
+    filesSkipped: 0,
+    sourceUrl: "http://readarr.internal:8787",
+  };
+
+  function mountToaster() {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<Toaster />);
+    });
+    return () => {
+      act(() => root.unmount());
+      container.remove();
+    };
+  }
+
+  async function undoWithReply(reply: {
+    filesDeleted: number;
+    filesSkipped: number;
+    worksDeleted: number;
+    authorsDeleted: number;
+  }) {
+    useAuthStore.setState({ isAdmin: true });
+    const api = installApiStub((call) => {
+      if (call.method === "GET" && call.path === "/import/readarr/origin") {
+        return { status: 200, body: [] };
+      }
+      if (call.method === "GET" && call.path === "/import/readarr/history") {
+        return { status: 200, body: { imports: [finished] } };
+      }
+      if (call.method === "DELETE" && call.path === "/import/readarr/imp-9") {
+        return { status: 200, body: reply };
+      }
+      return baseReply(call);
+    });
+    const removeToaster = mountToaster();
+    const mounted = mountWith(newTestClient(), <ReadarrImportPage />);
+    try {
+      await vi.waitFor(() =>
+        expect(
+          Array.from(mounted.container.querySelectorAll("button")).some(
+            (b) => b.textContent?.trim() === "Undo",
+          ),
+        ).toBe(true),
+      );
+      await clickButton(mounted.container, "Undo");
+      await vi.waitFor(() =>
+        expect(document.body.textContent).toContain("Undo Import"),
+      );
+      const confirm = Array.from(document.body.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === "Undo Import",
+      );
+      expect(confirm).toBeDefined();
+      await act(async () => {
+        confirm!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await vi.waitFor(() =>
+        expect(
+          api.calls.some(
+            (c) => c.method === "DELETE" && c.path === "/import/readarr/imp-9",
+          ),
+        ).toBe(true),
+      );
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("[data-sonner-toast]").length).toBeGreaterThan(0),
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      });
+      return Array.from(document.querySelectorAll("[data-sonner-toast]")).map((t) => ({
+        type: t.getAttribute("data-type"),
+        text: t.textContent ?? "",
+      }));
+    } finally {
+      act(() => {
+        toast.dismiss();
+      });
+      mounted.cleanup();
+      removeToaster();
+      api.restore();
+    }
+  }
+
+  it("warns how many files were left when the undo skipped some", async () => {
+    const toasts = await undoWithReply({
+      filesDeleted: 3,
+      filesSkipped: 2,
+      worksDeleted: 3,
+      authorsDeleted: 1,
+    });
+    const parts = [
+      "Import undone",
+      "2 file(s) were left on disk because Livrarr could not safely delete them",
+      "the server log lists each one",
+    ];
+    expect({
+      types: toasts.map((t) => t.type),
+      missingText: parts.filter((part) => !(toasts[0]?.text ?? "").includes(part)),
+    }).toEqual({ types: ["warning"], missingText: [] });
+  });
+
+  it("shows the plain success toast when no file was skipped", async () => {
+    const toasts = await undoWithReply({
+      filesDeleted: 5,
+      filesSkipped: 0,
+      worksDeleted: 3,
+      authorsDeleted: 1,
+    });
+    expect(toasts).toEqual([{ type: "success", text: "Import undone" }]);
   });
 });

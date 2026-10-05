@@ -238,7 +238,7 @@ async fn build_route_harness_with_providers(
         import_workflow.clone(),
         tag_service.clone(),
         settings_service.clone(),
-        http_client_safe.clone(),
+        http_client.clone(),
     ));
     let trusted_origins = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
     let readarr_import_service =

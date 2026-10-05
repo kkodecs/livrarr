@@ -24,7 +24,7 @@ pub struct LiveImportService {
     import_workflow: Arc<LiveImportWorkflow>,
     tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
     settings_service: Arc<LiveSettingsService>,
-    http_client_safe: HttpClient,
+    http_client: HttpClient,
 }
 
 impl LiveImportService {
@@ -33,14 +33,14 @@ impl LiveImportService {
         import_workflow: Arc<LiveImportWorkflow>,
         tag_service: Arc<crate::tag_service::LiveTagService<LiveImportIoService>>,
         settings_service: Arc<LiveSettingsService>,
-        http_client_safe: HttpClient,
+        http_client: HttpClient,
     ) -> Self {
         Self {
             import_io,
             import_workflow,
             tag_service,
             settings_service,
-            http_client_safe,
+            http_client,
         }
     }
 }
@@ -221,7 +221,7 @@ impl ImportService for LiveImportService {
                     .map_err(|e| ServiceError::Internal(e.to_string()))?;
                 let content_path = if client.client_type() == "sabnzbd" {
                     import_pipeline::fetch_sabnzbd_storage_path(
-                        &self.http_client_safe,
+                        &self.http_client,
                         &client,
                         download_id,
                     )
@@ -229,7 +229,7 @@ impl ImportService for LiveImportService {
                     .map_err(|e| ServiceError::Internal(e.to_string()))?
                 } else {
                     import_pipeline::fetch_qbit_content_path(
-                        &self.http_client_safe,
+                        &self.http_client,
                         &client,
                         download_id,
                     )
@@ -1088,13 +1088,13 @@ mod manual_import_door_tests {
             db.clone(),
         ));
         let settings_service = Arc::new(LiveSettingsService::new(db.clone()));
-        let http_client_safe = livrarr_http::HttpClientBuilder::default().build().unwrap();
+        let http_client = livrarr_http::HttpClientBuilder::default().build().unwrap();
         LiveImportService::new(
             import_io,
             import_workflow,
             tag_service,
             settings_service,
-            http_client_safe,
+            http_client,
         )
     }
 

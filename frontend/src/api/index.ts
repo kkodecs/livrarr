@@ -81,6 +81,7 @@ import type {
   ImportPreviewResponse,
   ImportProgressResponse,
   ImportHistoryItem,
+  ReadarrUndoResponse,
   SeriesListResponse,
   SeriesResponse,
   SeriesWithAuthorResponse,
@@ -731,7 +732,9 @@ export const readarrHistory = () =>
     (d) => d.imports,
   );
 export const readarrUndo = (importId: string) =>
-  apiFetch<void>(`/import/readarr/${importId}`, { method: "DELETE" });
+  apiFetch<ReadarrUndoResponse>(`/import/readarr/${importId}`, {
+    method: "DELETE",
+  });
 
 // List imports (CSV: Goodreads, Hardcover)
 export const listImportPreview = (file: File) => {

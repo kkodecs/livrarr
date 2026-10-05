@@ -232,8 +232,14 @@ export default function ReadarrImportPage() {
   // Undo mutation
   const undoMut = useMutation({
     mutationFn: (importId: string) => api.readarrUndo(importId),
-    onSuccess: () => {
-      toast.success("Import undone");
+    onSuccess: (result) => {
+      if (result.filesSkipped > 0) {
+        toast.warning(
+          `Import undone. ${result.filesSkipped} file(s) were left on disk because Livrarr could not safely delete them; the server log lists each one.`,
+        );
+      } else {
+        toast.success("Import undone");
+      }
       refetchHistory();
       queryClient.invalidateQueries({ queryKey: ["works"] });
       queryClient.invalidateQueries({ queryKey: ["authors"] });

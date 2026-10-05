@@ -1583,6 +1583,13 @@ export interface ImportHistoryItem {
   sourceUrl: string | null;
 }
 
+export interface ReadarrUndoResponse {
+  filesDeleted: number;
+  filesSkipped: number;
+  worksDeleted: number;
+  authorsDeleted: number;
+}
+
 // List Imports (CSV: Goodreads, Hardcover)
 export interface ListImportPreviewRow {
   rowIndex: number;

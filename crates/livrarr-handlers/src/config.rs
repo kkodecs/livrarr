@@ -412,13 +412,55 @@ pub async fn test_llm<S: HasAppConfigService + HasHttpClient>(
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = blank_sent_key(&resp.text().await.unwrap_or_default(), &api_key);
         tracing::warn!(status = %status, body = %text, "LLM test endpoint returned non-success");
         return Err(ApiError::BadGateway(format!(
             "LLM returned {status} (see server logs for details)"
         )));
     }
     Ok(())
+}
+
+/// Replaces every occurrence of `key` in a provider reply with `[REDACTED]`.
+///
+/// A reply that is valid JSON is decoded, the key is replaced in every string
+/// (member names and values, at any depth), so any JSON spelling of it is
+/// caught, and the result is re-encoded; the literal pass then runs over that
+/// text. Any other reply gets the literal pass only: the key as sent and its
+/// JSON-escaped spelling.
+fn blank_sent_key(reply: &str, key: &str) -> String {
+    const MASK: &str = "[REDACTED]";
+    if key.is_empty() {
+        return reply.to_owned();
+    }
+    fn blank_value(value: serde_json::Value, key: &str) -> serde_json::Value {
+        use serde_json::Value;
+        match value {
+            Value::String(s) => Value::String(s.replace(key, MASK)),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| blank_value(v, key)).collect())
+            }
+            Value::Object(members) => Value::Object(
+                members
+                    .into_iter()
+                    .map(|(name, v)| (name.replace(key, MASK), blank_value(v, key)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    let text = match serde_json::from_str::<serde_json::Value>(reply) {
+        Ok(value) => {
+            serde_json::to_string(&blank_value(value, key)).unwrap_or_else(|_| reply.to_owned())
+        }
+        Err(_) => reply.to_owned(),
+    };
+    let quoted = serde_json::to_string(key).unwrap_or_default();
+    let escaped = quoted
+        .strip_prefix('"')
+        .and_then(|q| q.strip_suffix('"'))
+        .unwrap_or(key);
+    text.replace(key, MASK).replace(escaped, MASK)
 }
 
 pub async fn get_prowlarr<S: HasIndexerSettingsService>(

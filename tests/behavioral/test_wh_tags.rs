@@ -226,13 +226,13 @@ async fn wh_reorganize_road_retag_yields_exactly_one_tag_event() {
         db.clone(),
     ));
     let settings_service = Arc::new(LiveSettingsService::new(db.clone()));
-    let http_client_safe = livrarr_http::HttpClientBuilder::default().build().unwrap();
+    let http_client = livrarr_http::HttpClientBuilder::default().build().unwrap();
     let svc = LiveImportService::new(
         import_io,
         import_workflow,
         tag_service,
         settings_service,
-        http_client_safe,
+        http_client,
     );
 
     let warnings = svc

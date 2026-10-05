@@ -573,7 +573,7 @@ async fn build_route_harness_from(db: SqliteDb, tmp: tempfile::TempDir) -> Route
         import_workflow_arc.clone(),
         tag_service_arc.clone(),
         settings_service_arc.clone(),
-        http_client_safe.clone(),
+        http_client.clone(),
     ));
     let trusted_origins_arc = Arc::new(livrarr_http::ssrf::TrustedOrigins::new());
     let readarr_import_service_arc =

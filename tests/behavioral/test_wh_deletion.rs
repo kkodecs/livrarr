@@ -338,10 +338,6 @@ async fn wh_readarr_import_undo_marks_file_and_orphan_work_deletions_as_undo() {
     .unwrap();
 
     assert_eq!(
-        response.files_deleted, 2,
-        "fixture-reality: 2 items removed"
-    );
-    assert_eq!(
         response.works_deleted, 1,
         "fixture-reality: 1 orphan work removed"
     );
@@ -377,4 +373,412 @@ async fn wh_readarr_import_undo_marks_file_and_orphan_work_deletions_as_undo() {
     assert_eq!(event.data["work_title"].as_str(), Some(WORK_TITLE));
     assert_eq!(event.data["files_removed"].as_u64(), Some(0));
     assert_eq!(event.data["undo"].as_bool(), Some(true));
+
+    assert_eq!(
+        (response.files_deleted, response.files_skipped),
+        (0, 2),
+        "fixture-reality: neither item's root folder exists on disk, so both files are skipped"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Readarr import undo removes files only inside each item's own root folder
+// ---------------------------------------------------------------------------
+
+/// A completed Readarr import with the given target root folder.
+async fn completed_import(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: UserId,
+    import_id: &str,
+    target_root_folder_id: Option<i64>,
+) {
+    db.create_import(CreateImportDbRequest {
+        id: import_id.to_string(),
+        user_id,
+        source: "readarr".to_string(),
+        source_url: None,
+        target_root_folder_id,
+    })
+    .await
+    .unwrap();
+    db.update_import_status(import_id, "completed")
+        .await
+        .unwrap();
+}
+
+async fn import_work(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: UserId,
+    import_id: &str,
+    title: &str,
+) -> WorkId {
+    db.create_work(work_req(user_id, title, Some(import_id)))
+        .await
+        .unwrap()
+        .0
+        .id
+}
+
+/// A library item of `import_id` under the root folder `root_id`.
+async fn seed_item_under(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: UserId,
+    work_id: WorkId,
+    root_id: i64,
+    path: &str,
+    media_type: MediaType,
+    import_id: &str,
+) {
+    db.create_library_item(CreateLibraryItemDbRequest {
+        user_id,
+        work_id,
+        root_folder_id: root_id,
+        path: path.to_string(),
+        media_type,
+        file_size: 1024,
+        import_id: Some(import_id.to_string()),
+        tag_status: TagStatus::Pending,
+        tagged_at_generation: 0,
+    })
+    .await
+    .unwrap();
+}
+
+async fn undo(
+    db: &livrarr_db::sqlite::SqliteDb,
+    user_id: UserId,
+    import_id: &str,
+) -> livrarr_domain::readarr::ReadarrUndoResponse {
+    let service = livrarr_server::readarr_import_service::LiveReadarrImportService::new(db.clone());
+    let data_dir = tempfile::tempdir().expect("test data dir");
+    livrarr_server::readarr_import_workflow::undo_import(
+        &service,
+        data_dir.path(),
+        db,
+        user_id,
+        import_id,
+    )
+    .await
+    .unwrap()
+}
+
+fn write_file(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, b"fixture").unwrap();
+}
+
+/// Present on disk without following a final link.
+fn on_disk(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Collects every failed check so one run reports all of them.
+#[derive(Default)]
+struct Findings(Vec<String>);
+
+impl Findings {
+    fn check(&mut self, ok: bool, what: impl FnOnce() -> String) {
+        if !ok {
+            self.0.push(what());
+        }
+    }
+
+    fn finish(self, case: &str) {
+        assert!(
+            self.0.is_empty(),
+            "{case}: {} check(s) failed:\n- {}",
+            self.0.len(),
+            self.0.join("\n- ")
+        );
+    }
+}
+
+/// Captured WARN lines that mention `path`.
+fn warn_lines_naming(path: &str) -> Vec<String> {
+    let buf = tracing_test::internal::global_buf().lock().unwrap().clone();
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .filter(|line| line.contains(" WARN ") && line.contains(path))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn readarr_undo_removes_only_regular_files_inside_the_item_root() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("lib").join("ebooks");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(root.join("1")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let inside = root.join("1/ac201-inside.epub");
+    let absolute_inside = root.join("1/ac201-absolute-inside.epub");
+    let dotdot_target = tmp.path().join("lib/outside/ac201-dotdot.epub");
+    let absolute_outside = outside.join("ac201-absolute.epub");
+    let link_target = outside.join("ac201-link-target.epub");
+    let link = root.join("1/ac201-link.epub");
+    let via_parent_target = outside.join("ac201-via-parent.epub");
+    let folder = root.join("1/ac201-folder.epub");
+    for file in [
+        &inside,
+        &absolute_inside,
+        &dotdot_target,
+        &absolute_outside,
+        &link_target,
+        &via_parent_target,
+    ] {
+        write_file(file);
+    }
+    symlink(&link_target, &link).unwrap();
+    symlink(&outside, root.join("1/linkdir")).unwrap();
+    std::fs::create_dir_all(folder.join("keep")).unwrap();
+
+    let absolute_inside_path = absolute_inside.to_string_lossy().into_owned();
+    let absolute_outside_path = absolute_outside.to_string_lossy().into_owned();
+    // (stored path, reason a skipped path is logged with)
+    let deleted: [&str; 3] = [
+        "1/ac201-inside.epub",
+        &absolute_inside_path,
+        "1/ac201-missing.epub",
+    ];
+    let skipped: [(&str, &str); 5] = [
+        (
+            "../outside/ac201-dotdot.epub",
+            "resolves outside the root folder",
+        ),
+        (&absolute_outside_path, "resolves outside the root folder"),
+        ("1/ac201-link.epub", "is a link, not a regular file"),
+        (
+            "1/linkdir/ac201-via-parent.epub",
+            "resolves outside the root folder",
+        ),
+        ("1/ac201-folder.epub", "is a folder, not a regular file"),
+    ];
+
+    let db = create_test_db().await;
+    let user_id = seed_user(&db).await;
+    let root_folder = db
+        .create_root_folder(&root.to_string_lossy(), MediaType::Ebook)
+        .await
+        .unwrap();
+    let import_id = "ac201-undo-shapes";
+    completed_import(&db, user_id, import_id, Some(root_folder.id)).await;
+    let work_id = import_work(&db, user_id, import_id, WORK_TITLE).await;
+    for path in deleted
+        .iter()
+        .copied()
+        .chain(skipped.iter().map(|(p, _)| *p))
+    {
+        seed_item_under(
+            &db,
+            user_id,
+            work_id,
+            root_folder.id,
+            path,
+            MediaType::Ebook,
+            import_id,
+        )
+        .await;
+    }
+
+    let response = undo(&db, user_id, import_id).await;
+
+    let mut findings = Findings::default();
+    for (name, path) in [
+        ("../ target outside the root", &dotdot_target),
+        ("absolute path outside the root", &absolute_outside),
+        ("link target outside the root", &link_target),
+        ("file behind a linked parent folder", &via_parent_target),
+    ] {
+        findings.check(path.exists(), || {
+            format!("{name} {} still exists", path.display())
+        });
+    }
+    findings.check(on_disk(&link), || {
+        "the link entry itself is kept".to_string()
+    });
+    findings.check(folder.is_dir(), || "the folder entry is kept".to_string());
+    findings.check(!on_disk(&inside), || {
+        "the inside file is removed".to_string()
+    });
+    findings.check(!on_disk(&absolute_inside), || {
+        "the absolute path to a file inside the root is removed".to_string()
+    });
+    findings.check(
+        (response.files_deleted, response.files_skipped) == (3, 5),
+        || {
+            format!(
+                "reply counts filesDeleted 3, filesSkipped 5; got {}, {}",
+                response.files_deleted, response.files_skipped
+            )
+        },
+    );
+    for (path, reason) in skipped {
+        let lines = warn_lines_naming(path);
+        findings.check(lines.len() == 1 && lines[0].contains(reason), || {
+            format!("one WARN line naming {path:?} with reason {reason:?}; got {lines:?}")
+        });
+    }
+    findings.finish("AC-201");
+}
+
+/// A folder under the process working folder, removed when dropped.
+struct WorkingFolderFixture(std::path::PathBuf);
+
+impl Drop for WorkingFolderFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn readarr_undo_without_an_import_root_uses_each_item_root_and_never_the_working_folder() {
+    let unique = format!(
+        "zz-ac202-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let stored = format!("{unique}/ac202-book.epub");
+    let cwd = std::env::current_dir().unwrap();
+    let _guard = WorkingFolderFixture(cwd.join(&unique));
+    let working_folder_copy = cwd.join(&stored);
+    write_file(&working_folder_copy);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ebook_root = tmp.path().join("ebooks");
+    let inside = ebook_root.join(&stored);
+    write_file(&inside);
+    let missing_audio_root = tmp.path().join("audiobooks-not-on-disk");
+
+    let db = create_test_db().await;
+    let user_id = seed_user(&db).await;
+    let ebook = db
+        .create_root_folder(&ebook_root.to_string_lossy(), MediaType::Ebook)
+        .await
+        .unwrap();
+    let audio = db
+        .create_root_folder(&missing_audio_root.to_string_lossy(), MediaType::Audiobook)
+        .await
+        .unwrap();
+    let import_id = "ac202-no-import-root";
+    completed_import(&db, user_id, import_id, None).await;
+    let work_id = import_work(&db, user_id, import_id, WORK_TITLE).await;
+    seed_item_under(
+        &db,
+        user_id,
+        work_id,
+        ebook.id,
+        &stored,
+        MediaType::Ebook,
+        import_id,
+    )
+    .await;
+    seed_item_under(
+        &db,
+        user_id,
+        work_id,
+        audio.id,
+        &format!("{unique}/ac202-book.m4b"),
+        MediaType::Audiobook,
+        import_id,
+    )
+    .await;
+
+    let response = undo(&db, user_id, import_id).await;
+
+    let mut findings = Findings::default();
+    findings.check(!on_disk(&inside), || {
+        format!(
+            "the file under the item's root {} is removed",
+            inside.display()
+        )
+    });
+    findings.check(working_folder_copy.exists(), || {
+        format!(
+            "the file at the same relative path under the working folder {} still exists",
+            working_folder_copy.display()
+        )
+    });
+    findings.check(
+        (response.files_deleted, response.files_skipped) == (1, 1),
+        || {
+            format!(
+                "the item whose root folder is missing on disk is skipped: expected \
+                 filesDeleted 1, filesSkipped 1; got {}, {}",
+                response.files_deleted, response.files_skipped
+            )
+        },
+    );
+    findings.finish("AC-202");
+}
+
+#[tokio::test]
+async fn readarr_undo_uses_each_item_own_root_not_the_import_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root_a = tmp.path().join("ebooks");
+    let root_b = tmp.path().join("audiobooks");
+    let p1 = "1/ac205-ebook.epub";
+    let p2 = "1/ac205-audio.m4b";
+    for file in [
+        root_a.join(p1),
+        root_b.join(p2),
+        root_a.join(p2),
+        root_b.join(p1),
+    ] {
+        write_file(&file);
+    }
+
+    let db = create_test_db().await;
+    let user_id = seed_user(&db).await;
+    let a = db
+        .create_root_folder(&root_a.to_string_lossy(), MediaType::Ebook)
+        .await
+        .unwrap();
+    let b = db
+        .create_root_folder(&root_b.to_string_lossy(), MediaType::Audiobook)
+        .await
+        .unwrap();
+    let import_id = "ac205-two-roots";
+    completed_import(&db, user_id, import_id, Some(a.id)).await;
+    let work_id = import_work(&db, user_id, import_id, WORK_TITLE).await;
+    seed_item_under(&db, user_id, work_id, a.id, p1, MediaType::Ebook, import_id).await;
+    seed_item_under(
+        &db,
+        user_id,
+        work_id,
+        b.id,
+        p2,
+        MediaType::Audiobook,
+        import_id,
+    )
+    .await;
+
+    let response = undo(&db, user_id, import_id).await;
+
+    let mut findings = Findings::default();
+    findings.check(!on_disk(&root_a.join(p1)), || "A/p1 is removed".to_string());
+    findings.check(!on_disk(&root_b.join(p2)), || "B/p2 is removed".to_string());
+    findings.check(root_a.join(p2).exists(), || {
+        "decoy A/p2 still exists".to_string()
+    });
+    findings.check(root_b.join(p1).exists(), || {
+        "decoy B/p1 still exists".to_string()
+    });
+    findings.check(
+        (response.files_deleted, response.files_skipped) == (2, 0),
+        || {
+            format!(
+                "expected filesDeleted 2, filesSkipped 0; got {}, {}",
+                response.files_deleted, response.files_skipped
+            )
+        },
+    );
+    findings.finish("AC-205");
 }

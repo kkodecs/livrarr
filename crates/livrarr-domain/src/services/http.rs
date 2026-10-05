@@ -76,7 +76,6 @@ pub enum UserAgentProfile {
     Custom(String),
 }
 
-#[derive(Debug)]
 pub struct FetchRequest {
     pub url: String,
     pub method: HttpMethod,
@@ -88,6 +87,45 @@ pub struct FetchRequest {
     pub anti_bot_check: bool,
     pub user_agent: UserAgentProfile,
     pub priority: RequestPriority,
+}
+
+/// Shows the URL through the log cleanser, each header by name with its value
+/// masked, and the body as its length.
+impl std::fmt::Debug for FetchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct Masked;
+        impl std::fmt::Debug for Masked {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("[REDACTED]")
+            }
+        }
+        struct Headers<'a>(&'a [(String, String)]);
+        impl std::fmt::Debug for Headers<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_list()
+                    .entries(self.0.iter().map(|(name, _)| (name, Masked)))
+                    .finish()
+            }
+        }
+        struct BodyLength(usize);
+        impl std::fmt::Debug for BodyLength {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{} bytes", self.0)
+            }
+        }
+        f.debug_struct("FetchRequest")
+            .field("url", &crate::redact::cleanse_log_line(&self.url))
+            .field("method", &self.method)
+            .field("headers", &Headers(&self.headers))
+            .field("body", &self.body.as_ref().map(|b| BodyLength(b.len())))
+            .field("timeout", &self.timeout)
+            .field("rate_bucket", &self.rate_bucket)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("anti_bot_check", &self.anti_bot_check)
+            .field("user_agent", &self.user_agent)
+            .field("priority", &self.priority)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -183,6 +221,60 @@ pub trait HttpFetcher: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_request_debug_names_headers_without_their_values_and_counts_the_body() {
+        let body = br#"{"query":"BODYSECRETx7k2"}"#.to_vec();
+        let length = body.len();
+        let request = FetchRequest {
+            url: "https://www.googleapis.com/books/v1/volumes?q=dune&api_key=URLSECRETx7k2"
+                .to_string(),
+            method: HttpMethod::Post,
+            headers: vec![
+                ("X-Goog-Api-Key".into(), "GBSECRETx7k2".into()),
+                ("Authorization".into(), "Bearer HCSECRETx7k2".into()),
+                ("X-Fixture-Header".into(), "PLAINVALUEx7k2".into()),
+            ],
+            body: Some(body.clone()),
+            timeout: Duration::from_secs(9),
+            rate_bucket: RateBucket::GoogleBooks,
+            max_body_bytes: 4096,
+            anti_bot_check: false,
+            user_agent: UserAgentProfile::Server,
+            priority: RequestPriority::Interactive,
+        };
+        let shown = format!("{request:?}");
+
+        let mut failed = Vec::new();
+        for name in ["X-Goog-Api-Key", "Authorization", "X-Fixture-Header"] {
+            if !shown.contains(name) {
+                failed.push(format!("header name {name} is shown"));
+            }
+        }
+        for value in ["GBSECRETx7k2", "HCSECRETx7k2", "PLAINVALUEx7k2"] {
+            if shown.contains(value) {
+                failed.push(format!("header value {value} is not shown"));
+            }
+        }
+        if shown.contains("URLSECRETx7k2") {
+            failed.push("the URL's api_key value is not shown".into());
+        }
+        let bytes = format!("{body:?}");
+        let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
+        if shown.contains("BODYSECRETx7k2")
+            || shown.contains(&bytes[1..bytes.len() - 1])
+            || shown.contains(&hex)
+        {
+            failed.push("the body's bytes are not shown".into());
+        }
+        if !shown.contains(&length.to_string()) {
+            failed.push(format!("the body's length {length} is shown"));
+        }
+        assert!(
+            failed.is_empty(),
+            "FetchRequest Debug: expected {failed:?}\nshown: {shown}"
+        );
+    }
 
     #[test]
     fn cover_bucket_for_host_matches_ol_covers_case_insensitively() {
