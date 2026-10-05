@@ -18,6 +18,22 @@ import sys
 
 ALLOWED_EMAIL = "kkodecs@proton.me"
 
+# Reserved placeholder domains (RFC 2606, RFC 6761): these second-level
+# domains and their subdomains, and any domain under these top-level labels.
+RESERVED_EXAMPLE_DOMAINS = ("example.com", "example.org", "example.net")
+RESERVED_TLDS = {"test", "invalid", "example"}
+
+
+def is_reserved_example_email(email):
+    """True when the address's domain is a reserved placeholder domain."""
+    domain = email.rpartition("@")[2].lower()
+    if domain.rpartition(".")[2] in RESERVED_TLDS:
+        return True
+    return any(
+        domain == d or domain.endswith("." + d) for d in RESERVED_EXAMPLE_DOMAINS
+    )
+
+
 # This file's own job is to contain the deny-listed terms as config entries,
 # not to leak them - exclude it from its own scan.
 EXEMPT_FILES = {"pii-denylist.txt"}
@@ -85,7 +101,10 @@ def main():
 
     email_pattern = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
     emails = {m.group(0) for m in email_pattern.finditer(added_text)}
-    bad_emails = {e for e in emails if e.lower() != ALLOWED_EMAIL}
+    bad_emails = {
+        e for e in emails
+        if e.lower() != ALLOWED_EMAIL and not is_reserved_example_email(e)
+    }
     if bad_emails:
         findings.append(("block", f"unexpected email(s): {sorted(bad_emails)}"))
 
