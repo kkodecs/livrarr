@@ -14,8 +14,8 @@
 
 ## Git and push
 
-- **Livrarr:** after the PM's push, main equals origin/main; the PM records the final hash in the commit. Code and tests `596f4f85` are already on origin (`d8c9117a..596f4f85`); the as-built docs `d245e923` and this steward pass go out with that push. Two untracked files predate this work.
-- **kk-build:** `arch-step-dogfood` equals origin at `d52b915` (chunk 1, pushed). Some kk-build files are uncommitted; the PM says two of them predate this work and are not the PM's. Ownership of the rest is open; see the [receipt](build/reviews/steward-close-silent-failures-2-2026-10-04/RECEIPT.md#contradictions).
+- **Livrarr:** main equals origin/main. Code and tests `596f4f85`, as-built docs `d245e923` and the close commit `5a579b93` are pushed (`d8c9117a..5a579b93`); this handoff correction follows them. Two untracked files predate this work.
+- **kk-build:** `arch-step-dogfood` equals origin at `d52b915` (chunk 1, pushed). Five tracked kk-build files are modified and uncommitted (`build/state/escaped-defects.jsonl`, `skills/kk-handoff/SKILL.md`, `wiki/framework/seat-context-check.md`, `wisdom/journal.md`, `wisdom/weaknesses.md`). They predate silent-failures-2, except one wisdom-journal entry the PM appended on 2026-10-05; their owner is not established, so do not commit them blind.
 
 ## What is delivered
 
@@ -31,6 +31,6 @@ Unapproved candidates are in [TODO](build/plans/TODO.md), grouped by the work pl
 
 ## Read next
 
-PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), then this handoff and the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary). Feature history: the silent-failures-2 [session log](build/state/session-log-silent-failures-2.md) and [state file](build/state/silent-failures-2.yaml). Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md) and this pass's [receipt](build/reviews/steward-close-silent-failures-2-2026-10-04/RECEIPT.md), which lists contradictions for the PM.
+PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), then the [PM handoff](build/state/handoff-silent-failures-2.md) (next move: ask the PO about chunk 3), then this handoff and the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary). Feature history: the silent-failures-2 [session log](build/state/session-log-silent-failures-2.md) and [state file](build/state/silent-failures-2.yaml). Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md) and this pass's [receipt](build/reviews/steward-close-silent-failures-2-2026-10-04/RECEIPT.md), which lists contradictions for the PM.
 
 The previous root handoff is preserved unchanged at `build/reviews/steward-close-silent-failures-2-2026-10-04/predecessors/HANDOFF.md`.
