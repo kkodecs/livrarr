@@ -241,6 +241,12 @@ to 28); that is the failure this rule prevents.
 - **List every input shape as an acceptance criterion for files and tokens the code reads.** Missing, exact, extra content, a trailing newline, a link, a directory, and other platforms. Three of the five code-review findings were shapes no criterion named: a token file with trailing data, a failure after the claim commits, and non-Unix builds.
 - **Copy the allowed test edits verbatim from the code packet into the review packet.** A paraphrase narrower than the code packet's wording produced a review finding against an allowed edit.
 
+## Lessons (from silent-failures-2 retro, 2026-10-04; PO-approved)
+
+- **Racing replies get one ordering rule, not a list of cases.** When a screen waits on two or more replies that can arrive in any order (a saved place, stream metadata, a refresh, a change of item), the spec states the rule that decides every order. For example: only the current opening, after its place is applied, may set the position or save. A test then drives each pair of events in both orders. The spec, code review r1 and code review r2 found this class four times, one ordering at a time, and each fix pinned only the ordering just named (`build/state/retro-silent-failures-2.md`).
+- **A red test must reach its main assertion before the tests gate.** If it fails on today's code at an earlier line, run it once against a scratch stand-in fix, or list its unexecuted assertions for the PM to probe before the code stage. Three browser tests passed tests review but could never pass with correct code: their main assertions had never run.
+- **A criterion that depends on a UI library's behaviour needs a probe of that library.** Examples are toast timers and a query's status on refetch. The spec seat runs the library directly (a `QueryObserver`, the toast source) and records the transition as a System Truth. All three missing-system-truth items this cycle were of this kind: Sonner's add timer and two-frame removal (`wiki/patterns/error-handling.md`), and TanStack Query putting an errored query with no data back to pending (`wiki/insights/coding-patterns.md`, lesson 107).
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation

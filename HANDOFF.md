@@ -2,34 +2,35 @@
 
 ## Executive summary
 
-**Chunk 2 of the work plan is in progress; chunk 1 is done.** Chunk 1 (five tool fixes in kk-build) passed Astra's review on round 3 and is committed in kk-build as `d52b915`, not pushed. Chunk 2 (silent failures, round 2) is the bugfix feature `silent-failures-2`, at the spec stage: spec v2 passed its gate check and Astra's first spec review is running. Livrarr main equals origin/main at `457dc333`; the chunk-2 spec and this steward pass are not committed yet. The next PM reads the [chunk 2 session log](build/state/session-log-silent-failures-2.md) and [state file](build/state/silent-failures-2.yaml). Nothing else is approved; scope additions need the PO's explicit word. See [current work](#current-work), [git and push](#git-and-push), [what is delivered](#what-is-delivered), [open items](#open-items) and [where to read next](#read-next).
+**Nothing is in progress.** Chunks 1 and 2 of the work plan are done. Chunk 2, the bugfix feature `silent-failures-2`, is closed (`verify.py close` PASS 2026-10-05T03:11:56Z) and pushed. The PO adopted the retro's three lessons into `CLAUDE.md` (2026-10-04). Nothing else is approved; chunk 3 needs the PO's word. Livrarr main equals origin/main after the PM's push of this pass. The next PM reads `pm-context.md`, [CLAUDE.md](CLAUDE.md), this handoff and the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary). See [current work](#current-work), [git and push](#git-and-push), [what is delivered](#what-is-delivered), [open items](#open-items) and [where to read next](#read-next).
 
 ## Current work
 
-**Chunk 2, `silent-failures-2` (Livrarr, stage spec).** Scope (PO "yes go", 2026-10-04): two pop-ups on a failed book delete, audiobook bookmark failures, ignored audio playback failure, the bell badge ignoring failed polls, and the ebook reader's saved-place load failure. The PO added the same saved-place fix for the audiobook player. PO decisions: Opus writes the tests and code and Astra reviews; a failed saved-place load shows an error with Retry plus a way out that opens at the start and saves no progress that session. Spec: [`spec-silent-failures-2.md`](spec-silent-failures-2.md#executive-summary) v2 (sha256 `5e9c358c…`), `verify.py spec` PASS; Astra spec review round 1 running. Source: [state](build/state/silent-failures-2.yaml), [session log](build/state/session-log-silent-failures-2.md), [spec packets and reviews](build/reviews/silent-failures-2/).
+**None.** `silent-failures-2` is closed: state `stage: done`, `closed_at: 2026-10-05T03:11:56Z`; [status](build/state/STATUS-silent-failures-2.md).
 
-**Chunk 1, tool fixes (kk-build): done.** The tests-gate timeout, the seat checker after a reset, the review tally, the close-gate background note, and a close-gate check that every test target ran. Astra review: round 1 FAIL, round 2 FAIL, round 3 PASS. Evidence: [build/reviews/tooling-fixes-2026-10-04/](build/reviews/tooling-fixes-2026-10-04/REVIEW-astra-r3.md). The tests-gate fix means chunk 2 should not need a gate bypass.
+**Retro lessons:** the PO adopted all [three](build/state/retro-silent-failures-2.md#recommendations) into `CLAUDE.md` ("Lessons (from silent-failures-2 retro").
 
-Chunks 3–9 are not approved; adopting the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary) set only the order. The [chunks 1 and 2 handoff](build/state/handoff-workplan-chunks-1-2.md) is history.
+**Next work:** chunk 3 of the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary) is not approved. Adopting the order approved no chunk by itself. Scope additions need the PO's explicit word.
 
 ## Git and push
 
-- **Livrarr:** main equals origin/main at `457dc333` (the previous root handoff). Uncommitted: `spec-silent-failures-2.md` (in progress) and this steward pass, which the PM commits. Two other untracked files predate this work.
-- **kk-build:** `arch-step-dogfood` is one commit ahead of origin (`d52b915`, chunk 1). Other uncommitted kk-build files were left untouched by the PM (session log 2026-10-04T05:15Z). Any push waits for the PO's word.
+- **Livrarr:** after the PM's push, main equals origin/main; the PM records the final hash in the commit. Code and tests `596f4f85` are already on origin (`d8c9117a..596f4f85`); the as-built docs `d245e923` and this steward pass go out with that push. Two untracked files predate this work.
+- **kk-build:** `arch-step-dogfood` equals origin at `d52b915` (chunk 1, pushed). Some kk-build files are uncommitted; the PM says two of them predate this work and are not the PM's. Ownership of the rest is open; see the [receipt](build/reviews/steward-close-silent-failures-2-2026-10-04/RECEIPT.md#contradictions).
 
 ## What is delivered
 
-- **Work-plan chunk 1** (2026-10-04) — five kk-build tool fixes, committed locally, unpushed.
-- **prerelease-trust-pass** (closed 2026-10-03) — corrected user docs (including the in-app AI help context), the dead `[auth]` keys removed with config warnings in the log, and a one-time setup token on first run. Pushed `59b7e9db..3ccf7db9`, then the lessons commit `fdd54cc6`. Source: [status](build/state/STATUS-prerelease-trust-pass.md), [retro](build/state/retro-prerelease-trust-pass.md), [spec v6](spec-prerelease-trust-pass.md#executive-summary).
-- **errors-and-delete-pass** (2026-09-30) and its retro follow-ups (2026-10-01), **small-bugs-pass** (2026-09-30) and **identity-upgrade-inplace** (2026-09-29) — delivered and pushed. Earlier features: see the [steward continuation](build/ops/document-steward/CONTINUE.md).
+- **silent-failures-2** (work-plan chunk 2, 2026-10-04) — six silent failures in the web app now show an error: one message on a failed book-page delete; audiobook bookmark errors; one playback-failure message with the play button reset; the bell's warning mark; and, in both the ebook reader and the audiobook player, a saved-place error screen with Retry and a way out that saves no progress. Astra was the sole reviewer (spec PASS round 3, tests round 2, code round 3). UI files only were deployed to port 8789; the PO did not report a live check. Source: [spec v6 as built](spec-silent-failures-2.md#7-as-built-corrections-and-limits), [retro](build/state/retro-silent-failures-2.md#executive-summary), [reviews](build/reviews/silent-failures-2/), [saved-place wiki page](wiki/domain/saved-place.md).
+- **Work-plan chunk 1** (2026-10-04) — five kk-build tool fixes, pushed as `d52b915`. Evidence: [review round 3](build/reviews/tooling-fixes-2026-10-04/REVIEW-astra-r3.md).
+- **prerelease-trust-pass** (closed 2026-10-03) — corrected user docs, the dead `[auth]` keys removed with config warnings, and a one-time setup token on first run. Source: [status](build/state/STATUS-prerelease-trust-pass.md), [retro](build/state/retro-prerelease-trust-pass.md).
+- Earlier features: see the [steward continuation](build/ops/document-steward/CONTINUE.md).
 - Standing PO directions: Gemini and Grok benched, Astra sole reviewer (2026-09-24); let the user edit what they want (2026-09-25); no push without the PO's word; the steward pass runs at every feature close.
 
 ## Open items
 
-Unapproved candidates are in [TODO](build/plans/TODO.md), grouped by the [work plan](build/plans/todo-chunks-2026-10-04.md), including four items noticed during chunk 2, the PDF reader fix, the delete-with-files folder-swap race (Security) and "Make url_base work" (GitHub #119). Also open: files on the parked branch `wip/identity-conflict-authority-stopped` ([proposal](build/reviews/steward-upkeep-2026-09-26/WIP-BRANCH-PROPOSAL.md)).
+Unapproved candidates are in [TODO](build/plans/TODO.md), grouped by the work plan. They include the items noticed during silent-failures-2 and one the PO left for later on 2026-10-04: after a stream refresh fails and its recovery works, the audiobook stays stopped with the button on pause. Also open: files on the parked branch `wip/identity-conflict-authority-stopped` ([proposal](build/reviews/steward-upkeep-2026-09-26/WIP-BRANCH-PROPOSAL.md)).
 
 ## Read next
 
-PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), then the chunk 2 [session log](build/state/session-log-silent-failures-2.md) and [state file](build/state/silent-failures-2.yaml). Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md) and this pass's [receipt](build/reviews/steward-upkeep-2026-10-04b/RECEIPT.md), which lists contradictions for the PM.
+PM: `~/Projects/kk-build/templates/claude-md/pm-context.md`, then [CLAUDE.md](CLAUDE.md), then this handoff and the [work plan](build/plans/todo-chunks-2026-10-04.md#executive-summary). Feature history: the silent-failures-2 [session log](build/state/session-log-silent-failures-2.md) and [state file](build/state/silent-failures-2.yaml). Document upkeep: [steward continuation](build/ops/document-steward/CONTINUE.md) and this pass's [receipt](build/reviews/steward-close-silent-failures-2-2026-10-04/RECEIPT.md), which lists contradictions for the PM.
 
-The previous root handoff is preserved unchanged at `build/reviews/steward-upkeep-2026-10-04b/predecessors/HANDOFF.md`.
+The previous root handoff is preserved unchanged at `build/reviews/steward-close-silent-failures-2-2026-10-04/predecessors/HANDOFF.md`.
