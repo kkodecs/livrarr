@@ -2,7 +2,18 @@
 
 ## Executive summary
 
-This log records wiki updates and their evidence. The [latest entry](#2026-10-05--log-redaction-readarr-undo-and-retry-client) adds the log-redaction page and two live-log lessons from security-before-release. The [2026-10-04 entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+This log records wiki updates and their evidence. The [latest entry](#2026-10-06--settings-pages-menu-roles-and-two-ui-lessons) adds the settings-pages page, the menu and role rules in the UI page, and two lessons from settings-honesty. The [2026-10-05 entry](#2026-10-05--log-redaction-readarr-undo-and-retry-client) adds the log-redaction page and two live-log lessons from security-before-release. The [2026-10-04 entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+
+## 2026-10-06 — Settings pages, menu roles and two UI lessons
+
+From settings-honesty (`fcbcb080`): a new page, [settings pages](architecture/settings-pages.md),
+records the Media Management sentence, the indexer search box and the Metadata page's rules (Test
+checks saved values, save first, the save lock, cancel before storing a save's reply).
+[UI architecture](architecture/ui-architecture.md#menu-routes-and-roles) gains an executive summary
+and a section on admin-only menu items, routes and links, the not-found page and the shared
+language list. [Lessons 110 and 111](insights/coding-patterns.md#lesson-110) record a save reply
+overwritten by an older read and pop-up content that ignored a role change. Source:
+`spec-settings-honesty.md` v6.
 
 ## 2026-10-05 — Log redaction, Readarr undo and Retry client
 

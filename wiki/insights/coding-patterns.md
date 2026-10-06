@@ -5,8 +5,10 @@
 Rules for how Livrarr code is structured, with links to their evidence. They cover service
 contracts and async traits ([7](#lesson-7), [8](#lesson-8)), handler and crate boundaries
 ([9b](#lesson-9b) to [9i](#lesson-9i)), and library traps that hid failures: a TOML file parsed
-as a single value ([106](#lesson-106)) and a TanStack Query error state that clears while the
-next check runs ([107](#lesson-107)).
+as a single value ([106](#lesson-106)), a TanStack Query error state that clears while the
+next check runs ([107](#lesson-107)), a save reply that an older read overwrites
+([110](#lesson-110)), and pop-up content that does not follow a later role change
+([111](#lesson-111)).
 
 Current guidance with links to the full dated evidence. Read implementation claims
 against the named source revision; accepted design is not proof of runtime behavior.
@@ -218,6 +220,50 @@ completion times (`frontend/src/components/Header/NotificationBell.test.tsx:404`
 
 Source: `build/reviews/silent-failures-2/packet-6-code-review/REVIEW-astra-code-r1.md` (F3),
 `packet-8-code-review-r2/REVIEW-astra-code-r2.md` (F3-R2); `spec-silent-failures-2.md` v6 §7.
+
+<a id="lesson-110"></a>
+## 110. Cancel in-flight reads before storing a save's reply
+
+In TanStack Query 5, `setQueryData` neither cancels nor supersedes a read of the same key that is
+already in flight. When that older read answers after the save's reply was stored, it puts the
+pre-save value back. `invalidateQueries` did not have this problem (it cancels the read and starts
+a fresh one), so swapping it for `setQueryData` to use the reply directly opened the race.
+
+Why it matters: on the Metadata settings page, a focus refetch held across a save made the page
+show the old Audnexus address after a successful save while the server stored the new one, and
+Test then ran without asking to save first (`build/reviews/settings-honesty/packet-7-code-review/reviewer-scratch/query-save-race.log:1-4`,
+`metadata-save-race.log`).
+
+To apply: in a mutation's `onSuccess`, `await queryClient.cancelQueries({ queryKey })` before
+`setQueryData(queryKey, reply)`, as `frontend/src/pages/settings/metadata/MetadataPage.tsx:181-182`
+and `:193-194` do. Awaiting matters: cancellation restores the query's earlier snapshot, so it
+must settle before the reply is stored. Test it by holding a read started before the save (for
+example by a `visibilitychange` event), completing the save, then releasing the read
+(`MetadataPage.test.tsx:1233`).
+
+Source: `REVIEW-astra-code-r1.md` (C1) and `REVIEW-astra-code-r2.md` in
+`build/reviews/settings-honesty/packet-7-code-review/`; `spec-settings-honesty.md` v6, AC-528.
+
+<a id="lesson-111"></a>
+## 111. A pop-up's content is drawn once; role-dependent parts must read the store themselves
+
+Sonner stores the React element passed as a toast's description. A value computed when the toast
+was issued, such as `isAdmin`, stays as it was; re-running the issuing effect does not help when
+it skips notifications it has already shown, and a fixed-id toast with no time-out can stay on
+screen through a role change.
+
+Why it matters: the path-not-found pop-up kept its admin-only "Configure path mapping" link after
+the user was refreshed as a normal user, while the bell entry, rendered normally, updated
+(`build/reviews/settings-honesty/packet-7-code-review/reviewer-scratch/notification-role-change.log`).
+
+To apply: put the role-dependent part in a small component that subscribes to the auth store
+itself, and pass that component in the toast's content, as `AdminOnlyItem` does
+(`frontend/src/components/Header/NotificationBell.tsx:48`, used at `:109` and `:284`). Test both
+directions of a role change through the real `refreshUser`, without remounting
+(`NotificationBell.test.tsx:636`).
+
+Source: `REVIEW-astra-code-r1.md` (C3) in `build/reviews/settings-honesty/packet-7-code-review/`;
+`spec-settings-honesty.md` v6, AC-724.
 
 ## Source and history
 

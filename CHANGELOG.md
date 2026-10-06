@@ -9,6 +9,7 @@
 - *(library)* Deleting a book from its page, or several from the Books page, offers "Also delete files from disk"; it starts unticked, so files stay unless you tick it; ticked, only the book's own files inside the library folder are removed, and any that cannot be are named in a warning
 - *(library)* "Delete File" on a book's files tab now deletes the file from disk, not just Livrarr's record; if the file cannot be removed, the record stays and the error says why
 - *(setup)* A fresh install asks for a one-time setup token before it creates the first account, so a stranger who reaches the port first cannot take it over; the token is printed when Livrarr starts (`docker logs livrarr`) and saved as `setup-token` in the config folder, and it stops working once setup succeeds
+- *(settings)* Settings → Metadata has a Test button for Hardcover, Audnexus and the AI connection; each tests the saved settings, and with unsaved changes it asks you to save first. The page locks its controls while a save runs, and a background reload can no longer undo a save
 
 ### 🐛 Bug Fixes
 
@@ -38,6 +39,14 @@
 - *(logs)* API keys, passwords, tokens and login headers are masked in every log line, plain, colour or JSON; the AI connection test no longer logs the key it sent (#76)
 - *(import)* Undoing a Readarr import deletes only files inside each book's library folder; a file that cannot be deleted safely is left on disk, and the page says how many
 - *(import)* Retry on a failed import reaches a download client on your local network (for example qBittorrent at `http://qbittorrent:8080`), as the background poller always could
+- *(ui)* The six "Coming soon" menu items that were not planned (Bookshelf, Calendar, Cutoff Unmet, Profiles, Custom Formats, Development) and their pages are removed; General, Notifications and Tags stay greyed. An address that does not exist now says "This page does not exist." instead of "coming in a future release" (#79)
+- *(settings)* Settings → UI no longer shows a Light theme button that could not be chosen
+- *(settings)* Media Management replaces the read-only Naming box, which wrongly said files are not renamed, and the inactive File Management checkboxes with one "File locations" sentence on where Livrarr puts imported files
+- *(indexers)* The Interactive Search box can be switched on and off and decides which indexers book search asks; the Automatic Search box and "Auto" badge, which controlled nothing, are removed
+- *(ui)* Unmapped Files has a menu link under Activity for admins, and its "Go to Settings" link and Manual Import's "Configure root folder" link open Media Management instead of a missing page
+- *(ui)* Normal (non-admin) users no longer see Manual Import, Readarr Import, Media Management, Status, Logs or the "Configure path mapping" link, which only admins can use; Settings opens on UI for them
+- *(search)* Add New and the header search show every user the languages the admin enabled, instead of English only for normal users
+- *(auth)* The server requires passwords of at least 8 characters, as the forms already said; existing shorter passwords still sign in
 
 ## [0.1.0-alpha6] - 2026-07-18
 

@@ -253,6 +253,21 @@ to 28); that is the failure this rule prevents.
 - **Probe any library whose output the code matches or parses**, not only UI libraries (extends the silent-failures-2 lesson above). Run it once and record its output shapes as a System Truth. The tracing text formatter quotes string and Debug field values; no criterion named that shape, and code review found it (C1).
 - **A fix that widens a matcher pins its nearest legitimate neighbour.** The same test that proves the new catch also proves the closest ordinary input stays byte-identical. The fix for a quote inside `user:pass@` let an escaped slash cross a URL path boundary and masked ordinary URLs (D4); only review caught it.
 
+## Lessons (from settings-honesty retro, 2026-10-06; PO-approved)
+
+- **A background re-read is a racing reply.** When a screen saves while the app may re-read the same
+  data in the background (the web app re-reads on window focus, `frontend/src/App.tsx:77`), the spec
+  names that re-read as one of the replies, and its ordering rule says which one wins. This one class
+  cost four review rounds on the Metadata page: two-part saves, edits during a save, a pending reply,
+  and an older read undoing a save (`build/state/retro-settings-honesty.md`).
+- **Check that a screen is reachable before asking the PO to decide on it.** Before a decision sitting
+  asks about a UI item, drive the real app to that screen once (a whole-app test with only the network
+  stubbed is enough). The setup wizard's download-client step looked editable but is never shown; the
+  PO decided on it, and it was dropped after spec review.
+- **A lesson reaches a seat only if its packet carries it.** Every spec packet for a screen that waits
+  on more than one reply lists the racing-replies rule among its retro rules, as it lists the others.
+  The silent-failures-2 lesson was already here; the packet left it out and the class came back.
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation
