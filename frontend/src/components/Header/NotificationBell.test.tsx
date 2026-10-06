@@ -1,6 +1,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotificationBell } from "@/components/Header/NotificationBell";
+import { useAuthStore } from "@/stores/auth";
 import {
   installApiStub,
   mountWith,
@@ -504,4 +505,249 @@ describe("Notification bell: the unread check fails", () => {
     expect(document.body.textContent).not.toContain(STILL_TRYING);
     expectNoPopUp();
   });
+});
+
+describe("Path-not-found notification: the path mapping link is for admins", () => {
+  const pathNotFound = {
+    id: 7,
+    notificationType: "pathNotFound",
+    refKey: "grab-12",
+    message: "Download not found locally",
+    data: {
+      clientName: "qBittorrent",
+      title: "Dune",
+      grabId: 12,
+      contentDir: "/downloads",
+      configuredRemotePath: null,
+      configuredLocalPath: null,
+      clientHost: "localhost",
+    },
+    read: false,
+    createdAt: "2026-09-29T12:00:00Z",
+  };
+
+  afterEach(() => {
+    useAuthStore.setState({ status: "loading", isAdmin: false, user: null });
+  });
+
+  function signInAs(role: "admin" | "user") {
+    useAuthStore.setState({
+      status: "authenticated",
+      isAdmin: role === "admin",
+      user: {
+        id: role === "admin" ? 1 : 2,
+        username: role === "admin" ? "admin" : "reader",
+        role,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    });
+  }
+
+  const linkTexts = (scope: Element[]) =>
+    scope.flatMap((el) =>
+      Array.from(el.querySelectorAll("a")).map((a) => a.textContent?.trim() ?? ""),
+    );
+
+  /** Link texts in the pop-up and in the bell's list entry for the notification. */
+  async function linksFor(role: "admin" | "user") {
+    signInAs(role);
+    const api = installApiStub((call) => {
+      if (call.method === "GET" && call.path === UNREAD_PATH) {
+        return page([pathNotFound]);
+      }
+      if (call.method === "GET" && call.path === FULL_PATH) {
+        return page([pathNotFound]);
+      }
+      if (call.method === "DELETE" && call.path === "/notification/7") {
+        return { status: 204 };
+      }
+      return serverFailure(`unexpected ${call.method} ${call.path}`);
+    });
+    const mounted = mountBell();
+    restore = () => {
+      mounted.cleanup();
+      api.restore();
+    };
+    // Control: the pop-up for the notification is on screen.
+    await vi.waitFor(() =>
+      expect(toastSummary()).toEqual([
+        { type: "error", text: expect.stringContaining("Dune") },
+      ]),
+    );
+    const popUp = linkTexts(
+      Array.from(
+        document.querySelectorAll('[data-sonner-toast]:not([data-removed="true"])'),
+      ),
+    );
+
+    await openBell(mounted.container);
+    // Control: the bell's list shows the notification's entry.
+    await vi.waitFor(() => expect(fullLoads(api.calls)).toBe(1));
+    const bellList = () =>
+      Array.from(document.body.children).filter(
+        (el) =>
+          !el.contains(mounted.container) &&
+          !el.querySelector("[data-sonner-toaster]") &&
+          !el.matches("[data-sonner-toaster]"),
+      );
+    await vi.waitFor(() =>
+      expect(bellList().map((el) => el.textContent).join("")).toContain("Dune"),
+    );
+    const bellEntry = linkTexts(bellList());
+    return { popUp, bellEntry };
+  }
+
+  it("normal user: neither the pop-up nor the bell entry shows Configure path mapping; both still show Get AI help", async () => {
+    const { popUp, bellEntry } = await linksFor("user");
+    expect({
+      popUp: {
+        pathMapping: popUp.includes("Configure path mapping"),
+        aiHelp: popUp.includes("Get AI help"),
+      },
+      bellEntry: {
+        pathMapping: bellEntry.includes("Configure path mapping"),
+        aiHelp: bellEntry.includes("Get AI help"),
+      },
+    }).toEqual({
+      popUp: { pathMapping: false, aiHelp: true },
+      bellEntry: { pathMapping: false, aiHelp: true },
+    });
+  });
+
+  it("admin: the pop-up and the bell entry show both links", async () => {
+    const { popUp, bellEntry } = await linksFor("admin");
+    expect({
+      popUp: {
+        pathMapping: popUp.includes("Configure path mapping"),
+        aiHelp: popUp.includes("Get AI help"),
+      },
+      bellEntry: {
+        pathMapping: bellEntry.includes("Configure path mapping"),
+        aiHelp: bellEntry.includes("Get AI help"),
+      },
+    }).toEqual({
+      popUp: { pathMapping: true, aiHelp: true },
+      bellEntry: { pathMapping: true, aiHelp: true },
+    });
+  });
+});
+
+describe("Path-not-found notification: the path mapping link follows a role change", () => {
+  const pathNotFound = {
+    id: 8,
+    notificationType: "pathNotFound",
+    refKey: "grab-13",
+    message: "Download not found locally",
+    data: {
+      clientName: "qBittorrent",
+      title: "Hyperion",
+      grabId: 13,
+      contentDir: "/downloads",
+      configuredRemotePath: null,
+      configuredLocalPath: null,
+      clientHost: "localhost",
+    },
+    read: false,
+    createdAt: "2026-09-29T12:00:00Z",
+  };
+
+  const account = (role: "admin" | "user") => ({
+    id: 5,
+    username: "member",
+    role,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+  });
+
+  afterEach(() => {
+    useAuthStore.setState({ status: "loading", isAdmin: false, user: null });
+  });
+
+  const linkTexts = (scope: Element[]) =>
+    scope.flatMap((el) =>
+      Array.from(el.querySelectorAll("a")).map((a) => a.textContent?.trim() ?? ""),
+    );
+  const popUps = () =>
+    Array.from(
+      document.querySelectorAll('[data-sonner-toast]:not([data-removed="true"])'),
+    );
+  const links = (scope: Element[]) => ({
+    pathMapping: linkTexts(scope).includes("Configure path mapping"),
+    aiHelp: linkTexts(scope).includes("Get AI help"),
+  });
+
+  for (const [from, to] of [
+    ["admin", "user"],
+    ["user", "admin"],
+  ] as const) {
+    it(`a pop-up shown to ${from === "admin" ? "an admin" : "a normal user"} follows the refreshed role (${to === "admin" ? "admin" : "normal user"}), in the pop-up and the bell entry`, async () => {
+      useAuthStore.setState({
+        status: "authenticated",
+        isAdmin: from === "admin",
+        user: account(from),
+      });
+      const api = installApiStub((call) => {
+        if (call.method === "GET" && call.path === "/auth/me") {
+          return { status: 200, body: { user: account(to), authType: "session" } };
+        }
+        if (call.method === "GET" && call.path === UNREAD_PATH) {
+          return page([pathNotFound]);
+        }
+        if (call.method === "GET" && call.path === FULL_PATH) {
+          return page([pathNotFound]);
+        }
+        return serverFailure(`unexpected ${call.method} ${call.path}`);
+      });
+      const mounted = mountBell();
+      restore = () => {
+        mounted.cleanup();
+        api.restore();
+      };
+      await vi.waitFor(() =>
+        expect(toastSummary()).toEqual([
+          { type: "error", text: expect.stringContaining("Hyperion") },
+        ]),
+      );
+      await openBell(mounted.container);
+      await vi.waitFor(() => expect(fullLoads(api.calls)).toBe(1));
+      const bellList = () =>
+        Array.from(document.body.children).filter(
+          (el) =>
+            !el.contains(mounted.container) &&
+            !el.querySelector("[data-sonner-toaster]") &&
+            !el.matches("[data-sonner-toaster]"),
+        );
+      await vi.waitFor(() =>
+        expect(bellList().map((el) => el.textContent).join("")).toContain(
+          "Hyperion",
+        ),
+      );
+      // Control: before the refresh both places follow the starting role.
+      const startAdmin = from === "admin";
+      expect({ popUp: links(popUps()), bellEntry: links(bellList()) }).toEqual({
+        popUp: { pathMapping: startAdmin, aiHelp: true },
+        bellEntry: { pathMapping: startAdmin, aiHelp: true },
+      });
+
+      // The production refresh of the signed-in user changes the role while
+      // the pop-up stays on screen and the bell stays mounted.
+      await act(async () => {
+        await useAuthStore.getState().refreshUser();
+      });
+      await settle();
+      // Control: the store now holds the new role.
+      expect(useAuthStore.getState().isAdmin).toBe(to === "admin");
+
+      expect({
+        popUpCount: popUps().length,
+        popUp: links(popUps()),
+        bellEntry: links(bellList()),
+      }).toEqual({
+        popUpCount: 1,
+        popUp: { pathMapping: to === "admin", aiHelp: true },
+        bellEntry: { pathMapping: to === "admin", aiHelp: true },
+      });
+    });
+  }
 });

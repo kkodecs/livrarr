@@ -9,7 +9,7 @@ use crate::context::{
 
 use crate::middleware::RequireAdmin;
 use crate::{
-    ApiError, AuthContext, DefaultLanguageResponse, EmailConfigResponse,
+    ApiError, AuthContext, DefaultLanguageResponse, EmailConfigResponse, LanguagesResponse,
     MediaManagementConfigResponse, MetadataConfigResponse, NamingConfigResponse,
     UpdateDefaultLanguageApiRequest, UpdateEmailApiRequest, UpdateMediaManagementApiRequest,
     UpdateMetadataApiRequest,
@@ -128,6 +128,18 @@ pub async fn get_metadata<S: HasAppConfigService + HasProviderStats>(
     let cfg = state.app_config_service().get_metadata_config().await?;
     let provider_status = provider_error_map(&state).await?;
     Ok(Json(metadata_to_response(cfg, provider_status)))
+}
+
+/// The saved enabled language codes, for any signed-in user. The reply type
+/// carries only the list, so no other metadata setting reaches a normal user.
+pub async fn get_languages<S: HasAppConfigService>(
+    State(state): State<S>,
+    _auth: AuthContext,
+) -> Result<Json<LanguagesResponse>, ApiError> {
+    let cfg = state.app_config_service().get_metadata_config().await?;
+    Ok(Json(LanguagesResponse {
+        languages: cfg.languages,
+    }))
 }
 
 /// Validate an LLM endpoint URL: must be http/https, no embedded credentials,

@@ -18,6 +18,7 @@ vi.mock("@/api", () => ({
   getHistory: vi.fn().mockResolvedValue({ items: [] }),
   getQueue: vi.fn(),
   getMetadataConfig: vi.fn().mockResolvedValue({ languages: ["en"] }),
+  getLanguages: vi.fn().mockResolvedValue({ languages: ["en"] }),
   removeQueueItem: vi.fn(),
   retryImport: vi.fn(),
   lookupWorks: vi.fn(),

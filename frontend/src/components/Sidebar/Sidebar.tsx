@@ -4,7 +4,6 @@ import {
   Library,
   Users,
   PlusCircle,
-  BookMarked,
   ListOrdered,
   History,
   HardDrive,
@@ -15,21 +14,18 @@ import {
   Palette,
   UserCog,
   Activity,
-  Calendar,
   AlertCircle,
-  LayoutList,
   Tag,
   Bell,
   Import,
-  Code,
   ScrollText,
   ChevronDown,
   ChevronRight,
-  Bookmark,
   ArrowUpCircle,
   Info,
   X,
   HelpCircle,
+  FolderSearch,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { cn } from "@/utils/cn";
@@ -75,12 +71,6 @@ const navGroups: NavGroup[] = [
         path: "/review",
         icon: <HelpCircle size={18} />,
       },
-      {
-        label: "Bookshelf",
-        path: "/shelf",
-        icon: <Bookmark size={18} />,
-        greyed: true,
-      },
     ],
   },
   {
@@ -101,28 +91,19 @@ const navGroups: NavGroup[] = [
         label: "Manual Import",
         path: "/import",
         icon: <Import size={18} />,
+        adminOnly: true,
       },
       {
         label: "Readarr Import",
         path: "/import/readarr",
         icon: <Download size={18} />,
-      },
-    ],
-  },
-  {
-    label: "More",
-    children: [
-      {
-        label: "Calendar",
-        path: "/calendar",
-        icon: <Calendar size={18} />,
-        greyed: true,
+        adminOnly: true,
       },
       {
-        label: "Cutoff Unmet",
-        path: "/wanted/cutoff",
-        icon: <LayoutList size={18} />,
-        greyed: true,
+        label: "Unmapped Files",
+        path: "/unmapped",
+        icon: <FolderSearch size={18} />,
+        adminOnly: true,
       },
     ],
   },
@@ -133,6 +114,7 @@ const navGroups: NavGroup[] = [
         label: "Media Management",
         path: "/settings/mediamanagement",
         icon: <HardDrive size={18} />,
+        adminOnly: true,
       },
       {
         label: "Indexers",
@@ -166,20 +148,6 @@ const navGroups: NavGroup[] = [
         adminOnly: true,
       },
       {
-        label: "Profiles",
-        path: "/settings/profiles",
-        icon: <BookMarked size={18} />,
-        adminOnly: true,
-        greyed: true,
-      },
-      {
-        label: "Custom Formats",
-        path: "/settings/customformats",
-        icon: <Tag size={18} />,
-        adminOnly: true,
-        greyed: true,
-      },
-      {
         label: "Notifications",
         path: "/settings/notifications",
         icon: <Bell size={18} />,
@@ -192,23 +160,22 @@ const navGroups: NavGroup[] = [
         icon: <Tag size={18} />,
         greyed: true,
       },
-      {
-        label: "Development",
-        path: "/settings/development",
-        icon: <Code size={18} />,
-        adminOnly: true,
-        greyed: true,
-      },
     ],
   },
   {
     label: "System",
     children: [
-      { label: "Status", path: "/system/status", icon: <Activity size={18} /> },
+      {
+        label: "Status",
+        path: "/system/status",
+        icon: <Activity size={18} />,
+        adminOnly: true,
+      },
       {
         label: "Logs",
         path: "/system/logs",
         icon: <ScrollText size={18} />,
+        adminOnly: true,
       },
       {
         label: "About Livrarr",

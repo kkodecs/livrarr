@@ -47,7 +47,6 @@ interface IndexerFormData {
   apiKey: string;
   categories: string;
   priority: number;
-  enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
   enableRss: boolean;
   enabled: boolean;
@@ -70,7 +69,6 @@ function toCreateRequest(data: IndexerFormData): CreateIndexerRequest {
     apiKey: data.apiKey || null,
     categories: parseCategories(data.categories),
     priority: data.priority,
-    enableAutomaticSearch: data.enableAutomaticSearch,
     enableInteractiveSearch: data.enableInteractiveSearch,
     enableRss: data.enableRss,
     enabled: data.enabled,
@@ -84,7 +82,6 @@ function toUpdateRequest(data: IndexerFormData): UpdateIndexerRequest {
     apiPath: data.apiPath || "/",
     categories: parseCategories(data.categories),
     priority: data.priority,
-    enableAutomaticSearch: data.enableAutomaticSearch,
     enableInteractiveSearch: data.enableInteractiveSearch,
     enableRss: data.enableRss,
     enabled: data.enabled,
@@ -101,7 +98,6 @@ const defaultValues: IndexerFormData = {
   apiKey: "",
   categories: "7020, 3030",
   priority: 1,
-  enableAutomaticSearch: true,
   enableInteractiveSearch: true,
   enableRss: true,
   enabled: true,
@@ -358,11 +354,6 @@ export default function IndexersPage() {
                               Interactive
                             </span>
                           )}
-                          {idx.enableAutomaticSearch && (
-                            <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">
-                              Auto
-                            </span>
-                          )}
                           {idx.enableRss && (
                             <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">
                               RSS
@@ -449,9 +440,6 @@ export default function IndexersPage() {
                         <div className="flex gap-1.5">
                           {idx.enableInteractiveSearch && (
                             <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">Interactive</span>
-                          )}
-                          {idx.enableAutomaticSearch && (
-                            <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">Auto</span>
                           )}
                           {idx.enableRss && (
                             <span className="rounded bg-zinc-600/30 px-1.5 py-0.5 text-xs text-zinc-400">RSS</span>
@@ -613,7 +601,6 @@ function IndexerFormModal({
           apiKey: "",
           categories: editing.categories.join(", "),
           priority: editing.priority,
-          enableAutomaticSearch: editing.enableAutomaticSearch,
           enableInteractiveSearch: editing.enableInteractiveSearch,
           enableRss: editing.enableRss,
           enabled: editing.enabled,
@@ -743,31 +730,14 @@ function IndexerFormModal({
             name="enableInteractiveSearch"
             control={control}
             render={({ field }) => (
-              <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
+              <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={field.value}
                   onChange={field.onChange}
-                  disabled
                   className="rounded border-border"
                 />
                 Interactive Search
-              </label>
-            )}
-          />
-          <Controller
-            name="enableAutomaticSearch"
-            control={control}
-            render={({ field }) => (
-              <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
-                <input
-                  type="checkbox"
-                  checked={field.value}
-                  onChange={field.onChange}
-                  disabled
-                  className="rounded border-border"
-                />
-                Automatic Search
               </label>
             )}
           />
@@ -1014,15 +984,9 @@ function InlineIndexerForm({
 
       <div className="flex flex-wrap gap-4 sm:gap-6">
         <Controller name="enableInteractiveSearch" control={control} render={({ field }) => (
-          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
-            <input type="checkbox" checked={field.value} onChange={field.onChange} disabled className="rounded border-border" />
+          <label className="flex items-center gap-2 text-sm text-zinc-200 cursor-pointer">
+            <input type="checkbox" checked={field.value} onChange={field.onChange} className="rounded border-border" />
             Interactive Search
-          </label>
-        )} />
-        <Controller name="enableAutomaticSearch" control={control} render={({ field }) => (
-          <label className="flex items-center gap-2 text-sm text-zinc-400 cursor-not-allowed opacity-50">
-            <input type="checkbox" checked={field.value} onChange={field.onChange} disabled className="rounded border-border" />
-            Automatic Search
           </label>
         )} />
         <Controller name="enableRss" control={control} render={({ field }) => (

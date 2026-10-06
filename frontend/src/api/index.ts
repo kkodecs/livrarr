@@ -62,6 +62,7 @@ import type {
   MetadataConfigResponse,
   UpdateMetadataConfigRequest,
   DefaultLanguageResponse,
+  LanguagesResponse,
   UpdateDefaultLanguageRequest,
   IndexerConfigResponse,
   UpdateIndexerConfigRequest,
@@ -555,6 +556,8 @@ export const updateMetadataConfig = (req: UpdateMetadataConfigRequest) =>
     method: "PUT",
     body: JSON.stringify(req),
   });
+export const getLanguages = () =>
+  apiFetch<LanguagesResponse>("/config/languages");
 export const getDefaultLanguage = () =>
   apiFetch<DefaultLanguageResponse>("/config/default-language");
 export const updateDefaultLanguage = (req: UpdateDefaultLanguageRequest) =>
@@ -562,6 +565,12 @@ export const updateDefaultLanguage = (req: UpdateDefaultLanguageRequest) =>
     method: "PUT",
     body: JSON.stringify(req),
   });
+export const testHardcover = () =>
+  apiFetch<void>("/config/metadata/test/hardcover", { method: "POST" });
+export const testAudnexus = () =>
+  apiFetch<void>("/config/metadata/test/audnexus", { method: "POST" });
+export const testLlm = () =>
+  apiFetch<void>("/config/metadata/test/llm", { method: "POST" });
 // Indexer Config (RSS sync settings)
 export const getIndexerConfig = () =>
   apiFetch<IndexerConfigResponse>("/config/indexer");

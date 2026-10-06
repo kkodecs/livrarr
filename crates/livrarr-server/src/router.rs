@@ -224,6 +224,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
                 .put(livrarr_handlers::config::update_metadata::<AppState>),
         )
         .route(
+            "/config/languages",
+            get(livrarr_handlers::config::get_languages::<AppState>),
+        )
+        .route(
             "/config/default-language",
             get(livrarr_handlers::config::get_default_language::<AppState>)
                 .put(livrarr_handlers::config::update_default_language::<AppState>),
@@ -740,7 +744,7 @@ mod tests {
     use axum::extract::ConnectInfo;
     use axum::http::Request;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::atomic::{AtomicBool, AtomicI64};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -1326,5 +1330,599 @@ mod tests {
             [StatusCode::OK, StatusCode::CONFLICT],
             "first={first:?} second={second:?}"
         );
+    }
+
+    // Language list route and the password rule, through the real router.
+
+    static NEXT_PEER: AtomicU32 = AtomicU32::new(1);
+
+    /// A peer address no other request in this module uses, so no
+    /// per-address rate limit is shared between calls.
+    fn fresh_peer() -> SocketAddr {
+        let [_, b, c, d] = NEXT_PEER.fetch_add(1, Ordering::Relaxed).to_be_bytes();
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, b, c, d)), 41000)
+    }
+
+    #[derive(Clone, Copy)]
+    enum Caller<'a> {
+        SignedOut,
+        Session(&'a str),
+        ApiKey(&'a str),
+    }
+
+    /// One request through the real router as `caller`, from a fresh peer.
+    async fn api(
+        app: &Router,
+        caller: Caller<'_>,
+        method: &str,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, String) {
+        match caller {
+            Caller::SignedOut => call(app, fresh_peer(), method, uri, &[], body).await,
+            Caller::Session(token) => {
+                let bearer = format!("Bearer {token}");
+                call(
+                    app,
+                    fresh_peer(),
+                    method,
+                    uri,
+                    &[("authorization", bearer.as_str())],
+                    body,
+                )
+                .await
+            }
+            Caller::ApiKey(key) => {
+                call(app, fresh_peer(), method, uri, &[("x-api-key", key)], body).await
+            }
+        }
+    }
+
+    fn json_of(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn message_of(body: &str) -> String {
+        json_of(body)["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    const OWNER: &str = "owner";
+    const OWNER_PASSWORD: &str = "owner-password-1";
+
+    /// The real router after first-run setup through `POST /setup`, with the
+    /// owner's session token and API key from its reply.
+    struct OwnedApp {
+        app: Router,
+        db: livrarr_db::sqlite::SqliteDb,
+        owner_session: String,
+        owner_api_key: String,
+        _tmp: tempfile::TempDir,
+    }
+
+    async fn router_before_setup() -> (Router, livrarr_db::sqlite::SqliteDb, tempfile::TempDir) {
+        let (state, tmp) = test_app_state_with_setup_token(KNOWN_SETUP_TOKEN).await;
+        let db = state.db.clone();
+        let ui_dir = state.data_dir.join("ui-not-present-in-test");
+        (build_router(state, ui_dir), db, tmp)
+    }
+
+    async fn router_with_owner() -> OwnedApp {
+        let (app, db, tmp) = router_before_setup().await;
+        let (status, body) = api(
+            &app,
+            Caller::SignedOut,
+            "POST",
+            "/api/v1/setup",
+            Some(serde_json::json!({
+                "username": OWNER,
+                "password": OWNER_PASSWORD,
+                "setupToken": KNOWN_SETUP_TOKEN,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "owner setup: {body}");
+        let reply = json_of(&body);
+        OwnedApp {
+            app,
+            db,
+            owner_session: reply["token"].as_str().unwrap().to_string(),
+            owner_api_key: reply["apiKey"].as_str().unwrap().to_string(),
+            _tmp: tmp,
+        }
+    }
+
+    /// A normal user created by the owner through `POST /user`; returns its id.
+    async fn create_normal_user(owned: &OwnedApp, username: &str, password: &str) -> i64 {
+        let (status, body) = api(
+            &owned.app,
+            Caller::Session(&owned.owner_session),
+            "POST",
+            "/api/v1/user",
+            Some(serde_json::json!({
+                "username": username,
+                "password": password,
+                "role": "user",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create {username}: {body}");
+        json_of(&body)["id"].as_i64().unwrap()
+    }
+
+    /// Signs in through `POST /auth/login`; the session token on success.
+    async fn sign_in(app: &Router, username: &str, password: &str) -> Option<String> {
+        let (status, body) = api(
+            app,
+            Caller::SignedOut,
+            "POST",
+            "/api/v1/auth/login",
+            Some(serde_json::json!({
+                "username": username,
+                "password": password,
+                "rememberMe": false,
+            })),
+        )
+        .await;
+        (status == StatusCode::OK).then(|| json_of(&body)["token"].as_str().unwrap().to_string())
+    }
+
+    /// `GET /auth/me` with `session`: the signed-in user's role, or None when refused.
+    async fn role_of_session(app: &Router, session: &str) -> Option<String> {
+        let (status, body) = api(
+            app,
+            Caller::Session(session),
+            "GET",
+            "/api/v1/auth/me",
+            None,
+        )
+        .await;
+        (status == StatusCode::OK)
+            .then(|| json_of(&body)["user"]["role"].as_str().unwrap().to_string())
+    }
+
+    const HARDCOVER_TOKEN: &str = "hc-token-6a1f0c";
+    const AI_ENDPOINT: &str = "https://llm-host-77d2.example.com/v1";
+    const AI_KEY: &str = "ai-key-90be41";
+    const GOOGLE_BOOKS_KEY: &str = "gb-key-3c58aa";
+
+    /// The owner saves every metadata secret and English, French and German
+    /// through `PUT /config/metadata`, then creates a normal user and signs it in.
+    async fn router_with_saved_languages() -> (OwnedApp, String) {
+        let owned = router_with_owner().await;
+        let (status, body) = api(
+            &owned.app,
+            Caller::Session(&owned.owner_session),
+            "PUT",
+            "/api/v1/config/metadata",
+            Some(serde_json::json!({
+                "hardcoverEnabled": true,
+                "hardcoverApiToken": HARDCOVER_TOKEN,
+                "llmEnabled": true,
+                "llmProvider": "openai",
+                "llmEndpoint": AI_ENDPOINT,
+                "llmApiKey": AI_KEY,
+                "llmModel": "model-name-1",
+                "googleBooksApiKey": GOOGLE_BOOKS_KEY,
+                "languages": ["en", "fr", "de"],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "save metadata settings: {body}");
+        assert_eq!(
+            json_of(&body)["languages"],
+            serde_json::json!(["en", "fr", "de"]),
+            "the saved language list"
+        );
+
+        create_normal_user(&owned, "reader", "reader-password-1").await;
+        let reader = sign_in(&owned.app, "reader", "reader-password-1")
+            .await
+            .expect("the normal user signs in");
+        assert_eq!(
+            role_of_session(&owned.app, &reader).await.as_deref(),
+            Some("user"),
+            "the reader is a normal user"
+        );
+        (owned, reader)
+    }
+
+    #[tokio::test]
+    async fn language_route_gives_every_signed_in_user_only_the_saved_list() {
+        let (owned, reader) = router_with_saved_languages().await;
+        let expected = serde_json::json!({ "languages": ["en", "fr", "de"] });
+
+        let mut wrong = Vec::new();
+        for (who, caller) in [
+            ("normal user", Caller::Session(&reader)),
+            ("admin", Caller::Session(&owned.owner_session)),
+            ("admin by API key", Caller::ApiKey(&owned.owner_api_key)),
+        ] {
+            let (status, body) =
+                api(&owned.app, caller, "GET", "/api/v1/config/languages", None).await;
+            if status != StatusCode::OK {
+                wrong.push(format!("{who}: status {status}, expected 200"));
+            }
+            if json_of(&body) != expected {
+                wrong.push(format!("{who}: body {body:?}, expected {expected}"));
+            }
+            for secret in [HARDCOVER_TOKEN, AI_ENDPOINT, AI_KEY, GOOGLE_BOOKS_KEY] {
+                if body.contains(secret) {
+                    wrong.push(format!("{who}: body carries {secret}"));
+                }
+            }
+        }
+        let (status, _) = api(
+            &owned.app,
+            Caller::SignedOut,
+            "GET",
+            "/api/v1/config/languages",
+            None,
+        )
+        .await;
+        if status != StatusCode::UNAUTHORIZED {
+            wrong.push(format!("signed out: status {status}, expected 401"));
+        }
+
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn metadata_settings_route_still_refuses_a_normal_user() {
+        let (owned, reader) = router_with_saved_languages().await;
+
+        let (admin_status, admin_body) = api(
+            &owned.app,
+            Caller::Session(&owned.owner_session),
+            "GET",
+            "/api/v1/config/metadata",
+            None,
+        )
+        .await;
+        assert_eq!(admin_status, StatusCode::OK, "control, admin: {admin_body}");
+
+        let (status, body) = api(
+            &owned.app,
+            Caller::Session(&reader),
+            "GET",
+            "/api/v1/config/metadata",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PasswordDoor {
+        Setup,
+        OwnProfile,
+        AdminCreate,
+        AdminEdit,
+    }
+
+    const PASSWORD_DOORS: [PasswordDoor; 4] = [
+        PasswordDoor::Setup,
+        PasswordDoor::OwnProfile,
+        PasswordDoor::AdminCreate,
+        PasswordDoor::AdminEdit,
+    ];
+
+    /// What one attempt to set a password through a door did.
+    struct PasswordAttempt {
+        status: StatusCode,
+        message: String,
+        /// The account and the attempted password sign in afterwards.
+        new_password_signs_in: bool,
+        /// Setup and admin create: an account with the attempted name exists afterwards.
+        account_exists: Option<bool>,
+        /// Profile and admin edit: the password held before the attempt still signs in.
+        old_password_signs_in: Option<bool>,
+        /// Profile and admin edit: the user's session issued before the attempt still works.
+        earlier_session_works: Option<bool>,
+    }
+
+    static NEXT_ACCOUNT: AtomicU32 = AtomicU32::new(1);
+
+    /// Sets `password` through `door`. Setup gets a router of its own, as it
+    /// can run once; the other doors act on a new normal user in `owned`.
+    async fn set_password_through(
+        owned: &OwnedApp,
+        door: PasswordDoor,
+        password: &str,
+    ) -> PasswordAttempt {
+        let n = NEXT_ACCOUNT.fetch_add(1, Ordering::Relaxed);
+        match door {
+            PasswordDoor::Setup => {
+                let (app, _db, _tmp) = router_before_setup().await;
+                let (status, body) = api(
+                    &app,
+                    Caller::SignedOut,
+                    "POST",
+                    "/api/v1/setup",
+                    Some(serde_json::json!({
+                        "username": OWNER,
+                        "password": password,
+                        "setupToken": KNOWN_SETUP_TOKEN,
+                    })),
+                )
+                .await;
+                let setup_required = setup_status_body(&app, fresh_peer()).await["setupRequired"]
+                    .as_bool()
+                    .unwrap();
+                PasswordAttempt {
+                    status,
+                    message: message_of(&body),
+                    new_password_signs_in: sign_in(&app, OWNER, password).await.is_some(),
+                    account_exists: Some(!setup_required),
+                    old_password_signs_in: None,
+                    earlier_session_works: None,
+                }
+            }
+            PasswordDoor::AdminCreate => {
+                let username = format!("created-{n}");
+                let (status, body) = api(
+                    &owned.app,
+                    Caller::Session(&owned.owner_session),
+                    "POST",
+                    "/api/v1/user",
+                    Some(serde_json::json!({
+                        "username": username,
+                        "password": password,
+                        "role": "user",
+                    })),
+                )
+                .await;
+                let (list_status, list) = api(
+                    &owned.app,
+                    Caller::Session(&owned.owner_session),
+                    "GET",
+                    "/api/v1/user",
+                    None,
+                )
+                .await;
+                assert_eq!(list_status, StatusCode::OK, "user list: {list}");
+                let exists = json_of(&list)
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|u| u["username"] == username.as_str());
+                PasswordAttempt {
+                    status,
+                    message: message_of(&body),
+                    new_password_signs_in: sign_in(&owned.app, &username, password).await.is_some(),
+                    account_exists: Some(exists),
+                    old_password_signs_in: None,
+                    earlier_session_works: None,
+                }
+            }
+            PasswordDoor::OwnProfile | PasswordDoor::AdminEdit => {
+                let username = format!("member-{n}");
+                let old_password = format!("old-password-{n}");
+                let id = create_normal_user(owned, &username, &old_password).await;
+                let session = sign_in(&owned.app, &username, &old_password)
+                    .await
+                    .expect("control: the user signs in with its first password");
+                assert_eq!(
+                    role_of_session(&owned.app, &session).await.as_deref(),
+                    Some("user"),
+                    "control: the session works before the change"
+                );
+                let change = serde_json::json!({ "password": password });
+                let (status, body) = match door {
+                    PasswordDoor::OwnProfile => {
+                        api(
+                            &owned.app,
+                            Caller::Session(&session),
+                            "PUT",
+                            "/api/v1/auth/profile",
+                            Some(change),
+                        )
+                        .await
+                    }
+                    _ => {
+                        api(
+                            &owned.app,
+                            Caller::Session(&owned.owner_session),
+                            "PUT",
+                            &format!("/api/v1/user/{id}"),
+                            Some(change),
+                        )
+                        .await
+                    }
+                };
+                let earlier_session_works = role_of_session(&owned.app, &session).await.is_some();
+                PasswordAttempt {
+                    status,
+                    message: message_of(&body),
+                    new_password_signs_in: sign_in(&owned.app, &username, password).await.is_some(),
+                    account_exists: None,
+                    old_password_signs_in: Some(
+                        sign_in(&owned.app, &username, &old_password)
+                            .await
+                            .is_some(),
+                    ),
+                    earlier_session_works: Some(earlier_session_works),
+                }
+            }
+        }
+    }
+
+    /// Checks that `password` is refused at the minimum on every door, with
+    /// nothing written; returns one line per difference.
+    async fn refused_below_minimum(owned: &OwnedApp, label: &str, password: &str) -> Vec<String> {
+        let mut wrong = Vec::new();
+        for door in PASSWORD_DOORS {
+            let attempt = set_password_through(owned, door, password).await;
+            if attempt.status != StatusCode::UNPROCESSABLE_ENTITY {
+                wrong.push(format!(
+                    "{door:?} {label}: status {}, expected 422",
+                    attempt.status
+                ));
+            }
+            if attempt.message != "invalid password: minimum 8 characters" {
+                wrong.push(format!("{door:?} {label}: message {:?}", attempt.message));
+            }
+            if attempt.account_exists == Some(true) {
+                wrong.push(format!("{door:?} {label}: an account was made"));
+            }
+            if attempt.old_password_signs_in == Some(false) {
+                wrong.push(format!(
+                    "{door:?} {label}: the old password no longer signs in"
+                ));
+            }
+        }
+        wrong
+    }
+
+    /// Checks each of `accepted` is accepted on every door and signs in, and
+    /// `refused` is answered 422; returns one line per difference.
+    async fn accepted_and_refused(
+        owned: &OwnedApp,
+        accepted: &[(&str, String)],
+        refused: (&str, String),
+    ) -> Vec<String> {
+        let mut wrong = Vec::new();
+        for door in PASSWORD_DOORS {
+            for (label, password) in accepted {
+                let attempt = set_password_through(owned, door, password).await;
+                if !attempt.status.is_success() {
+                    wrong.push(format!(
+                        "{door:?} {label}: status {} {:?}, expected success",
+                        attempt.status, attempt.message
+                    ));
+                }
+                if !attempt.new_password_signs_in {
+                    wrong.push(format!(
+                        "{door:?} {label}: the new password does not sign in"
+                    ));
+                }
+            }
+            let (label, password) = &refused;
+            let attempt = set_password_through(owned, door, password).await;
+            if attempt.status != StatusCode::UNPROCESSABLE_ENTITY {
+                wrong.push(format!(
+                    "{door:?} {label}: status {}, expected 422",
+                    attempt.status
+                ));
+            }
+        }
+        wrong
+    }
+
+    #[tokio::test]
+    async fn password_under_eight_characters_is_refused_on_every_door() {
+        let owned = router_with_owner().await;
+        let mut wrong = refused_below_minimum(&owned, "ASCII 7", "abcdefg").await;
+        wrong.extend(refused_below_minimum(&owned, "7 é", &"é".repeat(7)).await);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn ascii_password_from_eight_to_1024_characters_is_accepted_on_every_door() {
+        let owned = router_with_owner().await;
+        let wrong = accepted_and_refused(
+            &owned,
+            &[
+                ("ASCII 8", "abcdefgh".to_string()),
+                ("ASCII 1,024", "a".repeat(1024)),
+            ],
+            ("ASCII 1,025", "a".repeat(1025)),
+        )
+        .await;
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn multibyte_password_minimum_counts_characters_and_maximum_counts_bytes() {
+        let owned = router_with_owner().await;
+        let wrong = accepted_and_refused(
+            &owned,
+            &[
+                ("8 é", "é".repeat(8)),
+                ("512 é (1,024 bytes)", "é".repeat(512)),
+            ],
+            ("513 é (1,026 bytes)", "é".repeat(513)),
+        )
+        .await;
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn profile_and_admin_edit_without_a_password_still_succeed() {
+        let owned = router_with_owner().await;
+        let id = create_normal_user(&owned, "renamer", "renamer-password-1").await;
+        let session = sign_in(&owned.app, "renamer", "renamer-password-1")
+            .await
+            .expect("control: the user signs in");
+
+        let (status, body) = api(
+            &owned.app,
+            Caller::Session(&session),
+            "PUT",
+            "/api/v1/auth/profile",
+            Some(serde_json::json!({ "username": "renamed-self" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "own profile: {body}");
+
+        let (status, body) = api(
+            &owned.app,
+            Caller::Session(&owned.owner_session),
+            "PUT",
+            &format!("/api/v1/user/{id}"),
+            Some(serde_json::json!({ "username": "renamed-by-admin" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "admin edit: {body}");
+    }
+
+    #[tokio::test]
+    async fn existing_six_character_password_still_signs_in() {
+        use crate::auth_crypto::AuthCryptoService;
+        use livrarr_db::UserDb;
+
+        let owned = router_with_owner().await;
+        let crypto = crate::auth_crypto::RealAuthCrypto;
+        let api_key = crypto.generate_token().await.unwrap();
+        owned
+            .db
+            .create_user(livrarr_db::CreateUserDbRequest {
+                username: "veteran".to_string(),
+                password_hash: crypto.hash_password("six6ch").await.unwrap(),
+                role: livrarr_db::UserRole::User,
+                api_key_hash: crypto.hash_token(&api_key).await.unwrap(),
+            })
+            .await
+            .expect("production user writer");
+
+        let session = sign_in(&owned.app, "veteran", "six6ch").await;
+        assert!(session.is_some(), "the six-character password signs in");
+        assert_eq!(
+            role_of_session(&owned.app, &session.unwrap())
+                .await
+                .as_deref(),
+            Some("user")
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_password_change_keeps_earlier_sessions_and_the_old_password() {
+        let owned = router_with_owner().await;
+        let mut wrong = Vec::new();
+        for door in [PasswordDoor::OwnProfile, PasswordDoor::AdminEdit] {
+            let attempt = set_password_through(&owned, door, "abcdefg").await;
+            if attempt.earlier_session_works != Some(true) {
+                wrong.push(format!(
+                    "{door:?}: the session issued before the refused change stopped working (status {})",
+                    attempt.status
+                ));
+            }
+            if attempt.old_password_signs_in != Some(true) {
+                wrong.push(format!("{door:?}: the old password no longer signs in"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }

@@ -1252,6 +1252,11 @@ export interface DefaultLanguageResponse {
   defaultLanguage: string;
 }
 
+/** The enabled metadata language codes in saved order; the first is the primary language. */
+export interface LanguagesResponse {
+  languages: string[];
+}
+
 export interface UpdateDefaultLanguageRequest {
   defaultLanguage: string;
 }

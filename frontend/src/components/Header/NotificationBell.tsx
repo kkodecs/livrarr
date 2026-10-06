@@ -22,6 +22,7 @@ import type { NotificationType, NotificationResponse } from "@/types/api";
 import { formatRelativeDate } from "@/utils/format";
 import { LoadingSpinner } from "@/components/Page/LoadingSpinner";
 import { useUIStore } from "@/stores/ui";
+import { useAuthStore } from "@/stores/auth";
 import type { ReactNode } from "react";
 
 const notificationIcons: Record<NotificationType, ReactNode> = {
@@ -38,6 +39,16 @@ const notificationIcons: Record<NotificationType, ReactNode> = {
 };
 
 const CHECK_FAILED = "Could not check for new notifications";
+
+/**
+ * A list item shown only while the signed-in user is an admin. It reads the
+ * role itself, so content already handed to a toast follows a later role
+ * change.
+ */
+function AdminOnlyItem({ children }: { children: ReactNode }) {
+  const isAdmin = useAuthStore((s) => s.isAdmin);
+  return isAdmin ? <li>{children}</li> : null;
+}
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
@@ -95,11 +106,11 @@ export function NotificationBell() {
             onDismiss: () => dismiss.mutate(n.id),
             description: (
               <ul className="mt-1.5 space-y-0.5 text-xs list-disc pl-4">
-                <li>
+                <AdminOnlyItem>
                   <a href="/settings/mediamanagement" onClick={() => setRpmHighlight(true)} className="text-brand hover:underline">
                     Configure path mapping
                   </a>
-                </li>
+                </AdminOnlyItem>
                 <li>
                   <a href={`/help?question=${encodeURIComponent(question)}`} className="text-brand hover:underline">
                     Get AI help
@@ -270,11 +281,11 @@ export function NotificationBell() {
                             {String(d.clientName)} reports that {title ? <strong className="font-semibold text-white">{title}</strong> : <strong className="font-semibold text-white">Grab {String(d.grabId)}</strong>} (grab {String(d.grabId)} in the <Link to="/activity/queue" onClick={() => setOpen(false)} className="text-brand hover:underline">queue</Link>) has downloaded, but it does not seem to be available locally. You may need a remote path mapping.
                           </p>
                           <ul className="mt-1.5 space-y-0.5 text-xs list-disc pl-4">
-                            <li>
+                            <AdminOnlyItem>
                               <Link to="/settings/mediamanagement" onClick={() => { setOpen(false); setRpmHighlight(true); }} className="text-brand hover:underline">
                                 Configure path mapping
                               </Link>
-                            </li>
+                            </AdminOnlyItem>
                             <li>
                               <Link to={`/help?question=${encodeURIComponent(question)}`} onClick={() => setOpen(false)} className="text-brand hover:underline">
                                 Get AI help

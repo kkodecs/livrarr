@@ -65,7 +65,7 @@ describe("SearchPage Add facts", () => {
     };
     const unexpected: string[] = [];
     const api = installApiStub((call) => {
-      if (call.method === "GET" && call.path === "/config/metadata") {
+      if (call.method === "GET" && call.path === "/config/languages") {
         return { status: 200, body: { languages: ["fr", "en"] } };
       }
       if (call.method === "GET" && /^\/work(?:\?|$)/.test(call.path)) {
@@ -163,7 +163,7 @@ describe("SearchPage Add facts", () => {
     };
     const unexpected: string[] = [];
     const api = installApiStub((call) => {
-      if (call.method === "GET" && call.path === "/config/metadata") {
+      if (call.method === "GET" && call.path === "/config/languages") {
         return { status: 200, body: { languages: ["fr", "en"] } };
       }
       if (call.method === "GET" && /^\/work(?:\?|$)/.test(call.path)) {

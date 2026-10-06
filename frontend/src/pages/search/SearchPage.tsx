@@ -3,8 +3,9 @@ import { useSearchParams, useNavigate, Link } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Search, Plus, Loader2, ChevronDown } from "lucide-react";
 import { toast } from "sonner";
-import { lookupWorks, addWork, getMetadataConfig } from "@/api";
+import { lookupWorks, addWork } from "@/api";
 import { useLibraryWorks } from "@/hooks/useLibraryWorks";
+import { useEnabledLanguages } from "@/hooks/useEnabledLanguages";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageContent } from "@/components/Page/PageContent";
 import { EmptyState } from "@/components/Page/EmptyState";
@@ -44,22 +45,14 @@ export default function SearchPage() {
   const query = searchParams.get("q")?.trim() ?? "";
   const urlLang = searchParams.get("lang") ?? "";
   const [term, setTerm] = useState(query);
-  const [selectedLang, setSelectedLang] = useState<string>(urlLang || "en");
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
 
-  const { data: metaConfig } = useQuery({
-    queryKey: ["metadata-config"],
-    queryFn: getMetadataConfig,
-  });
-
-  useEffect(() => {
-    if (urlLang) {
-      setSelectedLang(urlLang);
-    } else if (metaConfig) {
-      setSelectedLang(metaConfig.languages[0] ?? "en");
-    }
-  }, [urlLang, metaConfig]);
+  const {
+    enabled: enabledLanguages,
+    selected: selectedLang,
+    setSelected: setSelectedLang,
+  } = useEnabledLanguages(urlLang);
 
   useEffect(() => {
     if (!langOpen) return;
@@ -71,11 +64,6 @@ export default function SearchPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [langOpen]);
-
-  const enabledLanguages = useMemo(() => {
-    const codes = metaConfig?.languages ?? ["en"];
-    return SUPPORTED_LANGUAGES.filter((l) => codes.includes(l.code));
-  }, [metaConfig]);
 
   const { data: allWorks } = useLibraryWorks();
 

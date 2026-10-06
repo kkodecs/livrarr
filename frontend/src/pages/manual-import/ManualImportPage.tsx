@@ -834,7 +834,7 @@ export default function ManualImportPage() {
                             </div>
                           ) : !f.routable ? (
                             <Link
-                              to="/settings/media-management"
+                              to="/settings/mediamanagement"
                               target="_blank"
                               className="text-xs text-blue-400 hover:underline"
                             >

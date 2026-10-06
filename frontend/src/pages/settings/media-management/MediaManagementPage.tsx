@@ -15,7 +15,6 @@ import {
   GripVertical,
   Settings2,
   FileText,
-  HardDrive,
   BookOpen,
   Headphones,
   Mail,
@@ -169,10 +168,6 @@ export default function MediaManagementPage() {
     queryKey: ["mediaManagementConfig"],
     queryFn: api.getMediaManagementConfig,
   });
-  const namingQ = useQuery({
-    queryKey: ["namingConfig"],
-    queryFn: api.getNamingConfig,
-  });
 
   // Root folder mutations
   const createRootFolder = useMutation({
@@ -273,13 +268,11 @@ export default function MediaManagementPage() {
   const isLoading =
     rootFoldersQ.isLoading ||
     remoteMappingsQ.isLoading ||
-    mmConfigQ.isLoading ||
-    namingQ.isLoading;
+    mmConfigQ.isLoading;
   const error =
     rootFoldersQ.error ||
     remoteMappingsQ.error ||
-    mmConfigQ.error ||
-    namingQ.error;
+    mmConfigQ.error;
 
   if (isLoading) return <PageLoading />;
   if (error)
@@ -290,7 +283,6 @@ export default function MediaManagementPage() {
           rootFoldersQ.refetch();
           remoteMappingsQ.refetch();
           mmConfigQ.refetch();
-          namingQ.refetch();
         }}
       />
     );
@@ -298,7 +290,6 @@ export default function MediaManagementPage() {
   const rootFolders = rootFoldersQ.data ?? [];
   const remoteMappings = remoteMappingsQ.data ?? [];
   const mmConfig = mmConfigQ.data;
-  const naming = namingQ.data;
 
   return (
     <>
@@ -350,7 +341,7 @@ export default function MediaManagementPage() {
             <h2 className="text-base font-semibold text-zinc-100">
               Root Folders
             </h2>
-            <HelpTip text="Where your library files are stored. Add one folder for ebooks and one for audiobooks. Livrarr organizes files into Author/Title subfolders within each root." />
+            <HelpTip text="Where your library files are stored. Add one folder for ebooks and one for audiobooks. Inside each, Livrarr files books by user number and author; File locations below gives the full layout." />
           </div>
           <div className="p-5">
 
@@ -583,72 +574,23 @@ export default function MediaManagementPage() {
         {/* ── Email / Send to Kindle (admin only) ── */}
         {isAdmin && <EmailConfigSection />}
 
-        {/* ── Naming (read-only) ── */}
-        <section className="rounded-lg border border-border bg-zinc-900/50 opacity-60" title="Coming Soon">
+        {/* ── File locations ── */}
+        <section className="rounded-lg border border-border bg-zinc-900/50">
           <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
             <FileText size={18} className="text-muted" />
-            <h2 className="text-base font-semibold text-zinc-100">Naming</h2>
-          </div>
-          <div className="p-5">
-          {naming && (
-            <div className="space-y-3 max-w-xl">
-              <div>
-                <label className="block text-xs text-muted mb-1">
-                  Author Folder Format
-                </label>
-                <input
-                  type="text"
-                  value={naming.authorFolderFormat}
-                  disabled
-                  className="w-full rounded border border-border bg-zinc-900/50 px-3 py-2 text-sm text-zinc-400 cursor-not-allowed"
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-muted mb-1">
-                  Book Folder Format
-                </label>
-                <input
-                  type="text"
-                  value={naming.bookFolderFormat}
-                  disabled
-                  className="w-full rounded border border-border bg-zinc-900/50 px-3 py-2 text-sm text-zinc-400 cursor-not-allowed"
-                />
-              </div>
-              <div className="flex flex-col sm:flex-row gap-2 sm:gap-6 text-sm text-zinc-400">
-                <span>Rename Files: {naming.renameFiles ? "Yes" : "No"}</span>
-                <span>
-                  Replace Illegal Chars:{" "}
-                  {naming.replaceIllegalChars ? "Yes" : "No"}
-                </span>
-              </div>
-            </div>
-          )}
-          </div>
-        </section>
-
-        {/* ── File Management (coming soon) — intentional placeholder for post-alpha features ── */}
-        <section className="rounded-lg border border-border bg-zinc-900/50 opacity-60" title="Coming Soon">
-          <div className="flex items-center gap-2 border-b border-border bg-zinc-800/60 px-5 py-3 rounded-t-lg">
-            <HardDrive size={18} className="text-muted" />
             <h2 className="text-base font-semibold text-zinc-100">
-              File Management
+              File locations
             </h2>
           </div>
           <div className="p-5">
-          <div className="space-y-3 max-w-xl">
-            <label className="flex items-center gap-3 text-sm text-zinc-400 cursor-not-allowed">
-              <input type="checkbox" disabled className="rounded" />
-              Create empty author folders
-            </label>
-            <label className="flex items-center gap-3 text-sm text-zinc-400 cursor-not-allowed">
-              <input type="checkbox" disabled className="rounded" />
-              Delete empty folders
-            </label>
-            <label className="flex items-center gap-3 text-sm text-zinc-400 cursor-not-allowed">
-              <input type="checkbox" disabled className="rounded" />
-              Import extra files
-            </label>
-          </div>
+            <p className="max-w-xl text-sm text-zinc-300">
+              When Livrarr imports a book it files each ebook as
+              Author/Title.ext and keeps each audiobook&apos;s own file names
+              inside an Author/Title folder, under a folder for your user
+              number in the root folder for that type; Readarr Import instead
+              puts every file, audiobooks included, in the root folder you
+              choose there, as Author/Title.ext.
+            </p>
           </div>
         </section>
       </PageContent>

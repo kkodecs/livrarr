@@ -120,9 +120,9 @@ impl<C: AuthCryptoService> ServerAuthService<C> {
     }
 
     fn validate_password(password: &str) -> Result<(), AuthError> {
-        if password.len() < 6 {
+        if password.chars().count() < 8 {
             return Err(AuthError::InvalidPassword {
-                reason: "minimum 6 characters".into(),
+                reason: "minimum 8 characters".into(),
             });
         }
         if password.len() > 1024 {

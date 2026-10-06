@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect } from "react";
-import { BrowserRouter, Routes, Route } from "react-router";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/auth";
@@ -7,6 +7,7 @@ import { AppLayout } from "@/components/Page/AppLayout";
 import { AuthGuard, AdminGuard, GuestGuard } from "@/components/Page/AuthGuard";
 import { FullPageLoading, PageLoading } from "@/components/Page/LoadingSpinner";
 import { ComingSoonPage } from "@/components/Page/ComingSoonPage";
+import { NotFoundPage } from "@/components/Page/NotFoundPage";
 
 // Eagerly loaded (initial bundle)
 import { LoginPage } from "@/pages/login/LoginPage";
@@ -95,6 +96,19 @@ function AuthInitializer({ children }: { children: React.ReactNode }) {
 
 function LazyPage({ children }: { children: React.ReactNode }) {
   return <Suspense fallback={<PageLoading />}>{children}</Suspense>;
+}
+
+/** Settings with no sub-page: Media Management for an admin, UI for everyone else. */
+function SettingsIndex() {
+  const isAdmin = useAuthStore((s) => s.isAdmin);
+  if (!isAdmin) {
+    return <Navigate to="/settings/ui" replace />;
+  }
+  return (
+    <LazyPage>
+      <MediaManagementPage />
+    </LazyPage>
+  );
 }
 
 export function App() {
@@ -219,17 +233,21 @@ export function App() {
               <Route
                 path="import"
                 element={
-                  <LazyPage>
-                    <ManualImportPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <ManualImportPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
                 path="import/readarr"
                 element={
-                  <LazyPage>
-                    <ReadarrImportPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <ReadarrImportPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
@@ -243,9 +261,11 @@ export function App() {
               <Route
                 path="unmapped"
                 element={
-                  <LazyPage>
-                    <UnmappedPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <UnmappedPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
@@ -282,20 +302,15 @@ export function App() {
               />
 
               {/* Settings */}
-              <Route
-                path="settings"
-                element={
-                  <LazyPage>
-                    <MediaManagementPage />
-                  </LazyPage>
-                }
-              />
+              <Route path="settings" element={<SettingsIndex />} />
               <Route
                 path="settings/mediamanagement"
                 element={
-                  <LazyPage>
-                    <MediaManagementPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <MediaManagementPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
@@ -352,14 +367,6 @@ export function App() {
                   </AdminGuard>
                 }
               />
-              <Route
-                path="settings/profiles"
-                element={<ComingSoonPage title="Profiles" />}
-              />
-              <Route
-                path="settings/customformats"
-                element={<ComingSoonPage title="Custom Formats" />}
-              />
               {/* Import Lists moved to /lists (main nav) */}
               <Route
                 path="settings/notifications"
@@ -369,26 +376,26 @@ export function App() {
                 path="settings/tags"
                 element={<ComingSoonPage title="Tags" />}
               />
-              <Route
-                path="settings/development"
-                element={<ComingSoonPage title="Development" />}
-              />
 
               {/* System */}
               <Route
                 path="system/status"
                 element={
-                  <LazyPage>
-                    <StatusPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <StatusPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
                 path="system/logs"
                 element={
-                  <LazyPage>
-                    <LogsPage />
-                  </LazyPage>
+                  <AdminGuard>
+                    <LazyPage>
+                      <LogsPage />
+                    </LazyPage>
+                  </AdminGuard>
                 }
               />
               <Route
@@ -410,11 +417,6 @@ export function App() {
                 }
               />
 
-              {/* Greyed-out placeholders */}
-              <Route
-                path="calendar"
-                element={<ComingSoonPage title="Calendar" />}
-              />
               <Route
                 path="wanted/missing"
                 element={
@@ -423,20 +425,9 @@ export function App() {
                   </LazyPage>
                 }
               />
-              <Route
-                path="wanted/cutoff"
-                element={<ComingSoonPage title="Cutoff Unmet" />}
-              />
-              <Route
-                path="shelf"
-                element={<ComingSoonPage title="Bookshelf" />}
-              />
 
               {/* Fallback */}
-              <Route
-                path="*"
-                element={<ComingSoonPage title="Page Not Found" />}
-              />
+              <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Routes>
         </AuthInitializer>

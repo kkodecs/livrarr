@@ -4,9 +4,8 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useUIStore } from "@/stores/ui";
 import { useAuthStore } from "@/stores/auth";
 import { NotificationBell } from "@/components/Header/NotificationBell";
-import { useState, useEffect, useRef, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { getMetadataConfig } from "@/api";
+import { useState, useEffect, useRef } from "react";
+import { useEnabledLanguages } from "@/hooks/useEnabledLanguages";
 import { SUPPORTED_LANGUAGES } from "@/types/api";
 
 export function Header() {
@@ -17,28 +16,16 @@ export function Header() {
   const logoutAction = useAuthStore((s) => s.logoutAction);
   const navigate = useNavigate();
   const [searchTerm, setSearchTerm] = useState("");
-  const [selectedLang, setSelectedLang] = useState("en");
   const [langOpen, setLangOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
   const mobileSearchRef = useRef<HTMLInputElement>(null);
 
-  const { data: metaConfig } = useQuery({
-    queryKey: ["metadata-config"],
-    queryFn: getMetadataConfig,
-  });
-
-  const enabledLanguages = useMemo(() => {
-    const codes = metaConfig?.languages ?? ["en"];
-    return SUPPORTED_LANGUAGES.filter((l) => codes.includes(l.code));
-  }, [metaConfig]);
-
-  // Sync to primary language from config
-  useEffect(() => {
-    if (metaConfig) {
-      setSelectedLang(metaConfig.languages[0] ?? "en");
-    }
-  }, [metaConfig]);
+  const {
+    enabled: enabledLanguages,
+    selected: selectedLang,
+    setSelected: setSelectedLang,
+  } = useEnabledLanguages();
 
   // Click-outside for language dropdown (desktop only — mobile has its own layout)
   useEffect(() => {

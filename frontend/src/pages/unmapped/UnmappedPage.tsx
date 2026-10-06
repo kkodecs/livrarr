@@ -160,7 +160,7 @@ export default function UnmappedPage() {
                 title="Configure a root folder in Settings first"
                 action={
                   <Link
-                    to="/settings/media-management"
+                    to="/settings/mediamanagement"
                     className="btn-primary text-sm"
                   >
                     Go to Settings

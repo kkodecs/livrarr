@@ -7,10 +7,14 @@ import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
-import type { LlmProvider, UpdateMetadataConfigRequest } from "@/types/api";
+import type {
+  LlmProvider,
+  MetadataConfigResponse,
+  UpdateMetadataConfigRequest,
+} from "@/types/api";
 import { SUPPORTED_LANGUAGES } from "@/types/api";
 import * as api from "@/api";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 // ── LLM Provider Configs ──
 
@@ -82,6 +86,63 @@ interface MetadataForm {
   llmModel: string;
 }
 
+/** The form as the saved settings fill it; secret fields are always blank. */
+function formValuesFrom(config: MetadataConfigResponse | undefined): MetadataForm {
+  return {
+    hardcoverEnabled: config?.hardcoverEnabled ?? true,
+    hardcoverApiToken: "",
+    googleBooksApiKey: "",
+    audnexusUrl: config?.audnexusUrl ?? "",
+    llmEnabled: config?.llmEnabled ?? true,
+    llmProvider: config?.llmProvider ?? "",
+    llmEndpoint: config?.llmEndpoint ?? "",
+    llmApiKey: "",
+    llmModel: config?.llmModel ?? "",
+  };
+}
+
+/** Same entries in the same order; the first entry is the primary language. */
+function sameLanguageList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((code, i) => code === b[i]);
+}
+
+const SAVE_FIRST_MESSAGE = "Save your changes first. Test checks the saved settings.";
+
+interface TestButtonProps {
+  run: () => Promise<void>;
+  successMessage: string;
+  hasUnsavedChanges: boolean;
+}
+
+/**
+ * Tests one service against the saved settings. With unsaved changes on the
+ * page it sends nothing and asks the user to save first.
+ */
+function TestButton({ run, successMessage, hasUnsavedChanges }: TestButtonProps) {
+  const test = useMutation({
+    mutationFn: run,
+    onSuccess: () => toast.success(successMessage),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <button
+      type="button"
+      disabled={test.isPending}
+      onClick={() => {
+        if (hasUnsavedChanges) {
+          toast.warning(SAVE_FIRST_MESSAGE);
+          return;
+        }
+        test.mutate();
+      }}
+      className="ml-auto rounded border border-border px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+    >
+      {test.isPending ? "Testing..." : "Test"}
+    </button>
+  );
+}
+
 export default function MetadataPage() {
   const qc = useQueryClient();
 
@@ -90,27 +151,9 @@ export default function MetadataPage() {
     queryFn: api.getMetadataConfig,
   });
 
-  const updateConfig = useMutation({
-    mutationFn: api.updateMetadataConfig,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["metadataConfig"] });
-      toast.success("Metadata configuration saved");
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
   const defaultLangQ = useQuery({
     queryKey: ["defaultLanguage"],
     queryFn: api.getDefaultLanguage,
-  });
-
-  const updateDefaultLang = useMutation({
-    mutationFn: api.updateDefaultLanguage,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["defaultLanguage"] });
-      setDefaultLangDirty(false);
-    },
-    onError: (e: Error) => toast.error(e.message),
   });
 
   const {
@@ -119,19 +162,40 @@ export default function MetadataPage() {
     control,
     watch,
     setValue,
-    formState: { isSubmitting },
+    reset,
+    formState: { isSubmitting, isDirty },
   } = useForm<MetadataForm>({
-    values: {
-      hardcoverEnabled: configQ.data?.hardcoverEnabled ?? true,
-      hardcoverApiToken: "",
-      googleBooksApiKey: "",
-      audnexusUrl: configQ.data?.audnexusUrl ?? "",
-      llmEnabled: configQ.data?.llmEnabled ?? true,
-      llmProvider: configQ.data?.llmProvider ?? "",
-      llmEndpoint: configQ.data?.llmEndpoint ?? "",
-      llmApiKey: "",
-      llmModel: configQ.data?.llmModel ?? "",
+    values: formValuesFrom(configQ.data),
+  });
+
+  // Edited language list and default language; null while they show the saved value.
+  const [languageDraft, setLanguageDraft] = useState<string[] | null>(null);
+  const [defaultLanguageDraft, setDefaultLanguageDraft] = useState<string | null>(null);
+
+  // A save's reply is the saved value: a read of the same settings sent before
+  // that reply is cancelled, and the cancellation settles, before the reply is
+  // stored, so the older read cannot replace it. The mutation stays pending,
+  // and the page locked, until this handling finishes.
+  const updateConfig = useMutation({
+    mutationFn: api.updateMetadataConfig,
+    onSuccess: async (saved) => {
+      await qc.cancelQueries({ queryKey: ["metadataConfig"] });
+      qc.setQueryData(["metadataConfig"], saved);
+      reset(formValuesFrom(saved));
+      setLanguageDraft(null);
+      toast.success("Metadata configuration saved");
     },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const updateDefaultLang = useMutation({
+    mutationFn: api.updateDefaultLanguage,
+    onSuccess: async (saved) => {
+      await qc.cancelQueries({ queryKey: ["defaultLanguage"] });
+      qc.setQueryData(["defaultLanguage"], saved);
+      setDefaultLanguageDraft(null);
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   const selectedProvider = watch("llmProvider");
@@ -147,32 +211,7 @@ export default function MetadataPage() {
   const showCustomModel =
     selectedProvider === "custom" || customModel || (!isPresetModel && currentModel !== "");
 
-  // Languages editing
-  const [languages, setLanguages] = useState<string[]>([]);
   const [langInput, setLangInput] = useState("");
-  const [langDirty, setLangDirty] = useState(false);
-
-  // Default language for new books
-  const [defaultLanguage, setDefaultLanguage] = useState("");
-  const [defaultLangDirty, setDefaultLangDirty] = useState(false);
-
-  // Sync languages from query data on first load
-  useEffect(() => {
-    if (
-      configQ.data &&
-      !langDirty &&
-      configQ.data.languages.length > 0
-    ) {
-      setLanguages(configQ.data.languages);
-    }
-  }, [configQ.data, langDirty]);
-
-  // Sync the default language from query data on first load
-  useEffect(() => {
-    if (defaultLangQ.data && !defaultLangDirty) {
-      setDefaultLanguage(defaultLangQ.data.defaultLanguage);
-    }
-  }, [defaultLangQ.data, defaultLangDirty]);
 
   if (configQ.isLoading) return <PageLoading />;
   if (configQ.error)
@@ -184,6 +223,22 @@ export default function MetadataPage() {
     );
 
   const config = configQ.data!;
+
+  const languages = languageDraft ?? config.languages;
+  const languagesChanged = !sameLanguageList(languages, config.languages);
+  const savedDefaultLanguage = defaultLangQ.data?.defaultLanguage;
+  const defaultLanguage = defaultLanguageDraft ?? savedDefaultLanguage ?? "";
+  const defaultLanguageChanged =
+    defaultLanguageDraft !== null &&
+    savedDefaultLanguage !== undefined &&
+    defaultLanguageDraft !== savedDefaultLanguage;
+
+  // Unsaved changes: any form value, the language list or the default
+  // language differing from its saved value.
+  const hasUnsavedChanges = isDirty || languagesChanged || defaultLanguageChanged;
+
+  // Every settings writer is disabled from Save until both writes settle.
+  const saving = isSubmitting || updateConfig.isPending || updateDefaultLang.isPending;
 
   const onSubmit = (data: MetadataForm) => {
     const req: UpdateMetadataConfigRequest = {
@@ -205,25 +260,25 @@ export default function MetadataPage() {
       req.llmApiKey = data.llmApiKey;
     if (data.llmModel !== (config.llmModel ?? ""))
       req.llmModel = data.llmModel || null;
-    if (langDirty) req.languages = languages;
+    if (languagesChanged) req.languages = languages;
 
     updateConfig.mutate(req);
 
-    if (defaultLangDirty && defaultLanguage) {
-      updateDefaultLang.mutate({ defaultLanguage });
+    if (defaultLanguageChanged && defaultLanguageDraft) {
+      updateDefaultLang.mutate({ defaultLanguage: defaultLanguageDraft });
     }
   };
 
   const handleProviderChange = (newProvider: string) => {
-    setValue("llmProvider", newProvider as LlmProvider | "");
+    setValue("llmProvider", newProvider as LlmProvider | "", { shouldDirty: true });
     const cfg = PROVIDER_CONFIGS[newProvider];
     if (cfg) {
-      if (cfg.endpoint) setValue("llmEndpoint", cfg.endpoint);
+      if (cfg.endpoint) setValue("llmEndpoint", cfg.endpoint, { shouldDirty: true });
       if (cfg.models.length > 0) {
-        setValue("llmModel", cfg.models[0]!.value);
+        setValue("llmModel", cfg.models[0]!.value, { shouldDirty: true });
         setCustomModel(false);
       } else {
-        setValue("llmModel", "");
+        setValue("llmModel", "", { shouldDirty: true });
         setCustomModel(true);
       }
     }
@@ -232,15 +287,13 @@ export default function MetadataPage() {
   const addLanguage = (code?: string) => {
     const val = code ?? langInput.trim().toLowerCase();
     if (val && !languages.includes(val)) {
-      setLanguages([...languages, val]);
-      setLangDirty(true);
+      setLanguageDraft([...languages, val]);
     }
     setLangInput("");
   };
 
   const removeLanguage = (lang: string) => {
-    setLanguages(languages.filter((l) => l !== lang));
-    setLangDirty(true);
+    setLanguageDraft(languages.filter((l) => l !== lang));
   };
 
   return (
@@ -259,12 +312,18 @@ export default function MetadataPage() {
                 Hardcover
               </h2>
               <HelpTip text="Hardcover.app is a book metadata service with rich data (ratings, series info, covers). Get a free API token at hardcover.app → Settings → API. Optional but recommended for better metadata." />
+              <TestButton
+                run={api.testHardcover}
+                successMessage="Hardcover connection successful"
+                hasUnsavedChanges={hasUnsavedChanges}
+              />
             </div>
             <label className="flex items-center gap-3 mb-4">
               <input
                 type="checkbox"
                 {...register("hardcoverEnabled")}
-                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
+                disabled={saving}
+                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand disabled:opacity-50"
               />
               <span className="text-sm text-zinc-200">Enabled</span>
             </label>
@@ -274,9 +333,10 @@ export default function MetadataPage() {
               </label>
               <input
                 {...register("hardcoverApiToken")}
+                disabled={saving}
                 type="password"
                 placeholder={config.hardcoverApiTokenSet ? "Leave blank to keep saved token" : "Hardcover API token"}
-                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
               />
             </div>
           </section>
@@ -296,9 +356,10 @@ export default function MetadataPage() {
               </label>
               <input
                 {...register("googleBooksApiKey")}
+                disabled={saving}
                 type="password"
                 placeholder={config.googleBooksApiKeySet ? "Leave blank to keep saved key" : "Google Books API key"}
-                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
               />
             </div>
           </section>
@@ -310,13 +371,19 @@ export default function MetadataPage() {
               <h2 className="text-base font-semibold text-zinc-100">
                 Audnexus
               </h2>
+              <TestButton
+                run={api.testAudnexus}
+                successMessage="Audnexus connection successful"
+                hasUnsavedChanges={hasUnsavedChanges}
+              />
             </div>
             <div>
               <label className="block text-xs text-muted mb-1">URL</label>
               <input
                 {...register("audnexusUrl")}
+                disabled={saving}
                 placeholder="https://api.audnex.us"
-                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
               />
             </div>
           </section>
@@ -329,12 +396,18 @@ export default function MetadataPage() {
                 LLM Enrichment
               </h2>
               <HelpTip text="Optional. Uses an LLM to disambiguate search results and clean up author bibliographies. Livrarr only sends publicly available information (book titles, author names, publication years) — never file names, paths, or personal data. Both Groq and Gemini offer free tiers that are more than sufficient for typical use. Note: model names and pricing change frequently. If a model listed here stops working, check the provider's documentation for the latest available models." />
+              <TestButton
+                run={api.testLlm}
+                successMessage="AI connection successful"
+                hasUnsavedChanges={hasUnsavedChanges}
+              />
             </div>
             <label className="flex items-center gap-3 mb-4">
               <input
                 type="checkbox"
                 {...register("llmEnabled")}
-                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand"
+                disabled={saving}
+                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-brand disabled:opacity-50"
               />
               <span className="text-sm text-zinc-200">Enabled</span>
             </label>
@@ -352,7 +425,8 @@ export default function MetadataPage() {
                     <select
                       value={field.value}
                       onChange={(e) => handleProviderChange(e.target.value)}
-                      className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                      disabled={saving}
+                      className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                     >
                       <option value="">None</option>
                       {Object.entries(PROVIDER_CONFIGS).map(([key, cfg]) => (
@@ -393,8 +467,9 @@ export default function MetadataPage() {
                   </label>
                   <input
                     {...register("llmEndpoint")}
+                    disabled={saving}
                     placeholder="https://api.example.com/v1"
-                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                   />
                   {selectedProvider !== "custom" && (
                     <p className="mt-0.5 text-xs text-zinc-500">
@@ -419,7 +494,8 @@ export default function MetadataPage() {
                           <select
                             value={field.value}
                             onChange={field.onChange}
-                            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                            disabled={saving}
+                            className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                           >
                             {providerConfig.models.map((m) => (
                               <option key={m.value} value={m.value}>
@@ -432,7 +508,8 @@ export default function MetadataPage() {
                       <button
                         type="button"
                         onClick={() => setCustomModel(true)}
-                        className="text-xs text-zinc-500 hover:text-zinc-300"
+                        disabled={saving}
+                        className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
                       >
                         Use a different model...
                       </button>
@@ -441,17 +518,21 @@ export default function MetadataPage() {
                     <div className="space-y-2">
                       <input
                         {...register("llmModel")}
+                        disabled={saving}
                         placeholder="model-name"
-                        className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none"
+                        className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                       />
                       {providerConfig && providerConfig.models.length > 0 && (
                         <button
                           type="button"
                           onClick={() => {
                             setCustomModel(false);
-                            setValue("llmModel", providerConfig.models[0]!.value);
+                            setValue("llmModel", providerConfig.models[0]!.value, {
+                              shouldDirty: true,
+                            });
                           }}
-                          className="text-xs text-zinc-500 hover:text-zinc-300"
+                          disabled={saving}
+                          className="text-xs text-zinc-500 hover:text-zinc-300 disabled:opacity-50"
                         >
                           Back to preset models...
                         </button>
@@ -469,9 +550,10 @@ export default function MetadataPage() {
                   </label>
                   <input
                     {...register("llmApiKey")}
+                    disabled={saving}
                     type="password"
                     placeholder={config.llmApiKeySet ? "Leave blank to keep saved key" : "Paste your API key"}
-                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none"
+                    className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm font-mono text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
                   />
                 </div>
               )}
@@ -504,16 +586,9 @@ export default function MetadataPage() {
                 <HelpTip text="Used when a book is added and its language cannot be determined — nothing in the file, the provider record, or your pick says what it is. Books that already declare a language are not affected, and neither are books already in your library." />
               </div>
               <select
-                value={
-                  defaultLangQ.data
-                    ? defaultLanguage || defaultLangQ.data.defaultLanguage
-                    : ""
-                }
-                onChange={(e) => {
-                  setDefaultLanguage(e.target.value);
-                  setDefaultLangDirty(true);
-                }}
-                disabled={defaultLangQ.isLoading || !!defaultLangQ.error}
+                value={defaultLangQ.data ? defaultLanguage : ""}
+                onChange={(e) => setDefaultLanguageDraft(e.target.value)}
+                disabled={defaultLangQ.isLoading || !!defaultLangQ.error || saving}
                 className="w-full rounded border border-border bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-brand focus:outline-none disabled:opacity-50"
               >
                 {defaultLangQ.data ? (
@@ -627,7 +702,8 @@ export default function MetadataPage() {
                               addLanguage(lang.code);
                             }
                           }}
-                          className={`w-9 h-5 rounded-full relative transition-colors ${
+                          disabled={saving}
+                          className={`w-9 h-5 rounded-full relative transition-colors disabled:opacity-50 ${
                             isEnabled ? "bg-brand" : "bg-zinc-600"
                           }`}
                         >

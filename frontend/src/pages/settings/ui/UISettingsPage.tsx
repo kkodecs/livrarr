@@ -1,4 +1,4 @@
-import { Moon, Sun, Calendar, Clock, ArrowUpCircle } from "lucide-react";
+import { Calendar, Clock, ArrowUpCircle } from "lucide-react";
 import { useUIStore } from "@/stores/ui";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageToolbar } from "@/components/Page/PageToolbar";
@@ -25,26 +25,6 @@ export default function UISettingsPage() {
       </PageToolbar>
 
       <PageContent className="max-w-xl space-y-8">
-        {/* ── Theme ── */}
-        <section>
-          <div className="flex items-center gap-2 mb-4">
-            <Moon size={18} className="text-muted" />
-            <h2 className="text-base font-semibold text-zinc-100">Theme</h2>
-          </div>
-          <div className="flex gap-3">
-            <button className="flex items-center gap-2 rounded border-2 border-brand bg-zinc-800 px-4 py-3 text-sm font-medium text-zinc-100">
-              <Moon size={16} /> Dark
-            </button>
-            <button
-              disabled
-              title="Coming Soon"
-              className="flex items-center gap-2 rounded border border-border bg-zinc-800/50 px-4 py-3 text-sm text-zinc-500 cursor-not-allowed"
-            >
-              <Sun size={16} /> Light
-            </button>
-          </div>
-        </section>
-
         {/* ── Date Format ── */}
         <section>
           <div className="flex items-center gap-2 mb-4">

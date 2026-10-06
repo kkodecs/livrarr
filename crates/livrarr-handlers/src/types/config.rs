@@ -45,6 +45,14 @@ pub struct MetadataConfigResponse {
     pub provider_status: std::collections::HashMap<String, String>,
 }
 
+/// The enabled metadata language codes, in their saved order, and nothing
+/// else: the only metadata setting every signed-in user may read.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LanguagesResponse {
+    pub languages: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DefaultLanguageResponse {
