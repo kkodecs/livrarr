@@ -1,13 +1,16 @@
+use std::time::Duration;
+
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::accessors::{LogSurfaceAccessor, RssSyncAccessor, SystemAccessor};
 use crate::context::{
-    AppContext, HasAppConfigService, HasDataDir, HasDownloadClientSettingsService,
-    HasIndexerSettingsService, HasLogSurface, HasProviderStats, HasRssSync, HasStartupTime,
-    HasSystem,
+    AppContext, HasAppConfigService, HasConfigWarnings, HasDataDir, HasDatabaseHealth,
+    HasDownloadClientSettingsService, HasIndexerSettingsService, HasLogSurface, HasProviderStats,
+    HasRssSync, HasStartupTime, HasSystem,
 };
 use crate::middleware::RequireAdmin;
 use crate::types::api_error::ApiError;
@@ -16,19 +19,80 @@ use crate::types::system::{
     RssSyncStatus, SystemStatus,
 };
 use livrarr_domain::services::{
-    AppConfigService, DownloadClientSettingsService, IndexerSettingsService, ProviderStats,
-    ProviderStatsService,
+    AppConfigService, DatabaseHealth, DownloadClientSettingsService, IndexerSettingsService,
+    ProviderStats, ProviderStatsService,
 };
 use livrarr_domain::{HealthCheckType, MetadataProvider};
 
-pub async fn health<S: Clone + Send + Sync + 'static>(
-    State(_state): State<S>,
-) -> Result<Json<Vec<HealthCheckResult>>, ApiError> {
-    Ok(Json(vec![HealthCheckResult {
+/// How long the database check may take before it counts as failed.
+const DATABASE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The database item both health replies start with: `ok`, or `error` with
+/// the failure's detail, cleansed. A failure is logged at WARN with its
+/// detail.
+pub async fn database_check<S: HasDatabaseHealth>(state: &S) -> HealthCheckResult {
+    let checked = tokio::time::timeout(
+        DATABASE_CHECK_TIMEOUT,
+        state.database_health().check_database(),
+    )
+    .await;
+    let detail = match checked {
+        Ok(Ok(())) => {
+            return HealthCheckResult {
+                source: "database".into(),
+                check_type: HealthCheckType::Ok,
+                message: "database is reachable".into(),
+            }
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "did not answer within 2 seconds".to_string(),
+    };
+    tracing::warn!("database health check failed: {detail}");
+    HealthCheckResult {
         source: "database".into(),
-        check_type: HealthCheckType::Ok,
-        message: "database is reachable".into(),
-    }]))
+        check_type: HealthCheckType::Error,
+        message: livrarr_domain::cleanse_log_line(&format!("database check failed: {detail}")),
+    }
+}
+
+/// Public health: 200 with the database item when the check passes, 503 with
+/// a fixed failure item otherwise. No failure detail or config warning
+/// reaches this reply.
+pub async fn health<S: HasDatabaseHealth>(
+    State(state): State<S>,
+) -> (StatusCode, Json<Vec<HealthCheckResult>>) {
+    let item = database_check(&state).await;
+    if item.check_type == HealthCheckType::Ok {
+        return (StatusCode::OK, Json(vec![item]));
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(vec![HealthCheckResult {
+            source: "database".into(),
+            check_type: HealthCheckType::Error,
+            message: "database check failed".into(),
+        }]),
+    )
+}
+
+/// Admin health list: the database item with its detail, then one `warning`
+/// item per config warning.
+pub async fn admin_health<S: HasDatabaseHealth + HasConfigWarnings>(
+    State(state): State<S>,
+    RequireAdmin(_auth): RequireAdmin,
+) -> Result<Json<Vec<HealthCheckResult>>, ApiError> {
+    let mut items = vec![database_check(&state).await];
+    items.extend(
+        state
+            .config_warnings()
+            .into_iter()
+            .map(|message| HealthCheckResult {
+                source: "config".into(),
+                check_type: HealthCheckType::Warning,
+                message,
+            }),
+    );
+    Ok(Json(items))
 }
 
 pub async fn status<S: HasDataDir + HasStartupTime + HasSystem + HasLogSurface>(
@@ -260,6 +324,6 @@ pub async fn health_summary<
     }))
 }
 
-pub fn routes<S: AppContext>() -> Router<S> {
+pub fn routes<S: AppContext + HasDatabaseHealth>() -> Router<S> {
     Router::new().route("/health", get(health::<S>))
 }

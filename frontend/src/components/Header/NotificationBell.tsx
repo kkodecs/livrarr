@@ -135,6 +135,7 @@ export function NotificationBell() {
         });
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dismiss.mutate and setRpmHighlight keep their identity; rerun only when the unread list changes
   }, [unreadNotifications]);
 
   const {

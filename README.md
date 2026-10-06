@@ -101,6 +101,8 @@ bind_address = "0.0.0.0"
 level = "info"       # trace | debug | info | warn | error
 ```
 
+The Docker image's health check calls `http://127.0.0.1:8789/api/v1/health` inside the container, so if you change `port`, or set `bind_address` to one specific address, override the health check (in compose, with your own `healthcheck` block) to use the new address.
+
 ---
 
 ## Requirements

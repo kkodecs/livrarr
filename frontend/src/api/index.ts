@@ -585,6 +585,8 @@ export const triggerRssSync = () =>
 
 // System
 export const getHealth = () => apiFetch<HealthCheckResult[]>("/health");
+export const getSystemHealth = () =>
+  apiFetch<HealthCheckResult[]>("/system/health");
 export const getSystemStatus = () => apiFetch<SystemStatus>("/system/status"),
   getHealthSummary = () =>
     apiFetch<HealthSummaryResponse>("/system/health-summary");

@@ -28,6 +28,12 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub author_link: AuthorLinkConfig,
+
+    /// The keys in `config.toml` that the loader does not read, as
+    /// `unknown_keys` reports them. Set by `load_config`, never read from the
+    /// file.
+    #[serde(skip)]
+    pub unknown_keys: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -404,4 +410,63 @@ pub fn unknown_keys(table: &toml::Table) -> Vec<String> {
         }
     }
     unknown
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+/// Reads and validates `{data_dir}/config.toml`, returning the config and the
+/// keys in it that the loader does not read. The config also carries those
+/// keys in `unknown_keys`. An absent or blank file is the default config.
+pub fn load_config(data_dir: &std::path::Path) -> Result<(AppConfig, Vec<String>), String> {
+    let config_path = data_dir.join("config.toml");
+
+    let mut unknown = Vec::new();
+    let mut config: AppConfig = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("failed to read config.toml: {e}"))?;
+
+        if raw.trim().is_empty() {
+            AppConfig::default()
+        } else {
+            if let Ok(table) = raw.parse::<toml::Table>() {
+                unknown = unknown_keys(&table);
+            }
+
+            toml::from_str(&raw).map_err(|e| format!("failed to parse config.toml: {e}"))?
+        }
+    } else {
+        AppConfig::default()
+    };
+
+    validate_config(&config).map_err(|e| e.to_string())?;
+    config.unknown_keys = unknown.clone();
+    Ok((config, unknown))
+}
+
+// ---------------------------------------------------------------------------
+// Warnings
+// ---------------------------------------------------------------------------
+
+/// Every warning the loaded config gives, cleansed for display: first each
+/// rejected `[server] trusted_proxies` entry in file order, then each unknown
+/// key in the loader's order. Startup logs them; the admin health list shows
+/// them.
+pub fn config_warnings(config: &AppConfig) -> Vec<String> {
+    let (_, rejected) = crate::rate_limit::parse_trusted_proxies(&config.server.trusted_proxies);
+    let proxies = rejected.iter().map(|entry| {
+        format!(
+            "Ignored [server] trusted_proxies entry \"{entry}\": use an IP address or range \
+             such as 172.18.0.0/16; host names and ports are not supported"
+        )
+    });
+    let keys = config
+        .unknown_keys
+        .iter()
+        .map(|key| format!("Unknown config key: {key}"));
+    proxies
+        .chain(keys)
+        .map(|message| livrarr_domain::cleanse_log_line(&message))
+        .collect()
 }

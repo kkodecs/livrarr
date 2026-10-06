@@ -293,6 +293,18 @@ pub trait HasProviderStats: Clone + Send + Sync + 'static {
     fn provider_stats(&self) -> &Self::ProviderStatsSvc;
 }
 
+/// The database check behind both health replies.
+pub trait HasDatabaseHealth: Clone + Send + Sync + 'static {
+    type DatabaseHealth: livrarr_domain::services::DatabaseHealth + Send + Sync + 'static;
+    fn database_health(&self) -> &Self::DatabaseHealth;
+}
+
+/// The warnings drawn from the config loaded at startup, one message each,
+/// already cleansed for display.
+pub trait HasConfigWarnings: Clone + Send + Sync + 'static {
+    fn config_warnings(&self) -> Vec<String>;
+}
+
 /// Truthful log surface for the status page (REQ-003).
 pub trait HasLogSurface: Clone + Send + Sync + 'static {
     type LogSurface: LogSurfaceAccessor + Send + Sync + 'static;

@@ -32,7 +32,7 @@ export function AppLayout() {
     };
     window.addEventListener("livrarr:start-tour", handler);
     return () => window.removeEventListener("livrarr:start-tour", handler);
-  }); // eslint-disable-line react-hooks/exhaustive-deps
+  });
 
   return (
     <div className="min-h-screen bg-zinc-900">

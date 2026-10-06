@@ -37,6 +37,7 @@ mod sqlite_chapters;
 pub(crate) mod sqlite_common;
 mod sqlite_config;
 mod sqlite_cross_format_state;
+mod sqlite_database_health;
 mod sqlite_download_client;
 mod sqlite_external_id;
 mod sqlite_field_dissents;
@@ -127,6 +128,73 @@ pub mod test_helpers {
     /// tests. It retains the legacy Work-identity index those tests exercise.
     pub async fn create_test_db() -> SqliteDb {
         create_test_db_with_legacy_work_index(true).await
+    }
+
+    /// "Schema reads refused": while `refused` is true, SQLite itself refuses
+    /// every read of the schema table (`sqlite_schema`) on the test
+    /// database's one connection with "(code: 23) not authorized". Other
+    /// statements, including the session and user lookups behind login, keep
+    /// working. Passing false removes the refusal.
+    ///
+    /// Works on databases from `create_test_db` and `create_activated_test_db`,
+    /// whose pool holds exactly one connection.
+    pub async fn set_schema_reads_refused(db: &SqliteDb, refused: bool) {
+        use libsqlite3_sys as ffi;
+        use std::os::raw::{c_char, c_int, c_void};
+
+        unsafe extern "C" fn refuse_schema_table(
+            _user_data: *mut c_void,
+            action: c_int,
+            table: *const c_char,
+            _column: *const c_char,
+            _database: *const c_char,
+            _trigger: *const c_char,
+        ) -> c_int {
+            if action != ffi::SQLITE_READ || table.is_null() {
+                return ffi::SQLITE_OK;
+            }
+            // SAFETY: SQLite passes a NUL-terminated table name valid for this call.
+            let table = unsafe { std::ffi::CStr::from_ptr(table) }.to_bytes();
+            if table == b"sqlite_schema" || table == b"sqlite_master" {
+                ffi::SQLITE_DENY
+            } else {
+                ffi::SQLITE_OK
+            }
+        }
+
+        assert_eq!(
+            db.pool().options().get_max_connections(),
+            1,
+            "the refusal is installed on one connection, so the pool must hold only one"
+        );
+        let mut conn = db
+            .pool()
+            .acquire()
+            .await
+            .expect("acquire the test database's connection");
+        let mut handle = conn
+            .lock_handle()
+            .await
+            .expect("lock the test database's SQLite handle");
+        let raw = handle.as_raw_handle().as_ptr();
+        let callback: Option<
+            unsafe extern "C" fn(
+                *mut c_void,
+                c_int,
+                *const c_char,
+                *const c_char,
+                *const c_char,
+                *const c_char,
+            ) -> c_int,
+        > = if refused {
+            Some(refuse_schema_table)
+        } else {
+            None
+        };
+        // SAFETY: `raw` is the live handle of a connection this function holds
+        // locked; the callback is a plain function and reads no user data.
+        let rc = unsafe { ffi::sqlite3_set_authorizer(raw, callback, std::ptr::null_mut()) };
+        assert_eq!(rc, ffi::SQLITE_OK, "sqlite3_set_authorizer");
     }
 
     /// Create the live post-activation schema shape.

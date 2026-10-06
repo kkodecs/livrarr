@@ -777,6 +777,19 @@ impl HasProviderStats for AppState {
     }
 }
 
+impl livrarr_handlers::context::HasDatabaseHealth for AppState {
+    type DatabaseHealth = SqliteDb;
+    fn database_health(&self) -> &Self::DatabaseHealth {
+        &self.db
+    }
+}
+
+impl livrarr_handlers::context::HasConfigWarnings for AppState {
+    fn config_warnings(&self) -> Vec<String> {
+        crate::config::config_warnings(&self.config)
+    }
+}
+
 impl HasLogSurface for AppState {
     type LogSurface = LogSurfaceAccessorImpl;
     fn log_surface(&self) -> &Self::LogSurface {

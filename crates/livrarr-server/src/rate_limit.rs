@@ -22,6 +22,9 @@ impl IpNet {
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
             (IpAddr::V4(net), IpAddr::V4(test)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
                 if self.prefix_len >= 32 {
                     return net == test;
                 }
@@ -29,6 +32,9 @@ impl IpNet {
                 (u32::from(net) & mask) == (u32::from(test) & mask)
             }
             (IpAddr::V6(net), IpAddr::V6(test)) => {
+                if self.prefix_len == 0 {
+                    return true;
+                }
                 if self.prefix_len >= 128 {
                     return net == test;
                 }
@@ -41,10 +47,18 @@ impl IpNet {
         }
     }
 
+    /// Parses an address (`10.0.0.1`, `::1`) or a range (`10.0.0.0/8`,
+    /// `fd00::/8`), ignoring surrounding spaces. A prefix wider than the
+    /// address (above 32 for IPv4, above 128 for IPv6) is rejected.
     pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
         if let Some((addr_str, prefix_str)) = s.split_once('/') {
-            let addr = addr_str.parse().ok()?;
-            let prefix_len = prefix_str.parse().ok()?;
+            let addr: IpAddr = addr_str.parse().ok()?;
+            let prefix_len: u8 = prefix_str.parse().ok()?;
+            let width = if addr.is_ipv4() { 32 } else { 128 };
+            if prefix_len > width {
+                return None;
+            }
             Some(Self { addr, prefix_len })
         } else {
             let addr: IpAddr = s.parse().ok()?;
@@ -52,6 +66,20 @@ impl IpNet {
             Some(Self { addr, prefix_len })
         }
     }
+}
+
+/// Splits `[server] trusted_proxies` entries into the ranges `IpNet::parse`
+/// accepts and the entries it rejects, each list in file order.
+pub fn parse_trusted_proxies(entries: &[String]) -> (Vec<IpNet>, Vec<String>) {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+    for entry in entries {
+        match IpNet::parse(entry) {
+            Some(net) => accepted.push(net),
+            None => rejected.push(entry.clone()),
+        }
+    }
+    (accepted, rejected)
 }
 
 impl SmartIpKeyExtractor {

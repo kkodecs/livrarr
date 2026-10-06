@@ -1039,6 +1039,266 @@ async fn url_base_alone_starts_and_names_no_unknown_key() {
     );
 }
 
+/// The startup warning for a `trusted_proxies` entry that is not an address
+/// or range.
+fn ignored_proxy_warning(entry: &str) -> String {
+    format!(
+        "Ignored [server] trusted_proxies entry \"{entry}\": use an IP address or range such \
+         as 172.18.0.0/16; host names and ports are not supported"
+    )
+}
+
+#[tokio::test]
+async fn startup_warns_once_about_a_host_name_in_trusted_proxies() {
+    let (mut server, _data) = ready_with_config("proxy-warning.log", |port| {
+        format!(
+            "[server]\nbind_address = '127.0.0.1'\nport = {port}\n\
+             trusted_proxies = ['nginx']\n\
+             [log]\nlevel = 'info'\nformat = 'text'\n\
+             [convergence]\nenabled = false\n\
+             [author_link]\nenabled = false\n"
+        )
+    })
+    .await;
+    server.stop();
+    let stdout = strip_ansi(&server.stdout());
+    assert!(
+        stdout.contains(STARTUP_EVENT),
+        "control: startup logged to stdout:\n{stdout}"
+    );
+    let expected = ignored_proxy_warning("nginx");
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.contains(&expected)).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one stdout line carries {expected:?}; found {lines:?}\n{stdout}"
+    );
+    assert!(
+        lines[0].contains(" WARN "),
+        "the proxy warning is logged at WARN: {:?}",
+        lines[0]
+    );
+}
+
+/// The `config` / `warning` messages of an admin health reply; empty when the
+/// body is not a list of items.
+fn config_warning_messages(body: &str) -> Vec<String> {
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| item["source"] == "config" && item["checkType"] == "warning")
+        .filter_map(|item| item["message"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[tokio::test]
+async fn startup_keeps_unknown_keys_for_the_admin_health_list() {
+    let secret_key = toml_key("x?apikey=ac712Marker");
+    let (mut server, _data) = ready_with_config("unknown-keys-admin.log", |port| {
+        format!(
+            "nginx = 1\n{secret_key} = 1\n\
+             [server]\nbind_address = '127.0.0.1'\nport = {port}\n\
+             api_kye = \"sk-live-ac711Marker\"\n\
+             [log]\nlevel = 'info'\nformat = 'text'\n\
+             [convergence]\nenabled = false\n\
+             [author_link]\nenabled = false\n\
+             [foo]\n"
+        )
+    })
+    .await;
+    let client = client();
+    let (token, _) = setup_owner(&server, &client).await;
+    let (status, body) = api(
+        &server,
+        &client,
+        &token,
+        reqwest::Method::GET,
+        "/system/health",
+        None,
+    )
+    .await;
+    server.stop();
+
+    let logged = unknown_config_keys(&server.logs());
+    for key in ["foo", "nginx", "server.api_kye"] {
+        assert!(
+            logged.iter().any(|k| k == key),
+            "control: startup logged unknown key {key:?}; logged {logged:?}"
+        );
+    }
+
+    let messages = config_warning_messages(&body);
+    let mut findings = Findings::default();
+    for key in ["foo", "nginx", "server.api_kye"] {
+        let row = format!("Unknown config key: {key}");
+        findings.check(messages.contains(&row), || {
+            format!("no warning row {row:?}; rows {messages:?}; status {status}, body {body}")
+        });
+    }
+    let masked: Vec<&String> = messages
+        .iter()
+        .filter(|m| m.starts_with("Unknown config key: x?apikey="))
+        .collect();
+    findings.check(
+        masked.len() == 1 && masked[0].contains("[REDACTED]"),
+        || format!("expected one masked row for the secret-shaped key; got {masked:?}"),
+    );
+    findings.check(status == StatusCode::OK, || {
+        format!("admin health answers 200; got {status}")
+    });
+    for marker in ["ac711Marker", "ac712Marker"] {
+        findings.check(!body.contains(marker), || {
+            format!("the reply carries {marker:?}: {body}")
+        });
+    }
+    findings.finish("unknown keys reach the admin health list");
+}
+
+// ---------------------------------------------------------------------------
+// Log file retention and log file failure through the built binary
+// ---------------------------------------------------------------------------
+
+/// Runs `attempt` with the UTC date it starts on and returns its result when
+/// it also ends on that date. An attempt that spans UTC midnight is discarded
+/// and run once more, on a fresh data folder and the new date.
+async fn within_one_utc_day<T, F, Fut>(mut attempt: F) -> T
+where
+    F: FnMut(chrono::NaiveDate) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    for _ in 0..2 {
+        let day = chrono::Utc::now().date_naive();
+        let outcome = attempt(day).await;
+        if chrono::Utc::now().date_naive() == day {
+            return outcome;
+        }
+    }
+    panic!("the UTC date changed during both attempts");
+}
+
+/// The log file name for `day`.
+fn log_name_for(day: chrono::NaiveDate) -> String {
+    format!("livrarr.log.{}", day.format("%Y-%m-%d"))
+}
+
+fn folder_entries(dir: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(dir)
+        .expect("read folder")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn startup_keeps_todays_log_file_and_the_30_newest_of_85() {
+    let (expected, actual) = within_one_utc_day(|today| async move {
+        let data = TempDir::new().unwrap();
+        let logs = data.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let mut seeded = Vec::new();
+        for days in (1..=85).rev() {
+            let name = log_name_for(today - chrono::Duration::days(days));
+            std::fs::write(logs.join(&name), b"seeded\n").unwrap();
+            seeded.push(name);
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert_eq!(folder_entries(&logs).len(), 85, "control: seeded");
+
+        let client = client();
+        let mut server = Server::start(data.path(), data.path().join("ac317.log")).await;
+        server.ready(&client).await;
+        server.stop();
+
+        let mut expected: std::collections::BTreeSet<String> =
+            seeded.iter().rev().take(30).cloned().collect();
+        expected.insert(log_name_for(today));
+        (expected, folder_entries(&logs))
+    })
+    .await;
+
+    assert_eq!(
+        actual,
+        expected,
+        "logs/ holds today's file and the 30 newest: expected {} entries, found {}; \
+         unexpected {:?}",
+        expected.len(),
+        actual.len(),
+        actual.difference(&expected).collect::<Vec<_>>()
+    );
+}
+
+/// What one start with today's log file name blocked produced.
+struct BlockedStart {
+    /// `Err` holds why the binary did not serve.
+    served: Result<(), String>,
+    status: Option<(StatusCode, String)>,
+    stderr: String,
+}
+
+#[tokio::test]
+async fn startup_with_todays_log_file_blocked_serves_and_reports_the_error() {
+    const BUILD_ERROR: &str = "failed to create initial log file";
+    let outcome = within_one_utc_day(|today| async move {
+        let data = TempDir::new().unwrap();
+        let logs = data.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        std::fs::create_dir(logs.join(log_name_for(today))).unwrap();
+
+        let client = client();
+        let mut server = Server::start(data.path(), data.path().join("ac318.log")).await;
+        let served = match server.observe_refusal(&client).await {
+            (_, true) => Ok(()),
+            (Some(exit), false) => Err(format!("exited before serving ({exit})")),
+            (None, false) => Err("did not serve within the deadline".to_owned()),
+        };
+        let mut status = None;
+        if served.is_ok() {
+            server.ready(&client).await;
+            let (token, _) = setup_owner(&server, &client).await;
+            status = Some(
+                api(
+                    &server,
+                    &client,
+                    &token,
+                    reqwest::Method::GET,
+                    "/system/status",
+                    None,
+                )
+                .await,
+            );
+        }
+        server.stop();
+        BlockedStart {
+            served,
+            status,
+            stderr: server.stderr(),
+        }
+    })
+    .await;
+
+    let stderr = &outcome.stderr;
+    if let Err(why) = &outcome.served {
+        panic!("the binary serves GET /api/v1/health: it {why}\n--- stderr:\n{stderr}");
+    }
+    let (status, body) = outcome.status.expect("system status was read");
+    assert_eq!(status, StatusCode::OK, "control: system status: {body}");
+    let reply: Value = serde_json::from_str(&body).expect("system status is JSON");
+    let init_error = reply["logInitError"].as_str().unwrap_or_default();
+    assert!(
+        init_error.contains(BUILD_ERROR),
+        "logInitError names the failed file creation: {body}"
+    );
+    assert!(
+        stderr.contains(BUILD_ERROR),
+        "stderr names the failed file creation:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "the log file failure is reported, not a panic:\n{stderr}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // First-run setup token through the built binary
 // ---------------------------------------------------------------------------

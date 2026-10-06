@@ -718,7 +718,7 @@ fn init_tracing_and_config(
     Arc<livrarr_server::state::LogLevelHandle>,
     livrarr_domain::LogSurfaceStatus,
 ) {
-    let (config, unknown_keys) = match load_config(data_dir) {
+    let (config, _unknown_keys) = match livrarr_server::config::load_config(data_dir) {
         Ok(loaded) => loaded,
         Err(e) => {
             eprintln!("Configuration error: {e}");
@@ -730,8 +730,8 @@ fn init_tracing_and_config(
     let (log_level_handle, log_surface) = init_tracing(&config.log, log_buffer.clone(), data_dir);
 
     info!("Livrarr starting — data directory: {}", data_dir.display());
-    for key in &unknown_keys {
-        warn!("Unknown config key: {key}");
+    for message in livrarr_server::config::config_warnings(&config) {
+        warn!("{message}");
     }
 
     (config, log_buffer, log_level_handle, log_surface)
@@ -1250,33 +1250,6 @@ async fn serve_until_shutdown(
     info!("Livrarr stopped");
 }
 
-/// Reads and validates `config.toml`, returning the config and the keys in it
-/// that the loader does not read.
-fn load_config(data_dir: &std::path::Path) -> Result<(AppConfig, Vec<String>), String> {
-    let config_path = data_dir.join("config.toml");
-
-    let mut unknown_keys = Vec::new();
-    let config: AppConfig = if config_path.exists() {
-        let raw = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("failed to read config.toml: {e}"))?;
-
-        if raw.trim().is_empty() {
-            AppConfig::default()
-        } else {
-            if let Ok(table) = raw.parse::<toml::Table>() {
-                unknown_keys = livrarr_server::config::unknown_keys(&table);
-            }
-
-            toml::from_str(&raw).map_err(|e| format!("failed to parse config.toml: {e}"))?
-        }
-    } else {
-        AppConfig::default()
-    };
-
-    livrarr_server::config::validate_config(&config).map_err(|e| e.to_string())?;
-    Ok((config, unknown_keys))
-}
-
 fn init_tracing(
     log: &livrarr_server::config::LogConfig,
     log_buffer: Arc<livrarr_server::state::LogBuffer>,
@@ -1327,34 +1300,47 @@ fn init_tracing(
     // In-memory ring buffer for UI
     let buf_layer = LogBufferLayer(log_buffer);
 
-    // File output: {data_dir}/logs/livrarr.log.<date> (daily roller).
-    // REQ-003: a dir-creation or writability failure is captured and surfaced
-    // (stderr now, status page later) — never swallowed; the file layer is
-    // skipped so console + ring buffer keep working and the server boots.
+    // File output: {data_dir}/logs/livrarr.log.<date> (daily roller with a
+    // file cap). A folder that cannot be created or written, or an appender
+    // that fails to build, is printed to stderr and recorded in the status
+    // reply's `logInitError`; the file layer is skipped so console and ring
+    // buffer keep working and the server boots.
     let log_dir = data_dir.join("logs");
-    let surface = livrarr_server::log_surface::prepare_log_surface(&log_dir);
-    let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> =
-        if surface.init_error.is_none() {
-            let file_appender = tracing_appender::rolling::daily(&log_dir, "livrarr.log");
-            Some(if use_json {
-                Box::new(
-                    tracing_subscriber::fmt::layer()
-                        .json()
-                        .with_target(false)
-                        .with_ansi(false)
-                        .with_writer(CleansingWriter(file_appender)),
-                )
-            } else {
-                Box::new(
-                    tracing_subscriber::fmt::layer()
-                        .with_target(false)
-                        .with_ansi(false)
-                        .with_writer(CleansingWriter(file_appender)),
-                )
-            })
-        } else {
-            None
-        };
+    let mut surface = livrarr_server::log_surface::prepare_log_surface(&log_dir);
+    let file_appender = if surface.init_error.is_none() {
+        match livrarr_server::log_surface::build_file_appender(&log_dir) {
+            Ok(appender) => Some(appender),
+            Err(e) => {
+                let error = e.to_string();
+                eprintln!("WARNING: file logging disabled — {error}");
+                surface.init_error = Some(error);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let file_layer: Option<Box<dyn tracing_subscriber::Layer<_> + Send + Sync>> = file_appender
+        .map(
+            |file_appender| -> Box<dyn tracing_subscriber::Layer<_> + Send + Sync> {
+                if use_json {
+                    Box::new(
+                        tracing_subscriber::fmt::layer()
+                            .json()
+                            .with_target(false)
+                            .with_ansi(false)
+                            .with_writer(CleansingWriter(file_appender)),
+                    )
+                } else {
+                    Box::new(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(false)
+                            .with_ansi(false)
+                            .with_writer(CleansingWriter(file_appender)),
+                    )
+                }
+            },
+        );
 
     tracing_subscriber::registry()
         .with(filter)

@@ -1,6 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { ReactReader, ReactReaderStyle } from "react-reader";
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Rendition = any;
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -275,7 +274,7 @@ export function EpubReader({ libraryItemId }: Props) {
       setSavedPlace({ opening, attempt, status: "known" });
       savePermitRef.current = opening;
     });
-    // libraryItemId changes only together with openingId.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- libraryItemId changes only together with openingId
   }, [openingId, readAttempt]);
 
   // Opens the book as for "no saved place" and saves no position for the rest of this session.

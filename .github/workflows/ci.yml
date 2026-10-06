@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', 'wiki/**', 'build/**', '*.md']
   pull_request:
     branches: [main]
   workflow_dispatch:

@@ -105,4 +105,10 @@ VOLUME ["/config"]
 
 EXPOSE 8789
 
+# Checks the default listener inside the container. The server's database check gives up
+# after 2 s, wget after 4 s, Docker after 5 s. An admin who changes [server] port, or binds
+# to one specific address, overrides this check.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD ["wget","-q","-T","4","--spider","http://127.0.0.1:8789/api/v1/health"]
+
 ENTRYPOINT ["/entrypoint.sh"]

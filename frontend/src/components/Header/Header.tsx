@@ -37,7 +37,7 @@ export function Header() {
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
-  }, [langOpen]);
+  }, [langOpen, mobileSearchOpen]);
 
   // Focus mobile search input when opened
   useEffect(() => {

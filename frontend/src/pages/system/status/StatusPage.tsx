@@ -8,7 +8,7 @@ import {
   Database,
   Loader2,
 } from "lucide-react";
-import { getSystemStatus, getHealth, getHealthSummary } from "@/api";
+import { getSystemStatus, getSystemHealth, getHealthSummary } from "@/api";
 import { PageContent } from "@/components/Page/PageContent";
 import { PageLoading } from "@/components/Page/LoadingSpinner";
 import { ErrorState } from "@/components/Page/ErrorState";
@@ -185,8 +185,8 @@ export default function StatusPage() {
     error: healthError,
     refetch: refetchHealth,
   } = useQuery({
-    queryKey: ["health"],
-    queryFn: getHealth,
+    queryKey: ["system-health"],
+    queryFn: getSystemHealth,
   });
 
   const {

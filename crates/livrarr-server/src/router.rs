@@ -18,14 +18,10 @@ use crate::state::AppState;
 ///
 /// Satisfies: RUNTIME-SERVER-005, RUNTIME-COMPOSE-003, RUNTIME-COMPOSE-004
 pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
-    // Parse trusted_proxies from config (empty = direct exposure, peer IP only).
-    let trusted_proxies: Vec<crate::rate_limit::IpNet> = state
-        .config
-        .server
-        .trusted_proxies
-        .iter()
-        .filter_map(|s| crate::rate_limit::IpNet::parse(s))
-        .collect();
+    // Trusted proxies from config (empty = direct exposure, peer IP only).
+    // Rejected entries trust nothing; `config::config_warnings` reports them.
+    let (trusted_proxies, _rejected) =
+        crate::rate_limit::parse_trusted_proxies(&state.config.server.trusted_proxies);
     let extractor = SmartIpKeyExtractor::new(trusted_proxies);
 
     // Rate limiter for login: 5 requests per 60 seconds per IP.
@@ -457,6 +453,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         .route(
             "/system/logs/level",
             put(livrarr_handlers::system::set_log_level::<AppState>),
+        )
+        .route(
+            "/system/health",
+            get(livrarr_handlers::system::admin_health::<AppState>),
         )
         .route(
             "/system/health-summary",
@@ -1924,5 +1924,1119 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    // Health, the admin health list, config warnings and trusted proxies,
+    // through the real router with `config.toml` read from a temporary folder.
+
+    use crate::config::AppConfig;
+    use std::net::Ipv6Addr;
+
+    /// Reads `{dir}/config.toml` with the startup loader's steps: an absent or
+    /// blank file is the default config; otherwise the TOML is read into
+    /// `AppConfig` and then checked by `validate_config`.
+    fn load_config_from(dir: &std::path::Path) -> Result<AppConfig, String> {
+        crate::config::load_config(dir).map(|(config, _unknown_keys)| config)
+    }
+
+    /// Writes `text` as `config.toml` into a new temporary folder (no file
+    /// when `None`) and loads it.
+    fn loaded_config(text: Option<&str>) -> AppConfig {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(text) = text {
+            std::fs::write(dir.path().join("config.toml"), text).unwrap();
+        }
+        load_config_from(dir.path()).expect("config.toml loads")
+    }
+
+    /// The real router over a fresh real database, with `config` as the
+    /// state's loaded config. No account exists yet.
+    async fn router_with_config(
+        config: AppConfig,
+    ) -> (Router, livrarr_db::sqlite::SqliteDb, tempfile::TempDir) {
+        let (mut state, tmp) = test_app_state_with_setup_token(KNOWN_SETUP_TOKEN).await;
+        state.config = Arc::new(config);
+        let db = state.db.clone();
+        let ui_dir = state.data_dir.join("ui-not-present-in-test");
+        (build_router(state, ui_dir), db, tmp)
+    }
+
+    static NEXT_QUIET_PEER: AtomicU32 = AtomicU32::new(1);
+
+    /// Where an app's own requests (setup, sign-in, admin reads) come from.
+    #[derive(Clone, Copy)]
+    enum ControlPeers {
+        /// A new address in 100.64.0.0/10 for each request.
+        V4,
+        /// A new address in 2001:db8:ffff::/48 for each request.
+        V6,
+        /// One address for every request.
+        Fixed(SocketAddr),
+    }
+
+    impl ControlPeers {
+        fn next(self) -> SocketAddr {
+            let n = NEXT_QUIET_PEER.fetch_add(1, Ordering::Relaxed);
+            match self {
+                ControlPeers::V4 => {
+                    let [_, _, c, d] = n.to_be_bytes();
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 64 + (c % 64), d, 1)), 42000)
+                }
+                ControlPeers::V6 => SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::new(
+                        0x2001,
+                        0xdb8,
+                        0xffff,
+                        0,
+                        0,
+                        0,
+                        (n >> 16) as u16,
+                        n as u16,
+                    )),
+                    42000,
+                ),
+                ControlPeers::Fixed(addr) => addr,
+            }
+        }
+    }
+
+    fn caller_headers(caller: Caller<'_>) -> Vec<(&'static str, String)> {
+        match caller {
+            Caller::SignedOut => Vec::new(),
+            Caller::Session(token) => vec![("authorization", format!("Bearer {token}"))],
+            Caller::ApiKey(key) => vec![("x-api-key", key.to_string())],
+        }
+    }
+
+    /// The real router after first-run setup, with `config` loaded, an admin
+    /// (the owner) and a signed-in normal user.
+    struct ConfiguredApp {
+        app: Router,
+        db: livrarr_db::sqlite::SqliteDb,
+        peers: ControlPeers,
+        owner_session: String,
+        owner_api_key: String,
+        reader_session: String,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl ConfiguredApp {
+        async fn new(config: AppConfig, peers: ControlPeers) -> Self {
+            let (app, db, tmp) = router_with_config(config).await;
+            let (status, body) = call(
+                &app,
+                peers.next(),
+                "POST",
+                "/api/v1/setup",
+                &[],
+                Some(serde_json::json!({
+                    "username": OWNER,
+                    "password": OWNER_PASSWORD,
+                    "setupToken": KNOWN_SETUP_TOKEN,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "control, owner setup: {body}");
+            let reply = json_of(&body);
+            let owner_session = reply["token"].as_str().unwrap().to_string();
+            let owner_api_key = reply["apiKey"].as_str().unwrap().to_string();
+
+            let bearer = format!("Bearer {owner_session}");
+            let (status, body) = call(
+                &app,
+                peers.next(),
+                "POST",
+                "/api/v1/user",
+                &[("authorization", bearer.as_str())],
+                Some(serde_json::json!({
+                    "username": "reader",
+                    "password": "reader-password-1",
+                    "role": "user",
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "control, create reader: {body}");
+            let (status, body) = call(
+                &app,
+                peers.next(),
+                "POST",
+                "/api/v1/auth/login",
+                &[],
+                Some(serde_json::json!({
+                    "username": "reader",
+                    "password": "reader-password-1",
+                    "rememberMe": false,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "control, reader signs in: {body}");
+            let reader_session = json_of(&body)["token"].as_str().unwrap().to_string();
+
+            Self {
+                app,
+                db,
+                peers,
+                owner_session,
+                owner_api_key,
+                reader_session,
+                _tmp: tmp,
+            }
+        }
+
+        async fn send(&self, caller: Caller<'_>, method: &str, uri: &str) -> (StatusCode, String) {
+            let headers = caller_headers(caller);
+            let headers: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(name, value)| (*name, value.as_str()))
+                .collect();
+            call(&self.app, self.peers.next(), method, uri, &headers, None).await
+        }
+
+        /// `GET /api/v1/system/health` as the admin, by session.
+        async fn admin_health(&self) -> (StatusCode, String) {
+            self.send(
+                Caller::Session(&self.owner_session),
+                "GET",
+                "/api/v1/system/health",
+            )
+            .await
+        }
+    }
+
+    fn items_of(body: &str) -> Vec<serde_json::Value> {
+        json_of(body).as_array().cloned().unwrap_or_default()
+    }
+
+    /// The `(checkType, message)` of every item whose source is `config`.
+    fn config_rows(body: &str) -> Vec<(String, String)> {
+        items_of(body)
+            .iter()
+            .filter(|item| item["source"] == "config")
+            .map(|item| {
+                (
+                    item["checkType"].as_str().unwrap_or_default().to_string(),
+                    item["message"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn warning_row(message: &str) -> (String, String) {
+        ("warning".to_string(), message.to_string())
+    }
+
+    fn proxy_warning(entry: &str) -> String {
+        format!(
+            "Ignored [server] trusted_proxies entry \"{entry}\": use an IP address or range \
+             such as 172.18.0.0/16; host names and ports are not supported"
+        )
+    }
+
+    /// The public reply when the database check fails.
+    fn minimal_failure_body() -> serde_json::Value {
+        serde_json::json!([{
+            "source": "database",
+            "checkType": "error",
+            "message": "database check failed",
+        }])
+    }
+
+    /// Records a finding unless the admin health reply is a 200 whose first
+    /// item is the database check.
+    fn check_admin_reply_shape(wrong: &mut Vec<String>, who: &str, status: StatusCode, body: &str) {
+        if status != StatusCode::OK {
+            wrong.push(format!(
+                "{who}: GET /api/v1/system/health answered {status}, expected 200; body {body:?}"
+            ));
+            return;
+        }
+        let items = items_of(body);
+        if items.first().map(|item| &item["source"]) != Some(&serde_json::json!("database")) {
+            wrong.push(format!(
+                "{who}: first item is not the database check: {body}"
+            ));
+        }
+    }
+
+    /// One request through the real router as its own task, so a panic in
+    /// the request path is returned as `Err(panic message)`.
+    async fn send_catching(
+        app: &Router,
+        from: SocketAddr,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: serde_json::Value,
+    ) -> Result<StatusCode, String> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut request = builder.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ConnectInfo(from));
+        let app = app.clone();
+        let joined =
+            tokio::spawn(async move { app.oneshot(request).await.unwrap().status() }).await;
+        joined.map_err(|e| {
+            if !e.is_panic() {
+                return e.to_string();
+            }
+            let payload = e.into_panic();
+            payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic".to_string())
+        })
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Bucket {
+        /// The sixth failed login, with client B, was not answered 429.
+        Trusted,
+        /// The sixth failed login, with client B, was answered 429.
+        Untrusted,
+    }
+
+    /// Five failed logins from `peer` with `header` naming client `a`, then
+    /// one naming client `b`. Each of the five must reach the login handler
+    /// (401); the sixth decides whether the peer's header picked the key.
+    async fn bucket_test(
+        app: &Router,
+        peer: SocketAddr,
+        header: &str,
+        a: &str,
+        b: &str,
+    ) -> Result<Bucket, String> {
+        let login = serde_json::json!({
+            "username": "bucket-probe",
+            "password": "wrong-password-1",
+            "rememberMe": false,
+        });
+        for attempt in 1..=5 {
+            let status = send_catching(
+                app,
+                peer,
+                "/api/v1/auth/login",
+                &[(header, a)],
+                login.clone(),
+            )
+            .await
+            .map_err(|panic| format!("{header} from {peer}: login {attempt} panicked: {panic}"))?;
+            if status != StatusCode::UNAUTHORIZED {
+                return Err(format!(
+                    "{header} from {peer}: control, login {attempt} answered {status}, expected 401"
+                ));
+            }
+        }
+        let status = send_catching(app, peer, "/api/v1/auth/login", &[(header, b)], login)
+            .await
+            .map_err(|panic| format!("{header} from {peer}: login 6 panicked: {panic}"))?;
+        match status {
+            StatusCode::TOO_MANY_REQUESTS => Ok(Bucket::Untrusted),
+            StatusCode::UNAUTHORIZED => Ok(Bucket::Trusted),
+            other => Err(format!(
+                "{header} from {peer}: login 6 answered {other}, expected 401 or 429"
+            )),
+        }
+    }
+
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(a, b, c, d)), 43000)
+    }
+
+    fn v6(text: &str) -> SocketAddr {
+        SocketAddr::new(text.parse::<IpAddr>().unwrap(), 43000)
+    }
+
+    /// Runs one bucket test on a fresh router built from `config` and records
+    /// a finding unless it gives `expected`.
+    #[allow(clippy::too_many_arguments)]
+    async fn expect_bucket(
+        wrong: &mut Vec<String>,
+        label: &str,
+        config: &AppConfig,
+        peer: SocketAddr,
+        header: &str,
+        a: &str,
+        b: &str,
+        expected: Bucket,
+    ) {
+        let (app, _db, _tmp) = router_with_config(config.clone()).await;
+        match bucket_test(&app, peer, header, a, b).await {
+            Ok(outcome) if outcome == expected => {}
+            Ok(outcome) => wrong.push(format!("{label}: {outcome:?}, expected {expected:?}")),
+            Err(reason) => wrong.push(format!("{label}: expected {expected:?}; {reason}")),
+        }
+    }
+
+    const DATABASE_FAILED_PREFIX: &str = "database check failed: ";
+
+    // REQ-101, REQ-103: the public health route.
+
+    #[tokio::test]
+    async fn public_health_answers_database_ok_to_every_caller() {
+        let owned = ConfiguredApp::new(loaded_config(None), ControlPeers::V4).await;
+        let mut wrong = Vec::new();
+        for (who, caller) in [
+            ("signed out", Caller::SignedOut),
+            ("normal user", Caller::Session(&owned.reader_session)),
+            ("admin", Caller::Session(&owned.owner_session)),
+        ] {
+            let (status, body) = owned.send(caller, "GET", "/api/v1/health").await;
+            let items = items_of(&body);
+            if status != StatusCode::OK
+                || items.len() != 1
+                || items[0]["source"] != "database"
+                || items[0]["checkType"] != "ok"
+            {
+                wrong.push(format!(
+                    "{who}: {status} {body}, expected 200 with one database/ok item"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn public_health_answers_503_when_the_pool_is_closed() {
+        let (app, db, _tmp) = router_with_config(loaded_config(None)).await;
+        db.pool().close().await;
+        assert!(db.pool().is_closed(), "control: the pool is closed");
+
+        let (status, body) = call(&app, fresh_peer(), "GET", "/api/v1/health", &[], None).await;
+        let items = items_of(&body);
+        let mut wrong = Vec::new();
+        if status != StatusCode::SERVICE_UNAVAILABLE {
+            wrong.push(format!("status {status}, expected 503; body {body}"));
+        }
+        if items.len() != 1
+            || items[0]["checkType"] != "error"
+            || items[0]["message"] != "database check failed"
+        {
+            wrong.push(format!(
+                "body {body}, expected one error item \"database check failed\""
+            ));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn public_health_answers_503_within_three_seconds_when_no_connection_is_free() {
+        let (app, db, _tmp) = router_with_config(loaded_config(None)).await;
+        let held = db
+            .pool()
+            .acquire()
+            .await
+            .expect("hold the pool's only connection");
+        assert_eq!(
+            db.pool().num_idle(),
+            0,
+            "control: no idle connection remains"
+        );
+
+        let started = std::time::Instant::now();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(10),
+            call(&app, fresh_peer(), "GET", "/api/v1/health", &[], None),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        drop(held);
+
+        let (status, body) = reply.expect("the health reply arrives within 10 seconds");
+        let mut wrong = Vec::new();
+        if status != StatusCode::SERVICE_UNAVAILABLE {
+            wrong.push(format!("status {status}, expected 503; body {body}"));
+        }
+        if elapsed >= Duration::from_secs(3) {
+            wrong.push(format!(
+                "the reply took {elapsed:?}, expected under 3 seconds"
+            ));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn public_health_head_answers_the_get_status_with_an_empty_body() {
+        let (app, db, _tmp) = router_with_config(loaded_config(None)).await;
+        let mut wrong = Vec::new();
+        for (case, expected) in [
+            ("healthy", StatusCode::OK),
+            ("pool closed", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            if expected == StatusCode::SERVICE_UNAVAILABLE {
+                db.pool().close().await;
+            }
+            let (get_status, _) =
+                call(&app, fresh_peer(), "GET", "/api/v1/health", &[], None).await;
+            let (head_status, head_body) =
+                call(&app, fresh_peer(), "HEAD", "/api/v1/health", &[], None).await;
+            if get_status != expected {
+                wrong.push(format!(
+                    "{case}: GET answered {get_status}, expected {expected}"
+                ));
+            }
+            if head_status != get_status || head_status != expected {
+                wrong.push(format!(
+                    "{case}: HEAD answered {head_status}, GET {get_status}, expected both {expected}"
+                ));
+            }
+            if !head_body.is_empty() {
+                wrong.push(format!("{case}: HEAD body {head_body:?}, expected empty"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn public_health_never_carries_config_warnings() {
+        let config = loaded_config(Some(
+            "zz_marker_615 = 1\n[server]\ntrusted_proxies = ['nginx-marker-615']\n",
+        ));
+        assert_eq!(
+            config.server.trusted_proxies,
+            vec!["nginx-marker-615".to_string()],
+            "control: the config loaded"
+        );
+        let owned = ConfiguredApp::new(config, ControlPeers::V4).await;
+        let mut wrong = Vec::new();
+        for (who, caller) in [
+            ("signed out", Caller::SignedOut),
+            ("normal user", Caller::Session(&owned.reader_session)),
+            ("admin", Caller::Session(&owned.owner_session)),
+        ] {
+            let (status, body) = owned.send(caller, "GET", "/api/v1/health").await;
+            if status != StatusCode::OK {
+                wrong.push(format!("{who}: control, status {status}, expected 200"));
+            }
+            for marker in ["nginx-marker-615", "zz_marker_615"] {
+                if body.contains(marker) {
+                    wrong.push(format!("{who}: body carries {marker}: {body}"));
+                }
+            }
+            if items_of(&body).len() != 1 {
+                wrong.push(format!("{who}: expected one item, got {body}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn public_health_answers_the_minimal_503_while_schema_reads_are_refused() {
+        let (app, db, _tmp) = router_with_config(loaded_config(None)).await;
+
+        livrarr_db::test_helpers::set_schema_reads_refused(&db, true).await;
+        let refusal = schema_read_error(&db).await;
+        let (status, body) = call(&app, fresh_peer(), "GET", "/api/v1/health", &[], None).await;
+        livrarr_db::test_helpers::set_schema_reads_refused(&db, false).await;
+        let (after_status, after_body) =
+            call(&app, fresh_peer(), "GET", "/api/v1/health", &[], None).await;
+
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|e| e.contains("not authorized")),
+            "control: SQLite refuses the schema read under the fixture, got {refusal:?}"
+        );
+        let mut wrong = Vec::new();
+        if status != StatusCode::SERVICE_UNAVAILABLE || json_of(&body) != minimal_failure_body() {
+            wrong.push(format!(
+                "under refusal: {status} {body}, expected 503 {}",
+                minimal_failure_body()
+            ));
+        }
+        let after = items_of(&after_body);
+        if after_status != StatusCode::OK
+            || after.len() != 1
+            || after[0]["source"] != "database"
+            || after[0]["checkType"] != "ok"
+        {
+            wrong.push(format!(
+                "after removal: {after_status} {after_body}, expected 200 with database/ok"
+            ));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The error SQLite gives for a read of the schema table, or `None` when
+    /// the read succeeds.
+    async fn schema_read_error(db: &livrarr_db::sqlite::SqliteDb) -> Option<String> {
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM sqlite_schema")
+            .fetch_one(db.pool())
+            .await
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    // REQ-102: the admin health list.
+
+    #[tokio::test]
+    async fn admin_health_answers_the_admin_by_session_and_by_api_key() {
+        let owned = ConfiguredApp::new(loaded_config(None), ControlPeers::V4).await;
+        let mut wrong = Vec::new();
+        for (who, caller) in [
+            ("admin by session", Caller::Session(&owned.owner_session)),
+            ("admin by API key", Caller::ApiKey(&owned.owner_api_key)),
+        ] {
+            let (status, body) = owned.send(caller, "GET", "/api/v1/system/health").await;
+            let items = items_of(&body);
+            if status != StatusCode::OK
+                || items.first().map(|i| (&i["source"], &i["checkType"]))
+                    != Some((&serde_json::json!("database"), &serde_json::json!("ok")))
+            {
+                wrong.push(format!(
+                    "{who}: {status} {body:?}, expected 200 with database/ok first"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn admin_health_refuses_a_normal_user_and_a_signed_out_caller() {
+        let owned = ConfiguredApp::new(loaded_config(None), ControlPeers::V4).await;
+        let mut wrong = Vec::new();
+        for (who, caller, expected) in [
+            (
+                "normal user",
+                Caller::Session(&owned.reader_session),
+                StatusCode::FORBIDDEN,
+            ),
+            ("signed out", Caller::SignedOut, StatusCode::UNAUTHORIZED),
+        ] {
+            let (status, body) = owned.send(caller, "GET", "/api/v1/system/health").await;
+            if status != expected {
+                wrong.push(format!("{who}: {status} {body:?}, expected {expected}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn admin_health_shows_the_database_error_and_still_lists_config_warnings() {
+        let config = loaded_config(Some("[server]\ntrusted_proxies = ['nginx']\n"));
+        let owned = ConfiguredApp::new(config, ControlPeers::V4).await;
+        let mut wrong = Vec::new();
+
+        livrarr_db::test_helpers::set_schema_reads_refused(&owned.db, true).await;
+        let refusal = schema_read_error(&owned.db).await;
+        let (me_status, me_body) = owned
+            .send(
+                Caller::Session(&owned.owner_session),
+                "GET",
+                "/api/v1/auth/me",
+            )
+            .await;
+        let (status, body) = owned.admin_health().await;
+        let (public_status, public_body) =
+            owned.send(Caller::SignedOut, "GET", "/api/v1/health").await;
+        livrarr_db::test_helpers::set_schema_reads_refused(&owned.db, false).await;
+        let restored = schema_read_error(&owned.db).await;
+        let (after_status, after_body) = owned.admin_health().await;
+
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|e| e.contains("not authorized")),
+            "control: SQLite refuses the schema read under the fixture, got {refusal:?}"
+        );
+        assert_eq!(
+            me_status,
+            StatusCode::OK,
+            "control: the admin's session still passes the login check under the fixture: {me_body}"
+        );
+        assert_eq!(
+            restored, None,
+            "control: the schema read succeeds after removal"
+        );
+
+        let items = items_of(&body);
+        if status != StatusCode::OK {
+            wrong.push(format!(
+                "admin under refusal: {status} {body:?}, expected 200"
+            ));
+        }
+        match items.first() {
+            Some(first)
+                if first["source"] == "database"
+                    && first["checkType"] == "error"
+                    && first["message"].as_str().is_some_and(|m| {
+                        m.starts_with(DATABASE_FAILED_PREFIX)
+                            && m.len() > DATABASE_FAILED_PREFIX.len()
+                    }) => {}
+            other => wrong.push(format!(
+                "admin under refusal: first item {other:?}, expected database/error \
+                 \"{DATABASE_FAILED_PREFIX}<detail>\""
+            )),
+        }
+        let expected_second = serde_json::json!({
+            "source": "config",
+            "checkType": "warning",
+            "message": proxy_warning("nginx"),
+        });
+        if items.get(1) != Some(&expected_second) {
+            wrong.push(format!(
+                "admin under refusal: second item {:?}, expected {expected_second}",
+                items.get(1)
+            ));
+        }
+        if public_status != StatusCode::SERVICE_UNAVAILABLE
+            || json_of(&public_body) != minimal_failure_body()
+        {
+            wrong.push(format!(
+                "signed out under refusal: {public_status} {public_body}, expected 503 {}",
+                minimal_failure_body()
+            ));
+        }
+        let after = items_of(&after_body);
+        if after_status != StatusCode::OK
+            || after.first().map(|i| &i["checkType"]) != Some(&serde_json::json!("ok"))
+        {
+            wrong.push(format!(
+                "admin after removal: {after_status} {after_body:?}, expected database/ok first"
+            ));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    // REQ-601 to REQ-603, REQ-701: config warnings and trusted proxies.
+
+    /// Every proxy entry shape. `10.0.0.1` comes before both `/0` ranges so a
+    /// request from 10.0.0.1 is matched before either is tried.
+    const EVERY_PROXY_SHAPE: &str = "[server]\ntrusted_proxies = ['', ' 10.0.0.5 ', '10.0.0.1', \
+        '10.0.0.0/8', '::1', 'fd00::/8', '0.0.0.0/0', '::/0', '10.0.0.0/33', 'fd00::/129', \
+        '10.0.0.0/', 'nginx', '10.0.0.1:443', '[::1]:443', '10.0.0.1']\n";
+
+    const REJECTED_PROXY_SHAPES: [&str; 7] = [
+        "",
+        "10.0.0.0/33",
+        "fd00::/129",
+        "10.0.0.0/",
+        "nginx",
+        "10.0.0.1:443",
+        "[::1]:443",
+    ];
+
+    #[tokio::test]
+    async fn every_rejected_proxy_entry_gets_one_warning_row_and_no_accepted_one_does() {
+        let mut expected: Vec<(String, String)> = REJECTED_PROXY_SHAPES
+            .iter()
+            .map(|entry| warning_row(&proxy_warning(entry)))
+            .collect();
+        for (_, message) in &expected {
+            assert_eq!(
+                &livrarr_domain::cleanse_log_line(message),
+                message,
+                "control: the cleanser leaves the warning text unchanged"
+            );
+        }
+        expected.sort();
+
+        let owned = ConfiguredApp::new(
+            loaded_config(Some(EVERY_PROXY_SHAPE)),
+            ControlPeers::Fixed(v4(10, 0, 0, 1)),
+        )
+        .await;
+        let empty = ConfiguredApp::new(
+            loaded_config(Some("[server]\ntrusted_proxies = []\n")),
+            ControlPeers::V4,
+        )
+        .await;
+
+        let mut wrong = Vec::new();
+        let (status, body) = owned.admin_health().await;
+        check_admin_reply_shape(&mut wrong, "every shape", status, &body);
+        let mut rows = config_rows(&body);
+        rows.sort();
+        if rows != expected {
+            wrong.push(format!(
+                "every shape: config rows {rows:#?}\nexpected {expected:#?}"
+            ));
+        }
+        let (status, body) = empty.admin_health().await;
+        check_admin_reply_shape(&mut wrong, "empty list", status, &body);
+        if !config_rows(&body).is_empty() {
+            wrong.push(format!("empty list: config rows in {body}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn config_with_every_proxy_shape_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), EVERY_PROXY_SHAPE).unwrap();
+        let loaded = load_config_from(dir.path());
+        assert!(loaded.is_ok(), "{loaded:?}");
+    }
+
+    #[tokio::test]
+    async fn padded_proxy_entry_is_trusted_and_a_host_name_trusts_nothing() {
+        let config = loaded_config(Some(
+            "[server]\ntrusted_proxies = [' 10.0.0.5 ', 'nginx']\n",
+        ));
+        let mut wrong = Vec::new();
+        expect_bucket(
+            &mut wrong,
+            "peer 10.0.0.5 (padded entry)",
+            &config,
+            v4(10, 0, 0, 5),
+            "x-real-ip",
+            "203.0.113.1",
+            "203.0.113.2",
+            Bucket::Trusted,
+        )
+        .await;
+        expect_bucket(
+            &mut wrong,
+            "peer 10.0.0.9 (control, listed nowhere)",
+            &config,
+            v4(10, 0, 0, 9),
+            "x-real-ip",
+            "203.0.113.1",
+            "203.0.113.2",
+            Bucket::Untrusted,
+        )
+        .await;
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn proxy_warning_stays_until_the_config_is_fixed_and_reloaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[server]\ntrusted_proxies = ['nginx']\n").unwrap();
+        let before = ConfiguredApp::new(
+            load_config_from(dir.path()).expect("config.toml loads"),
+            ControlPeers::V4,
+        )
+        .await;
+        let expected = vec![warning_row(&proxy_warning("nginx"))];
+
+        let mut wrong = Vec::new();
+        for reply in ["first reply", "second reply"] {
+            let (status, body) = before.admin_health().await;
+            check_admin_reply_shape(&mut wrong, reply, status, &body);
+            let rows = config_rows(&body);
+            if rows != expected {
+                wrong.push(format!(
+                    "{reply}: config rows {rows:?}, expected {expected:?}"
+                ));
+            }
+        }
+
+        std::fs::write(&path, "[server]\ntrusted_proxies = []\n").unwrap();
+        let after = ConfiguredApp::new(
+            load_config_from(dir.path()).expect("config.toml loads"),
+            ControlPeers::V4,
+        )
+        .await;
+        let (status, body) = after.admin_health().await;
+        check_admin_reply_shape(&mut wrong, "after restart", status, &body);
+        if !config_rows(&body).is_empty() {
+            wrong.push(format!("after restart: config rows remain in {body}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn admin_health_refuses_a_normal_user_while_warnings_are_configured() {
+        let owned = ConfiguredApp::new(
+            loaded_config(Some(
+                "zz_marker_616 = 1\n[server]\ntrusted_proxies = ['nginx']\n",
+            )),
+            ControlPeers::V4,
+        )
+        .await;
+        let (status, body) = owned
+            .send(
+                Caller::Session(&owned.reader_session),
+                "GET",
+                "/api/v1/system/health",
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body {body:?}");
+        assert!(
+            !body.contains("nginx") && !body.contains("zz_marker_616"),
+            "the refusal carries a warning: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn over_wide_proxy_ranges_are_warned_about_and_trust_nothing() {
+        let mut wrong = Vec::new();
+
+        let config = loaded_config(Some(
+            "[server]\ntrusted_proxies = ['10.0.0.0/33', 'fd00::/129']\n",
+        ));
+        let owned = ConfiguredApp::new(config, ControlPeers::V4).await;
+        let (status, body) = owned.admin_health().await;
+        check_admin_reply_shape(&mut wrong, "over-wide", status, &body);
+        let mut rows = config_rows(&body);
+        rows.sort();
+        let mut expected = vec![
+            warning_row(&proxy_warning("10.0.0.0/33")),
+            warning_row(&proxy_warning("fd00::/129")),
+        ];
+        expected.sort();
+        if rows != expected {
+            wrong.push(format!(
+                "over-wide: config rows {rows:?}, expected {expected:?}"
+            ));
+        }
+        for (label, peer, a, b) in [
+            (
+                "over-wide, peer 10.0.0.0",
+                v4(10, 0, 0, 0),
+                "203.0.113.1",
+                "203.0.113.2",
+            ),
+            (
+                "over-wide, peer fd00::",
+                v6("fd00::"),
+                "2001:db8::1",
+                "2001:db8::2",
+            ),
+        ] {
+            match bucket_test(&owned.app, peer, "x-real-ip", a, b).await {
+                Ok(Bucket::Untrusted) => {}
+                other => wrong.push(format!("{label}: {other:?}, expected Untrusted")),
+            }
+        }
+
+        let control = ConfiguredApp::new(
+            loaded_config(Some(
+                "[server]\ntrusted_proxies = ['10.0.0.0/8', 'fd00::/8']\n",
+            )),
+            ControlPeers::V4,
+        )
+        .await;
+        let (status, body) = control.admin_health().await;
+        check_admin_reply_shape(&mut wrong, "control ranges", status, &body);
+        if !config_rows(&body).is_empty() {
+            wrong.push(format!("control ranges: config rows in {body}"));
+        }
+        for (label, peer, a, b) in [
+            (
+                "control ranges, peer 10.0.0.0",
+                v4(10, 0, 0, 0),
+                "203.0.113.1",
+                "203.0.113.2",
+            ),
+            (
+                "control ranges, peer fd00::",
+                v6("fd00::"),
+                "2001:db8::1",
+                "2001:db8::2",
+            ),
+        ] {
+            match bucket_test(&control.app, peer, "x-real-ip", a, b).await {
+                Ok(Bucket::Trusted) => {}
+                other => wrong.push(format!("{label}: {other:?}, expected Trusted")),
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The admin reply for `config` holds no `config` row.
+    async fn expect_no_config_rows(
+        wrong: &mut Vec<String>,
+        label: &str,
+        config: &AppConfig,
+        peers: ControlPeers,
+    ) {
+        let owned = ConfiguredApp::new(config.clone(), peers).await;
+        let (status, body) = owned.admin_health().await;
+        check_admin_reply_shape(wrong, label, status, &body);
+        if !config_rows(&body).is_empty() {
+            wrong.push(format!("{label}: config rows in {body}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn ipv4_zero_range_trusts_every_ipv4_peer_and_no_ipv6_peer() {
+        let config = loaded_config(Some("[server]\ntrusted_proxies = ['0.0.0.0/0']\n"));
+        let mut wrong = Vec::new();
+        expect_bucket(
+            &mut wrong,
+            "0.0.0.0/0, peer 192.0.2.7",
+            &config,
+            v4(192, 0, 2, 7),
+            "x-real-ip",
+            "203.0.113.1",
+            "203.0.113.2",
+            Bucket::Trusted,
+        )
+        .await;
+        expect_bucket(
+            &mut wrong,
+            "0.0.0.0/0, peer 2001:db8::7",
+            &config,
+            v6("2001:db8::7"),
+            "x-real-ip",
+            "2001:db8::1",
+            "2001:db8::2",
+            Bucket::Untrusted,
+        )
+        .await;
+        expect_no_config_rows(&mut wrong, "0.0.0.0/0", &config, ControlPeers::V6).await;
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn ipv6_zero_range_trusts_every_ipv6_peer_and_no_ipv4_peer() {
+        let config = loaded_config(Some("[server]\ntrusted_proxies = ['::/0']\n"));
+        let mut wrong = Vec::new();
+        expect_bucket(
+            &mut wrong,
+            "::/0, peer 2001:db8::7",
+            &config,
+            v6("2001:db8::7"),
+            "x-real-ip",
+            "2001:db8::1",
+            "2001:db8::2",
+            Bucket::Trusted,
+        )
+        .await;
+        expect_bucket(
+            &mut wrong,
+            "::/0, peer 192.0.2.7",
+            &config,
+            v4(192, 0, 2, 7),
+            "x-real-ip",
+            "203.0.113.1",
+            "203.0.113.2",
+            Bucket::Untrusted,
+        )
+        .await;
+        expect_no_config_rows(&mut wrong, "::/0", &config, ControlPeers::V4).await;
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn zero_range_with_only_forwarded_for_falls_back_to_the_peer() {
+        let mut wrong = Vec::new();
+        for (range, peer, a, b, peers) in [
+            (
+                "0.0.0.0/0",
+                v4(192, 0, 2, 7),
+                "203.0.113.1",
+                "203.0.113.2",
+                ControlPeers::V6,
+            ),
+            (
+                "::/0",
+                v6("2001:db8::7"),
+                "2001:db8::1",
+                "2001:db8::2",
+                ControlPeers::V4,
+            ),
+        ] {
+            let config = loaded_config(Some(&format!("[server]\ntrusted_proxies = ['{range}']\n")));
+            expect_bucket(
+                &mut wrong,
+                &format!("{range}, forwarded-for from {peer}"),
+                &config,
+                peer,
+                "x-forwarded-for",
+                a,
+                b,
+                Bucket::Untrusted,
+            )
+            .await;
+            expect_bucket(
+                &mut wrong,
+                &format!("{range}, X-Real-IP from {peer} (control)"),
+                &config,
+                peer,
+                "x-real-ip",
+                a,
+                b,
+                Bucket::Trusted,
+            )
+            .await;
+            expect_no_config_rows(&mut wrong, range, &config, peers).await;
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn unknown_keys_get_rows_by_name_and_never_show_a_value() {
+        let config = loaded_config(Some(
+            "nginx = 1\n[foo]\n[server]\napi_kye = \"sk-live-ac711Marker\"\n",
+        ));
+        let owned = ConfiguredApp::new(config, ControlPeers::V4).await;
+        let (status, body) = owned.admin_health().await;
+        let mut wrong = Vec::new();
+        check_admin_reply_shape(&mut wrong, "unknown keys", status, &body);
+        let rows = config_rows(&body);
+        for key in ["foo", "nginx", "server.api_kye"] {
+            let row = warning_row(&format!("Unknown config key: {key}"));
+            if !rows.contains(&row) {
+                wrong.push(format!("no row {row:?} in {rows:?}"));
+            }
+        }
+        if body.contains("ac711Marker") {
+            wrong.push(format!("the reply carries the value: {body}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn secret_shaped_unknown_key_name_is_masked_in_its_row() {
+        let key = "x?apikey=ac712Marker";
+        assert!(
+            livrarr_domain::cleanse_log_line(&format!("Unknown config key: {key}"))
+                .contains("[REDACTED]"),
+            "control: the cleanser masks this key name"
+        );
+        let config = loaded_config(Some(&format!("\"{key}\" = 1\n")));
+        let owned = ConfiguredApp::new(config, ControlPeers::V4).await;
+        let (status, body) = owned.admin_health().await;
+        let mut wrong = Vec::new();
+        check_admin_reply_shape(&mut wrong, "secret-shaped key", status, &body);
+        let rows: Vec<_> = config_rows(&body)
+            .into_iter()
+            .filter(|(_, message)| message.starts_with("Unknown config key: x?apikey="))
+            .collect();
+        if rows.len() != 1 || rows[0].0 != "warning" || !rows[0].1.contains("[REDACTED]") {
+            wrong.push(format!(
+                "expected one warning row for the key, masked with [REDACTED]; got {rows:?}"
+            ));
+        }
+        if body.contains("ac712Marker") {
+            wrong.push(format!("the reply carries the secret part: {body}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[tokio::test]
+    async fn without_config_toml_the_admin_list_holds_only_the_database_item() {
+        let owned = ConfiguredApp::new(loaded_config(None), ControlPeers::V4).await;
+        let (status, body) = owned.admin_health().await;
+        let items = items_of(&body);
+        assert_eq!(status, StatusCode::OK, "body {body:?}");
+        assert_eq!(items.len(), 1, "only the database item: {body}");
+        assert_eq!(items[0]["source"], "database", "{body}");
+    }
+
+    #[tokio::test]
+    async fn shared_database_check_reports_a_closed_pool_with_its_detail() {
+        let (state, _tmp) = test_app_state_with_setup_token(KNOWN_SETUP_TOKEN).await;
+        state.db.pool().close().await;
+        assert!(state.db.pool().is_closed(), "control: the pool is closed");
+
+        let item = livrarr_handlers::system::database_check(&state).await;
+
+        assert_eq!(item.source, "database");
+        assert_eq!(item.check_type, livrarr_domain::HealthCheckType::Error);
+        assert!(
+            item.message.starts_with(DATABASE_FAILED_PREFIX)
+                && item.message.len() > DATABASE_FAILED_PREFIX.len(),
+            "expected \"{DATABASE_FAILED_PREFIX}<detail>\", got {:?}",
+            item.message
+        );
     }
 }

@@ -183,7 +183,7 @@ The only file-level config is `config.toml` in the data directory:
 [server]
 bind_address = "0.0.0.0"  # default
 port = 8789                # default
-trusted_proxies = []       # default; e.g. ["10.0.0.0/8"]. Per-IP rate limits trust X-Real-IP / X-Forwarded-For only from these addresses.
+trusted_proxies = []       # default; e.g. ["10.0.0.0/8"]. Per-IP rate limits trust X-Real-IP / X-Forwarded-For only from these addresses. An entry that is not an IP address or range (a host name, a port, a prefix above /32 or /128) is ignored and reported as a warning in the log and on System > Status.
 # url_base: serving Livrarr under a sub-path (e.g. "/livrarr") is not supported yet. The key is accepted and has no effect.
 
 [log]
@@ -242,6 +242,8 @@ services:
 - Library root folders and download paths must be accessible inside the container
 - Remote path mappings (Settings > Download Clients) are needed if the download client and Livrarr see different mount paths for the same files
 - Log file is written to `{data_dir}/logs/livrarr.log.<YYYY-MM-DD>`, a new file each day
+- After each change of day Livrarr keeps today's log file and the 30 most recent earlier files, and after a restart later the same day it keeps today's file and the 29 most recent earlier ones, ordered by file creation time and counting every file whose name starts with `livrarr.log` (so an old undated `livrarr.log` is deleted like a dated one); days Livrarr did not run leave no file and use none of the 30
+- The image's health check calls `http://127.0.0.1:8789/api/v1/health` inside the container, so if you change `port`, or set `bind_address` to one specific address, override the health check (in compose, with your own `healthcheck` block) to use the new address
 
 ## File Organization
 
@@ -376,7 +378,8 @@ REST API at `/api/v1/`. Authenticate with an `X-Api-Key: <key>` header, or with 
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/health` | GET | No | Health check |
+| `/health` | GET | No | Health check: reads the database within 2 seconds; 200 with `database` / `ok`, or 503 with `database` / `error` and the message "database check failed" |
+| `/system/health` | GET | Admin | Health Checks list on System > Status: the database check with its failure detail, then config warnings (ignored `trusted_proxies` entries, unknown config keys) |
 | `/system/status` | GET | Admin | Version, OS, uptime, DB path |
 | `/system/logs/tail?lines=N` | GET | Admin | Recent log lines |
 | `/system/logs/level` | PUT | Admin | Change runtime log level |

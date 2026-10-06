@@ -85,8 +85,7 @@ export function useStreamUrl(
       controller.dispose();
       controllerRef.current = null;
     };
-    // audioRef is a stable ref object; mint/buildUrl close over libraryItemId
-    // directly, so it is the only real dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- audioRef is a ref object; libraryItemId is the only real dependency
   }, [libraryItemId]);
 
   const handleMediaError = useCallback(() => {

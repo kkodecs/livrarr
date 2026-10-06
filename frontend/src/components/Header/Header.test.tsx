@@ -435,3 +435,110 @@ describe("Header search: the saved language list changes after a language was ch
     });
   }
 });
+
+/** The phone search overlay: the header's direct child that holds a search form. */
+const mobileOverlay = (header: Element) =>
+  Array.from(header.children).find(
+    (el) => el.tagName === "DIV" && el.querySelector("form") !== null,
+  ) ?? null;
+
+/** Language names offered in the phone overlay's language list (outside its form). */
+function mobileListLanguages(header: Element): string[] {
+  const overlay = mobileOverlay(header);
+  if (!overlay) return [];
+  const form = overlay.querySelector("form")!;
+  const texts = Array.from(overlay.querySelectorAll("button"))
+    .filter((b) => !form.contains(b))
+    .map((b) => b.textContent ?? "");
+  return SUPPORTED_LANGUAGES.filter((l) =>
+    texts.some((t) => t.includes(l.englishName)),
+  ).map((l) => l.englishName);
+}
+
+/** A tap on a phone: `mousedown`, then `click`, on the same element. */
+async function tap(el: Element) {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  });
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+async function click(el: Element) {
+  await act(async () => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+}
+
+describe("Header search on a phone: the language list after closing and reopening search", () => {
+  it("open search, open the language list, close with X, tap the search button: the language list is closed", async () => {
+    signIn("user");
+    const api = headerApi("user", () => languages(["en", "fr"]), ["en", "fr"]);
+    const mounted = mountHeader(api);
+    restore = mounted.cleanup;
+
+    await vi.waitFor(() => expect(languageRouteReads(api.calls)).toBe(1));
+    await settle();
+    const header = mounted.header();
+    const searchButton = header.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search"]',
+    )!;
+
+    // Open search.
+    await tap(searchButton);
+    const overlay = mobileOverlay(header);
+    expect(overlay).not.toBeNull();
+
+    // Open the language list from the overlay's picker.
+    const overlayPicker = overlay!
+      .querySelector("form")!
+      .querySelector<HTMLButtonElement>('button[type="button"]')!;
+    await click(overlayPicker);
+    // Control: the overlay shows the language list.
+    expect(mobileListLanguages(header)).toEqual(["English", "French"]);
+
+    // Close search with X: the overlay form's last button.
+    const formButtons = overlay!
+      .querySelector("form")!
+      .querySelectorAll<HTMLButtonElement>('button[type="button"]');
+    await click(formButtons[formButtons.length - 1]!);
+    // Control: the overlay is gone.
+    expect(mobileOverlay(header)).toBeNull();
+
+    // Reopen search with a tap on the search button.
+    await tap(searchButton);
+    // Control: the overlay is back.
+    expect(mobileOverlay(header)).not.toBeNull();
+
+    expect(mobileListLanguages(header)).toEqual([]);
+  });
+});
+
+describe("Header search on the desktop: click outside the language list", () => {
+  it("an open language list closes on a mousedown outside it", async () => {
+    signIn("user");
+    const api = headerApi("user", () => languages(["en", "fr"]), ["en", "fr"]);
+    const mounted = mountHeader(api);
+    restore = mounted.cleanup;
+
+    await vi.waitFor(() => expect(languageRouteReads(api.calls)).toBe(1));
+    await settle();
+    const header = mounted.header();
+    const trigger = pickerTrigger(header)!;
+    const options = () =>
+      Array.from(
+        searchForm(header).querySelectorAll<HTMLButtonElement>('button[type="button"]'),
+      ).filter((b) => b !== trigger).length;
+
+    await click(trigger);
+    // Control: the list is open with one option per language.
+    expect(options()).toBe(2);
+
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(options()).toBe(0);
+  });
+});

@@ -43,6 +43,7 @@ const ADMIN_ONLY = new Set([
   "/config/email",
   "/config/metadata",
   "/system/status",
+  "/system/health",
   "/system/health-summary",
   "/system/logs/tail",
   "/import/readarr/origin",
@@ -99,6 +100,12 @@ const ADMIN_REPLIES: Record<string, StubReply> = {
       logLevel: "info",
       rssBytes: null,
     },
+  },
+  "/system/health": {
+    status: 200,
+    body: [
+      { source: "database", checkType: "ok", message: "database is reachable" },
+    ],
   },
   "/system/health-summary": {
     status: 200,
@@ -320,7 +327,7 @@ const ADMIN_PAGES: Array<{ path: string; heading: string; adminCalls: string[] }
   {
     path: "/system/status",
     heading: "Status",
-    adminCalls: ["/system/status", "/system/health-summary"],
+    adminCalls: ["/system/status", "/system/health", "/system/health-summary"],
   },
   {
     path: "/system/logs",
