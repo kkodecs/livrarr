@@ -160,6 +160,7 @@ need both a theme entry and a short index link. Feature progress belongs in buil
 - [105. Finish SQLite fixture setup before pausing Tokio time](insights/tests-and-fixtures.md#lesson-105)
 - [108. Strip colour codes before searching the live log](insights/tests-and-fixtures.md#lesson-108)
 - [109. A passing connection test writes no log line](insights/tests-and-fixtures.md#lesson-109)
+- [112. A new web call needs every whole-app test stub that renders its page](insights/tests-and-fixtures.md#lesson-112)
 
 ## Source and history
 

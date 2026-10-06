@@ -7,7 +7,8 @@ They cover failures hidden behind the first failing binary ([34](#lesson-34)), t
 registered but never tracked or run ([65](#lesson-65)), tracing capture in tests
 ([83](#lesson-83)), fixture timing ([105](#lesson-105)), and two traps when reading the live log:
 colour codes hide matches from a plain search ([108](#lesson-108)), and a passing connection
-test writes nothing, so a clean log proves little ([109](#lesson-109)).
+test writes nothing, so a clean log proves little ([109](#lesson-109)). A new web call must be
+added to every whole-app test stub that renders its page, or that file times out ([112](#lesson-112)).
 
 Current guidance with links to the full dated evidence. Read implementation claims
 against the named source revision; accepted design is not proof of runtime behavior.
@@ -199,6 +200,26 @@ showed only that routine running leaks nothing
 To apply: to see masking work live, use a flow that logs the secret-bearing text (for example the
 AI connection test with a key the provider refuses), or rely on the binary tests that drive each
 flow and read every sink ([log redaction](../patterns/log-redaction.md#testing-a-change)).
+
+<a id="lesson-112"></a>
+## 112. A new web call needs every whole-app test stub that renders its page
+
+`frontend/src/App.routes.test.tsx` renders the whole app per role with only `fetch` stubbed. Its
+stub answers any path it does not know with 404 "unstubbed" (`App.routes.test.tsx:147-150`). A page
+whose new call gets that 404 shows its error screen instead of its heading, and the case waits for
+the heading until the 5-second test timeout. The query client retries once first
+(`frontend/src/App.tsx:76`), so the failure is a timeout, not an error naming the path.
+
+Why it matters: after operations-hygiene moved System → Status to the new admin route
+`/system/health`, 8 cases in that file timed out, deterministically when the file ran alone. Only
+the Status case was broken; the others failed behind the hung one and passed alone
+(`build/reviews/operations-hygiene/packet-5-knockon-tests/HANDBACK.md`).
+
+To apply: when a page gains a web call, add it to every whole-app stub that renders that page. In
+`App.routes.test.tsx` an admin-only route goes in `ADMIN_ONLY` (`:38-50`), gets a reply in
+`ADMIN_REPLIES` (`/system/health` at `:104-109`), and joins the page's `adminCalls` (`:330`), which
+also checks that a normal user never sends it. Run the whole frontend suite, not only the page's own
+test file, before calling the change green.
 
 ## Source and history
 

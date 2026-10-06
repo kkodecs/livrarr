@@ -10,6 +10,9 @@
 - *(library)* "Delete File" on a book's files tab now deletes the file from disk, not just Livrarr's record; if the file cannot be removed, the record stays and the error says why
 - *(setup)* A fresh install asks for a one-time setup token before it creates the first account, so a stranger who reaches the port first cannot take it over; the token is printed when Livrarr starts (`docker logs livrarr`) and saved as `setup-token` in the config folder, and it stops working once setup succeeds
 - *(settings)* Settings → Metadata has a Test button for Hardcover, Audnexus and the AI connection; each tests the saved settings, and with unsaved changes it asks you to save first. The page locks its controls while a save runs, and a background reload can no longer undo a save
+- *(status)* System → Status lists config warnings as amber rows: each `[server] trusted_proxies` entry that is ignored (a host name, a port, or a range wider than the address) and each unknown key in `config.toml`, by name only, never its value. A row stays until the file is fixed and Livrarr is restarted
+- *(logs)* Log files are capped: Livrarr keeps today's file and the 30 most recent earlier ones, so the log folder no longer grows forever
+- *(docker)* The Docker image has its own health check, so `docker run`, Unraid and other setups without our compose file show healthy or unhealthy; it arrives with the next release image. If you change `[server] port`, or bind to one specific address, inside the container, set your own `healthcheck` to match
 
 ### 🐛 Bug Fixes
 
@@ -47,6 +50,14 @@
 - *(ui)* Normal (non-admin) users no longer see Manual Import, Readarr Import, Media Management, Status, Logs or the "Configure path mapping" link, which only admins can use; Settings opens on UI for them
 - *(search)* Add New and the header search show every user the languages the admin enabled, instead of English only for normal users
 - *(auth)* The server requires passwords of at least 8 characters, as the forms already said; existing shorter passwords still sign in
+- *(health)* The health check (`/api/v1/health`) now reads the database and answers 503 "database check failed" when it cannot within 2 seconds, so Docker and uptime monitors see a real failure; before, it always said the database was reachable
+- *(config)* A `trusted_proxies` range ending in `/0` (`0.0.0.0/0` or `::/0`) now trusts every address of its kind, instead of crashing a development build
+- *(search)* On a phone, the search language list is closed when you reopen search, instead of still being open from last time
+
+### ⚙️ Miscellaneous Tasks
+
+- *(ci)* CI builds the Docker image on every push to main, except pushes that change only documentation
+- *(lint)* Frontend lint works again with the React hooks rules and fails on any warning
 
 ## [0.1.0-alpha6] - 2026-07-18
 

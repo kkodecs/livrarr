@@ -268,6 +268,26 @@ to 28); that is the failure this rule prevents.
   on more than one reply lists the racing-replies rule among its retro rules, as it lists the others.
   The silent-failures-2 lesson was already here; the packet left it out and the class came back.
 
+## Lessons (from operations-hygiene retro, 2026-10-06; PO-approved)
+
+- **Every acceptance criterion names one plausible wrong fix that fails it.** Naming the real entry
+  is not enough. For each criterion the spec seat writes the most likely wrong fix (it works below
+  the entry, skips the step that matters, or matches too widely) and says which assertion catches
+  it. Eight of the cycle's thirteen P2 findings were criteria a wrong fix still passed, although the
+  packet had asked for the real entry (`build/state/retro-operations-hygiene.md`).
+- **The spec names every new function a test must call, with its crate, file and signature.** When
+  a requirement adds behaviour behind a function that does not exist yet, the test seat needs that
+  name to write red tests. Both test seats blocked on it (the log file setup and the config loader
+  that lived in the binary), and each cost a PM decision and an allowed test edit at code time.
+- **When a page gains a server call, the code packet lists every test file that mounts the page.**
+  Find them by searching the tests for the page's route; each one's fetch stub must answer the new
+  call. The Status page's new health call broke eight tests in the whole-app routing file
+  (`wiki/insights/tests-and-fixtures.md`, lesson 112).
+- **Every packet walks the full retro-rules checklist.** Spec, fold, tests and code packets include
+  the output of `python3 build/ops/retro-rules/checklist.py` and mark each rule "applies" (with how)
+  or "not applicable" (with why). The PM does not pick rules from memory: the fold for trust-all
+  proxy ranges left out the nearest-neighbour rule above, and review found exactly that gap.
+
 ## Communication with the user — speak in simple English (PERMANENT)
 Speak to the user in simple, plain English. Confusing them is counterproductive and a
 failure, no matter how correct the content. Do NOT make the user parse implementation

@@ -2,7 +2,18 @@
 
 ## Executive summary
 
-This log records wiki updates and their evidence. The [latest entry](#2026-10-06--settings-pages-menu-roles-and-two-ui-lessons) adds the settings-pages page, the menu and role rules in the UI page, and two lessons from settings-honesty. The [2026-10-05 entry](#2026-10-05--log-redaction-readarr-undo-and-retry-client) adds the log-redaction page and two live-log lessons from security-before-release. The [2026-10-04 entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+This log records wiki updates and their evidence. The [latest entry](#2026-10-06--health-checks-config-warnings-and-log-files) adds the health, config-warnings and log-retention page and one testing lesson from operations-hygiene. The [earlier 2026-10-06 entry](#2026-10-06--settings-pages-menu-roles-and-two-ui-lessons) adds the settings-pages page, the menu and role rules in the UI page, and two lessons from settings-honesty. The [2026-10-05 entry](#2026-10-05--log-redaction-readarr-undo-and-retry-client) adds the log-redaction page and two live-log lessons from security-before-release. The [2026-10-04 entry](#2026-10-04--saved-place-sonner-timing-and-query-error-state) adds the readers' saved-place page and two lessons from silent-failures-2. The [2026-09-26 entry](#2026-09-26--branch-documentation-brought-to-main-and-five-pages-hand-merged) records the September 2026 wiki cleanup arriving on main and the hand merge of five pages; the [2026-09-07 entry](#2026-09-07--temporary-merge-containment) is main's own record of the merge containment. Earlier entries retain their original findings and dates.
+
+## 2026-10-06 — Health checks, config warnings and log files
+
+From operations-hygiene (`25ca4f30`): a new page,
+[health checks, config warnings and log files](deployment/health-logs-and-config.md), records the
+public and admin health replies, the 2-second database check and what it cannot detect on SQLite,
+the image's health check and its fixed address, where config warnings are built and that they change
+only after a restart, the trusted-proxy parser rules and the `X-Forwarded-For` fallback left as is,
+and log retention by file count and creation time. [Lesson 112](insights/tests-and-fixtures.md#lesson-112)
+records the whole-app test stub that timed out when System → Status gained a web call. Source:
+`spec-operations-hygiene.md` v4.
 
 ## 2026-10-06 — Settings pages, menu roles and two UI lessons
 

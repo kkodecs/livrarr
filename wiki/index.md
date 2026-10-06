@@ -34,6 +34,7 @@ today's main are different baselines. Current work and acceptance belong in
 | How is deployment configured? | [Container permissions](deployment/container-permissions.md), [key decisions](decisions/key-decisions.md) |
 | What happens when an alpha6 library is upgraded, and how do I roll back? | [Upgrading from alpha6](deployment/upgrading.md) |
 | How does a fresh install's first account get created safely? | [First-run setup token](deployment/first-run-setup.md) |
+| What does the health check prove, where do config warnings show, and how long are logs kept? | [Health checks, config warnings and log files](deployment/health-logs-and-config.md) |
 | What was decided about merging duplicate Works? | [Decisions](#decisions) below |
 
 Further record references: [Release](domain/release.md), [Grab](domain/grab.md),
@@ -77,7 +78,7 @@ every correction and amendment, lives in these theme pages.
 - Domain: [BIG7](domain/big7.md), [metadata principles](domain/metadata-principles.md), [Work](domain/work.md), [Author](domain/author.md), [Series](domain/series.md), [Release](domain/release.md), [Grab](domain/grab.md), [LibraryItem](domain/library-item.md), [List](domain/list.md), [cross-format resume](domain/cross-format-resume.md), [saved place](domain/saved-place.md), [metadata sources](domain/metadata-sources.md), [enrichment priorities](domain/enrichment-priorities.md), [search-result metadata](domain/search-result-metadata.md)
 - Crates: [domain](crates/domain.md), [db](crates/db.md), [handlers](crates/handlers.md), [server](crates/server.md)
 - Integrations: [OpenLibrary](integrations/openlibrary.md), [Google Books](integrations/google-books.md), [Hardcover](integrations/hardcover.md), [Audnexus](integrations/audnexus.md), [Goodreads](integrations/goodreads.md)
-- Deployment: [container permissions](deployment/container-permissions.md), [upgrading from alpha6](deployment/upgrading.md), [first-run setup token](deployment/first-run-setup.md), [document site](deployment/document-site.md)
+- Deployment: [container permissions](deployment/container-permissions.md), [upgrading from alpha6](deployment/upgrading.md), [first-run setup token](deployment/first-run-setup.md), [health checks, config warnings and log files](deployment/health-logs-and-config.md), [document site](deployment/document-site.md)
 - Quick reference: [lesson index](insights.md), [change log](log.md)
 
 ## Maintaining this wiki
