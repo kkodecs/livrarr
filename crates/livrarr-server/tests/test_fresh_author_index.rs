@@ -78,6 +78,18 @@ impl Server {
         config: impl FnOnce(u16) -> String,
         no_proxy: &str,
     ) -> Self {
+        Self::launch_with_env(data, log, config, no_proxy, &[]).await
+    }
+
+    /// Starts the binary as `launch` does, then sets each `env` pair in its
+    /// environment, after (and so over) the harness's proxy settings.
+    async fn launch_with_env(
+        data: &Path,
+        log: PathBuf,
+        config: impl FnOnce(u16) -> String,
+        no_proxy: &str,
+        env: &[(&str, String)],
+    ) -> Self {
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind local unavailable-provider fixture");
@@ -107,7 +119,8 @@ impl Server {
             .env("HTTP_PROXY", &proxy_url)
             .env("HTTPS_PROXY", &proxy_url)
             .env("ALL_PROXY", &proxy_url)
-            .env("NO_PROXY", no_proxy);
+            .env("NO_PROXY", no_proxy)
+            .envs(env.iter().map(|(key, value)| (key, value)));
         // A coverage run's profile destination is the only inherited setting.
         if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
             command.env("LLVM_PROFILE_FILE", profile);
@@ -4028,4 +4041,864 @@ async fn no_secret_reaches_a_text_log_sink_in_the_flows_that_handle_one() {
 #[tokio::test]
 async fn no_secret_reaches_a_json_log_sink_in_the_flows_that_handle_one() {
     no_secret_reaches_a_log_sink(LogFormat::Json).await;
+}
+
+// ---------------------------------------------------------------------------
+// Trace switch through the built binary
+// ---------------------------------------------------------------------------
+
+/// The query-string value sent with the traced request.
+const TRACE_SECRET: &str = "sk-trace-ac901Marker";
+/// The Work id in the traced request's path.
+const TRACE_ID: &str = "987654321";
+/// The route template of the traced request.
+const TRACE_ROUTE: &str = "/api/v1/work/{id}";
+
+/// The loopback address fake collectors listen on. It differs from the
+/// harness servers' `127.0.0.1`, so a collector never holds a port a server
+/// was given and a server's address never reaches a collector.
+const COLLECTOR_HOST: &str = "127.0.0.2";
+
+/// One span as a fake collector decoded it from an OTLP export.
+#[derive(Debug)]
+struct RecordedSpan {
+    service: Option<String>,
+    name: String,
+    attributes: BTreeMap<String, Value>,
+    start: u64,
+    end: u64,
+}
+
+/// A fake OTLP-over-HTTP trace collector on a random local port. It counts the
+/// connections it accepts, keeps the body of every `POST /v1/traces` and
+/// answers it with 200 after `delay`; any other request gets 404, so a test
+/// server that lands on a released port is never mistaken for a ready one.
+struct Collector {
+    endpoint: String,
+    connections: Arc<std::sync::atomic::AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+    headers: Arc<Mutex<Vec<String>>>,
+    reply: Arc<Mutex<ViewerReply>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// How a fake collector answers an export after `delay`.
+#[derive(Clone, Copy, Debug)]
+enum ViewerReply {
+    /// 200 with an empty body: every span accepted.
+    Accept,
+    /// 200 with an `ExportTraceServiceResponse` rejecting one span.
+    Reject,
+    /// 200 announcing a 4-byte body that never arrives.
+    Stall,
+    /// 200 announcing a 4-byte body, then 2 bytes, a pause and the end of the body.
+    Truncate,
+    /// 200 with a 4-byte acceptance (`rejected_spans: 0`) sent one byte every
+    /// 3 seconds.
+    Trickle,
+}
+
+impl ViewerReply {
+    fn response(self) -> axum::response::Response {
+        use axum::body::Body;
+        use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+        let builder = axum::response::Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/x-protobuf");
+        match self {
+            ViewerReply::Accept => builder.body(Body::empty()),
+            // partial_success { rejected_spans: 1 }
+            ViewerReply::Reject => builder.body(Body::from(vec![0x0a, 0x02, 0x08, 0x01])),
+            ViewerReply::Stall => builder.header(CONTENT_LENGTH, "4").body(Body::from_stream(
+                futures::stream::pending::<Result<Vec<u8>, std::io::Error>>(),
+            )),
+            ViewerReply::Truncate => {
+                use futures::StreamExt;
+                // The pause lets the first bytes reach the wire before the
+                // body ends short of its announced length.
+                let pause = futures::stream::once(tokio::time::sleep(Duration::from_millis(200)))
+                    .filter_map(|()| async { None::<Result<Vec<u8>, std::io::Error>> });
+                let first = futures::stream::iter([Ok::<_, std::io::Error>(vec![0x0a, 0x02])]);
+                builder
+                    .header(CONTENT_LENGTH, "4")
+                    .body(Body::from_stream(first.chain(pause)))
+            }
+            ViewerReply::Trickle => {
+                use futures::StreamExt;
+                let bytes =
+                    futures::stream::iter([0x0a_u8, 0x02, 0x08, 0x00]).then(|byte| async move {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        Ok::<_, std::io::Error>(vec![byte])
+                    });
+                builder
+                    .header(CONTENT_LENGTH, "4")
+                    .body(Body::from_stream(bytes))
+            }
+        }
+        .unwrap()
+    }
+}
+
+impl Collector {
+    async fn start(delay: Duration) -> Self {
+        Self::start_on(&format!("{COLLECTOR_HOST}:0"), delay).await
+    }
+
+    /// Starts the collector on `address`.
+    async fn start_on(address: &str, delay: Duration) -> Self {
+        Self::start_replying(address, delay, ViewerReply::Accept).await
+    }
+
+    /// Starts the collector on `address`, answering exports with `reply`.
+    async fn start_replying(address: &str, delay: Duration, reply: ViewerReply) -> Self {
+        use axum::serve::ListenerExt;
+        let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bodies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let headers: Arc<Mutex<Vec<String>>> = Arc::default();
+        let counted = connections.clone();
+        let sink = bodies.clone();
+        let header_sink = headers.clone();
+        let reply = Arc::new(Mutex::new(reply));
+        let current = reply.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/traces",
+                axum::routing::post(move |map: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let sink = sink.clone();
+                    let header_sink = header_sink.clone();
+                    let current = *current.lock().unwrap();
+                    async move {
+                        header_sink
+                            .lock()
+                            .unwrap()
+                            .extend(map.iter().map(|(name, value)| {
+                                format!("{name}: {}", String::from_utf8_lossy(value.as_bytes()))
+                            }));
+                        sink.lock().unwrap().push(body.to_vec());
+                        tokio::time::sleep(delay).await;
+                        current.response()
+                    }
+                }),
+            )
+            .fallback(|| async { StatusCode::NOT_FOUND });
+        let listener = listener.tap_io(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve fake collector");
+        });
+        Self {
+            endpoint,
+            connections,
+            bodies,
+            headers,
+            reply,
+            task,
+        }
+    }
+
+    /// Answers later exports with `reply`.
+    fn set_reply(&self, reply: ViewerReply) {
+        *self.reply.lock().unwrap() = reply;
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Every header of every received export, as lowercase `name: value` lines.
+    fn header_lines(&self) -> Vec<String> {
+        self.headers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| line.to_lowercase())
+            .collect()
+    }
+
+    /// Every received body, decoded as lossy UTF-8 text.
+    fn text(&self) -> String {
+        self.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|body| String::from_utf8_lossy(body).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every span in every received body.
+    fn spans(&self) -> Vec<RecordedSpan> {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value as Any;
+        use prost::Message;
+        fn value(any: Option<&opentelemetry_proto::tonic::common::v1::AnyValue>) -> Value {
+            match any.and_then(|any| any.value.as_ref()) {
+                Some(Any::StringValue(text)) => Value::from(text.as_str()),
+                Some(Any::IntValue(number)) => Value::from(*number),
+                other => Value::from(format!("{other:?}")),
+            }
+        }
+        let mut spans = Vec::new();
+        for body in self.bodies.lock().unwrap().iter() {
+            let request = ExportTraceServiceRequest::decode(body.as_slice())
+                .expect("the collector receives OTLP protobuf");
+            for resource_spans in request.resource_spans {
+                let service = resource_spans.resource.as_ref().and_then(|resource| {
+                    resource
+                        .attributes
+                        .iter()
+                        .find(|kv| kv.key == "service.name")
+                        .and_then(|kv| value(kv.value.as_ref()).as_str().map(str::to_owned))
+                });
+                for scope in resource_spans.scope_spans {
+                    for span in scope.spans {
+                        spans.push(RecordedSpan {
+                            service: service.clone(),
+                            name: span.name,
+                            attributes: span
+                                .attributes
+                                .iter()
+                                .map(|kv| (kv.key.clone(), value(kv.value.as_ref())))
+                                .collect(),
+                            start: span.start_time_unix_nano,
+                            end: span.end_time_unix_nano,
+                        });
+                    }
+                }
+            }
+        }
+        spans
+    }
+
+    /// Waits until a span for `route` arrives or `within` passes, then a
+    /// further second for any later export, and returns every span.
+    async fn spans_after_route(&self, route: &str, within: Duration) -> Vec<RecordedSpan> {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline
+            && !self
+                .spans()
+                .iter()
+                .any(|span| span.attributes.get("http.route") == Some(&Value::from(route)))
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.spans()
+    }
+}
+
+impl Drop for Collector {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// The harness config with `trace_line` added to the `[log]` section.
+fn trace_config(port: u16, trace_line: &str) -> String {
+    format!(
+        "[server]\nbind_address = '127.0.0.1'\nport = {port}\n\
+         [log]\nlevel = 'info'\n{trace_line}\n\
+         [convergence]\nenabled = false\n\
+         [author_link]\nenabled = false\n"
+    )
+}
+
+/// Starts the binary with `trace_line` in `[log]`; local addresses, including
+/// `COLLECTOR_HOST`, bypass the refusing proxy so the exporter can reach a
+/// fake collector.
+async fn ready_with_trace(name: &str, trace_line: String) -> (Server, TempDir) {
+    ready_with_trace_env(name, trace_line, &[]).await
+}
+
+/// Starts the binary as `ready_with_trace` does, with `env` set on purpose.
+async fn ready_with_trace_env(
+    name: &str,
+    trace_line: String,
+    env: &[(&str, String)],
+) -> (Server, TempDir) {
+    let data = TempDir::new().unwrap();
+    let mut server = Server::launch_with_env(
+        data.path(),
+        data.path().join(name),
+        move |port| trace_config(port, &trace_line),
+        &format!("localhost,127.0.0.1,{COLLECTOR_HOST}"),
+        env,
+    )
+    .await;
+    server.ready(&client()).await;
+    (server, data)
+}
+
+/// `GET /work/{TRACE_ID}?apikey={TRACE_SECRET}` as the signed-in user.
+async fn traced_request(server: &Server, client: &Client, token: &str) -> StatusCode {
+    api(
+        server,
+        client,
+        token,
+        reqwest::Method::GET,
+        &format!("/work/{TRACE_ID}?apikey={TRACE_SECRET}"),
+        None,
+    )
+    .await
+    .0
+}
+
+/// The names of the server's threads that belong to a trace exporter: the
+/// batch span processor and the blocking HTTP client's runtime. Linux only;
+/// elsewhere the list is empty.
+fn exporter_threads(server: &Server) -> Vec<String> {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{}/task", server.child.id())) else {
+        return Vec::new();
+    };
+    tasks
+        .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| name.starts_with("OpenTelemetry") || name.starts_with("reqwest-interna"))
+        .collect()
+}
+
+/// The first words of the warning logged when an export to the viewer fails.
+const EXPORT_FAILED: &str = "Request tracing: cannot send traces";
+/// The first words of the line logged when exports to the viewer work again.
+const EXPORT_RECOVERED: &str = "Request tracing: sending traces again";
+
+/// The log lines that contain `marker` at `level` (` WARN `, ` INFO `).
+fn log_lines_with(server: &Server, level: &str, marker: &str) -> Vec<String> {
+    strip_ansi(&server.logs())
+        .lines()
+        .filter(|line| line.contains(marker) && line.contains(level))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Waits until a `level` line containing `marker` is logged or `within` passes.
+async fn wait_for_log(server: &Server, level: &str, marker: &str, within: Duration) {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline && log_lines_with(server, level, marker).is_empty() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The log lines that mention the trace exporter library.
+fn exporter_log_lines(server: &Server) -> Vec<String> {
+    strip_ansi(&server.logs())
+        .lines()
+        .filter(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("opentelemetry") || lower.contains("otlp")
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn trace_endpoint_sends_one_span_per_request_named_for_the_route_template() {
+    let collector = Collector::start(Duration::ZERO).await;
+    let (mut server, _data) = ready_with_trace(
+        "trace-on.log",
+        format!("trace_endpoint = '{}'", collector.endpoint),
+    )
+    .await;
+    let client = client();
+    let (token, api_key) = setup_owner(&server, &client).await;
+    let status = traced_request(&server, &client, &token).await;
+    let (_, health) = api(
+        &server,
+        &client,
+        &token,
+        reqwest::Method::GET,
+        "/system/health",
+        None,
+    )
+    .await;
+    let spans = collector
+        .spans_after_route(TRACE_ROUTE, Duration::from_secs(15))
+        .await;
+    let threads = exporter_threads(&server);
+    server.stop();
+
+    let mut findings = Findings::default();
+    let route_spans: Vec<&RecordedSpan> = spans
+        .iter()
+        .filter(|span| span.attributes.get("http.route") == Some(&Value::from(TRACE_ROUTE)))
+        .collect();
+    findings.check(route_spans.len() == 1, || {
+        format!(
+            "one span for the request to /work/{TRACE_ID}; got {} among {} spans: {spans:#?}\n{}",
+            route_spans.len(),
+            spans.len(),
+            server.logs()
+        )
+    });
+    if let [span] = route_spans[..] {
+        findings.check(span.name == format!("GET {TRACE_ROUTE}"), || {
+            format!(
+                "span named for method and route template; got {:?}",
+                span.name
+            )
+        });
+        let expected: BTreeMap<String, Value> = [
+            ("http.request.method", Value::from("GET")),
+            ("http.route", Value::from(TRACE_ROUTE)),
+            (
+                "http.response.status_code",
+                Value::from(i64::from(status.as_u16())),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+        findings.check(span.attributes == expected, || {
+            format!(
+                "the span records method, route and status only; got {:?}",
+                span.attributes
+            )
+        });
+        findings.check(span.start > 0 && span.end >= span.start, || {
+            format!("the span carries its duration; got {span:?}")
+        });
+        findings.check(span.service.as_deref() == Some("livrarr"), || {
+            format!("service name livrarr; got {:?}", span.service)
+        });
+    }
+    let sent = collector.text();
+    for (label, value) in [
+        ("query-string secret", TRACE_SECRET),
+        ("raw id path", "/work/987654321"),
+        ("raw id", TRACE_ID),
+        ("session token", token.as_str()),
+        ("API key", api_key.as_str()),
+    ] {
+        findings.check(!sent.contains(value), || {
+            format!("the exported bytes carry the {label} {value:?}")
+        });
+    }
+    findings.check(config_warning_messages(&health).is_empty(), || {
+        format!("trace_endpoint is a known key and gives no config warning; got {health}")
+    });
+    if cfg!(target_os = "linux") {
+        findings.check(!threads.is_empty(), || {
+            "control: the exporter's threads run while tracing is on".to_owned()
+        });
+    }
+    findings.finish("trace switch on");
+}
+
+#[tokio::test]
+async fn trace_endpoint_missing_or_empty_sends_nothing_and_starts_no_exporter() {
+    for (label, trace_line) in [("missing", ""), ("empty", "trace_endpoint = ''")] {
+        let collector = Collector::start(Duration::ZERO).await;
+        let (mut server, _data) =
+            ready_with_trace(&format!("trace-{label}.log"), trace_line.to_owned()).await;
+        let client = client();
+        let (token, _) = setup_owner(&server, &client).await;
+        traced_request(&server, &client, &token).await;
+        let (_, health) = api(
+            &server,
+            &client,
+            &token,
+            reqwest::Method::GET,
+            "/system/health",
+            None,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let threads = exporter_threads(&server);
+        server.stop();
+
+        let mut findings = Findings::default();
+        findings.check(threads.is_empty(), || {
+            format!("{label}: no exporter thread runs; found {threads:?}")
+        });
+        findings.check(collector.connections() == 0, || {
+            format!("{label}: the collector receives no connection")
+        });
+        findings.check(config_warning_messages(&health).is_empty(), || {
+            format!("{label}: no config warning; got {health}")
+        });
+        findings.finish(&format!("trace switch off ({label})"));
+    }
+}
+
+#[tokio::test]
+async fn malformed_trace_endpoint_warns_on_the_admin_health_list_and_stays_off() {
+    let collector = Collector::start(Duration::ZERO).await;
+    let address = collector.endpoint.trim_start_matches("http://").to_owned();
+    for value in [
+        address.clone(),
+        format!("ftp://{address}"),
+        "http://".to_owned(),
+    ] {
+        let (mut server, _data) =
+            ready_with_trace("trace-malformed.log", format!("trace_endpoint = '{value}'")).await;
+        let client = client();
+        let (token, _) = setup_owner(&server, &client).await;
+        let status = traced_request(&server, &client, &token).await;
+        let (_, health) = api(
+            &server,
+            &client,
+            &token,
+            reqwest::Method::GET,
+            "/system/health",
+            None,
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let threads = exporter_threads(&server);
+        server.stop();
+
+        let mut findings = Findings::default();
+        let rows: Vec<String> = config_warning_messages(&health)
+            .into_iter()
+            .filter(|row| row.contains("trace_endpoint"))
+            .collect();
+        findings.check(rows.len() == 1 && rows[0].contains(&value), || {
+            format!(
+                "{value:?}: one config warning naming trace_endpoint and the value; got {health}"
+            )
+        });
+        findings.check(
+            !rows.iter().any(|row| row.starts_with("Unknown config key")),
+            || format!("{value:?}: trace_endpoint is a known key; got {rows:?}"),
+        );
+        findings.check(status == StatusCode::NOT_FOUND, || {
+            format!("{value:?}: requests are still served; got {status}")
+        });
+        findings.check(threads.is_empty(), || {
+            format!("{value:?}: no exporter thread runs; found {threads:?}")
+        });
+        findings.finish(&format!("malformed trace endpoint {value:?}"));
+    }
+    assert_eq!(
+        collector.connections(),
+        0,
+        "a malformed endpoint sends nothing"
+    );
+}
+
+#[tokio::test]
+async fn trace_viewer_down_or_slow_leaves_requests_unaffected() {
+    const REQUESTS: usize = 20;
+    let closed = std::net::TcpListener::bind((COLLECTOR_HOST, 0)).unwrap();
+    let down = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let slow = Collector::start(Duration::from_secs(120)).await;
+    for (label, endpoint) in [("down", down), ("slow", slow.endpoint.clone())] {
+        let (mut server, _data) = ready_with_trace(
+            &format!("trace-{label}.log"),
+            format!("trace_endpoint = '{endpoint}'"),
+        )
+        .await;
+        let client = client();
+        let (token, _) = setup_owner(&server, &client).await;
+        let mut findings = Findings::default();
+        let mut slowest = Duration::ZERO;
+        for _ in 0..REQUESTS {
+            let started = Instant::now();
+            let status = traced_request(&server, &client, &token).await;
+            slowest = slowest.max(started.elapsed());
+            findings.check(status == StatusCode::NOT_FOUND, || {
+                format!("{label}: the request is answered as usual; got {status}")
+            });
+        }
+        findings.check(slowest < Duration::from_secs(2), || {
+            format!("{label}: every request answers promptly; slowest {slowest:?}")
+        });
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let late = traced_request(&server, &client, &token).await;
+        findings.check(late == StatusCode::NOT_FOUND, || {
+            format!("{label}: the server still answers after export attempts; got {late}")
+        });
+        findings.check(server.child.try_wait().unwrap().is_none(), || {
+            format!("{label}: the server is still running")
+        });
+        server.stop();
+        let lines = exporter_log_lines(&server);
+        findings.check(lines.len() < REQUESTS, || {
+            format!("{label}: exporter errors are not logged per request; got {lines:#?}")
+        });
+        let warned = log_lines_with(&server, " WARN ", EXPORT_FAILED);
+        findings.check(warned.len() <= 1, || {
+            format!("{label}: the export failure is warned at most once; got {warned:#?}")
+        });
+        if label == "slow" {
+            findings.check(slow.connections() > 0, || {
+                "control: the exporter reached the slow collector".to_owned()
+            });
+        }
+        findings.finish(&format!("trace viewer {label}"));
+    }
+}
+
+#[tokio::test]
+async fn trace_viewer_down_is_warned_once_and_its_recovery_logged_once() {
+    let closed = std::net::TcpListener::bind((COLLECTOR_HOST, 0)).unwrap();
+    let address = closed.local_addr().unwrap().to_string();
+    drop(closed);
+    let (mut server, _data) = ready_with_trace(
+        "trace-down-once.log",
+        format!("trace_endpoint = 'http://{address}'"),
+    )
+    .await;
+    let client = client();
+    let (token, _) = setup_owner(&server, &client).await;
+    for _ in 0..10 {
+        traced_request(&server, &client, &token).await;
+    }
+    wait_for_log(&server, " WARN ", EXPORT_FAILED, Duration::from_secs(10)).await;
+    for _ in 0..10 {
+        traced_request(&server, &client, &token).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let warned_while_down = log_lines_with(&server, " WARN ", EXPORT_FAILED);
+
+    let collector = Collector::start_on(&address, Duration::ZERO).await;
+    traced_request(&server, &client, &token).await;
+    let spans = collector
+        .spans_after_route(TRACE_ROUTE, Duration::from_secs(15))
+        .await;
+    wait_for_log(&server, " INFO ", EXPORT_RECOVERED, Duration::from_secs(5)).await;
+    traced_request(&server, &client, &token).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    server.stop();
+
+    let mut findings = Findings::default();
+    findings.check(warned_while_down.len() == 1, || {
+        format!(
+            "one warning while the viewer is down after 20 requests; got {warned_while_down:#?}\n{}",
+            server.logs()
+        )
+    });
+    if let [line] = &warned_while_down[..] {
+        findings.check(line.contains("[log] trace_endpoint"), || {
+            format!("the warning names the setting; got {line:?}")
+        });
+        findings.check(!line.contains(&address), || {
+            format!("the warning carries no endpoint value; got {line:?}")
+        });
+    }
+    findings.check(!spans.is_empty(), || {
+        "control: spans reach the viewer once it is up".to_owned()
+    });
+    let recovered = log_lines_with(&server, " INFO ", EXPORT_RECOVERED);
+    findings.check(recovered.len() == 1, || {
+        format!("one recovery line once the viewer is up; got {recovered:#?}")
+    });
+    let warned = log_lines_with(&server, " WARN ", EXPORT_FAILED);
+    findings.check(warned.len() == 1, || {
+        format!("no further warning after recovery; got {warned:#?}")
+    });
+    findings.finish("trace viewer down, then up");
+}
+
+/// Starts the binary with `trace_endpoint` at `collector` and `env` set, sends
+/// the traced request, and returns the spans the collector received.
+async fn traced_with_env(
+    name: &str,
+    collector: &Collector,
+    env: &[(&str, String)],
+) -> (Server, TempDir, Vec<RecordedSpan>) {
+    let (server, data) = ready_with_trace_env(
+        name,
+        format!("trace_endpoint = '{}'", collector.endpoint),
+        env,
+    )
+    .await;
+    let client = client();
+    let (token, _) = setup_owner(&server, &client).await;
+    traced_request(&server, &client, &token).await;
+    let spans = collector
+        .spans_after_route(TRACE_ROUTE, Duration::from_secs(15))
+        .await;
+    (server, data, spans)
+}
+
+/// Whether `spans` holds a span for the traced request's route.
+fn has_route_span(spans: &[RecordedSpan]) -> bool {
+    spans
+        .iter()
+        .any(|span| span.attributes.get("http.route") == Some(&Value::from(TRACE_ROUTE)))
+}
+
+#[tokio::test]
+async fn trace_export_sends_no_header_from_the_environment() {
+    let collector = Collector::start(Duration::ZERO).await;
+    let env = [
+        (
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "authorization=Bearer%20ac9h1Marker,x-ac9h2=ac9h2Marker".to_owned(),
+        ),
+        (
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "x-ac9h3=ac9h3Marker".to_owned(),
+        ),
+    ];
+    let (mut server, _data, spans) =
+        traced_with_env("trace-env-headers.log", &collector, &env).await;
+    server.stop();
+
+    let mut findings = Findings::default();
+    findings.check(has_route_span(&spans), || {
+        format!(
+            "control: the span arrives; got {spans:#?}\n{}",
+            server.logs()
+        )
+    });
+    let headers = collector.header_lines();
+    for marker in [
+        "authorization",
+        "x-ac9h2",
+        "x-ac9h3",
+        "ac9h1marker",
+        "ac9h2marker",
+        "ac9h3marker",
+    ] {
+        findings.check(!headers.iter().any(|line| line.contains(marker)), || {
+            format!("the export carries {marker:?} from the environment: {headers:#?}")
+        });
+    }
+    findings.finish("trace export with header variables set");
+}
+
+#[tokio::test]
+async fn trace_export_goes_direct_whatever_proxy_the_environment_names() {
+    let collector = Collector::start(Duration::ZERO).await;
+    let proxy = Collector::start(Duration::ZERO).await;
+    let env: Vec<(&str, String)> = [
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .into_iter()
+    .map(|key| (key, proxy.endpoint.clone()))
+    .chain([("NO_PROXY", String::new()), ("no_proxy", String::new())])
+    .collect();
+    let (mut server, _data, spans) = traced_with_env("trace-env-proxy.log", &collector, &env).await;
+    server.stop();
+
+    let mut findings = Findings::default();
+    findings.check(has_route_span(&spans), || {
+        format!(
+            "the span reaches the viewer directly; got {spans:#?}\n{}",
+            server.logs()
+        )
+    });
+    findings.check(proxy.connections() == 0, || {
+        format!(
+            "the proxy named in the environment gets no connection; it got {}",
+            proxy.connections()
+        )
+    });
+    findings.finish("trace export with proxy variables set");
+}
+
+#[tokio::test]
+async fn trace_export_stays_uncompressed_whatever_the_environment_says() {
+    let collector = Collector::start(Duration::ZERO).await;
+    let env = [
+        ("OTEL_EXPORTER_OTLP_COMPRESSION", "gzip".to_owned()),
+        ("OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "zstd".to_owned()),
+    ];
+    let (mut server, _data, spans) =
+        traced_with_env("trace-env-compression.log", &collector, &env).await;
+    server.stop();
+
+    let mut findings = Findings::default();
+    findings.check(has_route_span(&spans), || {
+        format!(
+            "the span arrives as plain protobuf; got {spans:#?}\n{}",
+            server.logs()
+        )
+    });
+    let headers = collector.header_lines();
+    findings.check(
+        !headers
+            .iter()
+            .any(|line| line.starts_with("content-encoding")),
+        || format!("the export is not compressed: {headers:#?}"),
+    );
+    findings.finish("trace export with compression variables set");
+}
+
+/// A viewer answering with `reply` is warned about once; once it accepts, one
+/// recovery line follows.
+async fn bad_viewer_reply_is_a_failure(reply: ViewerReply) {
+    let collector =
+        Collector::start_replying(&format!("{COLLECTOR_HOST}:0"), Duration::ZERO, reply).await;
+    let (mut server, _data) = ready_with_trace(
+        &format!("trace-reply-{reply:?}.log"),
+        format!("trace_endpoint = '{}'", collector.endpoint),
+    )
+    .await;
+    let client = client();
+    let (token, _) = setup_owner(&server, &client).await;
+    let first_request = Instant::now();
+    traced_request(&server, &client, &token).await;
+    wait_for_log(&server, " WARN ", EXPORT_FAILED, Duration::from_secs(14)).await;
+    let warned_after = first_request.elapsed();
+    for _ in 0..3 {
+        traced_request(&server, &client, &token).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+    }
+    let warned_while_bad = log_lines_with(&server, " WARN ", EXPORT_FAILED);
+    let recovered_while_bad = log_lines_with(&server, " INFO ", EXPORT_RECOVERED);
+
+    collector.set_reply(ViewerReply::Accept);
+    traced_request(&server, &client, &token).await;
+    wait_for_log(&server, " INFO ", EXPORT_RECOVERED, Duration::from_secs(15)).await;
+    server.stop();
+
+    let mut findings = Findings::default();
+    findings.check(warned_after < Duration::from_secs(9), || {
+        format!("{reply:?}: the failure is warned within the 5 s export deadline plus the 1 s interval; took {warned_after:?}")
+    });
+    findings.check(warned_while_bad.len() == 1, || {
+        format!(
+            "{reply:?}: one warning while the viewer answers badly; got {warned_while_bad:#?}\n{}",
+            server.logs()
+        )
+    });
+    findings.check(recovered_while_bad.is_empty(), || {
+        format!(
+            "{reply:?}: no recovery line before the viewer accepts; got {recovered_while_bad:#?}"
+        )
+    });
+    let recovered = log_lines_with(&server, " INFO ", EXPORT_RECOVERED);
+    findings.check(recovered.len() == 1, || {
+        format!("{reply:?}: one recovery line once the viewer accepts; got {recovered:#?}")
+    });
+    let warned = log_lines_with(&server, " WARN ", EXPORT_FAILED);
+    findings.check(warned.len() == 1, || {
+        format!("{reply:?}: no further warning; got {warned:#?}")
+    });
+    findings.finish(&format!("viewer reply {reply:?}"));
+}
+
+#[tokio::test]
+async fn viewer_rejecting_spans_counts_as_a_failed_export() {
+    bad_viewer_reply_is_a_failure(ViewerReply::Reject).await;
+}
+
+#[tokio::test]
+async fn viewer_reply_that_stalls_counts_as_a_failed_export() {
+    bad_viewer_reply_is_a_failure(ViewerReply::Stall).await;
+}
+
+#[tokio::test]
+async fn viewer_reply_cut_short_counts_as_a_failed_export() {
+    bad_viewer_reply_is_a_failure(ViewerReply::Truncate).await;
+}
+
+#[tokio::test]
+async fn viewer_reply_that_trickles_past_the_deadline_counts_as_a_failed_export() {
+    bad_viewer_reply_is_a_failure(ViewerReply::Trickle).await;
 }

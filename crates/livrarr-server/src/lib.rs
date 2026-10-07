@@ -187,3 +187,4 @@ pub mod services;
 pub mod setup_token;
 pub mod state;
 pub mod tag_service;
+pub mod trace_export;

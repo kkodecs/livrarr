@@ -1258,9 +1258,12 @@ fn init_tracing(
     Arc<livrarr_server::state::LogLevelHandle>,
     livrarr_domain::LogSurfaceStatus,
 ) {
+    use livrarr_server::config::TraceEndpoint;
+    use tracing_subscriber::filter::FilterExt;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer;
 
     let level = match log.level {
         LogLevel::Trace => "trace",
@@ -1342,11 +1345,33 @@ fn init_tracing(
             },
         );
 
+    // The log filter applies to the log layers only, so the trace layer's own
+    // filter decides what it exports at every log level; request spans never
+    // reach the logs.
+    let log_layers = fmt_layer
+        .and_then(file_layer)
+        .and_then(buf_layer)
+        .with_filter(filter.and(livrarr_server::trace_export::not_request_spans()));
+
+    let trace_layer = match log.trace_endpoint() {
+        TraceEndpoint::Export(traces_url) => {
+            match livrarr_server::trace_export::request_trace_layer(&traces_url) {
+                Ok(layer) => Some(layer),
+                Err(e) => {
+                    eprintln!(
+                        "WARNING: request tracing disabled — {}",
+                        livrarr_domain::cleanse_log_line(&e)
+                    );
+                    None
+                }
+            }
+        }
+        TraceEndpoint::Off | TraceEndpoint::Malformed(_) => None,
+    };
+
     tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer)
-        .with(file_layer)
-        .with(buf_layer)
+        .with(log_layers)
+        .with(trace_layer)
         .init();
 
     (

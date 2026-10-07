@@ -95,6 +95,12 @@ pub struct LogConfig {
 
     #[serde(default = "default_log_format")]
     pub format: LogFormat,
+
+    /// The trace viewer's OTLP-over-HTTP endpoint, such as
+    /// `http://127.0.0.1:4318`. Missing or empty means tracing is off;
+    /// `trace_endpoint()` reads it.
+    #[serde(default)]
+    pub trace_endpoint: Option<String>,
 }
 
 impl Default for LogConfig {
@@ -102,6 +108,45 @@ impl Default for LogConfig {
         Self {
             level: default_log_level(),
             format: default_log_format(),
+            trace_endpoint: None,
+        }
+    }
+}
+
+/// What `[log] trace_endpoint` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceEndpoint {
+    /// Missing or empty: no exporter is built.
+    Off,
+    /// The OTLP/HTTP traces URL request spans are sent to: the endpoint with
+    /// `/v1/traces` appended.
+    Export(String),
+    /// A value that is not an `http://` or `https://` address with a host and
+    /// no query or fragment, as written. No exporter is built.
+    Malformed(String),
+}
+
+impl LogConfig {
+    /// The one reading of `trace_endpoint`, shared by tracing start-up and the
+    /// config warnings.
+    pub fn trace_endpoint(&self) -> TraceEndpoint {
+        let Some(raw) = self.trace_endpoint.as_deref() else {
+            return TraceEndpoint::Off;
+        };
+        let value = raw.trim();
+        if value.is_empty() {
+            return TraceEndpoint::Off;
+        }
+        match reqwest::Url::parse(value) {
+            Ok(url)
+                if matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some_and(|host| !host.is_empty())
+                    && url.query().is_none()
+                    && url.fragment().is_none() =>
+            {
+                TraceEndpoint::Export(format!("{}/v1/traces", url.as_str().trim_end_matches('/')))
+            }
+            _ => TraceEndpoint::Malformed(raw.to_owned()),
         }
     }
 }
@@ -374,7 +419,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
         "server",
         &["bind_address", "port", "url_base", "trusted_proxies"],
     ),
-    ("log", &["level", "format"]),
+    ("log", &["level", "format", "trace_endpoint"]),
     (
         "convergence",
         &[
@@ -450,9 +495,9 @@ pub fn load_config(data_dir: &std::path::Path) -> Result<(AppConfig, Vec<String>
 // ---------------------------------------------------------------------------
 
 /// Every warning the loaded config gives, cleansed for display: first each
-/// rejected `[server] trusted_proxies` entry in file order, then each unknown
-/// key in the loader's order. Startup logs them; the admin health list shows
-/// them.
+/// rejected `[server] trusted_proxies` entry in file order, then a malformed
+/// `[log] trace_endpoint`, then each unknown key in the loader's order.
+/// Startup logs them; the admin health list shows them.
 pub fn config_warnings(config: &AppConfig) -> Vec<String> {
     let (_, rejected) = crate::rate_limit::parse_trusted_proxies(&config.server.trusted_proxies);
     let proxies = rejected.iter().map(|entry| {
@@ -461,11 +506,19 @@ pub fn config_warnings(config: &AppConfig) -> Vec<String> {
              such as 172.18.0.0/16; host names and ports are not supported"
         )
     });
+    let trace = match config.log.trace_endpoint() {
+        TraceEndpoint::Malformed(value) => Some(format!(
+            "Ignored [log] trace_endpoint \"{value}\": use an http:// or https:// address \
+             such as http://127.0.0.1:4318; tracing is off"
+        )),
+        TraceEndpoint::Off | TraceEndpoint::Export(_) => None,
+    };
     let keys = config
         .unknown_keys
         .iter()
         .map(|key| format!("Unknown config key: {key}"));
     proxies
+        .chain(trace)
         .chain(keys)
         .map(|message| livrarr_domain::cleanse_log_line(&message))
         .collect()

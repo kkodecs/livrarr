@@ -34,6 +34,11 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "registry"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace"] }
+prost = "0.14"
+tracing-opentelemetry = { version = "0.32", default-features = false }
 argon2 = { version = "0.5", features = ["std"] }
 getrandom = { version = "0.2", features = ["std"] }
 hmac = { workspace = true }
@@ -47,7 +52,7 @@ clap = { version = "4", features = ["derive"] }
 tokio-util = { workspace = true }
 sqlx = { workspace = true }
 urlencoding = { workspace = true }
-reqwest = { workspace = true, features = ["multipart", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "multipart", "rustls-tls"] }
 image = { workspace = true, features = ["jpeg"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "pool", "hostname", "tracing"] }
 uuid = { workspace = true }

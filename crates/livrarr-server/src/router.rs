@@ -712,6 +712,10 @@ pub fn build_router(state: AppState, ui_dir: std::path::PathBuf) -> Router {
         app
     };
 
+    // One request span per routed request; it reads the matched route, so it
+    // is added with `Router::layer`, which runs after routing.
+    let app = app.layer(axum::middleware::from_fn(crate::trace_export::request_span));
+
     // Security headers per security-model-policy.md
     app.layer(SetResponseHeaderLayer::overriding(
         axum::http::header::X_FRAME_OPTIONS,
