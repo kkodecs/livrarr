@@ -17830,3 +17830,241 @@ async fn list_undo_removes_the_book_and_keeps_its_file_on_disk() {
         "the file's contents are unchanged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Served cover routes: upload and select through the production router.
+// ---------------------------------------------------------------------------
+
+async fn post_cover_upload(harness: &RouteHarness, work_id: i64, data: &[u8]) -> RouteResponse {
+    let boundary = "livrarr-cover-upload-boundary";
+    let mut body = Vec::with_capacity(data.len() + 256);
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"image_data\"; \
+             filename=\"cover.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/api/v1/work/{work_id}/cover/upload?media_type=ebook"
+        ))
+        .header("x-api-key", &harness.api_key)
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .expect("build cover upload request");
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42)),
+        31_000,
+    )));
+    let response = harness
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("production router response");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 2 * 1024 * 1024)
+        .await
+        .expect("read cover upload response body");
+    let json = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        json!({
+            "unparsedBody": String::from_utf8_lossy(&bytes).into_owned()
+        })
+    });
+    RouteResponse { status, json }
+}
+
+/// A decodable JPEG of the given size.
+fn cover_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(width, height, image::Rgb([40, 90, 140]));
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .expect("encode cover JPEG");
+    buf.into_inner()
+}
+
+/// A decodable JPEG whose pixels are hash-derived noise, so the encoded file
+/// stays large.
+fn noisy_cover_jpeg(width: u32, height: u32) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut pixels = Vec::with_capacity((width * height * 3) as usize);
+    let mut counter: u64 = 0;
+    while pixels.len() < (width * height * 3) as usize {
+        pixels.extend_from_slice(&Sha256::digest(counter.to_le_bytes()));
+        counter += 1;
+    }
+    pixels.truncate((width * height * 3) as usize);
+    let img = image::RgbImage::from_raw(width, height, pixels).expect("noise image buffer");
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .expect("encode noisy cover JPEG");
+    buf.into_inner()
+}
+
+async fn seed_other_user_work(harness: &RouteHarness, label: &str) -> (i64, i64) {
+    let n = ROUTE_CASE.fetch_add(1, Ordering::Relaxed);
+    let other = harness
+        .db
+        .create_user(CreateUserDbRequest {
+            username: format!("ilr-cover-{label}-{n}"),
+            password_hash: "unused".to_string(),
+            role: UserRole::Admin,
+            api_key_hash: format!("unused-cover-{label}-{n}"),
+        })
+        .await
+        .expect("seed other user")
+        .id;
+    let title = format!("ILR other {label} {n}");
+    let work_id = harness
+        .db
+        .create_work(CreateWorkDbRequest {
+            user_id: other,
+            title: title.clone(),
+            author_name: format!("ILR Other Author {n}"),
+            normalized_title: title.to_ascii_lowercase(),
+            normalized_author: format!("ilr other author {n}"),
+            language: Some("en".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("seed other user's Work")
+        .0
+        .id;
+    (other, work_id)
+}
+
+#[tokio::test]
+async fn cover_upload_route_missing_book_returns_not_found() {
+    let harness = build_route_harness().await;
+
+    let response = post_cover_upload(&harness, 9_999_999, &cover_jpeg(4, 4)).await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND, "{}", response.json);
+}
+
+#[tokio::test]
+async fn cover_upload_route_other_users_book_returns_not_found_and_leaves_their_cover() {
+    let harness = build_route_harness().await;
+    let (other_user, other_work) = seed_other_user_work(&harness, "upload").await;
+
+    let response = post_cover_upload(&harness, other_work, &cover_jpeg(4, 4)).await;
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND, "{}", response.json);
+    let theirs = harness
+        .db
+        .get_work(other_user, other_work)
+        .await
+        .expect("other user's Work");
+    assert!(!theirs.cover_manual, "their cover choice is untouched");
+    assert_eq!(theirs.cover_url, None, "their cover address is untouched");
+}
+
+#[tokio::test]
+async fn cover_select_route_missing_or_foreign_book_returns_not_found() {
+    let harness = build_route_harness().await;
+    let (_, other_work) = seed_other_user_work(&harness, "select").await;
+
+    for work_id in [9_999_999, other_work] {
+        let response = call_router_json(
+            &harness,
+            Method::POST,
+            format!("/api/v1/work/{work_id}/cover/select"),
+            Some(json!({"candidateId": "openlibrary:ebook", "mediaType": "ebook"})),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::NOT_FOUND,
+            "work {work_id}: {}",
+            response.json
+        );
+    }
+}
+
+#[tokio::test]
+async fn cover_upload_route_existing_book_stores_a_manual_cover() {
+    let harness = build_route_harness().await;
+    let work_id = seed_route_work(&harness, "cover upload").await;
+    let upload = noisy_cover_jpeg(1000, 1000);
+    assert!(
+        upload.len() > 1024 * 1024,
+        "fixture must exceed 1 MiB, got {} bytes",
+        upload.len()
+    );
+
+    let response = post_cover_upload(&harness, work_id, &upload).await;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.json);
+    let work = harness
+        .db
+        .get_work(harness.user_id, work_id)
+        .await
+        .expect("uploaded Work");
+    assert!(
+        work.cover_manual,
+        "an upload is the user's own cover choice"
+    );
+    let cover_path = harness
+        .state
+        .data_dir
+        .join("covers")
+        .join(harness.user_id.to_string())
+        .join(format!("{work_id}.jpg"));
+    assert!(
+        cover_path.is_file(),
+        "cover file at {}",
+        cover_path.display()
+    );
+}
+
+#[tokio::test]
+async fn cover_upload_route_rejects_empty_and_oversized_data() {
+    let harness = build_route_harness().await;
+    let work_id = seed_route_work(&harness, "cover reject").await;
+    let mut oversized = vec![0x5a; 5 * 1024 * 1024 + 1];
+    oversized[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+
+    for (label, data) in [("empty", Vec::new()), ("oversized", oversized)] {
+        let response = post_cover_upload(&harness, work_id, &data).await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{label}: {}",
+            response.json
+        );
+    }
+}
+
+/// A write failure on an existing book stays an internal error; only a
+/// missing book is "not found". The covers folder path is occupied by a
+/// plain file, so the gate cannot create it.
+#[tokio::test]
+async fn cover_upload_route_write_failure_is_internal_error_not_not_found() {
+    let harness = build_route_harness().await;
+    let work_id = seed_route_work(&harness, "cover write failure").await;
+    let covers_root = harness.state.data_dir.join("covers");
+    std::fs::create_dir_all(&covers_root).expect("covers root");
+    std::fs::write(
+        covers_root.join(harness.user_id.to_string()),
+        b"not a folder",
+    )
+    .expect("occupy the user's covers folder path");
+
+    let response = post_cover_upload(&harness, work_id, &cover_jpeg(4, 4)).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "{}",
+        response.json
+    );
+}

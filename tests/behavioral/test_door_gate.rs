@@ -1045,15 +1045,6 @@ impl WorkService for RecordingWorkService {
         })
     }
 
-    async fn upload_cover(
-        &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-        _bytes: &[u8],
-    ) -> Result<(), WorkServiceError> {
-        todo!("not exercised by door-gate")
-    }
-
     async fn download_cover(
         &self,
         _user_id: UserId,

@@ -243,15 +243,6 @@ impl WorkService for StubWorkService {
     //     Ok(RefreshAllHandle { total_works: 0 })
     // }
 
-    async fn upload_cover(
-        &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-        _bytes: &[u8],
-    ) -> Result<(), WorkServiceError> {
-        Ok(())
-    }
-
     async fn download_cover(
         &self,
         _user_id: UserId,

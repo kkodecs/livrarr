@@ -2,7 +2,7 @@
 #![allow(dead_code, unused_imports)]
 
 //! Behavioral tests for WorkService trait (SVC-WORK-001..004).
-//! Covers: fn.work_service.{add, get, list, update, delete, refresh, refresh_all, upload_cover, download_cover}
+//! Covers: fn.work_service.{add, get, list, update, delete, refresh, refresh_all, download_cover}
 //! Test obligations: test.work.add.*, test.work.refresh.*, test.work.refresh_all.*
 //! Added for redesign phase:
 //! - AddWorkRequest.provenance_setter behavioral contracts
@@ -843,31 +843,6 @@ async fn test_work_refresh_preserves_user_provenance() {
 //     // SVC-WORK-003: Single work failure does not abort the batch
 //     todo!("Setup: seed multiple works and stub refresh so one work fails")
 // }
-
-// =============================================================================
-// upload_cover
-// =============================================================================
-
-#[tokio::test]
-#[ignore = "pk-implement: requires filesystem integration"]
-async fn test_work_upload_cover_writes_and_sets_manual() {
-    // SVC-WORK-001: Given valid bytes, cover is written and cover_manual set
-    todo!("Setup: seed an existing work, provide valid image bytes")
-}
-
-#[tokio::test]
-#[ignore = "pk-implement: requires filesystem integration"]
-async fn test_work_upload_cover_oversized_returns_error() {
-    // SVC-WORK-001: Given oversized bytes, returns CoverTooLarge
-    todo!("Setup: seed an existing work and create oversized bytes")
-}
-
-#[tokio::test]
-#[ignore = "pk-implement: requires filesystem integration"]
-async fn test_work_upload_cover_nonexistent_returns_not_found() {
-    // SVC-WORK-001: Given nonexistent work, returns NotFound
-    todo!("Setup: ensure work_id does not exist for user_id")
-}
 
 // =============================================================================
 // download_cover

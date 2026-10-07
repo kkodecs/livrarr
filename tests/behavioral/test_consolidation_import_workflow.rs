@@ -1651,9 +1651,6 @@ impl WorkService for StubWorkService {
     async fn retry_all_incomplete(&self, _: UserId) -> Result<RetrySummary, WorkServiceError> {
         unreachable!("not used by scan")
     }
-    async fn upload_cover(&self, _: UserId, _: WorkId, _: &[u8]) -> Result<(), WorkServiceError> {
-        unreachable!("not used by scan")
-    }
     async fn download_cover(&self, _: UserId, _: WorkId) -> Result<Vec<u8>, WorkServiceError> {
         unreachable!("not used by scan")
     }

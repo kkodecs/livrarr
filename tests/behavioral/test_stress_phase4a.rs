@@ -189,38 +189,6 @@ async fn test_work_add_long_title_round_trips() {
 }
 
 #[tokio::test]
-async fn test_work_upload_cover_zero_bytes_returns_error() {
-    let db = create_test_db().await;
-    let user_id = setup_user(&db).await;
-    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
-    let work_id = seed_work(&db, user_id, "Coverless", "Author").await;
-
-    let result = svc.upload_cover(user_id, work_id, &[]).await;
-
-    assert!(matches!(result, Err(WorkServiceError::Enrichment(_))));
-}
-
-#[tokio::test]
-async fn test_work_upload_cover_one_mebibyte_boundary_succeeds() {
-    let db = create_test_db().await;
-    let user_id = setup_user(&db).await;
-    let svc = WorkServiceImpl::without_enrichment(db.clone(), stub_http(), test_data_dir());
-    let work_id = seed_work(&db, user_id, "Boundary Cover", "Author").await;
-    let mut bytes = vec![0x5a; 1_024 * 1_024];
-    bytes[0] = 0xFF;
-    bytes[1] = 0xD8;
-    bytes[2] = 0xFF;
-
-    svc.upload_cover(user_id, work_id, &bytes).await.unwrap();
-
-    let downloaded = svc.download_cover(user_id, work_id).await.unwrap();
-    let work = svc.get(user_id, work_id).await.unwrap();
-    assert_eq!(downloaded.len(), 1_024 * 1_024);
-    assert_eq!(downloaded, bytes);
-    assert!(work.cover_manual);
-}
-
-#[tokio::test]
 async fn test_work_download_cover_missing_file_returns_not_found() {
     let db = create_test_db().await;
     let user_id = setup_user(&db).await;

@@ -1705,71 +1705,6 @@ where
     // never wired up — the handler does its own list + spawn + iterate +
     // finish_bulk_refresh directly.
 
-    async fn upload_cover(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        bytes: &[u8],
-    ) -> Result<(), WorkServiceError> {
-        // 5 MB — accommodates high-resolution covers from providers like Google Books.
-        // TODO(alpha6+): reduce stored cover resolution to limit on-disk footprint.
-        const MAX_COVER_BYTES: usize = 5 * 1024 * 1024;
-
-        if bytes.len() > MAX_COVER_BYTES {
-            return Err(WorkServiceError::Enrichment(format!(
-                "cover too large: {} bytes (max {})",
-                bytes.len(),
-                MAX_COVER_BYTES
-            )));
-        }
-        if bytes.is_empty() {
-            return Err(WorkServiceError::Enrichment("empty image data".into()));
-        }
-        if !is_supported_image(bytes) {
-            return Err(WorkServiceError::Enrichment(
-                "unrecognized image format (expected JPEG, PNG, GIF, or WebP)".into(),
-            ));
-        }
-
-        let _work = self.get(user_id, work_id).await?;
-
-        let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
-        tokio::fs::create_dir_all(&covers_dir)
-            .await
-            .map_err(|e| WorkServiceError::Enrichment(format!("create covers dir: {e}")))?;
-
-        let cover_path = crate::cover_write_gate::final_cover_path(&covers_dir, work_id, "");
-        let tmp_path = cover_path.with_extension("jpg.tmp");
-        let tmp_clone = tmp_path.clone();
-        let target = cover_path.clone();
-        let bytes_vec = bytes.to_vec();
-        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            use std::io::Write;
-            let mut f = std::fs::File::create(&tmp_clone)?;
-            f.write_all(&bytes_vec)?;
-            f.sync_all()?;
-            drop(f);
-            std::fs::rename(&tmp_clone, &target)
-        })
-        .await
-        .map_err(|e| WorkServiceError::Enrichment(format!("spawn error: {e}")))?;
-
-        if let Err(e) = write_result {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(WorkServiceError::Enrichment(format!("write cover: {e}")));
-        }
-
-        let thumb_path = crate::cover_write_gate::final_cover_path(&covers_dir, work_id, "_thumb");
-        let _ = tokio::fs::remove_file(&thumb_path).await;
-
-        self.db
-            .set_cover_manual(user_id, work_id, true)
-            .await
-            .map_err(WorkServiceError::Db)?;
-
-        Ok(())
-    }
-
     async fn download_cover(
         &self,
         user_id: UserId,
@@ -3091,6 +3026,10 @@ async fn attempt_initial_cover<D, H>(
                 );
                 return;
             }
+            Err(crate::cover_write_gate::UserCoverError::WorkNotFound) => {
+                tracing::warn!(work_id, "initial cover attempt: work not found");
+                return;
+            }
         }
     } else {
         // Same containment as ranked resolution: an automatic Goodreads
@@ -3597,25 +3536,6 @@ pub async fn delete_cover_files(data_dir: &std::path::Path, user_id: i64, work_i
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}.candidate.tmp"))).await;
         let _ = tokio::fs::remove_file(dir.join(format!("{work_id}_audio.candidate.tmp"))).await;
     }
-}
-
-fn is_supported_image(bytes: &[u8]) -> bool {
-    if bytes.len() < 12 {
-        return false;
-    }
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return true;
-    }
-    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return true;
-    }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return true;
-    }
-    if &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return true;
-    }
-    false
 }
 
 /// Whether a phase-1 ebook write earns the durable manual-selection lock.

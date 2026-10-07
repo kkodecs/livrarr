@@ -10,8 +10,8 @@ use livrarr_db::WorkDb;
 use livrarr_domain::identity_layer::{IdentityRepositoryError, WorkIdentityRepository, WorkRoute};
 use livrarr_domain::services::CoverServiceError;
 use livrarr_domain::{
-    CoverCandidate, CoverCandidateSource, CoverMediaType, InternalCoverCandidate, MetadataProvider,
-    UserId, Work, WorkId,
+    CoverCandidate, CoverCandidateSource, CoverMediaType, DbError, InternalCoverCandidate,
+    MetadataProvider, UserId, Work, WorkId,
 };
 use livrarr_external_data::provider_client::ProviderClient;
 use livrarr_http::fetcher::HttpFetcherImpl;
@@ -201,7 +201,10 @@ impl livrarr_domain::services::CoverService for LiveCoverService {
             .db
             .get_work(user_id, work_id)
             .await
-            .map_err(|e| CoverServiceError::Internal(e.to_string()))?;
+            .map_err(|e| match e {
+                DbError::NotFound { .. } => CoverServiceError::NotFound,
+                other => CoverServiceError::Internal(other.to_string()),
+            })?;
 
         let covers_dir = self.data_dir.join("covers").join(user_id.to_string());
 
@@ -300,6 +303,7 @@ fn map_user_cover_outcome(
             "cover write gate: unexpected outcome for a user cover write: {other:?}"
         ))),
         Err(UserCoverError::Validation(m)) => Err(CoverServiceError::UploadValidation(m)),
+        Err(UserCoverError::WorkNotFound) => Err(CoverServiceError::NotFound),
     }
 }
 

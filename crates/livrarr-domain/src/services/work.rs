@@ -508,12 +508,6 @@ pub trait WorkService: Send + Sync {
     // (`crates/livrarr-handlers/src/work.rs::refresh_all`) per insight 9g.
     // Restore here only if the spawn pattern is ever moved into services.
     // async fn refresh_all(&self, user_id: UserId) -> Result<RefreshAllHandle, WorkServiceError>;
-    async fn upload_cover(
-        &self,
-        user_id: UserId,
-        work_id: WorkId,
-        bytes: &[u8],
-    ) -> Result<(), WorkServiceError>;
     async fn download_cover(
         &self,
         user_id: UserId,

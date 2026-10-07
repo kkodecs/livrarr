@@ -41,7 +41,9 @@ use std::sync::LazyLock;
 use livrarr_db::WorkDb;
 use livrarr_domain::keyed_mutex::{KeyedMutex, KeyedMutexGuard};
 use livrarr_domain::services::HttpFetcher;
-use livrarr_domain::{CoverMediaType, CoverResolution, RequestPriority, UserId, Work, WorkId};
+use livrarr_domain::{
+    CoverMediaType, CoverResolution, DbError, RequestPriority, UserId, Work, WorkId,
+};
 use livrarr_enrichment::cover_rank::CoverRankModel;
 use livrarr_enrichment::cover_resolution::should_upgrade_same_tier;
 
@@ -208,7 +210,7 @@ where
 
     let work = match read_work_row(db, user_id, work_id).await {
         Ok(w) => w,
-        Err(outcome) => return outcome,
+        Err(_) => return GateOutcome::NoOp,
     };
     let audiobook_manual = if media_type == CoverMediaType::Audiobook {
         match db.get_audiobook_cover_manual(user_id, work_id).await {
@@ -338,14 +340,18 @@ pub enum UserCoverPayload {
     Bytes { data: Vec<u8> },
 }
 
-/// Failure detail a bare [`GateOutcome`] can't carry: a user's upload bytes
-/// failed validation (size cap, format, dimensions), and the caller needs
+/// Failure detail a bare [`GateOutcome`] can't carry. `Validation`: a user's
+/// upload bytes failed validation (size cap, format, dimensions), and the caller needs
 /// the specific reason to surface to the user (HTTP 400) — the same
 /// messages `cover_service.rs` used to construct directly before this
 /// validation moved into the gate as the single validation site (AR-11).
+///
+/// `WorkNotFound`: the book does not exist for this user (missing, or owned
+/// by another user), so there is no cover slot to write.
 #[derive(Debug)]
 pub enum UserCoverError {
     Validation(String),
+    WorkNotFound,
 }
 
 /// Offer one user-chosen cover (a `select_cover` pick or an `upload_cover`
@@ -376,7 +382,8 @@ where
 
     let work = match read_work_row(db, user_id, work_id).await {
         Ok(w) => w,
-        Err(outcome) => return Ok(outcome),
+        Err(DbError::NotFound { .. }) => return Err(UserCoverError::WorkNotFound),
+        Err(_) => return Ok(GateOutcome::NoOp),
     };
     let sibling_cover_url = work.audiobook_cover_url.clone();
 
@@ -436,17 +443,17 @@ where
     .await)
 }
 
-/// Read the work row inside the slot lock. Both entry points treat an
-/// unreadable row identically: there's nothing to compare against or
-/// update, so the safest response is a no-op.
+/// Read the work row inside the slot lock. An unreadable row leaves nothing
+/// to compare against or update: the enrichment entry point treats every
+/// failure as a no-op; the user entry point reports a missing book as
+/// [`UserCoverError::WorkNotFound`] and any other failure as a no-op.
 async fn read_work_row<D: WorkDb + Sync>(
     db: &D,
     user_id: UserId,
     work_id: WorkId,
-) -> Result<Work, GateOutcome> {
-    db.get_work(user_id, work_id).await.map_err(|e| {
+) -> Result<Work, DbError> {
+    db.get_work(user_id, work_id).await.inspect_err(|e| {
         tracing::warn!(work_id, error = %e, "cover write gate: work row unreadable");
-        GateOutcome::NoOp
     })
 }
 

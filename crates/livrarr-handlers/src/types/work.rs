@@ -88,13 +88,6 @@ pub trait WorkApi: Send + Sync {
         id: WorkId,
         req: UpdateWorkRequest,
     ) -> Result<WorkDetailResponse, ApiError>;
-    async fn upload_cover(
-        &self,
-        user_id: livrarr_domain::UserId,
-        id: WorkId,
-        image_data: &[u8],
-        content_type: &str,
-    ) -> Result<(), ApiError>;
     async fn delete(
         &self,
         user_id: livrarr_domain::UserId,

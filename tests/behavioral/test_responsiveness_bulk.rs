@@ -206,15 +206,6 @@ impl WorkService for BulkRefreshStub {
         unimplemented!("not exercised")
     }
 
-    async fn upload_cover(
-        &self,
-        _user_id: UserId,
-        _work_id: WorkId,
-        _bytes: &[u8],
-    ) -> Result<(), WorkServiceError> {
-        unimplemented!("not exercised")
-    }
-
     async fn download_cover(
         &self,
         _user_id: UserId,

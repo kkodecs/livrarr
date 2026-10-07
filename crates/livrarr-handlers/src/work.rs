@@ -1,4 +1,3 @@
-use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -97,29 +96,6 @@ fn proxy_cover_url(url: String) -> String {
         return url;
     }
     format!("/api/v1/coverproxy?url={}", urlencoding::encode(&url))
-}
-
-/// Validate that image data begins with a recognized magic byte signature.
-pub fn validate_image_magic_bytes(data: &[u8]) -> Result<(), ApiError> {
-    const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF];
-    const PNG_MAGIC: &[u8] = &[0x89, 0x50, 0x4E, 0x47];
-    const WEBP_RIFF: &[u8] = b"RIFF";
-    const WEBP_WEBP: &[u8] = b"WEBP";
-
-    if data.len() < 12 {
-        return Err(ApiError::BadRequest(
-            "image data too small to identify format".into(),
-        ));
-    }
-    if data.starts_with(JPEG_MAGIC) || data.starts_with(PNG_MAGIC) {
-        return Ok(());
-    }
-    if data.starts_with(WEBP_RIFF) && data[8..12] == *WEBP_WEBP {
-        return Ok(());
-    }
-    Err(ApiError::BadRequest(
-        "unsupported image format: expected JPEG, PNG, or WebP".into(),
-    ))
 }
 
 fn mime_for_ext(ext: &str) -> &'static str {
@@ -1355,37 +1331,6 @@ pub(crate) async fn read_work_identity_presentations<S: HasIdentityLayerReposito
         .into_iter()
         .map(|presentation| (presentation.work_id, presentation))
         .collect())
-}
-
-pub async fn upload_cover<S: HasWorkService>(
-    State(state): State<S>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-    mut multipart: axum::extract::Multipart,
-) -> Result<(), ApiError> {
-    let mut image_data: Option<Bytes> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("multipart error: {e}")))?
-    {
-        if field.name() == Some("image_data") {
-            image_data = Some(
-                field
-                    .bytes()
-                    .await
-                    .map_err(|e| ApiError::BadRequest(format!("read field: {e}")))?,
-            );
-            break;
-        }
-    }
-    let data = image_data.ok_or_else(|| ApiError::BadRequest("missing image_data field".into()))?;
-    validate_image_magic_bytes(&data)?;
-    state
-        .work_service()
-        .upload_cover(ctx.user.id, id, &data)
-        .await?;
-    Ok(())
 }
 
 /// `?deleteFiles=true` removes the work's library files from disk; absent or
