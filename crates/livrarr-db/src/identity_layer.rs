@@ -3895,7 +3895,9 @@ async fn merge_contributors(
         .iter()
         .map(|contributor| contributor.author_id)
         .collect::<Vec<_>>();
-    for author_id in existing_authors {
+    // `existing_authors` is newest-first for the bump loop; unnamed authors
+    // follow the requested ones in their stored (ascending) order.
+    for author_id in existing_authors.into_iter().rev() {
         if !ordered.contains(&author_id) {
             ordered.push(author_id);
         }

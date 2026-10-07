@@ -1836,6 +1836,88 @@ fn settlement_commit(
     }
 }
 
+/// A settlement that names only some of a Work's stored authors puts the
+/// named ones first, in requested order, and keeps every other stored author
+/// in its stored order.
+#[tokio::test]
+async fn settlement_naming_some_authors_keeps_the_others_in_stored_order() {
+    for (named, expected) in [("A", ["A", "B", "C"]), ("C", ["C", "A", "B"])] {
+        let db = create_test_db().await;
+        let (user_id, author_a) = seed_identity_principals(&db, "author-order").await;
+        let mut ids = vec![("A", author_a)];
+        // C is created before B so author ids do not follow the stored order.
+        for label in ["C", "B"] {
+            let (author, _) = db
+                .create_author(CreateAuthorDbRequest {
+                    user_id,
+                    name: format!("Author Order {label}"),
+                    sort_name: None,
+                    ol_key: None,
+                    gr_key: None,
+                    hc_key: None,
+                    import_id: None,
+                })
+                .await
+                .expect("seed later author");
+            ids.push((label, author.id));
+        }
+        let id_of = |label: &str| {
+            ids.iter()
+                .find(|(name, _)| *name == label)
+                .map(|(_, id)| *id)
+                .expect("known author label")
+        };
+        assert!(
+            id_of("C") < id_of("B"),
+            "fixture: ids differ from stored order"
+        );
+        let label_of = |author_id: i64| {
+            ids.iter()
+                .find(|(_, id)| *id == author_id)
+                .map(|(name, _)| *name)
+                .expect("stored author is one of the seeded authors")
+        };
+
+        let mut seed = settlement_commit(user_id, author_a, None);
+        seed.contributors = ["A", "B", "C"]
+            .iter()
+            .enumerate()
+            .map(|(ordinal, label)| ilr::WorkContributor {
+                user_id,
+                work_id: 0,
+                author_id: id_of(label),
+                ordinal: ordinal as u32,
+                roles: vec![],
+            })
+            .collect();
+        let seeded = WorkIdentityRepository::commit_settlement(&db, seed)
+            .await
+            .expect("seed Work with authors A, B, C");
+        let work_id = seeded.identity.own_work_id;
+
+        let mut settle = settlement_commit(user_id, id_of(named), Some(work_id));
+        settle.expected_generation = seeded.identity.identity_generation;
+        WorkIdentityRepository::commit_settlement(&db, settle)
+            .await
+            .expect("settle naming one author");
+
+        let stored: Vec<i64> = sqlx::query_scalar(
+            "SELECT author_id FROM work_contributors \
+              WHERE user_id = ?1 AND work_id = ?2 ORDER BY ordinal",
+        )
+        .bind(user_id)
+        .bind(work_id)
+        .fetch_all(db.pool())
+        .await
+        .expect("read stored contributor order");
+        let stored: Vec<&str> = stored.into_iter().map(label_of).collect();
+        assert_eq!(
+            stored, expected,
+            "settlement naming only {named}: stored contributor order"
+        );
+    }
+}
+
 enum RepoCommitContract {
     DomainDedupGeneration,
     DomainCollisionRollback,
