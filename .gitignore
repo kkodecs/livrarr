@@ -1,6 +1,5 @@
 /target
 build/
-tests/
 node_modules/
 .pnpm-store/
 .claude/*

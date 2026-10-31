@@ -227,7 +227,7 @@ to 28); that is the failure this rule prevents.
 ## Lessons (from responsiveness retro, 2026-07-12)
 
 - **Performance work: measure before designing.** A perf REQ enters design only with a measurement/probe artifact attached. This cycle's natural experiment: the two levers measured first (keepalive tuning, bulk-refresh concurrency) settled on one cheap capture each; the one designed first (Hardcover batching) consumed a probe + design draft + a full dual-family review round before the same measurement logic cancelled it.
-- **Registering a behavioral test and force-adding its file are ONE change.** `tests/` is gitignored for new files; a `[[test]]` entry in `livrarr-behavioral/Cargo.toml` whose file was never `git add -f`'d is green locally and uncompilable on every fresh clone. The manifest guard does NOT catch this direction (two files sat unshipped for a full feature cycle). Register + `git add -f` together, always.
+- **Registering a behavioral test and committing its file are ONE change.** A `[[test]]` entry in `livrarr-behavioral/Cargo.toml` whose file was never committed is green locally and uncompilable on every fresh clone. The manifest guard does NOT catch this direction (two files sat unshipped for a full feature cycle, back when `.gitignore` hid new files in every `tests/` folder; that line was removed 2026-10-31). Register + `git add` together, always.
 
 ## Lessons (from errors-and-delete-pass retro, 2026-09-30; PO-approved)
 
