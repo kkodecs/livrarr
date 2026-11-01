@@ -18,6 +18,20 @@ export function formatAbsoluteDate(iso: string): string {
   return format(date, "MMM d, yyyy HH:mm");
 }
 
+export function formatUptime(startupIso: string, now: Date = new Date()): string {
+  let start = parseISO(startupIso);
+  if (isNaN(start.getTime())) start = new Date(startupIso);
+  if (isNaN(start.getTime())) return startupIso;
+  const totalMinutes = Math.max(0, Math.floor((now.getTime() - start.getTime()) / 60000));
+  if (totalMinutes === 0) return "under a minute";
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
 export function formatMB(bytes: number): string {
   if (bytes === 0) return "0 MB";
   const mb = bytes / (1024 * 1024);
