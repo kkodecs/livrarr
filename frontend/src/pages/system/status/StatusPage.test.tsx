@@ -229,6 +229,39 @@ describe("System → Status: the Health Checks list comes from the admin health 
   });
 });
 
+describe("System → Status: the Uptime row", () => {
+  it("shows uptime right after Startup Time", async () => {
+    signInAdmin();
+    const startedAgo = ((2 * 24 + 3) * 60 + 15) * 60 * 1000 + 30 * 1000;
+    const api = statusApi([databaseOk], {
+      status: 200,
+      body: {
+        ...(systemStatus.body as object),
+        startupTime: new Date(Date.now() - startedAgo).toISOString(),
+      },
+    });
+    const mounted = mountStatus(api);
+    cleanup = mounted.cleanup;
+    await settle();
+
+    await vi.waitFor(() =>
+      expect(infoRow(mounted.container, "Version")).toBe(VERSION),
+    );
+    expect(infoRow(mounted.container, "Uptime")).toBe("2d 3h 15m");
+    const labels = Array.from(mounted.container.querySelectorAll("dt")).map(
+      (dt) => dt.textContent?.trim(),
+    );
+    expect(labels).toEqual([
+      "Version",
+      "OS",
+      "Data Directory",
+      "Log File",
+      "Startup Time",
+      "Uptime",
+    ]);
+  });
+});
+
 describe("System → Status when the signed-in reads fail", () => {
   it("with only /system/status answering 500, shows Something went wrong and Retry", async () => {
     signInAdmin();
