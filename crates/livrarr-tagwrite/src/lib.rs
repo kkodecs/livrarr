@@ -410,6 +410,17 @@ fn write_epub(
 
     match write_result {
         Ok(()) => {
+            // NamedTempFile creates the file at 0600; without this the rename
+            // would replace the book with a file only its owner can read.
+            let original = std::fs::metadata(path).map_err(|e| TagWriteError::Io {
+                message: format!("cannot stat EPUB: {e}"),
+            })?;
+            std::fs::set_permissions(&*tmp_path, original.permissions()).map_err(|e| {
+                TagWriteError::Io {
+                    message: format!("cannot preserve EPUB permissions: {e}"),
+                }
+            })?;
+
             // Flush temp file to disk before rename for crash safety.
             if let Ok(f) = std::fs::File::open(&*tmp_path) {
                 let _ = f.sync_all();
@@ -1299,4 +1310,81 @@ pub fn extract_m4b_chapters(
         chapters,
         duration_secs,
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn minimal_epub(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("mimetype", stored).unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.start_file("META-INF/container.xml", stored).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/content.opf", stored).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="id">urn:uuid:00000000-0000-0000-0000-000000000000</dc:identifier>
+    <dc:title>Old Title</dc:title>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#,
+        )
+        .unwrap();
+        zip.start_file("OEBPS/c1.xhtml", stored).unwrap();
+        zip.write_all(
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>x</p></body></html>"#,
+        )
+        .unwrap();
+        zip.finish().unwrap();
+    }
+
+    fn metadata() -> TagMetadata {
+        TagMetadata {
+            title: "New Title".into(),
+            subtitle: None,
+            author: "New Author".into(),
+            narrator: None,
+            year: None,
+            genre: None,
+            description: None,
+            publisher: None,
+            isbn: None,
+            language: Some("en".into()),
+            series_name: None,
+            series_position: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn epub_tag_write_keeps_the_original_file_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("Book.epub");
+        minimal_epub(&book);
+        std::fs::set_permissions(&book, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let status = write_tags(book.to_string_lossy().into_owned(), metadata(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(status, TagWriteStatus::Written);
+        let mode = std::fs::metadata(&book).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "tag write changed the book's mode to {mode:o}");
+    }
 }

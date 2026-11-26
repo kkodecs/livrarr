@@ -1532,6 +1532,35 @@ mod import_recovery_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hardlink_first_copy_fallback_keeps_the_source_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A file already at `dst` makes hard_link fail, so the copy fallback
+        // runs, as in the test above.
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("source.epub");
+        tokio::fs::write(&src, b"cross-fs fallback bytes")
+            .await
+            .unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst = dst_dir.path().join("target.epub");
+        tokio::fs::write(&dst, b"pre-existing decoy").await.unwrap();
+
+        materialize_hardlink_first(&src, &dst).await.unwrap();
+
+        assert_eq!(
+            tokio::fs::read(&dst).await.unwrap(),
+            b"cross-fs fallback bytes",
+            "the copy fallback did not run"
+        );
+        let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "copy fallback wrote the book at mode {mode:o}");
+    }
+
     #[tokio::test]
     async fn recovery_surfaces_list_intents_failure_instead_of_a_default_report() {
         // A DB error while listing intents must never look identical to
@@ -1846,9 +1875,9 @@ async fn materialize_hardlink_first(src: &Path, dst: &Path) -> Result<u64, Strin
         let parent = dst.parent().ok_or("dest has no parent")?;
         let mut tmp = tempfile::NamedTempFile::new_in(parent)
             .map_err(|e| format!("tempfile create failed: {e}"))?;
-        let source_size = std::fs::metadata(&src)
-            .map_err(|e| format!("cannot stat source: {e}"))?
-            .len();
+        let source_meta =
+            std::fs::metadata(&src).map_err(|e| format!("cannot stat source: {e}"))?;
+        let source_size = source_meta.len();
         let copied = std::io::copy(
             &mut std::fs::File::open(&src).map_err(|e| format!("open source failed: {e}"))?,
             &mut tmp,
@@ -1868,6 +1897,11 @@ async fn materialize_hardlink_first(src: &Path, dst: &Path) -> Result<u64, Strin
         if fsync_test_failpoint::is_armed(&dst) {
             return Err("data fsync failed: injected (test)".to_string());
         }
+        // NamedTempFile creates the file at 0600; keep the source's mode, as a
+        // hard link would have.
+        tmp.as_file()
+            .set_permissions(source_meta.permissions())
+            .map_err(|e| format!("cannot preserve source permissions: {e}"))?;
         tmp.as_file()
             .sync_all()
             .map_err(|e| format!("data fsync failed: {e}"))?;
