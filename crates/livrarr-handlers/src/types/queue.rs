@@ -11,6 +11,9 @@ pub struct QueueItemResponse {
     pub media_type: Option<MediaType>,
     pub indexer: String,
     pub download_client: String,
+    /// The download client's own id for this grab (the torrent's info hash for qBittorrent),
+    /// so an external tool can match a download to its grab.
+    pub download_id: Option<String>,
     pub work_id: WorkId,
     pub protocol: String,
     pub error: Option<String>,

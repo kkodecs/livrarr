@@ -862,6 +862,7 @@ export interface QueueItemResponse {
   mediaType: MediaType | null;
   indexer: string;
   downloadClient: string;
+  downloadId: string | null;
   workId: number;
   protocol: string;
   error: string | null;
